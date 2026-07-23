@@ -207,13 +207,17 @@ func DoScheduledWork() {
 
 func cleanupScheduledData() {
 	cfg, _ := config.GetManyAs[config.Settings]()
+	taskResultPreserveTime, err := config.GetAs[int](config.TaskResultPreserveTimeKey)
+	if err != nil {
+		taskResultPreserveTime = cfg.RecordPreserveTime
+	}
 	if err := records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime))); err != nil {
 		log.Printf("Deferred record cleanup failed: %v", err)
 	}
 	if err := records.CompactRecord(); err != nil {
 		log.Printf("Deferred record compaction failed: %v", err)
 	}
-	if err := tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime))); err != nil {
+	if err := tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(taskResultPreserveTime))); err != nil {
 		log.Printf("Deferred task cleanup failed: %v", err)
 	}
 	if err := tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime))); err != nil {

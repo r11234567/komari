@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/komari-monitor/komari/database/history"
@@ -83,6 +84,10 @@ var ltsMetricDefinitions = []struct {
 	{"ping.latency_ms", "Ping", "ms", "ping"},
 }
 
+const ltsMetricRetentionConfigKey = "metric_retention_days_by_name"
+
+var ltsMetricRetentionMu sync.Mutex
+
 func init() {
 	regPublic("listMetricDefinitions", publicListMetricDefinitions, "List 1.2.5 LTS metric definitions")
 	regPublic("queryMetrics", publicQueryMetrics, "Query bounded 1.2.5 LTS metrics")
@@ -92,25 +97,66 @@ func init() {
 	})
 }
 
-func ltsMetricRetention() (float64, float64) {
+func ltsDefaultMetricRetentionDays() map[string]int {
 	settings, err := config.GetManyAs[config.Settings]()
-	if err != nil || settings == nil {
-		return 30, 1
+	loadDays, pingDays := 30, 1
+	if err == nil && settings != nil {
+		loadDays = int(math.Ceil(float64(settings.RecordPreserveTime) / 24))
+		pingDays = int(math.Ceil(float64(settings.PingRecordPreserveTime) / 24))
 	}
-	return float64(settings.RecordPreserveTime) / 24, float64(settings.PingRecordPreserveTime) / 24
+	defaults := make(map[string]int, len(ltsMetricDefinitions))
+	for _, item := range ltsMetricDefinitions {
+		if item.source == "ping" {
+			defaults[item.key] = pingDays
+		} else {
+			defaults[item.key] = loadDays
+		}
+	}
+	return defaults
+}
+
+func ltsMetricRetentionDays() map[string]int {
+	ltsMetricRetentionMu.Lock()
+	defer ltsMetricRetentionMu.Unlock()
+	return ltsMetricRetentionDaysLocked()
+}
+
+func ltsMetricRetentionDaysLocked() map[string]int {
+	defaults := ltsDefaultMetricRetentionDays()
+	stored, err := config.GetAs[map[string]int](ltsMetricRetentionConfigKey)
+	if err != nil || stored == nil {
+		_ = config.Set(ltsMetricRetentionConfigKey, defaults)
+		return defaults
+	}
+	changed := false
+	for name, days := range defaults {
+		if _, ok := stored[name]; !ok {
+			stored[name] = days
+			changed = true
+		}
+	}
+	if changed {
+		_ = config.Set(ltsMetricRetentionConfigKey, stored)
+	}
+	return stored
+}
+
+func ltsMetricDefinitionByName(name string) (source string, ok bool) {
+	for _, item := range ltsMetricDefinitions {
+		if item.key == name {
+			return item.source, true
+		}
+	}
+	return "", false
 }
 
 func publicListMetricDefinitions(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	loadDays, pingDays := ltsMetricRetention()
+	retention := ltsMetricRetentionDays()
 	definitions := make([]ltsMetricDefinition, 0, len(ltsMetricDefinitions))
 	for _, item := range ltsMetricDefinitions {
-		retention := loadDays
-		if item.source == "ping" {
-			retention = pingDays
-		}
 		definitions = append(definitions, ltsMetricDefinition{
 			Name: item.key, Description: item.description, Type: "gauge",
-			Unit: item.unit, RetentionDays: retention,
+			Unit: item.unit, RetentionDays: float64(retention[item.key]),
 		})
 	}
 	return definitions, nil
@@ -136,42 +182,47 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 	defer cancel()
 
 	requested := make(map[string]bool, len(params.MetricKeys))
-	needsLoad, needsPing := false, false
+	retention := ltsMetricRetentionDays()
+	loadRetentionDays, pingRetentionDays := 0, 0
 	for _, key := range params.MetricKeys {
 		requested[key] = true
 		switch ltsMetricSource(key) {
 		case "ping":
-			needsPing = true
+			pingRetentionDays = max(pingRetentionDays, retention[key])
 		case "load", "gpu":
-			needsLoad = true
+			loadRetentionDays = max(loadRetentionDays, retention[key])
 		}
 	}
 
 	series := make([]ltsMetricSeries, 0, len(params.MetricKeys))
 	var responseStart, responseEnd time.Time
-	if needsLoad {
+	if loadRetentionDays > 0 {
 		loadRequest := queryRequest
 		loadRequest.Type = "load"
 		loadRequest.UUID = params.EntityID
-		result, queryErr := history.Query(ctx, loadRequest)
-		if queryErr != nil {
-			return nil, historyRPCError(queryErr, "Failed to query resource metrics")
+		if clamped, ok := clampLTSHistoryRequest(loadRequest, loadRetentionDays); ok {
+			result, queryErr := history.Query(ctx, clamped)
+			if queryErr != nil {
+				return nil, historyRPCError(queryErr, "Failed to query resource metrics")
+			}
+			responseStart, responseEnd = result.Start, result.End
+			series = append(series, ltsLoadMetricSeries(result, requested, params.EntityID, retention)...)
 		}
-		responseStart, responseEnd = result.Start, result.End
-		series = append(series, ltsLoadMetricSeries(result, requested, params.EntityID)...)
 	}
-	if needsPing {
+	if pingRetentionDays > 0 {
 		pingRequest := queryRequest
 		pingRequest.Type = "ping"
 		pingRequest.UUID = params.EntityID
-		result, queryErr := history.Query(ctx, pingRequest)
-		if queryErr != nil {
-			return nil, historyRPCError(queryErr, "Failed to query Ping metrics")
+		if clamped, ok := clampLTSHistoryRequest(pingRequest, pingRetentionDays); ok {
+			result, queryErr := history.Query(ctx, clamped)
+			if queryErr != nil {
+				return nil, historyRPCError(queryErr, "Failed to query Ping metrics")
+			}
+			if responseStart.IsZero() {
+				responseStart, responseEnd = result.Start, result.End
+			}
+			series = append(series, ltsPingMetricSeries(result, params.EntityID, pingRetentionDays)...)
 		}
-		if responseStart.IsZero() {
-			responseStart, responseEnd = result.Start, result.End
-		}
-		series = append(series, ltsPingMetricSeries(result, params.EntityID)...)
 	}
 	if responseStart.IsZero() {
 		responseStart, responseEnd, err = ltsMetricRange(params)
@@ -191,6 +242,28 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 	return map[string]any{
 		"start": responseStart, "end": responseEnd, "series": series, "count": total,
 	}, nil
+}
+
+func clampLTSHistoryRequest(request history.QueryRequest, retentionDays int) (history.QueryRequest, bool) {
+	if retentionDays <= 0 {
+		return request, false
+	}
+	start, err := time.Parse(time.RFC3339, request.Start)
+	if err != nil {
+		return request, true
+	}
+	end, err := time.Parse(time.RFC3339, request.End)
+	if err != nil {
+		return request, true
+	}
+	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	if !end.After(cutoff) {
+		return request, false
+	}
+	if start.Before(cutoff) {
+		request.Start = cutoff.Format(time.RFC3339)
+	}
+	return request, true
 }
 
 func ltsMetricHistoryRequest(params ltsMetricQueryParams) (history.QueryRequest, error) {
@@ -253,8 +326,7 @@ func ltsMetricSource(key string) string {
 	return ""
 }
 
-func ltsLoadMetricSeries(result *history.Response, requested map[string]bool, entityID string) []ltsMetricSeries {
-	loadDays, _ := ltsMetricRetention()
+func ltsLoadMetricSeries(result *history.Response, requested map[string]bool, entityID string, retention map[string]int) []ltsMetricSeries {
 	interval := ltsResolutionSeconds(result.Resolution)
 	series := make([]ltsMetricSeries, 0, len(requested))
 	for _, source := range result.Series {
@@ -264,14 +336,19 @@ func ltsLoadMetricSeries(result *history.Response, requested map[string]bool, en
 				if definition.source != "load" || !requested[definition.key] {
 					continue
 				}
+				days := retention[definition.key]
 				points := make([]ltsMetricPoint, 0, len(source.Points))
+				cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
 				for _, point := range source.Points {
+					if days <= 0 || point.Time.Before(cutoff) {
+						continue
+					}
 					value := ltsLoadMetricValue(definition.key, point.Metrics)
 					points = append(points, ltsMetricPoint{Time: point.Time, Value: &value, Count: point.TotalCount})
 				}
 				series = append(series, ltsMetricSeries{
 					MetricKey: definition.key, EntityID: entityID, Type: "gauge", Unit: definition.unit,
-					RetentionDays: loadDays, Downsampled: result.Sampled, DownsampleAlgorithm: "avg",
+					RetentionDays: float64(days), Downsampled: result.Sampled, DownsampleAlgorithm: "avg",
 					IntervalSeconds: interval, Count: len(points), Points: points,
 				})
 			}
@@ -284,14 +361,19 @@ func ltsLoadMetricSeries(result *history.Response, requested map[string]bool, en
 				if definition.source != "gpu" || !requested[definition.key] {
 					continue
 				}
+				days := retention[definition.key]
 				points := make([]ltsMetricPoint, 0, len(source.Points))
+				cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
 				for _, point := range source.Points {
+					if days <= 0 || point.Time.Before(cutoff) {
+						continue
+					}
 					value := ltsGPUMetricValue(definition.key, point.Metrics)
 					points = append(points, ltsMetricPoint{Time: point.Time, Value: &value, Count: point.TotalCount})
 				}
 				series = append(series, ltsMetricSeries{
 					MetricKey: definition.key, EntityID: entityID, Type: "gauge", Unit: definition.unit,
-					RetentionDays: loadDays, Downsampled: result.Sampled, DownsampleAlgorithm: "avg",
+					RetentionDays: float64(days), Downsampled: result.Sampled, DownsampleAlgorithm: "avg",
 					IntervalSeconds: interval, Tags: tags, Count: len(points), Points: points,
 				})
 			}
@@ -360,16 +442,19 @@ func ltsGPUMetricValue(key string, metrics map[string]float64) float64 {
 	}
 }
 
-func ltsPingMetricSeries(result *history.Response, entityID string) []ltsMetricSeries {
-	_, pingDays := ltsMetricRetention()
+func ltsPingMetricSeries(result *history.Response, entityID string, retentionDays int) []ltsMetricSeries {
 	interval := ltsResolutionSeconds(result.Resolution)
 	series := make([]ltsMetricSeries, 0, len(result.Series))
+	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
 	for _, source := range result.Series {
 		if source.Kind != "ping" {
 			continue
 		}
 		points := make([]ltsMetricPoint, 0, len(source.Points))
 		for _, point := range source.Points {
+			if retentionDays <= 0 || point.Time.Before(cutoff) {
+				continue
+			}
 			var value *float64
 			if point.TotalCount > point.LossCount {
 				average := point.Avg
@@ -379,7 +464,7 @@ func ltsPingMetricSeries(result *history.Response, entityID string) []ltsMetricS
 		}
 		series = append(series, ltsMetricSeries{
 			MetricKey: "ping.latency_ms", EntityID: entityID, Type: "gauge", Unit: "ms",
-			RetentionDays: pingDays, Downsampled: result.Sampled, DownsampleAlgorithm: "avg",
+			RetentionDays: float64(retentionDays), Downsampled: result.Sampled, DownsampleAlgorithm: "avg",
 			IntervalSeconds: interval, Tags: map[string]string{"task_id": strconv.FormatUint(uint64(source.TaskID), 10)},
 			Count: len(points), Points: points,
 		})
@@ -480,6 +565,20 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 	}
 	queryRequest.Type = "ping"
 	queryRequest.UUID = params.EntityID
+	retentionDays := ltsMetricRetentionDays()["ping.latency_ms"]
+	queryRequest, ok := clampLTSHistoryRequest(queryRequest, retentionDays)
+	if !ok {
+		start, end, rangeErr := ltsMetricRange(params)
+		if rangeErr != nil {
+			return nil, historyRPCError(rangeErr, "Invalid Ping statistics query")
+		}
+		return map[string]any{
+			"start": start, "end": end, "interval_seconds": int64(0),
+			"stats": []ltsPingStat{}, "count": 0,
+		}, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, history.QueryTimeout)
+	defer cancel()
 	result, err := history.Query(ctx, queryRequest)
 	if err != nil {
 		return nil, historyRPCError(err, "Failed to query Ping statistics")

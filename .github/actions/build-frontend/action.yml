@@ -10,7 +10,7 @@ inputs:
     default: https://github.com/r11234567/komari-web.git
   ref:
     description: Exact komari-web tag or commit to build.
-    default: 1.2.5-LTS1-web
+    default: 1.2.5-LTS1-web.1
   artifact-name:
     description: Optional artifact name for the packed frontend theme.
     default: ""

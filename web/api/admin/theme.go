@@ -21,6 +21,13 @@ import (
 	"github.com/komari-monitor/komari/web/public"
 )
 
+const (
+	maxThemeArchiveFiles  = 10000
+	maxThemeFileSize      = 128 << 20
+	maxThemeExtractedSize = 512 << 20
+	maxThemeManifestSize  = 1 << 20
+)
+
 // UploadTheme 上传主题
 func UploadTheme(c *gin.Context) {
 	// 读取上传的文件内容
@@ -71,12 +78,14 @@ func ListThemes(c *gin.Context) {
 	}
 
 	var themes []models.Theme
+	seen := make(map[string]struct{})
 	defaultTheme, err := public.PublicFS.ReadFile("defaultTheme/komari-theme.json")
 	if err == nil {
 		dt := models.Theme{}
 		err := json.Unmarshal(defaultTheme, &dt)
 		if err == nil {
 			themes = append(themes, dt)
+			seen[strings.ToLower(dt.Short)] = struct{}{}
 		}
 
 	}
@@ -84,7 +93,12 @@ func ListThemes(c *gin.Context) {
 		if entry.IsDir() {
 			themeConfigPath := filepath.Join(dataDir, entry.Name(), "komari-theme.json")
 			if themeInfo, err := loadThemeConfig(themeConfigPath); err == nil {
+				key := strings.ToLower(themeInfo.Short)
+				if _, exists := seen[key]; exists {
+					continue
+				}
 				themes = append(themes, themeInfo)
+				seen[key] = struct{}{}
 			}
 		}
 	}
@@ -173,6 +187,9 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 		return themeInfo, fmt.Errorf("无法打开ZIP文件: %v", err)
 	}
 	defer r.Close()
+	if err := validateThemeArchive(r.File); err != nil {
+		return themeInfo, err
+	}
 
 	// 查找komari-theme.json文件
 	var themeConfigFile *zip.File
@@ -194,9 +211,12 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 	}
 	defer rc.Close()
 
-	configData, err := io.ReadAll(rc)
+	configData, err := io.ReadAll(io.LimitReader(rc, maxThemeManifestSize+1))
 	if err != nil {
 		return themeInfo, fmt.Errorf("读取主题配置失败: %v", err)
+	}
+	if len(configData) > maxThemeManifestSize {
+		return themeInfo, fmt.Errorf("主题配置文件超过 %d 字节限制", maxThemeManifestSize)
 	}
 
 	if err := json.Unmarshal(configData, &themeInfo); err != nil {
@@ -271,7 +291,59 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 		}
 	}
 
+	if err := removeThemeAliases(themeInfo.Short); err != nil {
+		return themeInfo, err
+	}
+
 	return themeInfo, nil
+}
+
+func removeThemeAliases(short string) error {
+	dataDir := "./data/theme"
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return fmt.Errorf("读取主题目录失败: %v", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == short {
+			continue
+		}
+		manifest, err := loadThemeConfig(filepath.Join(dataDir, entry.Name(), "komari-theme.json"))
+		if err != nil || !strings.EqualFold(manifest.Short, short) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dataDir, entry.Name())); err != nil {
+			return fmt.Errorf("删除同名旧主题失败: %v", err)
+		}
+	}
+
+	active, err := config.GetAs[string](config.ThemeKey)
+	if err == nil && active != short && strings.EqualFold(active, short) {
+		if err := config.Set(config.ThemeKey, short); err != nil {
+			return fmt.Errorf("更新当前主题名称失败: %v", err)
+		}
+	}
+	return nil
+}
+
+func validateThemeArchive(files []*zip.File) error {
+	if len(files) > maxThemeArchiveFiles {
+		return fmt.Errorf("主题压缩包文件数量超过 %d 个限制", maxThemeArchiveFiles)
+	}
+	var total uint64
+	for _, file := range files {
+		if file.FileInfo().IsDir() {
+			continue
+		}
+		if file.UncompressedSize64 > maxThemeFileSize {
+			return fmt.Errorf("主题文件 %s 超过 %d 字节限制", file.Name, maxThemeFileSize)
+		}
+		total += file.UncompressedSize64
+		if total > maxThemeExtractedSize {
+			return fmt.Errorf("主题解压后总大小超过 %d 字节限制", maxThemeExtractedSize)
+		}
+	}
+	return nil
 }
 
 // loadThemeConfig 加载主题配置
@@ -656,6 +728,9 @@ func peekThemeFromZip(zipPath string) (models.Theme, error) {
 		return themeInfo, fmt.Errorf("无法打开ZIP文件: %v", err)
 	}
 	defer r.Close()
+	if err := validateThemeArchive(r.File); err != nil {
+		return themeInfo, err
+	}
 
 	var themeConfigFile *zip.File
 	for _, f := range r.File {
@@ -675,9 +750,12 @@ func peekThemeFromZip(zipPath string) (models.Theme, error) {
 	}
 	defer rc.Close()
 
-	configData, err := io.ReadAll(rc)
+	configData, err := io.ReadAll(io.LimitReader(rc, maxThemeManifestSize+1))
 	if err != nil {
 		return themeInfo, fmt.Errorf("读取主题配置失败: %v", err)
+	}
+	if len(configData) > maxThemeManifestSize {
+		return themeInfo, fmt.Errorf("主题配置文件超过 %d 字节限制", maxThemeManifestSize)
 	}
 
 	if err := json.Unmarshal(configData, &themeInfo); err != nil {

@@ -3,6 +3,8 @@ package jsonrpc
 import (
 	"testing"
 	"time"
+
+	"github.com/komari-monitor/komari/database/history"
 )
 
 func TestLTSMetricRangeAcceptsFractionalHours(t *testing.T) {
@@ -13,6 +15,42 @@ func TestLTSMetricRangeAcceptsFractionalHours(t *testing.T) {
 	duration := end.Sub(start)
 	if duration < 9*time.Minute+59*time.Second || duration > 10*time.Minute+time.Second {
 		t.Fatalf("duration = %s, want about ten minutes", duration)
+	}
+}
+
+func TestLTSPhysicalRetentionUsesLongestMetric(t *testing.T) {
+	retention := map[string]int{
+		"cpu.usage":       30,
+		"memory.used":     90,
+		"ping.latency_ms": 15,
+	}
+	resourceDays, pingDays := ltsPhysicalRetentionDays(retention)
+	if resourceDays != 90 || pingDays != 15 {
+		t.Fatalf("physical retention = (%d, %d), want (90, 15)", resourceDays, pingDays)
+	}
+}
+
+func TestClampLTSHistoryRequestToRetention(t *testing.T) {
+	now := time.Now()
+	request := history.QueryRequest{
+		Start: now.Add(-90 * 24 * time.Hour).Format(time.RFC3339),
+		End:   now.Format(time.RFC3339),
+	}
+	clamped, ok := clampLTSHistoryRequest(request, 15)
+	if !ok {
+		t.Fatal("current query should overlap retention window")
+	}
+	start, err := time.Parse(time.RFC3339, clamped.Start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if age := time.Since(start); age < 15*24*time.Hour-time.Minute || age > 15*24*time.Hour+time.Minute {
+		t.Fatalf("clamped start age = %s, want about 15 days", age)
+	}
+
+	request.End = now.Add(-20 * 24 * time.Hour).Format(time.RFC3339)
+	if _, ok := clampLTSHistoryRequest(request, 15); ok {
+		t.Fatal("query entirely before retention window should be skipped")
 	}
 }
 
