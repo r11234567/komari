@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -471,8 +472,8 @@ func downloadThemeMarketURL(rawURL string, maxSize int64) ([]byte, error) {
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil {
 			return errors.New("only public HTTP and HTTPS URLs are allowed")
 		}
-		if isPrivateIP(parsed.Hostname()) {
-			return errors.New("requests to private or internal addresses are not allowed")
+		if err := validateThemeMarketHost(parsed.Hostname()); err != nil {
+			return err
 		}
 		return nil
 	}
@@ -507,6 +508,22 @@ func downloadThemeMarketURL(rawURL string, maxSize int64) ([]byte, error) {
 		return nil, errors.New("empty response")
 	}
 	return data, nil
+}
+
+func validateThemeMarketHost(host string) error {
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("failed to resolve host %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("host %q did not resolve to an address", host)
+	}
+	for _, ip := range ips {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return errors.New("requests to private or internal addresses are not allowed")
+		}
+	}
+	return nil
 }
 
 func invalidateThemeMarketCache(rawURL string) {

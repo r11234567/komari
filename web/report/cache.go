@@ -238,6 +238,8 @@ type previousTrafficRecord struct {
 	NetTotalDown int64            `gorm:"column:net_total_down"`
 }
 
+const recentTrafficBaselineWindow = 5 * time.Minute
+
 func fillTrafficDeltas(db *gorm.DB, records []models.Record, trafficByRecord map[string]cachedTrafficSummary) error {
 	recordsByTime := make(map[time.Time][]int)
 	for i := range records {
@@ -329,16 +331,36 @@ func getLatestTrafficRecordsBefore(db *gorm.DB, clientUUIDs []string, before tim
 		return previousByClient, nil
 	}
 
-	for _, table := range []string{"records", "records_long_term"} {
-		records, err := latestTrafficRecordsBeforeFromTable(db, table, clientUUIDs, before)
-		if err != nil {
-			return nil, err
+	recent, err := latestTrafficRecordsBeforeFromTable(db, "records", clientUUIDs, before)
+	if err != nil {
+		return nil, err
+	}
+	for _, record := range recent {
+		previousByClient[record.Client] = record
+	}
+
+	// The minute writer normally has a fresh raw baseline. Avoid touching the
+	// much larger long-term table unless a client has a missing or stale raw row.
+	longTermClients := make([]string, 0, len(clientUUIDs))
+	recentCutoff := before.Add(-recentTrafficBaselineWindow)
+	for _, clientUUID := range clientUUIDs {
+		previous, exists := previousByClient[clientUUID]
+		if !exists || previous.Time.ToTime().Before(recentCutoff) {
+			longTermClients = append(longTermClients, clientUUID)
 		}
-		for _, record := range records {
-			previous, exists := previousByClient[record.Client]
-			if !exists || record.Time.ToTime().After(previous.Time.ToTime()) {
-				previousByClient[record.Client] = record
-			}
+	}
+	if len(longTermClients) == 0 {
+		return previousByClient, nil
+	}
+
+	longTerm, err := latestTrafficRecordsBeforeFromTable(db, "records_long_term", longTermClients, before)
+	if err != nil {
+		return nil, err
+	}
+	for _, record := range longTerm {
+		previous, exists := previousByClient[record.Client]
+		if !exists || record.Time.ToTime().After(previous.Time.ToTime()) {
+			previousByClient[record.Client] = record
 		}
 	}
 	return previousByClient, nil
