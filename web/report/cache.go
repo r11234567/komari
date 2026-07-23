@@ -241,49 +241,54 @@ type previousTrafficRecord struct {
 const recentTrafficBaselineWindow = 5 * time.Minute
 
 func fillTrafficDeltas(db *gorm.DB, records []models.Record, trafficByRecord map[string]cachedTrafficSummary) error {
-	recordsByTime := make(map[time.Time][]int)
+	recordsByClient := make(map[string][]int)
 	for i := range records {
-		before := records[i].Time.ToTime().Round(0)
-		recordsByTime[before] = append(recordsByTime[before], i)
+		if records[i].Client != "" {
+			recordsByClient[records[i].Client] = append(recordsByClient[records[i].Client], i)
+		}
 	}
 
-	for before, indexes := range recordsByTime {
-		clientUUIDs := make([]string, 0, len(indexes))
-		seen := make(map[string]struct{}, len(indexes))
-		for _, index := range indexes {
-			clientUUID := records[index].Client
-			if clientUUID == "" {
-				continue
-			}
-			if _, exists := seen[clientUUID]; exists {
-				continue
-			}
-			seen[clientUUID] = struct{}{}
-			clientUUIDs = append(clientUUIDs, clientUUID)
-		}
+	clientsByFirstTime := make(map[time.Time][]string)
+	for clientUUID, indexes := range recordsByClient {
+		sort.SliceStable(indexes, func(i, j int) bool {
+			return records[indexes[i]].Time.ToTime().Before(records[indexes[j]].Time.ToTime())
+		})
+		recordsByClient[clientUUID] = indexes
+		firstTime := records[indexes[0]].Time.ToTime().Round(0)
+		clientsByFirstTime[firstTime] = append(clientsByFirstTime[firstTime], clientUUID)
+	}
 
-		previousByClient, err := getLatestTrafficRecordsBefore(db, clientUUIDs, before)
+	previousByClient := make(map[string]previousTrafficRecord, len(recordsByClient))
+	for before, clientUUIDs := range clientsByFirstTime {
+		baselines, err := getLatestTrafficRecordsBefore(db, clientUUIDs, before)
 		if err != nil {
 			return fmt.Errorf("load previous traffic records before %s: %w", before.Format(time.RFC3339), err)
 		}
+		for clientUUID, baseline := range baselines {
+			previousByClient[clientUUID] = baseline
+		}
+	}
 
+	for clientUUID, indexes := range recordsByClient {
+		previous, hasPrevious := previousByClient[clientUUID]
 		for _, index := range indexes {
 			key := recordDedupKey(records[index])
 			if summary, ok := trafficByRecord[key]; ok && len(summary.Points) > 0 {
-				if previous, exists := previousByClient[records[index].Client]; exists {
+				if hasPrevious {
 					records[index].TrafficUp, records[index].TrafficDown = sumCachedTrafficDeltas(summary, &previous)
 				} else {
 					records[index].TrafficUp, records[index].TrafficDown = sumCachedTrafficDeltas(summary, nil)
 				}
-				continue
+			} else if hasPrevious {
+				records[index].TrafficUp = utils.ComputeTrafficDelta(records[index].NetTotalUp, previous.NetTotalUp)
+				records[index].TrafficDown = utils.ComputeTrafficDelta(records[index].NetTotalDown, previous.NetTotalDown)
 			}
 
-			previous, exists := previousByClient[records[index].Client]
-			if !exists {
-				continue
+			previous = previousTrafficRecord{
+				Client: records[index].Client, Time: records[index].Time,
+				NetTotalUp: records[index].NetTotalUp, NetTotalDown: records[index].NetTotalDown,
 			}
-			records[index].TrafficUp = utils.ComputeTrafficDelta(records[index].NetTotalUp, previous.NetTotalUp)
-			records[index].TrafficDown = utils.ComputeTrafficDelta(records[index].NetTotalDown, previous.NetTotalDown)
+			hasPrevious = true
 		}
 	}
 
