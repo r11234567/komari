@@ -4,13 +4,13 @@ description: Clone komari-web, build the default theme, and optionally upload it
 inputs:
   node-version:
     description: Node.js version used to build komari-web.
-    default: "23"
+    default: "24"
   repository:
     description: komari-web repository URL.
-    default: https://github.com/komari-monitor/komari-web
+    default: https://github.com/r11234567/komari-web.git
   ref:
     description: Exact komari-web tag or commit to build.
-    default: 1.2.5-fix2
+    default: lts-1.2.5
   artifact-name:
     description: Optional artifact name for the packed frontend theme.
     default: ""
@@ -19,7 +19,7 @@ runs:
   using: composite
   steps:
     - name: Setup Node.js
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v5
       with:
         node-version: ${{ inputs.node-version }}
 
@@ -30,7 +30,7 @@ runs:
         rm -rf komari-web
         git clone --depth=1 --branch "${{ inputs.ref }}" "${{ inputs.repository }}" komari-web
         cd komari-web
-        npm install
+        npm ci
         npm run build
         cd ..
 
@@ -52,7 +52,7 @@ runs:
 
     - name: Upload frontend artifact
       if: ${{ inputs.artifact-name != '' }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: ${{ inputs.artifact-name }}
         path: ${{ runner.temp }}/${{ inputs.artifact-name }}.tar.gz
