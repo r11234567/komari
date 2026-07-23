@@ -1,0 +1,544 @@
+// Package history provides bounded, cancellable history queries shared by all themes.
+package history
+
+import (
+	"context"
+	"errors"
+	"math"
+	"sort"
+	"strconv"
+	"time"
+
+	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/models"
+)
+
+const (
+	DefaultMaxPoints = 1500
+	MaxMaxPoints     = 5000
+	QueryTimeout     = 20 * time.Second
+)
+
+var (
+	ErrInvalidQuery  = errors.New("history query requires a supported type and uuid or task_id")
+	ErrRangeTooLarge = errors.New("history range must be positive and no longer than 90 days")
+)
+
+type QueryRequest struct {
+	Type      string `json:"type"`
+	UUID      string `json:"uuid"`
+	TaskID    *uint  `json:"task_id,omitempty"`
+	Start     string `json:"start,omitempty"`
+	End       string `json:"end,omitempty"`
+	Hours     int    `json:"hours,omitempty"`
+	MaxPoints int    `json:"max_points,omitempty"`
+}
+
+type Point struct {
+	Time       time.Time          `json:"time"`
+	Avg        float64            `json:"avg,omitempty"`
+	Min        float64            `json:"min,omitempty"`
+	Max        float64            `json:"max,omitempty"`
+	LossCount  int                `json:"loss_count,omitempty"`
+	TotalCount int                `json:"total_count"`
+	Metrics    map[string]float64 `json:"metrics,omitempty"`
+}
+
+type Series struct {
+	Kind        string       `json:"kind"`
+	Client      string       `json:"client,omitempty"`
+	TaskID      uint         `json:"task_id,omitempty"`
+	DeviceIndex int          `json:"device_index,omitempty"`
+	DeviceName  string       `json:"device_name,omitempty"`
+	PingSummary *PingSummary `json:"ping_summary,omitempty"`
+	Points      []Point      `json:"points"`
+}
+
+type PingSummary struct {
+	TotalCount  int     `json:"total_count"`
+	LossCount   int     `json:"loss_count"`
+	ValidCount  int     `json:"valid_count"`
+	Avg         float64 `json:"avg,omitempty"`
+	Min         float64 `json:"min,omitempty"`
+	Max         float64 `json:"max,omitempty"`
+	Latest      float64 `json:"latest,omitempty"`
+	P50         float64 `json:"p50,omitempty"`
+	P99         float64 `json:"p99,omitempty"`
+	Stddev      float64 `json:"stddev,omitempty"`
+	Approximate bool    `json:"approximate"`
+}
+
+type Response struct {
+	Type           string    `json:"type"`
+	Start          time.Time `json:"start"`
+	End            time.Time `json:"end"`
+	Resolution     string    `json:"resolution"`
+	RawCount       int64     `json:"raw_count"`
+	ReturnedPoints int       `json:"returned_points"`
+	Sampled        bool      `json:"sampled"`
+	Series         []Series  `json:"series"`
+}
+
+type pingKey struct {
+	client string
+	taskID uint
+	bucket time.Time
+}
+
+type loadBucket struct {
+	time    time.Time
+	count   int
+	metrics map[string]float64
+}
+
+type gpuKey struct {
+	device int
+	name   string
+	bucket time.Time
+}
+
+func parseRequest(req QueryRequest) (time.Time, time.Time, time.Duration, int, error) {
+	if req.Type != "load" && req.Type != "ping" {
+		return time.Time{}, time.Time{}, 0, 0, ErrInvalidQuery
+	}
+	if req.Type == "load" && req.UUID == "" {
+		return time.Time{}, time.Time{}, 0, 0, ErrInvalidQuery
+	}
+	if req.Type == "ping" && req.UUID == "" && req.TaskID == nil {
+		return time.Time{}, time.Time{}, 0, 0, ErrInvalidQuery
+	}
+
+	end := time.Now()
+	var err error
+	if req.End != "" {
+		end, err = time.Parse(time.RFC3339, req.End)
+		if err != nil {
+			return time.Time{}, time.Time{}, 0, 0, err
+		}
+	}
+	start := end.Add(-4 * time.Hour)
+	if req.Start != "" {
+		start, err = time.Parse(time.RFC3339, req.Start)
+		if err != nil {
+			return time.Time{}, time.Time{}, 0, 0, err
+		}
+	} else if req.Hours > 90*24 {
+		return time.Time{}, time.Time{}, 0, 0, ErrRangeTooLarge
+	} else if req.Hours > 0 {
+		start = end.Add(-time.Duration(req.Hours) * time.Hour)
+	}
+	if !end.After(start) || end.Sub(start) > 90*24*time.Hour {
+		return time.Time{}, time.Time{}, 0, 0, ErrRangeTooLarge
+	}
+
+	maxPoints := req.MaxPoints
+	if maxPoints <= 0 {
+		maxPoints = DefaultMaxPoints
+	}
+	if maxPoints > MaxMaxPoints {
+		maxPoints = MaxMaxPoints
+	}
+	bucketSize := chooseBucketSize(end.Sub(start) / time.Duration(maxPoints))
+	return start, end, bucketSize, maxPoints, nil
+}
+
+func chooseBucketSize(minimum time.Duration) time.Duration {
+	for _, candidate := range []time.Duration{
+		10 * time.Second, 30 * time.Second, time.Minute,
+		5 * time.Minute, 10 * time.Minute, 15 * time.Minute,
+		30 * time.Minute, time.Hour, 2 * time.Hour, 6 * time.Hour,
+		12 * time.Hour, 24 * time.Hour,
+	} {
+		if candidate >= minimum {
+			return candidate
+		}
+	}
+	return 24 * time.Hour
+}
+
+func Query(ctx context.Context, req QueryRequest) (*Response, error) {
+	start, end, bucketSize, maxPoints, err := parseRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+
+	response := &Response{
+		Type:       req.Type,
+		Start:      start,
+		End:        end,
+		Resolution: bucketSize.String(),
+	}
+	if req.Type == "ping" {
+		response.Series, response.RawCount, err = queryPing(ctx, req, start, end, bucketSize, maxPoints)
+	} else {
+		response.Series, response.RawCount, err = queryLoad(ctx, req, start, end, bucketSize, maxPoints)
+	}
+	if err != nil {
+		return nil, err
+	}
+	response.Series = limitTotalPoints(response.Series, maxPoints)
+	for _, series := range response.Series {
+		response.ReturnedPoints += len(series.Points)
+	}
+	response.Sampled = response.RawCount > int64(response.ReturnedPoints)
+	return response, nil
+}
+
+func queryPing(ctx context.Context, req QueryRequest, start, end time.Time, size time.Duration, maxPoints int) ([]Series, int64, error) {
+	db := dbcore.GetReadDBInstance().WithContext(ctx).
+		Model(&models.PingRecord{}).
+		Select("client, task_id, time, value").
+		Where("time >= ? AND time <= ?", start, end)
+	if req.UUID != "" {
+		db = db.Where("client = ?", req.UUID)
+	}
+	if req.TaskID != nil {
+		db = db.Where("task_id = ?", *req.TaskID)
+	}
+	rows, err := db.Order("time ASC").Rows()
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	buckets := make(map[pingKey]*Point)
+	var count int64
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		var client string
+		var taskID uint
+		var recorded models.LocalTime
+		var value int
+		if err := rows.Scan(&client, &taskID, &recorded, &value); err != nil {
+			return nil, 0, err
+		}
+		count++
+		key := pingKey{client: client, taskID: taskID, bucket: recorded.ToTime().Truncate(size)}
+		point := buckets[key]
+		if point == nil {
+			point = &Point{Time: key.bucket}
+			buckets[key] = point
+		}
+		point.TotalCount++
+		if value < 0 {
+			point.LossCount++
+			continue
+		}
+		firstValid := point.TotalCount-point.LossCount == 1
+		point.Avg += float64(value)
+		if firstValid || float64(value) < point.Min {
+			point.Min = float64(value)
+		}
+		if firstValid || float64(value) > point.Max {
+			point.Max = float64(value)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	seriesMap := make(map[string]*Series)
+	for key, point := range buckets {
+		valid := point.TotalCount - point.LossCount
+		if valid > 0 {
+			point.Avg /= float64(valid)
+		}
+		seriesKey := key.client + "\x00" + strconv.FormatUint(uint64(key.taskID), 10)
+		series := seriesMap[seriesKey]
+		if series == nil {
+			series = &Series{Kind: "ping", Client: key.client, TaskID: key.taskID}
+			seriesMap[seriesKey] = series
+		}
+		series.Points = append(series.Points, *point)
+	}
+	return limitSeries(seriesMap, maxPoints), count, nil
+}
+
+func queryLoad(ctx context.Context, req QueryRequest, start, end time.Time, size time.Duration, maxPoints int) ([]Series, int64, error) {
+	if req.UUID == "" {
+		return nil, 0, errors.New("load history requires uuid")
+	}
+	buckets := make(map[time.Time]*loadBucket)
+	var count int64
+	for _, table := range []string{"records_long_term", "records"} {
+		db := dbcore.GetReadDBInstance().WithContext(ctx).Table(table).
+			Where("client = ? AND time >= ? AND time <= ?", req.UUID, start, end)
+		rows, err := db.Order("time ASC").Rows()
+		if err != nil {
+			return nil, 0, err
+		}
+		for rows.Next() {
+			if err := ctx.Err(); err != nil {
+				rows.Close()
+				return nil, 0, err
+			}
+			var record models.Record
+			if err := db.ScanRows(rows, &record); err != nil {
+				rows.Close()
+				return nil, 0, err
+			}
+			count++
+			bucketTime := record.Time.ToTime().Truncate(size)
+			bucket := buckets[bucketTime]
+			if bucket == nil {
+				bucket = &loadBucket{time: bucketTime, metrics: make(map[string]float64)}
+				buckets[bucketTime] = bucket
+			}
+			bucket.count++
+			addLoadMetrics(bucket.metrics, record)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, 0, err
+		}
+		rows.Close()
+	}
+
+	points := averageBuckets(buckets, maxPoints)
+	gpuSeries, gpuCount, err := queryGPU(ctx, req.UUID, start, end, size, maxPoints)
+	if err != nil {
+		return nil, 0, err
+	}
+	series := []Series{{Kind: "load", Client: req.UUID, Points: points}}
+	series = append(series, gpuSeries...)
+	return series, count + gpuCount, nil
+}
+
+func addLoadMetrics(metrics map[string]float64, record models.Record) {
+	metrics["cpu"] += float64(record.Cpu)
+	metrics["gpu"] += float64(record.Gpu)
+	metrics["ram"] += float64(record.Ram)
+	metrics["ram_total"] += float64(record.RamTotal)
+	metrics["swap"] += float64(record.Swap)
+	metrics["swap_total"] += float64(record.SwapTotal)
+	metrics["load"] += float64(record.Load)
+	metrics["temp"] += float64(record.Temp)
+	metrics["disk"] += float64(record.Disk)
+	metrics["disk_total"] += float64(record.DiskTotal)
+	metrics["net_in"] += float64(record.NetIn)
+	metrics["net_out"] += float64(record.NetOut)
+	metrics["net_total_up"] += float64(record.NetTotalUp)
+	metrics["net_total_down"] += float64(record.NetTotalDown)
+	metrics["traffic_up"] += float64(record.TrafficUp)
+	metrics["traffic_down"] += float64(record.TrafficDown)
+	metrics["process"] += float64(record.Process)
+	metrics["connections"] += float64(record.Connections)
+	metrics["connections_udp"] += float64(record.ConnectionsUdp)
+}
+
+func queryGPU(ctx context.Context, uuid string, start, end time.Time, size time.Duration, maxPoints int) ([]Series, int64, error) {
+	buckets := make(map[gpuKey]*loadBucket)
+	var count int64
+	for _, table := range []string{"gpu_records_long_term", "gpu_records"} {
+		db := dbcore.GetReadDBInstance().WithContext(ctx).Table(table).
+			Where("client = ? AND time >= ? AND time <= ?", uuid, start, end)
+		rows, err := db.Order("time ASC").Rows()
+		if err != nil {
+			return nil, 0, err
+		}
+		for rows.Next() {
+			if err := ctx.Err(); err != nil {
+				rows.Close()
+				return nil, 0, err
+			}
+			var record models.GPURecord
+			if err := db.ScanRows(rows, &record); err != nil {
+				rows.Close()
+				return nil, 0, err
+			}
+			count++
+			key := gpuKey{device: record.DeviceIndex, name: record.DeviceName, bucket: record.Time.ToTime().Truncate(size)}
+			bucket := buckets[key]
+			if bucket == nil {
+				bucket = &loadBucket{time: key.bucket, metrics: make(map[string]float64)}
+				buckets[key] = bucket
+			}
+			bucket.count++
+			bucket.metrics["mem_total"] += float64(record.MemTotal)
+			bucket.metrics["mem_used"] += float64(record.MemUsed)
+			bucket.metrics["utilization"] += float64(record.Utilization)
+			bucket.metrics["temperature"] += float64(record.Temperature)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, 0, err
+		}
+		rows.Close()
+	}
+
+	byDevice := make(map[string]*Series)
+	for key, bucket := range buckets {
+		deviceKey := strconv.Itoa(key.device) + "\x00" + key.name
+		series := byDevice[deviceKey]
+		if series == nil {
+			series = &Series{Kind: "gpu", Client: uuid, DeviceIndex: key.device, DeviceName: key.name}
+			byDevice[deviceKey] = series
+		}
+		point := Point{Time: bucket.time, TotalCount: bucket.count, Metrics: make(map[string]float64)}
+		for name, sum := range bucket.metrics {
+			point.Metrics[name] = sum / float64(bucket.count)
+		}
+		series.Points = append(series.Points, point)
+	}
+
+	result := make([]Series, 0, len(byDevice))
+	for _, series := range byDevice {
+		sort.Slice(series.Points, func(i, j int) bool { return series.Points[i].Time.Before(series.Points[j].Time) })
+		if len(series.Points) > maxPoints {
+			series.Points = series.Points[len(series.Points)-maxPoints:]
+		}
+		result = append(result, *series)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].DeviceIndex < result[j].DeviceIndex })
+	return result, count, nil
+}
+
+func averageBuckets(buckets map[time.Time]*loadBucket, maxPoints int) []Point {
+	points := make([]Point, 0, len(buckets))
+	for _, bucket := range buckets {
+		point := Point{Time: bucket.time, TotalCount: bucket.count, Metrics: make(map[string]float64)}
+		for name, sum := range bucket.metrics {
+			point.Metrics[name] = sum / float64(bucket.count)
+		}
+		points = append(points, point)
+	}
+	sort.Slice(points, func(i, j int) bool { return points[i].Time.Before(points[j].Time) })
+	if len(points) > maxPoints {
+		points = points[len(points)-maxPoints:]
+	}
+	return points
+}
+
+func limitSeries(seriesMap map[string]*Series, maxPoints int) []Series {
+	series := make([]Series, 0, len(seriesMap))
+	for _, item := range seriesMap {
+		sort.Slice(item.Points, func(i, j int) bool { return item.Points[i].Time.Before(item.Points[j].Time) })
+		item.PingSummary = summarizePingPoints(item.Points)
+		if len(item.Points) > maxPoints {
+			item.Points = item.Points[len(item.Points)-maxPoints:]
+		}
+		series = append(series, *item)
+	}
+	sort.Slice(series, func(i, j int) bool {
+		if series[i].Client == series[j].Client {
+			return series[i].TaskID < series[j].TaskID
+		}
+		return series[i].Client < series[j].Client
+	})
+	return series
+}
+
+type weightedPingPoint struct {
+	value  float64
+	weight int
+}
+
+func summarizePingPoints(points []Point) *PingSummary {
+	summary := &PingSummary{Approximate: true}
+	weighted := make([]weightedPingPoint, 0, len(points))
+	var sum, squared float64
+	for _, point := range points {
+		summary.TotalCount += point.TotalCount
+		summary.LossCount += point.LossCount
+		valid := point.TotalCount - point.LossCount
+		summary.ValidCount += valid
+		if valid == 0 {
+			continue
+		}
+		sum += point.Avg * float64(valid)
+		squared += point.Avg * point.Avg * float64(valid)
+		weighted = append(weighted, weightedPingPoint{value: point.Avg, weight: valid})
+		if summary.ValidCount == valid || point.Min < summary.Min {
+			summary.Min = point.Min
+		}
+		if summary.ValidCount == valid || point.Max > summary.Max {
+			summary.Max = point.Max
+		}
+		summary.Latest = point.Avg
+	}
+	if summary.ValidCount == 0 {
+		return summary
+	}
+	summary.Avg = sum / float64(summary.ValidCount)
+	variance := math.Max(0, squared/float64(summary.ValidCount)-summary.Avg*summary.Avg)
+	summary.Stddev = math.Sqrt(variance)
+	sort.Slice(weighted, func(i, j int) bool { return weighted[i].value < weighted[j].value })
+	summary.P50 = weightedPingPointPercentile(weighted, 0.50)
+	summary.P99 = weightedPingPointPercentile(weighted, 0.99)
+	return summary
+}
+
+func weightedPingPointPercentile(values []weightedPingPoint, percentile float64) float64 {
+	total := 0
+	for _, item := range values {
+		total += item.weight
+	}
+	target := int(math.Ceil(percentile * float64(total)))
+	if target < 1 {
+		target = 1
+	}
+	seen := 0
+	for _, item := range values {
+		seen += item.weight
+		if seen >= target {
+			return item.value
+		}
+	}
+	return values[len(values)-1].value
+}
+
+func limitTotalPoints(series []Series, maxPoints int) []Series {
+	if maxPoints <= 0 || len(series) == 0 {
+		return series
+	}
+	total := 0
+	for index := range series {
+		total += len(series[index].Points)
+	}
+	if total <= maxPoints {
+		return series
+	}
+
+	remainingPoints := maxPoints
+	remainingSeries := len(series)
+	for index := range series {
+		if remainingPoints == 0 {
+			series[index].Points = nil
+			continue
+		}
+		budget := remainingPoints / remainingSeries
+		if budget == 0 {
+			budget = 1
+		}
+		if budget > len(series[index].Points) {
+			budget = len(series[index].Points)
+		}
+		series[index].Points = samplePoints(series[index].Points, budget)
+		remainingPoints -= len(series[index].Points)
+		remainingSeries--
+	}
+	return series
+}
+
+func samplePoints(points []Point, count int) []Point {
+	if count <= 0 || len(points) == 0 {
+		return nil
+	}
+	if count >= len(points) {
+		return points
+	}
+	if count == 1 {
+		return points[len(points)-1:]
+	}
+
+	result := make([]Point, 0, count)
+	for index := 0; index < count; index++ {
+		source := index * (len(points) - 1) / (count - 1)
+		result = append(result, points[source])
+	}
+	return result
+}

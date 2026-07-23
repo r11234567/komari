@@ -1,0 +1,542 @@
+package jsonrpc
+
+import (
+	"context"
+	"math"
+	"strconv"
+	"time"
+
+	"github.com/komari-monitor/komari/database/history"
+	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/pkg/rpc"
+)
+
+type ltsMetricDefinition struct {
+	Name          string  `json:"name"`
+	Description   string  `json:"description"`
+	Type          string  `json:"type"`
+	Unit          string  `json:"unit,omitempty"`
+	RetentionDays float64 `json:"retention_days"`
+}
+
+type ltsMetricPoint struct {
+	Time  time.Time `json:"time"`
+	Value *float64  `json:"value"`
+	Count int       `json:"count,omitempty"`
+}
+
+type ltsMetricSeries struct {
+	MetricKey           string            `json:"metric_key"`
+	EntityID            string            `json:"entity_id"`
+	Type                string            `json:"type"`
+	Unit                string            `json:"unit,omitempty"`
+	RetentionDays       float64           `json:"retention_days"`
+	Downsampled         bool              `json:"downsampled"`
+	DownsampleAlgorithm string            `json:"downsample_algorithm"`
+	MaxPoints           int               `json:"max_points"`
+	IntervalSeconds     int64             `json:"interval_seconds"`
+	Tags                map[string]string `json:"tags,omitempty"`
+	Count               int               `json:"count"`
+	Points              []ltsMetricPoint  `json:"points"`
+}
+
+type ltsMetricQueryParams struct {
+	MetricKeys  []string `json:"metric_keys"`
+	EntityID    string   `json:"entity_id"`
+	Hours       float64  `json:"hours"`
+	Start       string   `json:"start"`
+	End         string   `json:"end"`
+	MaxPoints   int      `json:"max_points"`
+	Aggregation string   `json:"aggregation"`
+}
+
+var ltsMetricDefinitions = []struct {
+	key         string
+	description string
+	unit        string
+	source      string
+}{
+	{"cpu.usage", "CPU", "%", "load"},
+	{"gpu.usage", "GPU", "%", "load"},
+	{"gpu.device.usage", "GPU Device", "%", "gpu"},
+	{"gpu.memory.used", "GPU Memory", "bytes", "gpu"},
+	{"gpu.memory.total", "GPU Memory Total", "bytes", "gpu"},
+	{"gpu.temperature", "GPU Temperature", "degC", "gpu"},
+	{"memory.used", "RAM", "bytes", "load"},
+	{"memory.total", "RAM Total", "bytes", "load"},
+	{"swap.used", "Swap", "bytes", "load"},
+	{"swap.total", "Swap Total", "bytes", "load"},
+	{"load.average", "Load", "", "load"},
+	{"temperature", "Temperature", "degC", "load"},
+	{"disk.used", "Disk", "bytes", "load"},
+	{"disk.total", "Disk Total", "bytes", "load"},
+	{"net.in.rate", "Download", "bytes/s", "load"},
+	{"net.out.rate", "Upload", "bytes/s", "load"},
+	{"net.total.up", "Total Upload", "bytes", "load"},
+	{"net.total.down", "Total Download", "bytes", "load"},
+	{"traffic.up", "Traffic Upload", "bytes", "load"},
+	{"traffic.down", "Traffic Download", "bytes", "load"},
+	{"process.count", "Processes", "count", "load"},
+	{"connections.tcp", "TCP Connections", "count", "load"},
+	{"connections.udp", "UDP Connections", "count", "load"},
+	{"ping.latency_ms", "Ping", "ms", "ping"},
+}
+
+func init() {
+	regPublic("listMetricDefinitions", publicListMetricDefinitions, "List 1.2.5 LTS metric definitions")
+	regPublic("queryMetrics", publicQueryMetrics, "Query bounded 1.2.5 LTS metrics")
+	regPublic("getPingMetricStats", publicGetPingMetricStats, "Get bounded Ping statistics")
+	RegisterWithGroupAndMeta("listMetricDefinitions", rpc.RoleAdmin, publicListMetricDefinitions, &rpc.MethodMeta{
+		Name: "admin:listMetricDefinitions", Summary: "List 1.2.5 LTS metric definitions",
+	})
+}
+
+func ltsMetricRetention() (float64, float64) {
+	settings, err := config.GetManyAs[config.Settings]()
+	if err != nil || settings == nil {
+		return 30, 1
+	}
+	return float64(settings.RecordPreserveTime) / 24, float64(settings.PingRecordPreserveTime) / 24
+}
+
+func publicListMetricDefinitions(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	loadDays, pingDays := ltsMetricRetention()
+	definitions := make([]ltsMetricDefinition, 0, len(ltsMetricDefinitions))
+	for _, item := range ltsMetricDefinitions {
+		retention := loadDays
+		if item.source == "ping" {
+			retention = pingDays
+		}
+		definitions = append(definitions, ltsMetricDefinition{
+			Name: item.key, Description: item.description, Type: "gauge",
+			Unit: item.unit, RetentionDays: retention,
+		})
+	}
+	return definitions, nil
+}
+
+func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var params ltsMetricQueryParams
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid metric query: "+err.Error(), nil)
+	}
+	if params.EntityID == "" || len(params.MetricKeys) == 0 {
+		return nil, rpc.MakeError(rpc.InvalidParams, "entity_id and metric_keys are required", nil)
+	}
+	if !isLoginFromCtx(ctx) && isHiddenClient(params.EntityID) {
+		return nil, rpc.MakeError(rpc.NotFound, "client not found", nil)
+	}
+
+	queryRequest, err := ltsMetricHistoryRequest(params)
+	if err != nil {
+		return nil, historyRPCError(err, "Invalid metric query")
+	}
+	ctx, cancel := context.WithTimeout(ctx, history.QueryTimeout)
+	defer cancel()
+
+	requested := make(map[string]bool, len(params.MetricKeys))
+	needsLoad, needsPing := false, false
+	for _, key := range params.MetricKeys {
+		requested[key] = true
+		switch ltsMetricSource(key) {
+		case "ping":
+			needsPing = true
+		case "load", "gpu":
+			needsLoad = true
+		}
+	}
+
+	series := make([]ltsMetricSeries, 0, len(params.MetricKeys))
+	var responseStart, responseEnd time.Time
+	if needsLoad {
+		loadRequest := queryRequest
+		loadRequest.Type = "load"
+		loadRequest.UUID = params.EntityID
+		result, queryErr := history.Query(ctx, loadRequest)
+		if queryErr != nil {
+			return nil, historyRPCError(queryErr, "Failed to query resource metrics")
+		}
+		responseStart, responseEnd = result.Start, result.End
+		series = append(series, ltsLoadMetricSeries(result, requested, params.EntityID)...)
+	}
+	if needsPing {
+		pingRequest := queryRequest
+		pingRequest.Type = "ping"
+		pingRequest.UUID = params.EntityID
+		result, queryErr := history.Query(ctx, pingRequest)
+		if queryErr != nil {
+			return nil, historyRPCError(queryErr, "Failed to query Ping metrics")
+		}
+		if responseStart.IsZero() {
+			responseStart, responseEnd = result.Start, result.End
+		}
+		series = append(series, ltsPingMetricSeries(result, params.EntityID)...)
+	}
+	if responseStart.IsZero() {
+		responseStart, responseEnd, err = ltsMetricRange(params)
+		if err != nil {
+			return nil, historyRPCError(err, "Invalid metric query")
+		}
+	}
+
+	maxPoints := ltsMetricMaxPoints(params.MaxPoints)
+	series = limitLTSMetricPoints(series, maxPoints)
+	total := 0
+	for index := range series {
+		series[index].Count = len(series[index].Points)
+		series[index].MaxPoints = maxPoints
+		total += series[index].Count
+	}
+	return map[string]any{
+		"start": responseStart, "end": responseEnd, "series": series, "count": total,
+	}, nil
+}
+
+func ltsMetricHistoryRequest(params ltsMetricQueryParams) (history.QueryRequest, error) {
+	start, end, err := ltsMetricRange(params)
+	if err != nil {
+		return history.QueryRequest{}, err
+	}
+	return history.QueryRequest{
+		Start: start.Format(time.RFC3339), End: end.Format(time.RFC3339),
+		MaxPoints: ltsMetricMaxPoints(params.MaxPoints),
+	}, nil
+}
+
+func ltsMetricRange(params ltsMetricQueryParams) (time.Time, time.Time, error) {
+	end := time.Now()
+	var err error
+	if params.End != "" {
+		end, err = time.Parse(time.RFC3339, params.End)
+		if err != nil {
+			return time.Time{}, time.Time{}, err
+		}
+	}
+	if params.Start != "" {
+		start, parseErr := time.Parse(time.RFC3339, params.Start)
+		if parseErr != nil {
+			return time.Time{}, time.Time{}, parseErr
+		}
+		if !end.After(start) || end.Sub(start) > 90*24*time.Hour {
+			return time.Time{}, time.Time{}, history.ErrRangeTooLarge
+		}
+		return start, end, nil
+	}
+	hours := params.Hours
+	if hours <= 0 {
+		hours = 1
+	}
+	duration := time.Duration(hours * float64(time.Hour))
+	if duration <= 0 || duration > 90*24*time.Hour {
+		return time.Time{}, time.Time{}, history.ErrRangeTooLarge
+	}
+	return end.Add(-duration), end, nil
+}
+
+func ltsMetricMaxPoints(value int) int {
+	if value <= 0 {
+		return history.DefaultMaxPoints
+	}
+	if value > history.MaxMaxPoints {
+		return history.MaxMaxPoints
+	}
+	return value
+}
+
+func ltsMetricSource(key string) string {
+	for _, item := range ltsMetricDefinitions {
+		if item.key == key {
+			return item.source
+		}
+	}
+	return ""
+}
+
+func ltsLoadMetricSeries(result *history.Response, requested map[string]bool, entityID string) []ltsMetricSeries {
+	loadDays, _ := ltsMetricRetention()
+	interval := ltsResolutionSeconds(result.Resolution)
+	series := make([]ltsMetricSeries, 0, len(requested))
+	for _, source := range result.Series {
+		switch source.Kind {
+		case "load":
+			for _, definition := range ltsMetricDefinitions {
+				if definition.source != "load" || !requested[definition.key] {
+					continue
+				}
+				points := make([]ltsMetricPoint, 0, len(source.Points))
+				for _, point := range source.Points {
+					value := ltsLoadMetricValue(definition.key, point.Metrics)
+					points = append(points, ltsMetricPoint{Time: point.Time, Value: &value, Count: point.TotalCount})
+				}
+				series = append(series, ltsMetricSeries{
+					MetricKey: definition.key, EntityID: entityID, Type: "gauge", Unit: definition.unit,
+					RetentionDays: loadDays, Downsampled: result.Sampled, DownsampleAlgorithm: "avg",
+					IntervalSeconds: interval, Count: len(points), Points: points,
+				})
+			}
+		case "gpu":
+			tags := map[string]string{"device_index": strconv.Itoa(source.DeviceIndex)}
+			if source.DeviceName != "" {
+				tags["device_name"] = source.DeviceName
+			}
+			for _, definition := range ltsMetricDefinitions {
+				if definition.source != "gpu" || !requested[definition.key] {
+					continue
+				}
+				points := make([]ltsMetricPoint, 0, len(source.Points))
+				for _, point := range source.Points {
+					value := ltsGPUMetricValue(definition.key, point.Metrics)
+					points = append(points, ltsMetricPoint{Time: point.Time, Value: &value, Count: point.TotalCount})
+				}
+				series = append(series, ltsMetricSeries{
+					MetricKey: definition.key, EntityID: entityID, Type: "gauge", Unit: definition.unit,
+					RetentionDays: loadDays, Downsampled: result.Sampled, DownsampleAlgorithm: "avg",
+					IntervalSeconds: interval, Tags: tags, Count: len(points), Points: points,
+				})
+			}
+		}
+	}
+	return series
+}
+
+func ltsLoadMetricValue(key string, metrics map[string]float64) float64 {
+	switch key {
+	case "cpu.usage":
+		return metrics["cpu"]
+	case "gpu.usage":
+		return metrics["gpu"]
+	case "memory.used":
+		return metrics["ram"]
+	case "memory.total":
+		return metrics["ram_total"]
+	case "swap.used":
+		return metrics["swap"]
+	case "swap.total":
+		return metrics["swap_total"]
+	case "load.average":
+		return metrics["load"]
+	case "temperature":
+		return metrics["temp"]
+	case "disk.used":
+		return metrics["disk"]
+	case "disk.total":
+		return metrics["disk_total"]
+	case "net.in.rate":
+		return metrics["net_in"]
+	case "net.out.rate":
+		return metrics["net_out"]
+	case "net.total.up":
+		return metrics["net_total_up"]
+	case "net.total.down":
+		return metrics["net_total_down"]
+	case "traffic.up":
+		return metrics["traffic_up"]
+	case "traffic.down":
+		return metrics["traffic_down"]
+	case "process.count":
+		return metrics["process"]
+	case "connections.tcp":
+		return math.Max(0, metrics["connections"]-metrics["connections_udp"])
+	case "connections.udp":
+		return metrics["connections_udp"]
+	default:
+		return 0
+	}
+}
+
+func ltsGPUMetricValue(key string, metrics map[string]float64) float64 {
+	switch key {
+	case "gpu.device.usage":
+		return metrics["utilization"]
+	case "gpu.memory.used":
+		return metrics["mem_used"]
+	case "gpu.memory.total":
+		return metrics["mem_total"]
+	case "gpu.temperature":
+		return metrics["temperature"]
+	default:
+		return 0
+	}
+}
+
+func ltsPingMetricSeries(result *history.Response, entityID string) []ltsMetricSeries {
+	_, pingDays := ltsMetricRetention()
+	interval := ltsResolutionSeconds(result.Resolution)
+	series := make([]ltsMetricSeries, 0, len(result.Series))
+	for _, source := range result.Series {
+		if source.Kind != "ping" {
+			continue
+		}
+		points := make([]ltsMetricPoint, 0, len(source.Points))
+		for _, point := range source.Points {
+			var value *float64
+			if point.TotalCount > point.LossCount {
+				average := point.Avg
+				value = &average
+			}
+			points = append(points, ltsMetricPoint{Time: point.Time, Value: value, Count: point.TotalCount})
+		}
+		series = append(series, ltsMetricSeries{
+			MetricKey: "ping.latency_ms", EntityID: entityID, Type: "gauge", Unit: "ms",
+			RetentionDays: pingDays, Downsampled: result.Sampled, DownsampleAlgorithm: "avg",
+			IntervalSeconds: interval, Tags: map[string]string{"task_id": strconv.FormatUint(uint64(source.TaskID), 10)},
+			Count: len(points), Points: points,
+		})
+	}
+	return series
+}
+
+func ltsResolutionSeconds(value string) int64 {
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0
+	}
+	return int64(duration / time.Second)
+}
+
+func limitLTSMetricPoints(series []ltsMetricSeries, maxPoints int) []ltsMetricSeries {
+	total := 0
+	for index := range series {
+		total += len(series[index].Points)
+	}
+	if total <= maxPoints {
+		return series
+	}
+	remainingPoints := maxPoints
+	remainingSeries := len(series)
+	for index := range series {
+		if remainingPoints == 0 {
+			series[index].Points = nil
+			continue
+		}
+		budget := remainingPoints / remainingSeries
+		if budget == 0 {
+			budget = 1
+		}
+		if budget > len(series[index].Points) {
+			budget = len(series[index].Points)
+		}
+		series[index].Points = sampleLTSMetricPoints(series[index].Points, budget)
+		remainingPoints -= len(series[index].Points)
+		remainingSeries--
+	}
+	return series
+}
+
+func sampleLTSMetricPoints(points []ltsMetricPoint, count int) []ltsMetricPoint {
+	if count <= 0 || len(points) == 0 {
+		return nil
+	}
+	if count >= len(points) {
+		return points
+	}
+	if count == 1 {
+		return points[len(points)-1:]
+	}
+	result := make([]ltsMetricPoint, 0, count)
+	for index := 0; index < count; index++ {
+		source := index * (len(points) - 1) / (count - 1)
+		result = append(result, points[source])
+	}
+	return result
+}
+
+type ltsPingStat struct {
+	EntityID        string            `json:"entity_id"`
+	TaskID          string            `json:"task_id"`
+	Name            string            `json:"name,omitempty"`
+	Type            string            `json:"type,omitempty"`
+	Interval        int               `json:"interval,omitempty"`
+	Tags            map[string]string `json:"tags,omitempty"`
+	Total           int               `json:"total"`
+	Valid           int               `json:"valid"`
+	Loss            float64           `json:"loss"`
+	LossApproximate bool              `json:"loss_approximate"`
+	Min             *float64          `json:"min"`
+	Max             *float64          `json:"max"`
+	Avg             *float64          `json:"avg"`
+	Latest          *float64          `json:"latest"`
+	P50             *float64          `json:"p50"`
+	P99             *float64          `json:"p99"`
+	Stddev          *float64          `json:"stddev"`
+	P99P50Ratio     float64           `json:"p99_p50_ratio"`
+}
+
+func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var params ltsMetricQueryParams
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid Ping statistics query: "+err.Error(), nil)
+	}
+	if params.EntityID == "" {
+		return nil, rpc.MakeError(rpc.InvalidParams, "entity_id is required", nil)
+	}
+	if !isLoginFromCtx(ctx) && isHiddenClient(params.EntityID) {
+		return nil, rpc.MakeError(rpc.NotFound, "client not found", nil)
+	}
+	queryRequest, err := ltsMetricHistoryRequest(params)
+	if err != nil {
+		return nil, historyRPCError(err, "Invalid Ping statistics query")
+	}
+	queryRequest.Type = "ping"
+	queryRequest.UUID = params.EntityID
+	result, err := history.Query(ctx, queryRequest)
+	if err != nil {
+		return nil, historyRPCError(err, "Failed to query Ping statistics")
+	}
+
+	taskList, err := tasks.GetAllPingTasks()
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to load Ping tasks: "+err.Error(), nil)
+	}
+	taskMap := make(map[uint]struct {
+		name     string
+		taskType string
+		interval int
+	}, len(taskList))
+	for _, task := range taskList {
+		taskMap[task.Id] = struct {
+			name     string
+			taskType string
+			interval int
+		}{task.Name, task.Type, task.Interval}
+	}
+
+	stats := make([]ltsPingStat, 0, len(result.Series))
+	for _, source := range result.Series {
+		if source.Kind != "ping" {
+			continue
+		}
+		stat := ltsPingStat{
+			EntityID: params.EntityID, TaskID: strconv.FormatUint(uint64(source.TaskID), 10),
+			Tags: map[string]string{"task_id": strconv.FormatUint(uint64(source.TaskID), 10)},
+		}
+		if task, ok := taskMap[source.TaskID]; ok {
+			stat.Name, stat.Type, stat.Interval = task.name, task.taskType, task.interval
+		}
+		summary := source.PingSummary
+		if summary == nil {
+			summary = &history.PingSummary{}
+		}
+		stat.Total, stat.Valid = summary.TotalCount, summary.ValidCount
+		if stat.Total > 0 {
+			stat.Loss = float64(stat.Total-stat.Valid) / float64(stat.Total) * 100
+		}
+		if stat.Valid > 0 {
+			minimum, maximum, average := summary.Min, summary.Max, summary.Avg
+			latest, standardDeviation := summary.Latest, summary.Stddev
+			p50, p99 := summary.P50, summary.P99
+			stat.Min, stat.Max, stat.Latest = &minimum, &maximum, &latest
+			stat.Avg, stat.Stddev, stat.P50, stat.P99 = &average, &standardDeviation, &p50, &p99
+			if p50 > 0 && p99 >= p50 {
+				base := math.Max(10, math.Min(50, p50))
+				stat.P99P50Ratio = (p99 - p50) / base
+			}
+		}
+		stats = append(stats, stat)
+	}
+	return map[string]any{
+		"start": result.Start, "end": result.End, "interval_seconds": ltsResolutionSeconds(result.Resolution),
+		"stats": stats, "count": len(stats),
+	}, nil
+}
