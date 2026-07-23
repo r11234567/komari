@@ -162,7 +162,6 @@ func registerAdminRoutes(r *gin.Engine) {
 		databaseGroup.POST("/vacuum", jsonRpc.Bind("admin:vacuumDatabase", jsonRpc.WithMessage("database vacuumed")))
 	}
 
-
 	// clients
 	clientGroup := g.Group("/client")
 	{

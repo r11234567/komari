@@ -270,7 +270,6 @@ func getNodes(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcEr
 	return nodeMap, nil
 }
 
-
 func getPublicInfo(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	info, err := database.GetPublicInfo()
 	if err != nil {

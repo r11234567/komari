@@ -96,7 +96,6 @@ func adminVacuumDatabase(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.
 	}, nil
 }
 
-
 func adminGetLogs(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
 		Limit string `json:"limit"`

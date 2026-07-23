@@ -27,7 +27,7 @@ type TrafficReportNotification struct {
 	Client     string `json:"client" gorm:"type:varchar(36);not null;index;unique;constraint:OnDelete:CASCADE,OnUpdate:CASCADE;foreignKey:client;references:UUID"`
 	ClientInfo Client `json:"client_info,omitempty" gorm:"foreignKey:Client;references:UUID"`
 	Enable     bool   `json:"enable" gorm:"type:boolean;default:false"`
-	Daily      bool   `json:"daily" gorm:"type:boolean;default:false"`  // 日报
-	Weekly     bool   `json:"weekly" gorm:"type:boolean;default:false"` // 周报
+	Daily      bool   `json:"daily" gorm:"type:boolean;default:false"`   // 日报
+	Weekly     bool   `json:"weekly" gorm:"type:boolean;default:false"`  // 周报
 	Monthly    bool   `json:"monthly" gorm:"type:boolean;default:false"` // 月报
 }

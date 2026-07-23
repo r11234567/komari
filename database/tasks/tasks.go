@@ -91,9 +91,9 @@ func SaveTaskResult(taskId, clientId, result string, exitCode int, timestamp mod
 		return db.Model(&models.TaskResult{}).
 			Where("task_id = ? AND client = ?", taskId, clientId).
 			Updates(map[string]interface{}{
-			"result":      result,
-			"exit_code":   exitCode,
-			"finished_at": timestamp,
+				"result":      result,
+				"exit_code":   exitCode,
+				"finished_at": timestamp,
 			}).Error
 	})
 }

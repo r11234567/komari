@@ -197,4 +197,3 @@ func CheckPrincipal(p *Principal, method string) bool {
 	}
 	return p.HasRole(min)
 }
-
