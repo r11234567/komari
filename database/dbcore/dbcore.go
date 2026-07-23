@@ -294,14 +294,11 @@ func GetDBInstance() *gorm.DB {
 		err = instance.AutoMigrate(
 			&models.User{},
 			&models.Client{},
-			&models.Record{},
-			&models.GPURecord{},
 			&models.Log{},
 			&models.Clipboard{},
 			&models.LoadNotification{},
 			&models.OfflineNotification{},
 			&models.TrafficReportNotification{},
-			&models.PingRecord{},
 			&models.PingTask{},
 			&models.OidcProvider{},
 			&models.MessageSenderProvider{},
@@ -310,17 +307,34 @@ func GetDBInstance() *gorm.DB {
 		if err != nil {
 			log.Fatalf("Failed to create tables: %v", err)
 		}
-		err = instance.Table("records_long_term").AutoMigrate(
-			&models.Record{},
-		)
-		if err != nil {
-			log.Printf("Failed to create records_long_term table, it may already exist: %v", err)
+
+		// The 1.2.5 history schemas are frozen. SQLite's AutoMigrate may rebuild
+		// large existing tables while comparing types or constraints, so only use
+		// it when a history table does not exist yet.
+		if !instance.Migrator().HasTable(&models.Record{}) {
+			if err := instance.AutoMigrate(&models.Record{}); err != nil {
+				log.Fatalf("Failed to create records table: %v", err)
+			}
 		}
-		err = instance.Table("gpu_records_long_term").AutoMigrate(
-			&models.GPURecord{},
-		)
-		if err != nil {
-			log.Printf("Failed to create gpu_records_long_term table, it may already exist: %v", err)
+		if !instance.Migrator().HasTable(&models.GPURecord{}) {
+			if err := instance.AutoMigrate(&models.GPURecord{}); err != nil {
+				log.Fatalf("Failed to create GPU records table: %v", err)
+			}
+		}
+		if !instance.Migrator().HasTable(&models.PingRecord{}) {
+			if err := instance.AutoMigrate(&models.PingRecord{}); err != nil {
+				log.Fatalf("Failed to create Ping records table: %v", err)
+			}
+		}
+		if !instance.Migrator().HasTable("records_long_term") {
+			if err := instance.Table("records_long_term").AutoMigrate(&models.Record{}); err != nil {
+				log.Fatalf("Failed to create records_long_term table: %v", err)
+			}
+		}
+		if !instance.Migrator().HasTable("gpu_records_long_term") {
+			if err := instance.Table("gpu_records_long_term").AutoMigrate(&models.GPURecord{}); err != nil {
+				log.Fatalf("Failed to create gpu_records_long_term table: %v", err)
+			}
 		}
 		err = instance.AutoMigrate(
 			&models.Session{},
