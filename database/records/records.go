@@ -93,21 +93,20 @@ func DeleteRecordBefore(before time.Time) error {
 			return nil
 		})
 	}
+	const sqliteCleanupBatchSize = 1000
 	for _, table := range []string{"records_long_term", "gpu_records_long_term", "gpu_records", "records"} {
-		for {
-			var affected int64
-			ran, err := dbcore.TryMaintenance(context.Background(), func(db *gorm.DB) error {
-				result := db.Exec("DELETE FROM "+table+" WHERE rowid IN (SELECT rowid FROM "+table+" WHERE time < ? LIMIT 5000)", before)
-				affected = result.RowsAffected
-				return result.Error
-			})
-			if err != nil {
-				return err
-			}
-			if !ran || affected == 0 {
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
+		ran, err := dbcore.TryMaintenance(context.Background(), func(db *gorm.DB) error {
+			return db.Exec(
+				"DELETE FROM "+table+" WHERE rowid IN (SELECT rowid FROM "+table+" WHERE time < ? LIMIT ?)",
+				before,
+				sqliteCleanupBatchSize,
+			).Error
+		})
+		if err != nil {
+			return err
+		}
+		if !ran {
+			return nil
 		}
 	}
 	return nil

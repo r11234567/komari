@@ -153,18 +153,15 @@ func DeletePingRecordsBefore(cutoff time.Time) error {
 			return db.Where("time < ?", cutoff).Delete(&models.PingRecord{}).Error
 		})
 	}
-	for {
-		var affected int64
-		ran, err := dbcore.TryMaintenance(context.Background(), func(db *gorm.DB) error {
-			result := db.Exec("DELETE FROM ping_records WHERE rowid IN (SELECT rowid FROM ping_records WHERE time < ? LIMIT 5000)", cutoff)
-			affected = result.RowsAffected
-			return result.Error
-		})
-		if err != nil || !ran || affected == 0 {
-			return err
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	const sqliteCleanupBatchSize = 1000
+	_, err := dbcore.TryMaintenance(context.Background(), func(db *gorm.DB) error {
+		return db.Exec(
+			"DELETE FROM ping_records WHERE rowid IN (SELECT rowid FROM ping_records WHERE time < ? LIMIT ?)",
+			cutoff,
+			sqliteCleanupBatchSize,
+		).Error
+	})
+	return err
 }
 
 func DeletePingRecords(id []uint) error {
