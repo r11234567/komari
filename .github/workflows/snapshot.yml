@@ -71,8 +71,38 @@ jobs:
         with:
           artifact-name: komari-frontend
 
+  verify-go:
+    needs: build-frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Restore frontend artifact
+        uses: ./.github/actions/restore-frontend
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          UNFORMATTED="$(find . -name '*.go' -not -path './komari-web/*' -print0 | xargs -0 gofmt -l)"
+          if [ -n "${UNFORMATTED}" ]; then
+            echo "The following Go files need gofmt:"
+            echo "${UNFORMATTED}"
+            exit 1
+          fi
+
+      - name: Run Go tests
+        run: go test ./...
+
   build-and-attach-binaries:
-    needs: [prepare, build-frontend]
+    needs: [prepare, build-frontend, verify-go]
     runs-on: ubuntu-latest
 
     strategy:

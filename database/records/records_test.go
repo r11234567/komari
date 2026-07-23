@@ -22,8 +22,8 @@ var _ = func() bool {
 	return true
 }()
 
-// TestCompactRecord tests the database compaction logic by inserting 4h30m of data (one record per minute),
-// then running migrateOldRecords and verifying the aggregation and cleanup.
+// TestCompactRecord verifies that bounded passes eventually aggregate all
+// eligible windows while retaining the extra hour of raw overlap.
 func TestCompactRecord(t *testing.T) {
 	const totalMinutes = 12*60 + 30
 	loc := models.GetAppLocation()
@@ -78,9 +78,17 @@ func TestCompactRecord(t *testing.T) {
 		})
 	}
 
-	// 运行压缩（迁移）逻辑
+	// Each pass handles one window. The first assertion protects the bounded
+	// maintenance contract; the remaining passes verify eventual catch-up.
 	err = migrateOldRecordsAt(db, now)
 	assert.NoError(t, err)
+	var firstPassCount int64
+	assert.NoError(t, db.Table("records_long_term").Count(&firstPassCount).Error)
+	assert.Equal(t, int64(1), firstPassCount)
+	for i := 1; i < len(expectedGroups); i++ {
+		assert.NoError(t, migrateOldRecordsAt(db, now))
+	}
+	assert.NoError(t, migrateOldRecordsAt(db, now))
 
 	// 验证 long-term 表中的聚合记录数
 	var longCount int64
@@ -286,12 +294,51 @@ func TestCompactRecordRetainsOneHourOverlapWindow(t *testing.T) {
 	}
 
 	assert.NoError(t, migrateOldRecordsAt(db, now))
+	assert.NoError(t, migrateOldRecordsAt(db, now))
 
 	var remainTimes []models.Record
 	assert.NoError(t, db.Table("records").Order("time ASC").Find(&remainTimes).Error)
 	require.Len(t, remainTimes, 2)
 	assert.True(t, remainTimes[0].Time.ToTime().Equal(records[1].Time.ToTime()))
 	assert.True(t, remainTimes[1].Time.ToTime().Equal(records[2].Time.ToTime()))
+
+	var compacted []models.Record
+	assert.NoError(t, db.Table("records_long_term").Order("time ASC").Find(&compacted).Error)
+	require.Len(t, compacted, 2)
+	assert.True(t, compacted[1].Time.ToTime().Equal(records[1].Time.ToTime().Truncate(15*time.Minute)))
+}
+
+func TestCompactGPURecordRetainsOneHourOverlapWindow(t *testing.T) {
+	loc := models.GetAppLocation()
+	now := time.Date(2026, 6, 7, 12, 7, 0, 0, loc)
+	cutoff := compactRecordCutoff(now)
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	assert.NoError(t, err)
+	assert.NoError(t, db.AutoMigrate(&models.GPURecord{}))
+	assert.NoError(t, db.Table("gpu_records_long_term").AutoMigrate(&models.GPURecord{}))
+
+	records := []models.GPURecord{
+		{Client: uuid, DeviceIndex: 0, Time: models.FromTime(cutoff.Add(-time.Hour - time.Minute)), Utilization: 10},
+		{Client: uuid, DeviceIndex: 0, Time: models.FromTime(cutoff.Add(-30 * time.Minute)), Utilization: 20},
+		{Client: uuid, DeviceIndex: 0, Time: models.FromTime(now.Add(-3 * time.Hour)), Utilization: 30},
+	}
+	for _, rec := range records {
+		assert.NoError(t, db.Create(&rec).Error)
+	}
+
+	assert.NoError(t, migrateGPURecordsAt(db, now))
+	assert.NoError(t, migrateGPURecordsAt(db, now))
+
+	var remaining []models.GPURecord
+	assert.NoError(t, db.Table("gpu_records").Order("time ASC").Find(&remaining).Error)
+	require.Len(t, remaining, 2)
+	assert.True(t, remaining[0].Time.ToTime().Equal(records[1].Time.ToTime()))
+	assert.True(t, remaining[1].Time.ToTime().Equal(records[2].Time.ToTime()))
+
+	var compacted []models.GPURecord
+	assert.NoError(t, db.Table("gpu_records_long_term").Order("time ASC").Find(&compacted).Error)
+	require.Len(t, compacted, 2)
+	assert.True(t, compacted[1].Time.ToTime().Equal(records[1].Time.ToTime().Truncate(15*time.Minute)))
 }
 
 func TestCompactRecordOnlyMigratesCompleteFifteenMinuteBuckets(t *testing.T) {

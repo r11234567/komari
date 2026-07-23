@@ -8,6 +8,6 @@
 - Isolated SQLite history reads from the single legacy write connection under WAL mode.
 - Serialized foreground SQLite writes with bounded busy retries and write-priority maintenance scheduling.
 - Added durable load and Ping ingest spools so transient lock pressure does not create silent history gaps.
-- Changed retention cleanup to small batches and record compaction to one 15-minute window per pass.
+- Changed retention cleanup to small batches and record compaction to one 15-minute window per pass while preserving the original one-hour raw overlap.
 - Added administrator-only asynchronous raw CSV exports for Ping and resource history.
 - Reused the existing release workflows, pinned the default frontend to `komari-web/1.2.5-fix2`, and added GitHub-side Go formatting and test gates.

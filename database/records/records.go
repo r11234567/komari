@@ -218,23 +218,78 @@ func migrateOldRecords(db *gorm.DB) error {
 	return migrateOldRecordsAt(db, time.Now())
 }
 
+const (
+	recordCompactionWindow = 15 * time.Minute
+	rawRecordOverlap       = time.Hour
+)
+
 func compactRecordCutoff(now time.Time) time.Time {
-	return now.Add(-4 * time.Hour).Truncate(15 * time.Minute)
+	return now.Add(-4 * time.Hour).Truncate(recordCompactionWindow)
+}
+
+type recordWindowSample struct {
+	Client string
+	Time   models.LocalTime
+}
+
+type compactionWindow struct {
+	Start     time.Time
+	DeleteRaw bool
+}
+
+// nextRecordCompactionWindow first drains raw data beyond the one-hour overlap.
+// Once caught up, it finds one overlap window that has not been aggregated yet.
+func nextRecordCompactionWindow(db *gorm.DB, cutoff time.Time) (*compactionWindow, error) {
+	deleteCutoff := cutoff.Add(-rawRecordOverlap)
+	var sample recordWindowSample
+	if err := db.Table("records").Select("client", "time").Where("time < ?", deleteCutoff).
+		Order("time ASC").Limit(1).Scan(&sample).Error; err != nil {
+		return nil, err
+	}
+	if !sample.Time.ToTime().IsZero() {
+		return &compactionWindow{
+			Start:     sample.Time.ToTime().Truncate(recordCompactionWindow),
+			DeleteRaw: true,
+		}, nil
+	}
+
+	for windowStart := deleteCutoff; windowStart.Before(cutoff); windowStart = windowStart.Add(recordCompactionWindow) {
+		windowEnd := windowStart.Add(recordCompactionWindow)
+		sample = recordWindowSample{}
+		if err := db.Table("records").Select("client", "time").
+			Where("time >= ? AND time < ?", windowStart, windowEnd).
+			Order("time ASC").Limit(1).Scan(&sample).Error; err != nil {
+			return nil, err
+		}
+		if sample.Time.ToTime().IsZero() {
+			continue
+		}
+
+		var existing int64
+		if err := db.Table("records_long_term").
+			Where("client = ? AND time = ?", sample.Client, models.FromTime(windowStart)).
+			Count(&existing).Error; err != nil {
+			return nil, err
+		}
+		if existing == 0 {
+			return &compactionWindow{Start: windowStart}, nil
+		}
+	}
+
+	return nil, nil
 }
 
 func migrateOldRecordsAt(db *gorm.DB, now time.Time) error {
 	cutoff := compactRecordCutoff(now)
-	var oldest struct {
-		Time models.LocalTime `gorm:"column:time"`
-	}
-	if err := db.Table("records").Select("time").Where("time < ?", cutoff).Order("time ASC").Limit(1).Scan(&oldest).Error; err != nil {
+	window, err := nextRecordCompactionWindow(db, cutoff)
+	if err != nil {
 		return err
 	}
-	if oldest.Time.ToTime().IsZero() {
+	if window == nil {
 		return nil
 	}
-	windowStart := oldest.Time.ToTime().Truncate(15 * time.Minute)
-	windowEnd := windowStart.Add(15 * time.Minute)
+	windowStart := window.Start
+	windowEnd := windowStart.Add(recordCompactionWindow)
 
 	// Process one complete window per pass so maintenance never monopolizes writes.
 	var records []models.Record
@@ -421,8 +476,10 @@ func migrateOldRecordsAt(db *gorm.DB, now time.Time) error {
 			}
 		}
 
-		if err := tx.Table("records").Where("time >= ? AND time < ?", windowStart, windowEnd).Delete(&models.Record{}).Error; err != nil {
-			return err
+		if window.DeleteRaw {
+			if err := tx.Table("records").Where("time >= ? AND time < ?", windowStart, windowEnd).Delete(&models.Record{}).Error; err != nil {
+				return err
+			}
 		}
 
 		return nil
@@ -509,18 +566,66 @@ func repairZeroTrafficDeltas(records []models.Record, previousByClient map[strin
 
 // migrateGPURecords 压缩GPU记录数据
 func migrateGPURecords(db *gorm.DB) error {
-	cutoff := compactRecordCutoff(time.Now())
-	var oldest struct {
-		Time models.LocalTime `gorm:"column:time"`
+	return migrateGPURecordsAt(db, time.Now())
+}
+
+type gpuRecordWindowSample struct {
+	Client      string
+	DeviceIndex int
+	Time        models.LocalTime
+}
+
+func nextGPUCompactionWindow(db *gorm.DB, cutoff time.Time) (*compactionWindow, error) {
+	deleteCutoff := cutoff.Add(-rawRecordOverlap)
+	var sample gpuRecordWindowSample
+	if err := db.Table("gpu_records").Select("client", "device_index", "time").Where("time < ?", deleteCutoff).
+		Order("time ASC").Limit(1).Scan(&sample).Error; err != nil {
+		return nil, err
 	}
-	if err := db.Table("gpu_records").Select("time").Where("time < ?", cutoff).Order("time ASC").Limit(1).Scan(&oldest).Error; err != nil {
+	if !sample.Time.ToTime().IsZero() {
+		return &compactionWindow{
+			Start:     sample.Time.ToTime().Truncate(recordCompactionWindow),
+			DeleteRaw: true,
+		}, nil
+	}
+
+	for windowStart := deleteCutoff; windowStart.Before(cutoff); windowStart = windowStart.Add(recordCompactionWindow) {
+		windowEnd := windowStart.Add(recordCompactionWindow)
+		sample = gpuRecordWindowSample{}
+		if err := db.Table("gpu_records").Select("client", "device_index", "time").
+			Where("time >= ? AND time < ?", windowStart, windowEnd).
+			Order("time ASC").Limit(1).Scan(&sample).Error; err != nil {
+			return nil, err
+		}
+		if sample.Time.ToTime().IsZero() {
+			continue
+		}
+
+		var existing int64
+		if err := db.Table("gpu_records_long_term").
+			Where("client = ? AND device_index = ? AND time = ?", sample.Client, sample.DeviceIndex, models.FromTime(windowStart)).
+			Count(&existing).Error; err != nil {
+			return nil, err
+		}
+		if existing == 0 {
+			return &compactionWindow{Start: windowStart}, nil
+		}
+	}
+
+	return nil, nil
+}
+
+func migrateGPURecordsAt(db *gorm.DB, now time.Time) error {
+	cutoff := compactRecordCutoff(now)
+	window, err := nextGPUCompactionWindow(db, cutoff)
+	if err != nil {
 		return err
 	}
-	if oldest.Time.ToTime().IsZero() {
+	if window == nil {
 		return nil
 	}
-	windowStart := oldest.Time.ToTime().Truncate(15 * time.Minute)
-	windowEnd := windowStart.Add(15 * time.Minute)
+	windowStart := window.Start
+	windowEnd := windowStart.Add(recordCompactionWindow)
 
 	var gpuRecords []models.GPURecord
 	if err := db.Where("time >= ? AND time < ?", windowStart, windowEnd).Find(&gpuRecords).Error; err != nil {
@@ -652,8 +757,10 @@ func migrateGPURecords(db *gorm.DB) error {
 			}
 		}
 
-		if err := tx.Where("time >= ? AND time < ?", windowStart, windowEnd).Delete(&models.GPURecord{}).Error; err != nil {
-			return err
+		if window.DeleteRaw {
+			if err := tx.Where("time >= ? AND time < ?", windowStart, windowEnd).Delete(&models.GPURecord{}).Error; err != nil {
+				return err
+			}
 		}
 
 		return nil
