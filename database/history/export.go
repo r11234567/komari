@@ -438,7 +438,7 @@ func exportPing(ctx context.Context, job *ExportJob, writer *csv.Writer) error {
 	type rawRow struct {
 		clientUUID string
 		taskID     uint
-		t          string // RFC3339
+		bucket     time.Time // truncated to minute for grouping
 		value      int
 	}
 	var buf []rawRow
@@ -465,7 +465,6 @@ func exportPing(ctx context.Context, job *ExportJob, writer *csv.Writer) error {
 			if err := rows.Scan(&clientUUID, &taskID, &recorded, &value); err != nil {
 				return err
 			}
-			// Resolve client display name on demand.
 			if _, ok := nameCache[clientUUID]; !ok {
 				m := lookupClientNames([]string{clientUUID})
 				nameCache[clientUUID] = m[clientUUID]
@@ -473,7 +472,7 @@ func exportPing(ctx context.Context, job *ExportJob, writer *csv.Writer) error {
 			buf = append(buf, rawRow{
 				clientUUID: clientUUID,
 				taskID:     taskID,
-				t:          recorded.ToTime().Format(time.RFC3339),
+				bucket:     recorded.ToTime().Truncate(time.Minute),
 				value:      value,
 			})
 		}
@@ -483,13 +482,11 @@ func exportPing(ctx context.Context, job *ExportJob, writer *csv.Writer) error {
 		return collectErr
 	}
 
-	// --- Phase 2: determine which tasks actually appear in the data ---
+	// --- Phase 2: determine ordered task list from data ---
 	seen := make(map[uint]bool, len(allTasks))
 	for _, r := range buf {
 		seen[r.taskID] = true
 	}
-	// Keep order from allTasks; include only seen tasks, plus any task ID that
-	// appeared in the data but is not in allTasks (e.g. deleted task).
 	var tasks []pingTaskEntry
 	knownIDs := make(map[uint]bool, len(allTasks))
 	for _, t := range allTasks {
@@ -504,23 +501,62 @@ func exportPing(ctx context.Context, job *ExportJob, writer *csv.Writer) error {
 		}
 	}
 
-	// Build task-id → column-base-index (0-based within task block, starting after Client+Time).
 	taskColBase := make(map[uint]int, len(tasks))
 	for i, t := range tasks {
 		taskColBase[t.id] = 2 + i*2
 	}
 	totalCols := 2 + len(tasks)*2
 
-	// --- Phase 3: write two-row header ---
+	// --- Phase 3: group by (clientUUID, bucket) → dense rows ---
+	// rowKey uniquely identifies one output row.
+	type rowKey struct {
+		clientUUID string
+		bucket     time.Time
+	}
+	// denseRow stores the current ping/loss per task column.
+	// Index 0 = ping, index 1 = loss for each task pair.
+	type taskVal struct {
+		ping string
+		loss string
+		set  bool
+	}
+	grouped := make(map[rowKey][]taskVal) // key → slice indexed by task order
+	var keyOrder []rowKey                 // preserve insertion (time-sorted) order
+
+	for _, r := range buf {
+		k := rowKey{r.clientUUID, r.bucket}
+		if _, exists := grouped[k]; !exists {
+			grouped[k] = make([]taskVal, len(tasks))
+			keyOrder = append(keyOrder, k)
+		}
+		idx, ok := taskColBase[r.taskID]
+		if !ok {
+			continue
+		}
+		slotIdx := (idx - 2) / 2
+		if slotIdx < 0 || slotIdx >= len(tasks) {
+			continue
+		}
+		// For multiple measurements in the same bucket, keep the last one.
+		var ping, loss string
+		if r.value < 0 {
+			ping = ""
+			loss = "100.00"
+		} else {
+			ping = strconv.Itoa(r.value)
+			loss = "0.00"
+		}
+		grouped[k][slotIdx] = taskVal{ping: ping, loss: loss, set: true}
+	}
+
+	// --- Phase 4: write two-row header ---
 	header1 := make([]string, totalCols)
 	header2 := make([]string, totalCols)
 	header1[0] = "Client"
 	header1[1] = "Time"
-	header2[0] = ""
-	header2[1] = ""
 	for i, t := range tasks {
 		base := 2 + i*2
-		header1[base] = t.name // task name spans 2 cols visually
+		header1[base] = t.name
 		header1[base+1] = ""
 		header2[base] = "Ping (ms)"
 		header2[base+1] = "Loss (%)"
@@ -532,18 +568,16 @@ func exportPing(ctx context.Context, job *ExportJob, writer *csv.Writer) error {
 		return err
 	}
 
-	// --- Phase 4: write data rows ---
-	for _, r := range buf {
+	// --- Phase 5: write dense data rows in order ---
+	for _, k := range keyOrder {
 		row := make([]string, totalCols)
-		row[0] = nameCache[r.clientUUID]
-		row[1] = r.t
-		if base, ok := taskColBase[r.taskID]; ok {
-			if r.value < 0 {
-				row[base] = ""
-				row[base+1] = "100.00"
-			} else {
-				row[base] = strconv.Itoa(r.value)
-				row[base+1] = "0.00"
+		row[0] = nameCache[k.clientUUID]
+		row[1] = k.bucket.Format(time.RFC3339)
+		for i, tv := range grouped[k] {
+			if tv.set {
+				base := 2 + i*2
+				row[base] = tv.ping
+				row[base+1] = tv.loss
 			}
 		}
 		if err := writer.Write(row); err != nil {
