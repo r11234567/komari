@@ -37,12 +37,12 @@ func GetHistoryExport(c *gin.Context) {
 }
 
 func DownloadHistoryExport(c *gin.Context) {
-	path, ok := history.ExportFile(c.Param("id"))
+	path, name, ok := history.ExportFilename(c.Param("id"))
 	if !ok {
 		c.JSON(http.StatusConflict, gin.H{"status": "error", "code": "EXPORT_NOT_READY"})
 		return
 	}
-	c.FileAttachment(path, filepath.Base(path))
+	c.FileAttachment(path, name)
 }
 
 func CancelHistoryExport(c *gin.Context) {
@@ -51,4 +51,17 @@ func CancelHistoryExport(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "success"})
+}
+
+// GetExportRetention returns the configured history retention in hours for each
+// export type so the frontend can build a dynamic day-selector.
+func GetExportRetention(c *gin.Context) {
+	resourceHours, pingHours := history.ExportRetentionHours()
+	c.JSON(http.StatusOK, gin.H{
+		"status": "success",
+		"data": gin.H{
+			"resource_hours": resourceHours,
+			"ping_hours":     pingHours,
+		},
+	})
 }

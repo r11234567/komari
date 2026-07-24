@@ -84,6 +84,7 @@ func registerAgentRoutes(r *gin.Engine) {
 func registerAdminRoutes(r *gin.Engine) {
 	g := r.Group("/api/admin", api.RequireRole(api.RoleAdmin))
 	g.POST("/history/export", admin.StartHistoryExport)
+	g.GET("/history/export/retention", admin.GetExportRetention)
 	g.GET("/history/export/:id", admin.GetHistoryExport)
 	g.GET("/history/export/:id/download", admin.DownloadHistoryExport)
 	g.DELETE("/history/export/:id", admin.CancelHistoryExport)
