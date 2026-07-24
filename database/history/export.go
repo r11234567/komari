@@ -378,22 +378,47 @@ func exportWindows(ctx context.Context, job *ExportJob, fn func(time.Time, time.
 	return nil
 }
 
+// lookupTaskNames returns a map from task ID → task name for all ping tasks.
+// Missing entries fall back to a "Task #N" placeholder.
+func lookupTaskNames() map[uint]string {
+	result := make(map[uint]string)
+	type taskRow struct {
+		Id   uint
+		Name string
+	}
+	var rows []taskRow
+	if err := dbcore.GetReadDBInstance().
+		Table("ping_tasks").
+		Select("id, name").
+		Find(&rows).Error; err != nil {
+		return result
+	}
+	for _, r := range rows {
+		name := r.Name
+		if name == "" {
+			name = fmt.Sprintf("Task #%d", r.Id)
+		}
+		result[r.Id] = name
+	}
+	return result
+}
+
 // exportPing writes a human-readable Ping CSV.
-// Columns: Client, Time, Ping (ms), Loss (%)
+// Columns: Client, Task, Time, Ping (ms), Loss (%)
 // Each row represents one raw measurement; loss is 100.00 when value < 0.
 func exportPing(ctx context.Context, job *ExportJob, writer *csv.Writer) error {
-	if err := writer.Write([]string{"Client", "Time", "Ping (ms)", "Loss (%)"}); err != nil {
+	if err := writer.Write([]string{"Client", "Task", "Time", "Ping (ms)", "Loss (%)"}); err != nil {
 		return err
 	}
 
-	// Pre-load a name cache for all clients we might encounter.
+	// Pre-load lookup maps so we don't query per-row.
 	nameCache := make(map[string]string)
 	if job.request.UUID != "" {
-		names := lookupClientNames([]string{job.request.UUID})
-		for k, v := range names {
+		for k, v := range lookupClientNames([]string{job.request.UUID}) {
 			nameCache[k] = v
 		}
 	}
+	taskNames := lookupTaskNames()
 
 	return exportWindows(ctx, job, func(start, end time.Time) error {
 		db := dbcore.GetReadDBInstance().WithContext(ctx).Table("ping_records").
@@ -411,19 +436,25 @@ func exportPing(ctx context.Context, job *ExportJob, writer *csv.Writer) error {
 		defer rows.Close()
 		for rows.Next() {
 			var clientUUID string
-			var task uint
+			var taskID uint
 			var recorded models.LocalTime
 			var value int
-			if err := rows.Scan(&clientUUID, &task, &recorded, &value); err != nil {
+			if err := rows.Scan(&clientUUID, &taskID, &recorded, &value); err != nil {
 				return err
 			}
 
-			// Resolve display name on demand and cache.
+			// Resolve client display name on demand.
 			displayName, cached := nameCache[clientUUID]
 			if !cached {
 				m := lookupClientNames([]string{clientUUID})
 				displayName = m[clientUUID]
 				nameCache[clientUUID] = displayName
+			}
+
+			// Resolve task name.
+			taskName, ok := taskNames[taskID]
+			if !ok {
+				taskName = fmt.Sprintf("Task #%d", taskID)
 			}
 
 			var pingMS, lossStr string
@@ -437,6 +468,7 @@ func exportPing(ctx context.Context, job *ExportJob, writer *csv.Writer) error {
 
 			if err := writer.Write([]string{
 				displayName,
+				taskName,
 				recorded.ToTime().Format(time.RFC3339),
 				pingMS,
 				lossStr,
