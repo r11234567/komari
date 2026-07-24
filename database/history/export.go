@@ -327,6 +327,12 @@ func runExport(ctx context.Context, job *ExportJob) error {
 	if err != nil {
 		return err
 	}
+	// UTF-8 BOM so Excel opens the file with correct Chinese character encoding.
+	if _, err := file.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+		file.Close()
+		_ = os.Remove(partial)
+		return err
+	}
 	writer := csv.NewWriter(file)
 	if job.Type == "ping" {
 		err = exportPing(ctx, job, writer)
@@ -378,49 +384,61 @@ func exportWindows(ctx context.Context, job *ExportJob, fn func(time.Time, time.
 	return nil
 }
 
-// lookupTaskNames returns a map from task ID → task name for all ping tasks.
-// Missing entries fall back to a "Task #N" placeholder.
-func lookupTaskNames() map[uint]string {
-	result := make(map[uint]string)
+// lookupTasksOrdered returns ping tasks ordered by weight ASC, id ASC.
+// Each entry holds the task id and its display name.
+func lookupTasksOrdered() []struct{ id uint; name string } {
 	type taskRow struct {
-		Id   uint
-		Name string
+		Id     uint
+		Name   string
+		Weight int
 	}
 	var rows []taskRow
-	if err := dbcore.GetReadDBInstance().
+	_ = dbcore.GetReadDBInstance().
 		Table("ping_tasks").
-		Select("id, name").
-		Find(&rows).Error; err != nil {
-		return result
-	}
+		Select("id, name, weight").
+		Order("weight ASC, id ASC").
+		Find(&rows).Error
+	result := make([]struct{ id uint; name string }, 0, len(rows))
 	for _, r := range rows {
 		name := r.Name
 		if name == "" {
 			name = fmt.Sprintf("Task #%d", r.Id)
 		}
-		result[r.Id] = name
+		result = append(result, struct{ id uint; name string }{r.Id, name})
 	}
 	return result
 }
 
-// exportPing writes a human-readable Ping CSV.
-// Columns: Client, Task, Time, Ping (ms), Loss (%)
-// Each row represents one raw measurement; loss is 100.00 when value < 0.
+// exportPing writes a wide-format Ping CSV with two header rows and a UTF-8 BOM
+// (written by the caller before csv.Writer is created).
+//
+// Header layout (columns repeat per task):
+//
+//	Row 1:  Client │ Time │ <TaskName> │ (empty) │ <TaskName> │ (empty) │ …
+//	Row 2:  (empty)│(empty)│ Ping (ms)  │ Loss (%)│ Ping (ms)  │ Loss (%)│ …
+//
+// Data rows are sparse: each row only fills the two columns belonging to the
+// task that produced the measurement; all other task columns are left empty.
 func exportPing(ctx context.Context, job *ExportJob, writer *csv.Writer) error {
-	if err := writer.Write([]string{"Client", "Task", "Time", "Ping (ms)", "Loss (%)"}); err != nil {
-		return err
-	}
-
-	// Pre-load lookup maps so we don't query per-row.
+	// Pre-load lookup tables.
 	nameCache := make(map[string]string)
 	if job.request.UUID != "" {
 		for k, v := range lookupClientNames([]string{job.request.UUID}) {
 			nameCache[k] = v
 		}
 	}
-	taskNames := lookupTaskNames()
+	allTasks := lookupTasksOrdered() // ordered, used for column layout
 
-	return exportWindows(ctx, job, func(start, end time.Time) error {
+	// --- Phase 1: buffer all raw measurements ---
+	type rawRow struct {
+		clientUUID string
+		taskID     uint
+		t          string // RFC3339
+		value      int
+	}
+	var buf []rawRow
+
+	collectErr := exportWindows(ctx, job, func(start, end time.Time) error {
 		db := dbcore.GetReadDBInstance().WithContext(ctx).Table("ping_records").
 			Select("client, task_id, time, value").Where("time >= ? AND time < ?", start, end)
 		if job.request.UUID != "" {
@@ -442,42 +460,93 @@ func exportPing(ctx context.Context, job *ExportJob, writer *csv.Writer) error {
 			if err := rows.Scan(&clientUUID, &taskID, &recorded, &value); err != nil {
 				return err
 			}
-
 			// Resolve client display name on demand.
-			displayName, cached := nameCache[clientUUID]
-			if !cached {
+			if _, ok := nameCache[clientUUID]; !ok {
 				m := lookupClientNames([]string{clientUUID})
-				displayName = m[clientUUID]
-				nameCache[clientUUID] = displayName
+				nameCache[clientUUID] = m[clientUUID]
 			}
-
-			// Resolve task name.
-			taskName, ok := taskNames[taskID]
-			if !ok {
-				taskName = fmt.Sprintf("Task #%d", taskID)
-			}
-
-			var pingMS, lossStr string
-			if value < 0 {
-				pingMS = ""
-				lossStr = "100.00"
-			} else {
-				pingMS = strconv.Itoa(value)
-				lossStr = "0.00"
-			}
-
-			if err := writer.Write([]string{
-				displayName,
-				taskName,
-				recorded.ToTime().Format(time.RFC3339),
-				pingMS,
-				lossStr,
-			}); err != nil {
-				return err
-			}
+			buf = append(buf, rawRow{
+				clientUUID: clientUUID,
+				taskID:     taskID,
+				t:          recorded.ToTime().Format(time.RFC3339),
+				value:      value,
+			})
 		}
 		return rows.Err()
 	})
+	if collectErr != nil {
+		return collectErr
+	}
+
+	// --- Phase 2: determine which tasks actually appear in the data ---
+	seen := make(map[uint]bool, len(allTasks))
+	for _, r := range buf {
+		seen[r.taskID] = true
+	}
+	// Keep order from allTasks; include only seen tasks, plus any task ID that
+	// appeared in the data but is not in allTasks (e.g. deleted task).
+	type taskCol struct{ id uint; name string }
+	var tasks []taskCol
+	knownIDs := make(map[uint]bool, len(allTasks))
+	for _, t := range allTasks {
+		knownIDs[t.id] = true
+		if seen[t.id] {
+			tasks = append(tasks, taskCol{t.id, t.name})
+		}
+	}
+	for id := range seen {
+		if !knownIDs[id] {
+			tasks = append(tasks, taskCol{id, fmt.Sprintf("Task #%d", id)})
+		}
+	}
+
+	// Build task-id → column-base-index (0-based within task block, starting after Client+Time).
+	taskColBase := make(map[uint]int, len(tasks))
+	for i, t := range tasks {
+		taskColBase[t.id] = 2 + i*2
+	}
+	totalCols := 2 + len(tasks)*2
+
+	// --- Phase 3: write two-row header ---
+	header1 := make([]string, totalCols)
+	header2 := make([]string, totalCols)
+	header1[0] = "Client"
+	header1[1] = "Time"
+	header2[0] = ""
+	header2[1] = ""
+	for i, t := range tasks {
+		base := 2 + i*2
+		header1[base] = t.name // task name spans 2 cols visually
+		header1[base+1] = ""
+		header2[base] = "Ping (ms)"
+		header2[base+1] = "Loss (%)"
+	}
+	if err := writer.Write(header1); err != nil {
+		return err
+	}
+	if err := writer.Write(header2); err != nil {
+		return err
+	}
+
+	// --- Phase 4: write data rows ---
+	for _, r := range buf {
+		row := make([]string, totalCols)
+		row[0] = nameCache[r.clientUUID]
+		row[1] = r.t
+		if base, ok := taskColBase[r.taskID]; ok {
+			if r.value < 0 {
+				row[base] = ""
+				row[base+1] = "100.00"
+			} else {
+				row[base] = strconv.Itoa(r.value)
+				row[base+1] = "0.00"
+			}
+		}
+		if err := writer.Write(row); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // formatGiB converts a byte count to a GiB string with 3 decimal places.
