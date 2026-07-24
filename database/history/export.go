@@ -25,6 +25,12 @@ const exportTTL = 48 * time.Hour
 
 var ErrExportQueueFull = errors.New("history export queue is full")
 
+// pingTaskEntry holds a ping task's id and display name for export column ordering.
+type pingTaskEntry struct {
+	id   uint
+	name string
+}
+
 type ExportJob struct {
 	ID         string    `json:"id"`
 	Type       string    `json:"type"`
@@ -385,8 +391,7 @@ func exportWindows(ctx context.Context, job *ExportJob, fn func(time.Time, time.
 }
 
 // lookupTasksOrdered returns ping tasks ordered by weight ASC, id ASC.
-// Each entry holds the task id and its display name.
-func lookupTasksOrdered() []struct{ id uint; name string } {
+func lookupTasksOrdered() []pingTaskEntry {
 	type taskRow struct {
 		Id     uint
 		Name   string
@@ -398,13 +403,13 @@ func lookupTasksOrdered() []struct{ id uint; name string } {
 		Select("id, name, weight").
 		Order("weight ASC, id ASC").
 		Find(&rows).Error
-	result := make([]struct{ id uint; name string }, 0, len(rows))
+	result := make([]pingTaskEntry, 0, len(rows))
 	for _, r := range rows {
 		name := r.Name
 		if name == "" {
 			name = fmt.Sprintf("Task #%d", r.Id)
 		}
-		result = append(result, struct{ id uint; name string }{r.Id, name})
+		result = append(result, pingTaskEntry{r.Id, name})
 	}
 	return result
 }
@@ -485,18 +490,17 @@ func exportPing(ctx context.Context, job *ExportJob, writer *csv.Writer) error {
 	}
 	// Keep order from allTasks; include only seen tasks, plus any task ID that
 	// appeared in the data but is not in allTasks (e.g. deleted task).
-	type taskCol struct{ id uint; name string }
-	var tasks []taskCol
+	var tasks []pingTaskEntry
 	knownIDs := make(map[uint]bool, len(allTasks))
 	for _, t := range allTasks {
 		knownIDs[t.id] = true
 		if seen[t.id] {
-			tasks = append(tasks, taskCol{t.id, t.name})
+			tasks = append(tasks, pingTaskEntry{t.id, t.name})
 		}
 	}
 	for id := range seen {
 		if !knownIDs[id] {
-			tasks = append(tasks, taskCol{id, fmt.Sprintf("Task #%d", id)})
+			tasks = append(tasks, pingTaskEntry{id, fmt.Sprintf("Task #%d", id)})
 		}
 	}
 
