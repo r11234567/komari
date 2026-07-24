@@ -7,6 +7,8 @@
 
 [简体中文](./docs/README_zh.md) | [繁體中文](./docs/README_zh-TW.md) | [日本語](./docs/README_ja.md)
 
+> 本仓库是基于 Komari 1.2.5 架构维护的 LTS 分支。完整魔改背景、实现细节、接口约束和运维说明见 [Komari 1.2.5 LTS 魔改记录](./docs/LTS_CUSTOMIZATION.md)。
+
 Komari is a lightweight, self-hosted server monitoring tool designed to provide a simple and efficient solution for monitoring server performance. It supports viewing server status through a web interface and collects data through a lightweight agent.
 
 > [!WARNING]
