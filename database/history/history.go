@@ -496,49 +496,147 @@ func limitTotalPoints(series []Series, maxPoints int) []Series {
 		return series
 	}
 	total := 0
+	var start, end time.Time
 	for index := range series {
 		total += len(series[index].Points)
+		if len(series[index].Points) > 0 {
+			first := series[index].Points[0].Time
+			last := series[index].Points[len(series[index].Points)-1].Time
+			if start.IsZero() || first.Before(start) {
+				start = first
+			}
+			if end.IsZero() || last.After(end) {
+				end = last
+			}
+		}
 	}
 	if total <= maxPoints {
 		return series
 	}
 
-	remainingPoints := maxPoints
-	remainingSeries := len(series)
-	for index := range series {
-		if remainingPoints == 0 {
-			series[index].Points = nil
-			continue
-		}
-		budget := remainingPoints / remainingSeries
-		if budget == 0 {
-			budget = 1
-		}
-		if budget > len(series[index].Points) {
-			budget = len(series[index].Points)
-		}
-		series[index].Points = samplePoints(series[index].Points, budget)
-		remainingPoints -= len(series[index].Points)
-		remainingSeries--
+	// Compute the effective bucket size needed to stay within budget while keeping all series aligned.
+	perSeriesBudget := maxPoints / len(series)
+	if perSeriesBudget < 1 {
+		perSeriesBudget = 1
 	}
+	rangeDuration := end.Sub(start)
+	if rangeDuration <= 0 {
+		rangeDuration = time.Hour
+	}
+	targetInterval := chooseBucketSize(rangeDuration / time.Duration(perSeriesBudget))
+
+	// Re-bucket all series onto the same aligned time grid.
+	for index := range series {
+		series[index].Points = rebucketPoints(series[index].Points, targetInterval)
+	}
+
+	// Safety: if still over budget, coarsen further up to 24h, then trim newest if needed.
+	for attempt := 0; attempt < 5; attempt++ {
+		total = 0
+		for index := range series {
+			total += len(series[index].Points)
+		}
+		if total <= maxPoints {
+			break
+		}
+		nextInterval := chooseBucketSize(targetInterval + 1)
+		if nextInterval == targetInterval || nextInterval > 24*time.Hour {
+			break
+		}
+		targetInterval = nextInterval
+		for index := range series {
+			series[index].Points = rebucketPoints(series[index].Points, targetInterval)
+		}
+	}
+
+	// Final fallback: trim newest points if still over.
+	total = 0
+	for index := range series {
+		total += len(series[index].Points)
+	}
+	if total > maxPoints {
+		remainingPoints := maxPoints
+		remainingSeries := len(series)
+		for index := range series {
+			if remainingPoints == 0 {
+				series[index].Points = nil
+				continue
+			}
+			budget := remainingPoints / remainingSeries
+			if budget == 0 {
+				budget = 1
+			}
+			if budget < len(series[index].Points) {
+				series[index].Points = series[index].Points[len(series[index].Points)-budget:]
+			}
+			remainingPoints -= len(series[index].Points)
+			remainingSeries--
+		}
+	}
+
 	return series
 }
 
-func samplePoints(points []Point, count int) []Point {
-	if count <= 0 || len(points) == 0 {
-		return nil
-	}
-	if count >= len(points) {
+// rebucketPoints re-aggregates points onto a coarser aligned time grid.
+// For ping points, it computes count-weighted averages and preserves min/max.
+// For load/GPU points, it averages the metrics map by count.
+func rebucketPoints(points []Point, interval time.Duration) []Point {
+	if len(points) == 0 || interval <= 0 {
 		return points
 	}
-	if count == 1 {
-		return points[len(points)-1:]
+
+	buckets := make(map[int64]*Point)
+	for _, point := range points {
+		bucket := point.Time.Truncate(interval).Unix()
+		merged := buckets[bucket]
+		if merged == nil {
+			merged = &Point{
+				Time:    point.Time.Truncate(interval),
+				Metrics: make(map[string]float64),
+			}
+			buckets[bucket] = merged
+		}
+
+		merged.TotalCount += point.TotalCount
+		merged.LossCount += point.LossCount
+		validCount := point.TotalCount - point.LossCount
+		if validCount > 0 {
+			mergedValid := merged.TotalCount - merged.LossCount
+			if mergedValid == validCount {
+				// First valid contribution to this bucket.
+				merged.Avg = point.Avg
+				merged.Min = point.Min
+				merged.Max = point.Max
+			} else {
+				// Merge weighted average.
+				prevValid := mergedValid - validCount
+				merged.Avg = (merged.Avg*float64(prevValid) + point.Avg*float64(validCount)) / float64(mergedValid)
+				if point.Min < merged.Min {
+					merged.Min = point.Min
+				}
+				if point.Max > merged.Max {
+					merged.Max = point.Max
+				}
+			}
+		}
+
+		// Merge metrics map (for load/GPU).
+		for key, value := range point.Metrics {
+			merged.Metrics[key] += value * float64(point.TotalCount)
+		}
 	}
 
-	result := make([]Point, 0, count)
-	for index := 0; index < count; index++ {
-		source := index * (len(points) - 1) / (count - 1)
-		result = append(result, points[source])
+	// Finalize metrics averages.
+	result := make([]Point, 0, len(buckets))
+	for _, merged := range buckets {
+		if merged.TotalCount > 0 {
+			for key := range merged.Metrics {
+				merged.Metrics[key] /= float64(merged.TotalCount)
+			}
+		}
+		result = append(result, *merged)
 	}
+
+	sort.Slice(result, func(i, j int) bool { return result[i].Time.Before(result[j].Time) })
 	return result
 }

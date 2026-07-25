@@ -330,7 +330,7 @@ DELETE /api/admin/history/export/:id
 ```text
 git@github.com:r11234567/komari-web.git
 branch: lts-1.2.5
-tag:    1.2.5-LTS1-web.1
+tag:    1.2.5-LTS1-web.4
 ```
 
 后端工作流固定该 tag，不跟随前端最新提交。
@@ -385,7 +385,7 @@ data/theme/Mochi/dist/sw.js
 
 ## 16. CI、Snapshot 与正式发布
 
-`.github/actions/build-frontend/action.yml` 使用 Node.js 24，从固定 tag `1.2.5-LTS1-web.1` 执行 `npm ci` 和 `npm run build`，产物作为 artifact 给所有 Go 架构复用。
+`.github/actions/build-frontend/action.yml` 使用 Node.js 24，从固定 tag `1.2.5-LTS1-web.4` 执行 `npm ci` 和 `npm run build`，产物作为 artifact 给所有 Go 架构复用。
 
 Snapshot 和正式 release 都必须通过 Go 格式检查和 `go test ./...`。Snapshot push 到 main 自动触发，校验 SHA 仍为当前 main，构建 Windows/Linux amd64、arm64、386 和 Linux riscv64，使用 Zig 交叉编译，发布 prerelease 和 amd64/arm64 `snapshot` 镜像。concurrency 会取消旧构建，发布前再次校验 SHA，避免旧工作流覆盖新镜像。
 
@@ -442,7 +442,7 @@ go test ./...
 | `45ae85b` | 修复分批压缩边界，保留一小时 raw overlap |
 | `c33e393` | release/snapshot 使用适配后的默认前端 |
 | `dafd8ba` | 重新触发前端修复后的 snapshot |
-| `84590ce` | 固定前端 tag `1.2.5-LTS1-web.1` |
+| `84590ce` | 固定前端 tag `1.2.5-LTS1-web.4` |
 | `d71ef0b` | 逐指标保留与主题市场 |
 | `1045231` | 避免分钟持久化扫描 long-term 大表 |
 | `2194009` | 避免启动重复迁移/重建历史大表 |

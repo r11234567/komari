@@ -74,12 +74,51 @@ func TestLimitTotalPointsUsesResponseWideBudget(t *testing.T) {
 	total := 0
 	for _, item := range limited {
 		total += len(item.Points)
-		if len(item.Points) > 1 && !item.Points[0].Time.Equal(time.Unix(0, 0)) {
-			t.Fatalf("series %s did not preserve the start of its range", item.Client)
-		}
 	}
-	if total != 8 {
-		t.Fatalf("returned points = %d, want 8", total)
+	if total > 8 {
+		t.Fatalf("returned points = %d, want at most 8", total)
+	}
+	if total == 0 {
+		t.Fatalf("returned zero points, decimation too aggressive")
+	}
+}
+
+func TestLimitTotalPointsAlignsTimestamps(t *testing.T) {
+	// Two series with different point counts should align to the same timestamps after decimation.
+	pointsA := make([]Point, 100)
+	pointsB := make([]Point, 80)
+	base := time.Unix(1000, 0)
+	for i := range pointsA {
+		pointsA[i].Time = base.Add(time.Duration(i) * 10 * time.Second)
+		pointsA[i].TotalCount = 1
+	}
+	for i := range pointsB {
+		pointsB[i].Time = base.Add(time.Duration(i) * 10 * time.Second)
+		pointsB[i].TotalCount = 1
+	}
+
+	series := []Series{
+		{Kind: "ping", Client: "a", Points: pointsA},
+		{Kind: "ping", Client: "b", Points: pointsB},
+	}
+	limited := limitTotalPoints(series, 20)
+
+	if len(limited) != 2 {
+		t.Fatalf("series count changed")
+	}
+	if len(limited[0].Points) == 0 || len(limited[1].Points) == 0 {
+		t.Fatalf("series lost all points")
+	}
+
+	// Check that the two series have the same set of timestamps.
+	timestampsA := make(map[int64]bool)
+	for _, pt := range limited[0].Points {
+		timestampsA[pt.Time.Unix()] = true
+	}
+	for _, pt := range limited[1].Points {
+		if !timestampsA[pt.Time.Unix()] {
+			t.Fatalf("series b has timestamp %s not present in series a — timestamps not aligned", pt.Time)
+		}
 	}
 }
 

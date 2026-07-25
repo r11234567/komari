@@ -482,49 +482,95 @@ func ltsResolutionSeconds(value string) int64 {
 
 func limitLTSMetricPoints(series []ltsMetricSeries, maxPoints int) []ltsMetricSeries {
 	total := 0
+	var start, end time.Time
 	for index := range series {
 		total += len(series[index].Points)
+		if len(series[index].Points) > 0 {
+			first := series[index].Points[0].Time
+			last := series[index].Points[len(series[index].Points)-1].Time
+			if start.IsZero() || first.Before(start) {
+				start = first
+			}
+			if end.IsZero() || last.After(end) {
+				end = last
+			}
+		}
 	}
 	if total <= maxPoints {
 		return series
 	}
-	remainingPoints := maxPoints
-	remainingSeries := len(series)
-	for index := range series {
-		if remainingPoints == 0 {
-			series[index].Points = nil
-			continue
-		}
-		budget := remainingPoints / remainingSeries
-		if budget == 0 {
-			budget = 1
-		}
-		if budget > len(series[index].Points) {
-			budget = len(series[index].Points)
-		}
-		series[index].Points = sampleLTSMetricPoints(series[index].Points, budget)
-		remainingPoints -= len(series[index].Points)
-		remainingSeries--
+
+	// Compute aligned re-bucketing interval.
+	perSeriesBudget := maxPoints / len(series)
+	if perSeriesBudget < 1 {
+		perSeriesBudget = 1
 	}
+	rangeDuration := end.Sub(start)
+	if rangeDuration <= 0 {
+		rangeDuration = time.Hour
+	}
+	targetInterval := ltsChooseBucketSize(rangeDuration / time.Duration(perSeriesBudget))
+
+	// Re-bucket all series onto the same aligned time grid.
+	for index := range series {
+		series[index].Points, series[index].IntervalSeconds = rebucketLTSMetricPoints(
+			series[index].Points,
+			targetInterval,
+		)
+	}
+
 	return series
 }
 
-func sampleLTSMetricPoints(points []ltsMetricPoint, count int) []ltsMetricPoint {
-	if count <= 0 || len(points) == 0 {
-		return nil
+func ltsChooseBucketSize(minimum time.Duration) time.Duration {
+	candidates := []time.Duration{
+		10 * time.Second, 30 * time.Second, time.Minute,
+		5 * time.Minute, 10 * time.Minute, 15 * time.Minute,
+		30 * time.Minute, time.Hour, 2 * time.Hour, 6 * time.Hour,
+		12 * time.Hour, 24 * time.Hour,
 	}
-	if count >= len(points) {
-		return points
+	for _, candidate := range candidates {
+		if candidate >= minimum {
+			return candidate
+		}
 	}
-	if count == 1 {
-		return points[len(points)-1:]
+	return 24 * time.Hour
+}
+
+func rebucketLTSMetricPoints(points []ltsMetricPoint, interval time.Duration) ([]ltsMetricPoint, int64) {
+	if len(points) == 0 || interval <= 0 {
+		return points, 0
 	}
-	result := make([]ltsMetricPoint, 0, count)
-	for index := 0; index < count; index++ {
-		source := index * (len(points) - 1) / (count - 1)
-		result = append(result, points[source])
+
+	buckets := make(map[int64]*ltsMetricPoint)
+	for _, point := range points {
+		bucket := point.Time.Truncate(interval).Unix()
+		merged := buckets[bucket]
+		if merged == nil {
+			merged = &ltsMetricPoint{
+				Time:  point.Time.Truncate(interval),
+				Count: 0,
+			}
+			buckets[bucket] = merged
+		}
+
+		if point.Value != nil && merged.Value == nil {
+			merged.Value = new(float64)
+			*merged.Value = 0
+		}
+		if point.Value != nil {
+			*merged.Value = (*merged.Value*float64(merged.Count) + *point.Value*float64(point.Count)) / float64(merged.Count+point.Count)
+		}
+		merged.Count += point.Count
 	}
-	return result
+
+	result := make([]ltsMetricPoint, 0, len(buckets))
+	for _, merged := range buckets {
+		result = append(result, *merged)
+	}
+
+	sort.Slice(result, func(i, j int) bool { return result[i].Time.Before(result[j].Time) })
+	return result, int64(interval / time.Second)
 }
 
 type ltsPingStat struct {
