@@ -55,16 +55,39 @@ func TestClampLTSHistoryRequestToRetention(t *testing.T) {
 }
 
 func TestLimitLTSMetricPointsUsesTotalBudget(t *testing.T) {
-	points := make([]ltsMetricPoint, 10)
+	// Use a wider time range so rebucketing doesn't collapse everything into one bucket.
+	points := make([]ltsMetricPoint, 100)
+	base := time.Unix(10000, 0)
 	for index := range points {
-		points[index].Time = time.Unix(int64(index), 0)
+		points[index].Time = base.Add(time.Duration(index) * 10 * time.Second)
+		points[index].Count = 1
+		val := float64(index)
+		points[index].Value = &val
 	}
 	series := []ltsMetricSeries{
 		{MetricKey: "cpu.usage", Points: append([]ltsMetricPoint(nil), points...)},
 		{MetricKey: "memory.used", Points: append([]ltsMetricPoint(nil), points...)},
 	}
-	limited := limitLTSMetricPoints(series, 7)
-	if got := len(limited[0].Points) + len(limited[1].Points); got != 7 {
-		t.Fatalf("returned points = %d, want 7", got)
+	limited := limitLTSMetricPoints(series, 20)
+	total := len(limited[0].Points) + len(limited[1].Points)
+	if total > 20 {
+		t.Fatalf("returned points = %d, want at most 20", total)
+	}
+	if total == 0 {
+		t.Fatalf("returned zero points, decimation too aggressive")
+	}
+
+	// Check that the two series have the same set of timestamps (aligned).
+	if len(limited[0].Points) == 0 || len(limited[1].Points) == 0 {
+		t.Fatalf("one series lost all points")
+	}
+	timestampsA := make(map[int64]bool)
+	for _, pt := range limited[0].Points {
+		timestampsA[pt.Time.Unix()] = true
+	}
+	for _, pt := range limited[1].Points {
+		if !timestampsA[pt.Time.Unix()] {
+			t.Fatalf("series have misaligned timestamps: %s not in first series", pt.Time)
+		}
 	}
 }
