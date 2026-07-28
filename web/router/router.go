@@ -89,6 +89,7 @@ func registerAdminRoutes(r *gin.Engine) {
 	g.GET("/dashboard", jsonRpc.Bind("admin:getDashboard", jsonRpc.WithQuery("sections", "limit"), jsonRpc.WithRaw()))
 	g.GET("/dashboard/charts", jsonRpc.Bind("admin:getDashboardCharts", jsonRpc.WithQuery("sections", "limit"), jsonRpc.WithRaw()))
 	g.GET("/dashboard/alerts", jsonRpc.Bind("admin:getDashboardAlertItems", jsonRpc.WithQuery("kind"), jsonRpc.WithRaw()))
+	admin.RegisterPprofRoutes(g)
 
 	// --- 二进制/流/重定向类，保留 REST handler ---
 	g.GET("/download/backup", admin.DownloadBackup)
