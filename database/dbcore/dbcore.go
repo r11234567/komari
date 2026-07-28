@@ -16,6 +16,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/migrations"
 	logutil "github.com/komari-monitor/komari/utils/log"
+	"github.com/komari-monitor/komari/web/backup"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -202,6 +203,14 @@ func GetDBInstance() *gorm.DB {
 		func() {
 			backupZipPath := filepath.Join(".", "data", "backup.zip")
 			if _, statErr := os.Stat(backupZipPath); statErr == nil {
+				if validateErr := backup.ValidateArchive(backupZipPath); validateErr != nil {
+					quarantinePath := backupZipPath + ".invalid-" + time.Now().UTC().Format("20060102-150405")
+					log.Printf("[restore] rejected invalid backup before modifying data: %v", validateErr)
+					if renameErr := os.Rename(backupZipPath, quarantinePath); renameErr != nil {
+						log.Printf("[restore] failed to quarantine invalid backup: %v", renameErr)
+					}
+					return
+				}
 				// 4. 把除了 ./data/backup.zip 之外的所有文件压缩到 ./backup/{time}.zip
 				if err := os.MkdirAll("./backup", 0755); err != nil {
 					log.Printf("[restore] failed to create backup dir: %v", err)
