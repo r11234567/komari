@@ -18,11 +18,14 @@ require (
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/image v0.35.0
+	golang.org/x/sys v0.33.0
 	google.golang.org/grpc v1.75.0
 	google.golang.org/protobuf v1.36.6
 	gorm.io/driver/sqlite v1.5.7
 	gorm.io/gorm v1.26.1
 )
+
+require github.com/dop251/base64dec v0.0.0-20231022112746-c6c9f9a96217 // indirect
 
 // Misuse of ServerConfig.PublicKeyCallback may cause authorization bypass in golang.org/x/crypto #1
 // golang.org/x/crypto Vulnerable to Denial of Service (DoS) via Slow or Incomplete Key Exchange #3
@@ -71,7 +74,6 @@ require (
 	golang.org/x/arch v0.15.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.33.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250707201910-8d1bb00bc6a7 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
