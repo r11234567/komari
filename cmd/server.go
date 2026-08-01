@@ -64,6 +64,9 @@ func RunServer() {
 	if err := os.MkdirAll("./data/plugin", 0o755); err != nil {
 		log.Fatalf("Failed to create plugin directory: %v", err)
 	}
+	if err := os.MkdirAll("./data/plugin-data", 0o755); err != nil {
+		log.Fatalf("Failed to create plugin storage directory: %v", err)
+	}
 	InitDatabase()
 	if utils.VersionHash != "unknown" {
 		gin.SetMode(gin.ReleaseMode)
