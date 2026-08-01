@@ -24,6 +24,7 @@ import (
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/plugin"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/cloudflared"
@@ -59,6 +60,9 @@ func RunServer() {
 	// #region 初始化
 	if err := os.MkdirAll("./data/theme", os.ModePerm); err != nil {
 		log.Fatalf("Failed to create theme directory: %v", err)
+	}
+	if err := os.MkdirAll("./data/plugin", 0o755); err != nil {
+		log.Fatalf("Failed to create plugin directory: %v", err)
 	}
 	InitDatabase()
 	if utils.VersionHash != "unknown" {
@@ -148,10 +152,14 @@ func RunServer() {
 	})
 
 	router.Register(r)
+	plugin.Init(r)
+	if err := plugin.LoadAll(); err != nil {
+		log.Printf("Failed to load some plugins: %v", err)
+	}
 
 	srv := &http.Server{
 		Addr:    flags.Listen,
-		Handler: r,
+		Handler: plugin.WrapHandler(r),
 	}
 	log.Printf("Starting server on %s ...", flags.Listen)
 	go func() {
@@ -163,11 +171,12 @@ func RunServer() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
-	OnShutdown()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
+	shutdownErr := srv.Shutdown(ctx)
+	OnShutdown()
+	if shutdownErr != nil {
+		log.Printf("Server forced to shutdown: %v", shutdownErr)
 	}
 
 }
@@ -288,11 +297,18 @@ func minuteScheduledWork() {
 
 func OnShutdown() {
 	auditlog.Log("", "", "server is shutting down", "info")
+	if err := plugin.CloseAll(); err != nil {
+		log.Printf("Failed to close plugins: %v", err)
+	}
 	corn.StopAll()
 	cloudflared.Shutdown()
 }
 
 func OnFatal(err error) {
 	auditlog.Log("", "", "server encountered a fatal error: "+err.Error(), "error")
+	if closeErr := plugin.CloseAll(); closeErr != nil {
+		log.Printf("Failed to close plugins after fatal error: %v", closeErr)
+	}
+	corn.StopAll()
 	cloudflared.Shutdown()
 }
