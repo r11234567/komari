@@ -162,7 +162,7 @@ func RunServer() {
 
 	srv := &http.Server{
 		Addr:    flags.Listen,
-		Handler: plugin.WrapHandler(r),
+		Handler: plugin.HTMLInjectHandler(plugin.WrapHandler(r)),
 	}
 	log.Printf("Starting server on %s ...", flags.Listen)
 	go func() {
