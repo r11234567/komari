@@ -22,10 +22,10 @@ import (
 )
 
 const (
-	defaultThemeMarketURL       = "https://raw.githubusercontent.com/komari-monitor/theme-market/main/v1.json"
-	marketCatalogMaxSize        = 2 << 20
-	marketPackageMaxSize        = 100 << 20
-	marketCacheTTL              = 10 * time.Minute
+	defaultThemeMarketURL = "https://raw.githubusercontent.com/komari-monitor/theme-market/main/v1.json"
+	marketCatalogMaxSize  = 2 << 20
+	marketPackageMaxSize  = 100 << 20
+	marketCacheTTL        = 10 * time.Minute
 )
 
 type ThemeMarketSource struct {

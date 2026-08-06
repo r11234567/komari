@@ -15,10 +15,10 @@ import (
 // GET. Like the HTTP kinds, the input is lowercased, so any casing works
 // from JS.
 const (
-	hookWSConnect  hookKind = "wsconnect"
-	hookWSMessage  hookKind = "wsmessage"
-	hookWSSend     hookKind = "wssend"
-	hookWSClose    hookKind = "wsclose"
+	hookWSConnect hookKind = "wsconnect"
+	hookWSMessage hookKind = "wsmessage"
+	hookWSSend    hookKind = "wssend"
+	hookWSClose   hookKind = "wsclose"
 )
 
 // wsFrameHookTimeout bounds one frame-level callback. The agent read pumps
