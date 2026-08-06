@@ -2,12 +2,12 @@ package admin
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	logger "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/backup"
 )
@@ -37,7 +37,7 @@ func UploadBackup(c *gin.Context) {
 		"path":    "./data/backup.zip",
 	})
 	go func() {
-		logger.InfoArgs("admin-api", "Backup uploaded, restarting service in 2 seconds to apply on startup...")
+		slog.Info("Backup uploaded, restarting service in 2 seconds to apply on startup...", "_group", "admin-api")
 		time.Sleep(2 * time.Second)
 		restoreLock.Release()
 		os.Exit(0)

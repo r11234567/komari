@@ -5,12 +5,13 @@ package console
 // substitutions. assert(false, ...) and trace() include a stack trace.
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 
 	"github.com/dop251/goja"
-	logger "github.com/komari-monitor/komari/utils/log"
 )
 
 type level uint8
@@ -96,16 +97,16 @@ func (m *Module) write(vm *goja.Runtime, messageLevel level, values []goja.Value
 		_, _ = fmt.Fprintln(m.output, message)
 		return
 	}
+	slogLevel := slog.LevelInfo
 	switch messageLevel {
 	case debug:
-		logger.Debug("JavaScript", message)
+		slogLevel = slog.LevelDebug
 	case warn:
-		logger.Warn("JavaScript", message)
+		slogLevel = slog.LevelWarn
 	case errorLevel:
-		logger.Error("JavaScript", message)
-	default:
-		logger.Info("JavaScript", message)
+		slogLevel = slog.LevelError
 	}
+	slog.LogAttrs(context.Background(), slogLevel, message, slog.String("_group", "JavaScript"))
 }
 
 func formatConsoleValues(values []goja.Value) string {

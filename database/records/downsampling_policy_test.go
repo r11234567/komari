@@ -36,7 +36,7 @@ func TestParseDownsamplingPolicyValidatesTierOrder(t *testing.T) {
 		t.Fatalf("default policy is invalid: %v", err)
 	}
 
-	policy.Tiers[1].Interval = "3min"
+	policy.Tiers[1].Interval = "7min"
 	if _, err := parseDownsamplingPolicy(policy); err == nil {
 		t.Fatal("non-divisible tier interval unexpectedly accepted")
 	}
