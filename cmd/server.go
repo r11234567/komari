@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -172,14 +173,56 @@ func RunServer() {
 }
 
 func InitDatabase() {
+	const initialCredentialsPath = "./data/initial-admin-credentials"
 	var count int64 = 0
 	if dbcore.GetDBInstance().Model(&models.User{}).Count(&count); count == 0 {
+		passwordProvided := os.Getenv("ADMIN_PASSWORD") != ""
 		user, passwd, err := accounts.CreateDefaultAdminAccount()
 		if err != nil {
 			panic(err)
 		}
-		log.Println("Default admin account created. Username:", user, ", Password:", passwd)
+		if passwordProvided {
+			log.Printf("Default admin account created. Username: %s (password supplied by ADMIN_PASSWORD)", user)
+			return
+		}
+		if err := writeInitialCredentials(initialCredentialsPath, user, passwd); err != nil {
+			panic(fmt.Errorf("write initial admin credentials: %w", err))
+		}
+		log.Printf("Default admin account created. One-time credentials were written to %s", initialCredentialsPath)
+		return
 	}
+	_ = os.Remove(initialCredentialsPath)
+}
+
+func writeInitialCredentials(path, username, password string) error {
+	if err := os.MkdirAll("./data", 0o700); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp("./data", ".initial-admin-credentials-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0o600); err != nil {
+		temp.Close()
+		return err
+	}
+	if _, err := io.WriteString(temp, username+"\n"+password+"\n"); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(tempPath, path)
 }
 
 // #region 定时任务

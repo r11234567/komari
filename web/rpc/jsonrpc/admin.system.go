@@ -31,6 +31,11 @@ import (
 
 const cloudflaredStopConfirmText = "STOP CLOUDFLARED"
 
+const (
+	maxRemoteCommandBytes = 64 << 10
+	maxRemoteCommandNodes = 1000
+)
+
 func init() {
 	reg("getLogs", adminGetLogs, "Get audit logs (paged)")
 	reg("getCloudflaredStatus", adminCloudflaredStatus, "Get cloudflared tunnel status")
@@ -201,16 +206,54 @@ func adminExec(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcE
 		Command string   `json:"command"`
 		Clients []string `json:"clients"`
 	}
-	req.BindParams(&params)
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid remote command request: "+err.Error(), nil)
+	}
 	if strings.TrimSpace(params.Command) == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Command cannot be empty", nil)
+	}
+	if len(params.Command) > maxRemoteCommandBytes {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Command exceeds the 64 KiB limit", nil)
 	}
 	if len(params.Clients) == 0 {
 		return nil, rpc.MakeError(rpc.InvalidParams, "clients is required", nil)
 	}
+	if len(params.Clients) > maxRemoteCommandNodes {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Too many clients in one remote command", nil)
+	}
+
+	clientIDs := make([]string, 0, len(params.Clients))
+	seen := make(map[string]struct{}, len(params.Clients))
+	for _, clientID := range params.Clients {
+		clientID = strings.TrimSpace(clientID)
+		if clientID == "" {
+			return nil, rpc.MakeError(rpc.InvalidParams, "Client ID cannot be empty", nil)
+		}
+		if _, exists := seen[clientID]; exists {
+			continue
+		}
+		seen[clientID] = struct{}{}
+		clientIDs = append(clientIDs, clientID)
+	}
+	var registeredClientIDs []string
+	if err := dbcore.GetDBInstance().Model(&models.Client{}).
+		Where("uuid IN ?", clientIDs).Pluck("uuid", &registeredClientIDs).Error; err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to validate clients: "+err.Error(), nil)
+	}
+	if len(registeredClientIDs) != len(clientIDs) {
+		registered := make(map[string]struct{}, len(registeredClientIDs))
+		for _, clientID := range registeredClientIDs {
+			registered[clientID] = struct{}{}
+		}
+		for _, clientID := range clientIDs {
+			if _, exists := registered[clientID]; !exists {
+				return nil, rpc.MakeError(rpc.InvalidParams, "Unknown client: "+clientID, nil)
+			}
+		}
+	}
 
 	var onlineClients, queuedClients, offlineClients []string
-	for _, uuid := range params.Clients {
+	for _, uuid := range clientIDs {
 		if client := agent_runtime.GetConnectedClients()[uuid]; client != nil {
 			onlineClients = append(onlineClients, uuid)
 		} else if agent_runtime.IsAgentOnline(uuid) {
