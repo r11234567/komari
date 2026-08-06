@@ -28,16 +28,15 @@ func RecordGPU(rec models.GPURecord) error {
 
 func DeleteAll() error {
 	db := dbcore.GetDBInstance()
-	if err := db.Exec("DELETE FROM records_long_term").Error; err != nil {
-		return err
+	for _, table := range []string{
+		"resource_rollups", "gpu_rollups", "records_long_term",
+		"gpu_records_long_term", "gpu_records", "records",
+	} {
+		if err := db.Exec("DELETE FROM " + table).Error; err != nil {
+			return err
+		}
 	}
-	if err := db.Exec("DELETE FROM gpu_records_long_term").Error; err != nil {
-		return err
-	}
-	if err := db.Exec("DELETE FROM gpu_records").Error; err != nil {
-		return err
-	}
-	return db.Exec("DELETE FROM records").Error
+	return nil
 }
 
 // GetGPURecordsByClientAndTime 获取GPU记录数据
@@ -85,7 +84,7 @@ func GetLatestRecord(uuid string) (Record []models.Record, err error) {
 func DeleteRecordBefore(before time.Time) error {
 	if !flags.IsSQLite() {
 		return dbcore.Write(context.Background(), func(db *gorm.DB) error {
-			for _, table := range []string{"records_long_term", "gpu_records_long_term", "gpu_records", "records"} {
+			for _, table := range []string{"resource_rollups", "gpu_rollups", "records_long_term", "gpu_records_long_term", "gpu_records", "records"} {
 				if err := db.Exec("DELETE FROM "+table+" WHERE time < ?", before).Error; err != nil {
 					return err
 				}
@@ -94,7 +93,7 @@ func DeleteRecordBefore(before time.Time) error {
 		})
 	}
 	const sqliteCleanupBatchSize = 1000
-	for _, table := range []string{"records_long_term", "gpu_records_long_term", "gpu_records", "records"} {
+	for _, table := range []string{"resource_rollups", "gpu_rollups", "records_long_term", "gpu_records_long_term", "gpu_records", "records"} {
 		ran, err := dbcore.TryMaintenance(context.Background(), func(db *gorm.DB) error {
 			return db.Exec(
 				"DELETE FROM "+table+" WHERE rowid IN (SELECT rowid FROM "+table+" WHERE time < ? LIMIT ?)",

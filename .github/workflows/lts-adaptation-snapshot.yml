@@ -1,0 +1,188 @@
+name: LTS Adaptation Snapshot
+
+on:
+  push:
+    branches:
+      - feat/1.2.5-lts-1.4-adapt
+  workflow_dispatch:
+    inputs:
+      frontend_ref:
+        description: komari-web branch, tag, or commit to include
+        required: true
+        default: feat/1.2.5-lts-1.4-adapt
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lts-adaptation-snapshot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Require the LTS adaptation branch
+        env:
+          EXPECTED_REF: refs/heads/feat/1.2.5-lts-1.4-adapt
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" != "${EXPECTED_REF}" ]; then
+            echo "Run this workflow from ${EXPECTED_REF}; current ref is ${GITHUB_REF}."
+            exit 1
+          fi
+
+      - name: Generate snapshot version
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION="Snapshot-1.2.5-LTS-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v5
+
+      - name: Build frontend artifact
+        uses: ./.github/actions/build-frontend
+        with:
+          repository: https://github.com/r11234567/komari-web.git
+          ref: ${{ inputs.frontend_ref || 'feat/1.2.5-lts-1.4-adapt' }}
+          artifact-name: komari-frontend
+
+      - name: Lint frontend
+        working-directory: komari-web
+        run: npm run lint
+
+  verify-go:
+    needs: build-frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v5
+
+      - name: Restore frontend artifact
+        uses: ./.github/actions/restore-frontend
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Check Go formatting
+        run: |
+          set -euo pipefail
+          UNFORMATTED="$(find . -name '*.go' -not -path './komari-web/*' -print0 | xargs -0 gofmt -l)"
+          if [ -n "${UNFORMATTED}" ]; then
+            echo "The following Go files need gofmt:"
+            echo "${UNFORMATTED}"
+            exit 1
+          fi
+
+      - name: Run Go tests
+        run: go test ./...
+
+  build-binaries:
+    needs: [prepare, build-frontend, verify-go]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            zig_target: x86_64-windows-gnu
+            extension: .exe
+          - goos: windows
+            goarch: arm64
+            zig_target: aarch64-windows-gnu
+            extension: .exe
+          - goos: windows
+            goarch: "386"
+            zig_target: x86-windows-gnu
+            extension: .exe
+          - goos: linux
+            goarch: amd64
+            zig_target: x86_64-linux-musl
+            extension: ""
+          - goos: linux
+            goarch: arm64
+            zig_target: aarch64-linux-musl
+            extension: ""
+          - goos: linux
+            goarch: "386"
+            zig_target: x86-linux-musl
+            extension: ""
+          - goos: linux
+            goarch: riscv64
+            zig_target: riscv64-linux-musl
+            extension: ""
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v5
+
+      - name: Restore frontend artifact
+        uses: ./.github/actions/restore-frontend
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install Zig cross-compiler toolchain
+        uses: ./.github/actions/setup-zig
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+          CC: zig cc -target ${{ matrix.zig_target }}
+          GIN_MODE: release
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          BINARY="komari-${GOOS}-${GOARCH}${{ matrix.extension }}"
+          go build -trimpath \
+            -ldflags="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${GITHUB_SHA}" \
+            -o "${BINARY}" .
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: komari-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: komari-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.extension }}
+
+  publish-snapshot:
+    needs: [prepare, build-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v5
+        with:
+          pattern: komari-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create checksums
+        working-directory: artifacts
+        run: sha256sum komari-* > SHA256SUMS
+
+      - name: Create snapshot prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          FRONTEND_REF: ${{ inputs.frontend_ref || 'feat/1.2.5-lts-1.4-adapt' }}
+        run: |
+          set -euo pipefail
+          gh release create "${VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "${VERSION}" \
+            --notes "LTS adaptation snapshot from backend ${GITHUB_SHA} and komari-web ${FRONTEND_REF}. Not for production." \
+            --prerelease \
+            artifacts/komari-* artifacts/SHA256SUMS

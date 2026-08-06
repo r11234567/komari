@@ -107,10 +107,12 @@ func RunServer() {
 			}
 		}
 
-		if ok, t := config.IsChangedT[bool](event, config.NezhaCompatEnabledKey); ok {
-			if t {
-				l, _ := config.GetAs[string](config.NezhaCompatListenKey)
-				if err := nezha.StartNezhaCompat(l); err != nil {
+		enabledChanged, enabled := config.IsChangedT[bool](event, config.NezhaCompatEnabledKey)
+		listenChanged := event.IsChanged(config.NezhaCompatListenKey)
+		if enabledChanged {
+			if enabled {
+				listen, _ := config.GetAs[string](config.NezhaCompatListenKey, "0.0.0.0:5555")
+				if err := nezha.StartNezhaCompat(listen); err != nil {
 					log.Printf("start Nezha compat server error: %v", err)
 					auditlog.EventLog("error", fmt.Sprintf("start Nezha compat server error: %v", err))
 				}
@@ -118,6 +120,16 @@ func RunServer() {
 				if err := nezha.StopNezhaCompat(); err != nil {
 					log.Printf("stop Nezha compat server error: %v", err)
 					auditlog.EventLog("error", fmt.Sprintf("stop Nezha compat server error: %v", err))
+				}
+			}
+		} else if listenChanged {
+			enabled, _ := config.GetAs[bool](config.NezhaCompatEnabledKey, false)
+			if enabled {
+				_ = nezha.StopNezhaCompat()
+				listen, _ := config.GetAs[string](config.NezhaCompatListenKey, "0.0.0.0:5555")
+				if err := nezha.StartNezhaCompat(listen); err != nil {
+					log.Printf("restart Nezha compat server error: %v", err)
+					auditlog.EventLog("error", fmt.Sprintf("restart Nezha compat server error: %v", err))
 				}
 			}
 		}
@@ -246,7 +258,9 @@ func DoScheduledWork() {
 	if err := d_notification.ReloadLoadNotificationSchedule(); err != nil {
 		log.Println("Failed to reload load notification schedule:", err)
 	}
-	records.CompactRecord()
+	if err := records.MaintainRecords(); err != nil {
+		log.Printf("Initial record maintenance failed: %v", err)
+	}
 
 	if err := corn.AddFunc("records:cleanup", "@every 30m", cleanupScheduledData); err != nil {
 		log.Println("Failed to add cleanup scheduled task:", err)
@@ -266,17 +280,23 @@ func cleanupScheduledData() {
 	if err != nil {
 		taskResultPreserveTime = cfg.RecordPreserveTime
 	}
-	if err := records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime))); err != nil {
-		log.Printf("Deferred record cleanup failed: %v", err)
+	downsamplingPolicy, policyErr := records.GetDownsamplingPolicy()
+	if policyErr != nil {
+		log.Printf("Failed to load downsampling policy for cleanup: %v", policyErr)
 	}
-	if err := records.CompactRecord(); err != nil {
-		log.Printf("Deferred record compaction failed: %v", err)
+	if policyErr != nil || !downsamplingPolicy.Enabled {
+		if err := records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime))); err != nil {
+			log.Printf("Deferred record cleanup failed: %v", err)
+		}
+		if err := tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime))); err != nil {
+			log.Printf("Deferred ping cleanup failed: %v", err)
+		}
+	}
+	if err := records.MaintainRecords(); err != nil {
+		log.Printf("Deferred record maintenance failed: %v", err)
 	}
 	if err := tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(taskResultPreserveTime))); err != nil {
 		log.Printf("Deferred task cleanup failed: %v", err)
-	}
-	if err := tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime))); err != nil {
-		log.Printf("Deferred ping cleanup failed: %v", err)
 	}
 	auditlog.RemoveOldLogs()
 	accounts.RemoveExpiredSessions()
@@ -287,8 +307,8 @@ func minuteScheduledWork() {
 	if err := report_cache.SaveClientReportToDB(); err != nil {
 		log.Printf("Failed to persist client reports: %v", err)
 	}
-	if err := records.CompactRecord(); err != nil {
-		log.Printf("Deferred record compaction failed: %v", err)
+	if err := records.MaintainRecords(); err != nil {
+		log.Printf("Deferred record maintenance failed: %v", err)
 	}
 	if !cfg.RecordEnabled {
 		records.DeleteAll()

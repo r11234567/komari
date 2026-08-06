@@ -150,48 +150,58 @@ func SavePingRecordContext(ctx context.Context, record models.PingRecord) error 
 func DeletePingRecordsBefore(cutoff time.Time) error {
 	if !flags.IsSQLite() {
 		return dbcore.Write(context.Background(), func(db *gorm.DB) error {
-			return db.Where("time < ?", cutoff).Delete(&models.PingRecord{}).Error
+			if err := db.Where("time < ?", cutoff).Delete(&models.PingRecord{}).Error; err != nil {
+				return err
+			}
+			return db.Where("time < ?", cutoff).Delete(&models.PingRollup{}).Error
 		})
 	}
 	const sqliteCleanupBatchSize = 1000
 	_, err := dbcore.TryMaintenance(context.Background(), func(db *gorm.DB) error {
-		return db.Exec(
-			"DELETE FROM ping_records WHERE rowid IN (SELECT rowid FROM ping_records WHERE time < ? LIMIT ?)",
-			cutoff,
-			sqliteCleanupBatchSize,
-		).Error
+		for _, table := range []string{"ping_records", "ping_rollups"} {
+			if err := db.Exec(
+				"DELETE FROM "+table+" WHERE rowid IN (SELECT rowid FROM "+table+" WHERE time < ? LIMIT ?)",
+				cutoff,
+				sqliteCleanupBatchSize,
+			).Error; err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	return err
 }
 
 func DeletePingRecords(id []uint) error {
-	var result *gorm.DB
+	var rowsAffected int64
 	err := dbcore.Write(context.Background(), func(db *gorm.DB) error {
-		result = db.Where("task_id IN ?", id).Delete(&models.PingRecord{})
-		return result.Error
+		rawResult := db.Where("task_id IN ?", id).Delete(&models.PingRecord{})
+		if rawResult.Error != nil {
+			return rawResult.Error
+		}
+		rollupResult := db.Where("task_id IN ?", id).Delete(&models.PingRollup{})
+		if rollupResult.Error != nil {
+			return rollupResult.Error
+		}
+		rowsAffected = rawResult.RowsAffected + rollupResult.RowsAffected
+		return nil
 	})
 	if err != nil {
 		return err
 	}
-	if result.RowsAffected == 0 {
+	if rowsAffected == 0 {
 		return gorm.ErrRecordNotFound
 	}
-	return result.Error
+	return nil
 }
 
 func DeleteAllPingRecords() error {
-	var result *gorm.DB
-	err := dbcore.Write(context.Background(), func(db *gorm.DB) error {
-		result = db.Exec("DELETE FROM ping_records")
-		return result.Error
+	return dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		if err := db.Exec("DELETE FROM ping_records").Error; err != nil {
+			return err
+		}
+		return db.Exec("DELETE FROM ping_rollups").Error
 	})
-	if err != nil {
-		return err
-	}
-	if result.RowsAffected == 0 {
-		return gorm.ErrRecordNotFound
-	}
-	return result.Error
 }
 func ReloadPingSchedule() error {
 	db := dbcore.GetDBInstance()

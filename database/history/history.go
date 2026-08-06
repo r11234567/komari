@@ -240,6 +240,46 @@ func queryPing(ctx context.Context, req QueryRequest, start, end time.Time, size
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}
+	rows.Close()
+
+	rollupQuery := dbcore.GetReadDBInstance().WithContext(ctx).
+		Model(&models.PingRollup{}).
+		Where("time >= ? AND time <= ?", start, end)
+	if req.UUID != "" {
+		rollupQuery = rollupQuery.Where("client = ?", req.UUID)
+	}
+	if req.TaskID != nil {
+		rollupQuery = rollupQuery.Where("task_id = ?", *req.TaskID)
+	}
+	var rollups []models.PingRollup
+	if err := rollupQuery.Order("time ASC").Find(&rollups).Error; err != nil {
+		return nil, 0, err
+	}
+	for _, rollup := range rollups {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		key := pingKey{client: rollup.Client, taskID: rollup.TaskID, bucket: rollup.Time.ToTime().Truncate(size)}
+		point := buckets[key]
+		if point == nil {
+			point = &Point{Time: key.bucket}
+			buckets[key] = point
+		}
+		existingValid := point.TotalCount - point.LossCount
+		rollupValid := int(rollup.TotalCount - rollup.LossCount)
+		if rollupValid > 0 {
+			if existingValid == 0 || rollup.Minimum < point.Min {
+				point.Min = rollup.Minimum
+			}
+			if existingValid == 0 || rollup.Maximum > point.Max {
+				point.Max = rollup.Maximum
+			}
+		}
+		point.TotalCount += int(rollup.TotalCount)
+		point.LossCount += int(rollup.LossCount)
+		point.Avg += rollup.ValueSum
+		count += rollup.TotalCount
+	}
 
 	seriesMap := make(map[string]*Series)
 	for key, point := range buckets {
@@ -296,6 +336,28 @@ func queryLoad(ctx context.Context, req QueryRequest, start, end time.Time, size
 			return nil, 0, err
 		}
 		rows.Close()
+	}
+	var rollups []models.ResourceRollup
+	if err := dbcore.GetReadDBInstance().WithContext(ctx).
+		Where("client = ? AND time >= ? AND time <= ?", req.UUID, start, end).
+		Order("time ASC").Find(&rollups).Error; err != nil {
+		return nil, 0, err
+	}
+	for _, record := range rollups {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		bucketTime := record.Time.ToTime().Truncate(size)
+		bucket := buckets[bucketTime]
+		if bucket == nil {
+			bucket = &loadBucket{time: bucketTime, metrics: make(map[string]float64)}
+			buckets[bucketTime] = bucket
+		}
+		bucket.count += int(record.Count)
+		for name, sum := range record.Sums {
+			bucket.metrics[name] += sum
+		}
+		count += record.Count
 	}
 
 	points := averageBuckets(buckets, maxPoints)
@@ -368,6 +430,28 @@ func queryGPU(ctx context.Context, uuid string, start, end time.Time, size time.
 			return nil, 0, err
 		}
 		rows.Close()
+	}
+	var rollups []models.GPURollup
+	if err := dbcore.GetReadDBInstance().WithContext(ctx).
+		Where("client = ? AND time >= ? AND time <= ?", uuid, start, end).
+		Order("time ASC").Find(&rollups).Error; err != nil {
+		return nil, 0, err
+	}
+	for _, record := range rollups {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		key := gpuKey{device: record.DeviceIndex, name: record.DeviceName, bucket: record.Time.ToTime().Truncate(size)}
+		bucket := buckets[key]
+		if bucket == nil {
+			bucket = &loadBucket{time: key.bucket, metrics: make(map[string]float64)}
+			buckets[key] = bucket
+		}
+		bucket.count += int(record.Count)
+		for name, sum := range record.Sums {
+			bucket.metrics[name] += sum
+		}
+		count += record.Count
 	}
 
 	byDevice := make(map[string]*Series)

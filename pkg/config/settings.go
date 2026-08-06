@@ -23,7 +23,7 @@ type Settings struct {
 	GeoIpProvider string `json:"geo_ip_provider" default:"ipinfo"` // empty, mmdb, ip-api, geojs
 	// Nezha 兼容（Agent gRPC）
 	NezhaCompatEnabled bool   `json:"nezha_compat_enabled" default:"false"`
-	NezhaCompatListen  string `json:"nezha_compat_listen" default:""` // 例如 0.0.0.0:5555
+	NezhaCompatListen  string `json:"nezha_compat_listen" default:"0.0.0.0:5555"`
 	// OAuth 配置
 	OAuthEnabled          bool   `json:"o_auth_enabled" default:"false"`
 	OAuthProvider         string `json:"o_auth_provider" default:"github"`

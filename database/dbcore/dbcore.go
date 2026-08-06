@@ -355,6 +355,9 @@ func GetDBInstance() *gorm.DB {
 		err = instance.AutoMigrate(
 			&models.Task{},
 			&models.TaskResult{},
+			&models.ResourceRollup{},
+			&models.GPURollup{},
+			&models.PingRollup{},
 		)
 		if err != nil {
 			log.Printf("Failed to create Task and TaskResult table, it may already exist: %v", err)
