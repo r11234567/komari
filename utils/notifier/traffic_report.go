@@ -159,7 +159,7 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 		emoji = "📅"
 	}
 
-	if err := messageSender.SendEvent(models.EventMessage{
+	if err := messageSender.SendNotification(models.EventMessage{
 		Event:   eventType,
 		Clients: eventClients,
 		Time:    now,

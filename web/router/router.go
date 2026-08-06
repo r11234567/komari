@@ -38,6 +38,8 @@ func registerPublicRoutes(r *gin.Engine) {
 	r.GET("/api/oauth_callback", public_api.OAuthCallback)
 	r.GET("/api/mjpeg_live", public_api.MjpegLiveHandler)
 	r.GET("/api/v1/history/client.js", public_api.HistoryClientModule)
+	// 插件公开页面（visibility=public 的 iframe 页面），无需鉴权。
+	r.GET("/api/plugin/:short/*filepath", public_api.ServePluginFile)
 	// /api/clients 是 WebSocket 端点（客户端发 "get"/"get <uuid>" 拉取在线列表与最新上报），
 	// 非 JSON-RPC，保留为 WS handler。
 	r.GET("/api/clients", api.GetClients)
@@ -83,6 +85,7 @@ func registerAgentRoutes(r *gin.Engine) {
 // registerAdminRoutes 管理员路由。除二进制/流类外全部经 Bind 绑定到 admin: 命名空间方法。
 func registerAdminRoutes(r *gin.Engine) {
 	g := r.Group("/api/admin", api.RequireRole(api.RoleAdmin))
+	admin.RegisterPprofRoutes(g)
 	g.POST("/history/export", admin.StartHistoryExport)
 	g.GET("/history/export/retention", admin.GetExportRetention)
 	g.GET("/history/export/:id", admin.GetHistoryExport)
@@ -92,6 +95,10 @@ func registerAdminRoutes(r *gin.Engine) {
 	// --- 二进制/流/重定向类，保留 REST handler ---
 	g.GET("/download/backup", admin.DownloadBackup)
 	g.POST("/upload/backup", admin.UploadBackup)
+	// chunk upload 用于大备份文件分块上传，提高稳定性
+	g.POST("/upload/backup/init", admin.InitChunkUpload)
+	g.POST("/upload/backup/chunk", admin.UploadChunk)
+	g.POST("/upload/backup/merge", admin.MergeChunkUpload)
 	g.GET("/test/geoip", jsonRpc.Bind("admin:testGeoip", jsonRpc.WithQuery("ip")))
 	g.POST("/test/sendMessage", jsonRpc.Bind("admin:testSendMessage"))
 	g.POST("/update/mmdb", admin.UpdateMmdbGeoIP)
@@ -208,6 +215,26 @@ func registerAdminRoutes(r *gin.Engine) {
 		clipboardGroup.POST("/:id", jsonRpc.Bind("admin:updateClipboard", jsonRpc.WithPath("id")))
 		clipboardGroup.POST("/remove", jsonRpc.Bind("admin:batchDeleteClipboard"))
 		clipboardGroup.POST("/:id/remove", jsonRpc.Bind("admin:deleteClipboard", jsonRpc.WithPath("id")))
+	}
+
+	// plugins: 上传走 REST（zip 二进制），启停/列表/日志走 RPC2，市场对齐主题市场。
+	pluginGroup := g.Group("/plugin")
+	{
+		pluginGroup.GET("/list", jsonRpc.Bind("admin:listPlugins"))
+		pluginGroup.POST("/enabled", jsonRpc.Bind("admin:setPluginEnabled"))
+		pluginGroup.GET("/logs", jsonRpc.Bind("admin:getPluginLogs", jsonRpc.WithQuery("short")))
+		pluginGroup.POST("/install", admin.UploadPlugin)
+		pluginGroup.GET("/market/sources", admin.ListPluginMarketSources)
+		pluginGroup.POST("/market/sources", admin.CreatePluginMarketSource)
+		pluginGroup.PUT("/market/sources/:id", admin.UpdatePluginMarketSource)
+		pluginGroup.DELETE("/market/sources/:id", admin.DeletePluginMarketSource)
+		pluginGroup.GET("/market/catalog", admin.ListPluginMarketCatalog)
+		pluginGroup.POST("/market/install", admin.InstallPluginFromMarket)
+		pluginGroup.POST("/delete", jsonRpc.Bind("admin:deletePlugin"))
+		pluginGroup.GET("/configuration", jsonRpc.Bind("admin:getPluginConfiguration", jsonRpc.WithQuery("short")))
+		pluginGroup.POST("/configuration", jsonRpc.Bind("admin:setPluginConfiguration"))
+		// 插件注入的管理页面静态文件
+		pluginGroup.GET("/:short/*filepath", admin.ServePluginFile)
 	}
 
 	// notifications

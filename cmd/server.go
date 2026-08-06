@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -23,6 +24,7 @@ import (
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/plugin"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/cloudflared"
@@ -58,6 +60,12 @@ func RunServer() {
 	// #region 初始化
 	if err := os.MkdirAll("./data/theme", os.ModePerm); err != nil {
 		log.Fatalf("Failed to create theme directory: %v", err)
+	}
+	if err := os.MkdirAll("./data/plugin", 0o755); err != nil {
+		log.Fatalf("Failed to create plugin directory: %v", err)
+	}
+	if err := os.MkdirAll("./data/plugin-data", 0o755); err != nil {
+		log.Fatalf("Failed to create plugin storage directory: %v", err)
 	}
 	InitDatabase()
 	if utils.VersionHash != "unknown" {
@@ -99,10 +107,12 @@ func RunServer() {
 			}
 		}
 
-		if ok, t := config.IsChangedT[bool](event, config.NezhaCompatEnabledKey); ok {
-			if t {
-				l, _ := config.GetAs[string](config.NezhaCompatListenKey)
-				if err := nezha.StartNezhaCompat(l); err != nil {
+		enabledChanged, enabled := config.IsChangedT[bool](event, config.NezhaCompatEnabledKey)
+		listenChanged := event.IsChanged(config.NezhaCompatListenKey)
+		if enabledChanged {
+			if enabled {
+				listen, _ := config.GetAs[string](config.NezhaCompatListenKey, "0.0.0.0:5555")
+				if err := nezha.StartNezhaCompat(listen); err != nil {
 					log.Printf("start Nezha compat server error: %v", err)
 					auditlog.EventLog("error", fmt.Sprintf("start Nezha compat server error: %v", err))
 				}
@@ -110,6 +120,16 @@ func RunServer() {
 				if err := nezha.StopNezhaCompat(); err != nil {
 					log.Printf("stop Nezha compat server error: %v", err)
 					auditlog.EventLog("error", fmt.Sprintf("stop Nezha compat server error: %v", err))
+				}
+			}
+		} else if listenChanged {
+			enabled, _ := config.GetAs[bool](config.NezhaCompatEnabledKey, false)
+			if enabled {
+				_ = nezha.StopNezhaCompat()
+				listen, _ := config.GetAs[string](config.NezhaCompatListenKey, "0.0.0.0:5555")
+				if err := nezha.StartNezhaCompat(listen); err != nil {
+					log.Printf("restart Nezha compat server error: %v", err)
+					auditlog.EventLog("error", fmt.Sprintf("restart Nezha compat server error: %v", err))
 				}
 			}
 		}
@@ -147,10 +167,14 @@ func RunServer() {
 	})
 
 	router.Register(r)
+	plugin.Init(r)
+	if err := plugin.LoadAll(); err != nil {
+		log.Printf("Failed to load some plugins: %v", err)
+	}
 
 	srv := &http.Server{
 		Addr:    flags.Listen,
-		Handler: r,
+		Handler: plugin.HTMLInjectHandler(plugin.WrapHandler(r)),
 	}
 	log.Printf("Starting server on %s ...", flags.Listen)
 	go func() {
@@ -162,24 +186,67 @@ func RunServer() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
-	OnShutdown()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
+	shutdownErr := srv.Shutdown(ctx)
+	OnShutdown()
+	if shutdownErr != nil {
+		log.Printf("Server forced to shutdown: %v", shutdownErr)
 	}
 
 }
 
 func InitDatabase() {
+	const initialCredentialsPath = "./data/initial-admin-credentials"
 	var count int64 = 0
 	if dbcore.GetDBInstance().Model(&models.User{}).Count(&count); count == 0 {
+		passwordProvided := os.Getenv("ADMIN_PASSWORD") != ""
 		user, passwd, err := accounts.CreateDefaultAdminAccount()
 		if err != nil {
 			panic(err)
 		}
-		log.Println("Default admin account created. Username:", user, ", Password:", passwd)
+		if passwordProvided {
+			log.Printf("Default admin account created. Username: %s (password supplied by ADMIN_PASSWORD)", user)
+			return
+		}
+		if err := writeInitialCredentials(initialCredentialsPath, user, passwd); err != nil {
+			panic(fmt.Errorf("write initial admin credentials: %w", err))
+		}
+		log.Printf("Default admin account created. One-time credentials were written to %s", initialCredentialsPath)
+		return
 	}
+	_ = os.Remove(initialCredentialsPath)
+}
+
+func writeInitialCredentials(path, username, password string) error {
+	if err := os.MkdirAll("./data", 0o700); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp("./data", ".initial-admin-credentials-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0o600); err != nil {
+		temp.Close()
+		return err
+	}
+	if _, err := io.WriteString(temp, username+"\n"+password+"\n"); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(tempPath, path)
 }
 
 // #region 定时任务
@@ -191,7 +258,9 @@ func DoScheduledWork() {
 	if err := d_notification.ReloadLoadNotificationSchedule(); err != nil {
 		log.Println("Failed to reload load notification schedule:", err)
 	}
-	records.CompactRecord()
+	if err := records.MaintainRecords(); err != nil {
+		log.Printf("Initial record maintenance failed: %v", err)
+	}
 
 	if err := corn.AddFunc("records:cleanup", "@every 30m", cleanupScheduledData); err != nil {
 		log.Println("Failed to add cleanup scheduled task:", err)
@@ -211,17 +280,23 @@ func cleanupScheduledData() {
 	if err != nil {
 		taskResultPreserveTime = cfg.RecordPreserveTime
 	}
-	if err := records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime))); err != nil {
-		log.Printf("Deferred record cleanup failed: %v", err)
+	downsamplingPolicy, policyErr := records.GetDownsamplingPolicy()
+	if policyErr != nil {
+		log.Printf("Failed to load downsampling policy for cleanup: %v", policyErr)
 	}
-	if err := records.CompactRecord(); err != nil {
-		log.Printf("Deferred record compaction failed: %v", err)
+	if policyErr != nil || !downsamplingPolicy.Enabled {
+		if err := records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime))); err != nil {
+			log.Printf("Deferred record cleanup failed: %v", err)
+		}
+		if err := tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime))); err != nil {
+			log.Printf("Deferred ping cleanup failed: %v", err)
+		}
+	}
+	if err := records.MaintainRecords(); err != nil {
+		log.Printf("Deferred record maintenance failed: %v", err)
 	}
 	if err := tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(taskResultPreserveTime))); err != nil {
 		log.Printf("Deferred task cleanup failed: %v", err)
-	}
-	if err := tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime))); err != nil {
-		log.Printf("Deferred ping cleanup failed: %v", err)
 	}
 	auditlog.RemoveOldLogs()
 	accounts.RemoveExpiredSessions()
@@ -232,8 +307,8 @@ func minuteScheduledWork() {
 	if err := report_cache.SaveClientReportToDB(); err != nil {
 		log.Printf("Failed to persist client reports: %v", err)
 	}
-	if err := records.CompactRecord(); err != nil {
-		log.Printf("Deferred record compaction failed: %v", err)
+	if err := records.MaintainRecords(); err != nil {
+		log.Printf("Deferred record maintenance failed: %v", err)
 	}
 	if !cfg.RecordEnabled {
 		records.DeleteAll()
@@ -245,11 +320,18 @@ func minuteScheduledWork() {
 
 func OnShutdown() {
 	auditlog.Log("", "", "server is shutting down", "info")
+	if err := plugin.CloseAll(); err != nil {
+		log.Printf("Failed to close plugins: %v", err)
+	}
 	corn.StopAll()
 	cloudflared.Shutdown()
 }
 
 func OnFatal(err error) {
 	auditlog.Log("", "", "server encountered a fatal error: "+err.Error(), "error")
+	if closeErr := plugin.CloseAll(); closeErr != nil {
+		log.Printf("Failed to close plugins after fatal error: %v", closeErr)
+	}
+	corn.StopAll()
 	cloudflared.Shutdown()
 }

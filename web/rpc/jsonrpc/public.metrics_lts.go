@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/history"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/pkg/config"
@@ -168,11 +169,15 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 	if err := req.BindParams(&params); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid metric query: "+err.Error(), nil)
 	}
-	if params.EntityID == "" || len(params.MetricKeys) == 0 {
-		return nil, rpc.MakeError(rpc.InvalidParams, "entity_id and metric_keys are required", nil)
+	if len(params.MetricKeys) == 0 {
+		return nil, rpc.MakeError(rpc.InvalidParams, "metric_keys are required", nil)
 	}
 	if !isLoginFromCtx(ctx) && isHiddenClient(params.EntityID) {
 		return nil, rpc.MakeError(rpc.NotFound, "client not found", nil)
+	}
+	entityIDs, entityErr := ltsMetricEntityIDs(ctx, params.EntityID)
+	if entityErr != nil {
+		return nil, entityErr
 	}
 
 	queryRequest, err := ltsMetricHistoryRequest(params)
@@ -195,34 +200,50 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		}
 	}
 
-	series := make([]ltsMetricSeries, 0, len(params.MetricKeys))
-	var responseStart, responseEnd time.Time
-	if loadRetentionDays > 0 {
-		loadRequest := queryRequest
-		loadRequest.Type = "load"
-		loadRequest.UUID = params.EntityID
-		if clamped, ok := clampLTSHistoryRequest(loadRequest, loadRetentionDays); ok {
-			result, queryErr := history.Query(ctx, clamped)
-			if queryErr != nil {
-				return nil, historyRPCError(queryErr, "Failed to query resource metrics")
-			}
-			responseStart, responseEnd = result.Start, result.End
-			series = append(series, ltsLoadMetricSeries(result, requested, params.EntityID, retention)...)
-		}
+	maxPoints := ltsMetricMaxPoints(params.MaxPoints)
+	perEntityMaxPoints := maxPoints
+	if len(entityIDs) > 0 {
+		perEntityMaxPoints = max(1, maxPoints/len(entityIDs))
 	}
-	if pingRetentionDays > 0 {
-		pingRequest := queryRequest
-		pingRequest.Type = "ping"
-		pingRequest.UUID = params.EntityID
-		if clamped, ok := clampLTSHistoryRequest(pingRequest, pingRetentionDays); ok {
-			result, queryErr := history.Query(ctx, clamped)
-			if queryErr != nil {
-				return nil, historyRPCError(queryErr, "Failed to query Ping metrics")
+	queryRequest.MaxPoints = perEntityMaxPoints
+	series := make([]ltsMetricSeries, 0, len(params.MetricKeys)*len(entityIDs))
+	var responseStart, responseEnd time.Time
+	for _, entityID := range entityIDs {
+		if loadRetentionDays > 0 {
+			loadRequest := queryRequest
+			loadRequest.Type = "load"
+			loadRequest.UUID = entityID
+			if clamped, ok := clampLTSHistoryRequest(loadRequest, loadRetentionDays); ok {
+				result, queryErr := history.Query(ctx, clamped)
+				if queryErr != nil {
+					return nil, historyRPCError(queryErr, "Failed to query resource metrics")
+				}
+				if responseStart.IsZero() || result.Start.Before(responseStart) {
+					responseStart = result.Start
+				}
+				if responseEnd.IsZero() || result.End.After(responseEnd) {
+					responseEnd = result.End
+				}
+				series = append(series, ltsLoadMetricSeries(result, requested, entityID, retention)...)
 			}
-			if responseStart.IsZero() {
-				responseStart, responseEnd = result.Start, result.End
+		}
+		if pingRetentionDays > 0 {
+			pingRequest := queryRequest
+			pingRequest.Type = "ping"
+			pingRequest.UUID = entityID
+			if clamped, ok := clampLTSHistoryRequest(pingRequest, pingRetentionDays); ok {
+				result, queryErr := history.Query(ctx, clamped)
+				if queryErr != nil {
+					return nil, historyRPCError(queryErr, "Failed to query Ping metrics")
+				}
+				if responseStart.IsZero() || result.Start.Before(responseStart) {
+					responseStart = result.Start
+				}
+				if responseEnd.IsZero() || result.End.After(responseEnd) {
+					responseEnd = result.End
+				}
+				series = append(series, ltsPingMetricSeries(result, entityID, pingRetentionDays)...)
 			}
-			series = append(series, ltsPingMetricSeries(result, params.EntityID, pingRetentionDays)...)
 		}
 	}
 	if responseStart.IsZero() {
@@ -232,7 +253,6 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		}
 	}
 
-	maxPoints := ltsMetricMaxPoints(params.MaxPoints)
 	series = limitLTSMetricPoints(series, maxPoints)
 	total := 0
 	for index := range series {
@@ -243,6 +263,25 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 	return map[string]any{
 		"start": responseStart, "end": responseEnd, "series": series, "count": total,
 	}, nil
+}
+
+func ltsMetricEntityIDs(ctx context.Context, requested string) ([]string, *rpc.JsonRpcError) {
+	if requested != "" {
+		return []string{requested}, nil
+	}
+	clientList, err := clients.GetAllClientBasicInfo()
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to retrieve client information: "+err.Error(), nil)
+	}
+	isLogin := isLoginFromCtx(ctx)
+	entityIDs := make([]string, 0, len(clientList))
+	for _, client := range clientList {
+		if client.Hidden && !isLogin {
+			continue
+		}
+		entityIDs = append(entityIDs, client.UUID)
+	}
+	return entityIDs, nil
 }
 
 func clampLTSHistoryRequest(request history.QueryRequest, retentionDays int) (history.QueryRequest, bool) {
@@ -600,36 +639,24 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 	if err := req.BindParams(&params); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid Ping statistics query: "+err.Error(), nil)
 	}
-	if params.EntityID == "" {
-		return nil, rpc.MakeError(rpc.InvalidParams, "entity_id is required", nil)
-	}
 	if !isLoginFromCtx(ctx) && isHiddenClient(params.EntityID) {
 		return nil, rpc.MakeError(rpc.NotFound, "client not found", nil)
 	}
-	queryRequest, err := ltsMetricHistoryRequest(params)
+	entityIDs, entityErr := ltsMetricEntityIDs(ctx, params.EntityID)
+	if entityErr != nil {
+		return nil, entityErr
+	}
+	baseRequest, err := ltsMetricHistoryRequest(params)
 	if err != nil {
 		return nil, historyRPCError(err, "Invalid Ping statistics query")
 	}
-	queryRequest.Type = "ping"
-	queryRequest.UUID = params.EntityID
 	retentionDays := ltsMetricRetentionDays()["ping.latency_ms"]
-	queryRequest, ok := clampLTSHistoryRequest(queryRequest, retentionDays)
-	if !ok {
-		start, end, rangeErr := ltsMetricRange(params)
-		if rangeErr != nil {
-			return nil, historyRPCError(rangeErr, "Invalid Ping statistics query")
-		}
-		return map[string]any{
-			"start": start, "end": end, "interval_seconds": int64(0),
-			"stats": []ltsPingStat{}, "count": 0,
-		}, nil
+	maxPoints := ltsMetricMaxPoints(params.MaxPoints)
+	if len(entityIDs) > 0 {
+		baseRequest.MaxPoints = max(1, maxPoints/len(entityIDs))
 	}
 	ctx, cancel := context.WithTimeout(ctx, history.QueryTimeout)
 	defer cancel()
-	result, err := history.Query(ctx, queryRequest)
-	if err != nil {
-		return nil, historyRPCError(err, "Failed to query Ping statistics")
-	}
 
 	taskList, err := tasks.GetAllPingTasks()
 	if err != nil {
@@ -648,41 +675,70 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 		}{task.Name, task.Type, task.Interval}
 	}
 
-	stats := make([]ltsPingStat, 0, len(result.Series))
-	for _, source := range result.Series {
-		if source.Kind != "ping" {
+	stats := make([]ltsPingStat, 0)
+	var responseStart, responseEnd time.Time
+	var intervalSeconds int64
+	for _, entityID := range entityIDs {
+		queryRequest := baseRequest
+		queryRequest.Type = "ping"
+		queryRequest.UUID = entityID
+		queryRequest, ok := clampLTSHistoryRequest(queryRequest, retentionDays)
+		if !ok {
 			continue
 		}
-		stat := ltsPingStat{
-			EntityID: params.EntityID, TaskID: strconv.FormatUint(uint64(source.TaskID), 10),
-			Tags: map[string]string{"task_id": strconv.FormatUint(uint64(source.TaskID), 10)},
+		result, queryErr := history.Query(ctx, queryRequest)
+		if queryErr != nil {
+			return nil, historyRPCError(queryErr, "Failed to query Ping statistics")
 		}
-		if task, ok := taskMap[source.TaskID]; ok {
-			stat.Name, stat.Type, stat.Interval = task.name, task.taskType, task.interval
+		if responseStart.IsZero() || result.Start.Before(responseStart) {
+			responseStart = result.Start
 		}
-		summary := source.PingSummary
-		if summary == nil {
-			summary = &history.PingSummary{}
+		if responseEnd.IsZero() || result.End.After(responseEnd) {
+			responseEnd = result.End
 		}
-		stat.Total, stat.Valid = summary.TotalCount, summary.ValidCount
-		if stat.Total > 0 {
-			stat.Loss = float64(stat.Total-stat.Valid) / float64(stat.Total) * 100
-		}
-		if stat.Valid > 0 {
-			minimum, maximum, average := summary.Min, summary.Max, summary.Avg
-			latest, standardDeviation := summary.Latest, summary.Stddev
-			p50, p99 := summary.P50, summary.P99
-			stat.Min, stat.Max, stat.Latest = &minimum, &maximum, &latest
-			stat.Avg, stat.Stddev, stat.P50, stat.P99 = &average, &standardDeviation, &p50, &p99
-			if p50 > 0 && p99 >= p50 {
-				base := math.Max(10, math.Min(50, p50))
-				stat.P99P50Ratio = (p99 - p50) / base
+		intervalSeconds = max(intervalSeconds, ltsResolutionSeconds(result.Resolution))
+		for _, source := range result.Series {
+			if source.Kind != "ping" {
+				continue
 			}
+			stat := ltsPingStat{
+				EntityID: entityID, TaskID: strconv.FormatUint(uint64(source.TaskID), 10),
+				Tags: map[string]string{"task_id": strconv.FormatUint(uint64(source.TaskID), 10)},
+			}
+			if task, ok := taskMap[source.TaskID]; ok {
+				stat.Name, stat.Type, stat.Interval = task.name, task.taskType, task.interval
+			}
+			summary := source.PingSummary
+			if summary == nil {
+				summary = &history.PingSummary{}
+			}
+			stat.Total, stat.Valid = summary.TotalCount, summary.ValidCount
+			stat.LossApproximate = summary.Approximate
+			if stat.Total > 0 {
+				stat.Loss = float64(stat.Total-stat.Valid) / float64(stat.Total) * 100
+			}
+			if stat.Valid > 0 {
+				minimum, maximum, average := summary.Min, summary.Max, summary.Avg
+				latest, standardDeviation := summary.Latest, summary.Stddev
+				p50, p99 := summary.P50, summary.P99
+				stat.Min, stat.Max, stat.Latest = &minimum, &maximum, &latest
+				stat.Avg, stat.Stddev, stat.P50, stat.P99 = &average, &standardDeviation, &p50, &p99
+				if p50 > 0 && p99 >= p50 {
+					base := math.Max(10, math.Min(50, p50))
+					stat.P99P50Ratio = (p99 - p50) / base
+				}
+			}
+			stats = append(stats, stat)
 		}
-		stats = append(stats, stat)
+	}
+	if responseStart.IsZero() {
+		responseStart, responseEnd, err = ltsMetricRange(params)
+		if err != nil {
+			return nil, historyRPCError(err, "Invalid Ping statistics query")
+		}
 	}
 	return map[string]any{
-		"start": result.Start, "end": result.End, "interval_seconds": ltsResolutionSeconds(result.Resolution),
+		"start": responseStart, "end": responseEnd, "interval_seconds": intervalSeconds,
 		"stats": stats, "count": len(stats),
 	}, nil
 }
