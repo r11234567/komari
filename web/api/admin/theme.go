@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -382,7 +383,7 @@ func isValidMarketShort(short string) bool {
 }
 
 func downloadThemeFromURL(rawURL string) ([]byte, error) {
-	return downloadThemeMarketURL(rawURL, maxThemeArchiveSize)
+	return downloadMarketURL(rawURL, maxThemeArchiveSize)
 }
 
 // getGitHubReleaseDownloadURL 从GitHub API获取最新release的下载链接

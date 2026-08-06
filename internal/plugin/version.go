@@ -30,7 +30,7 @@ func CheckKomariVersion(constraint string) error {
 	if err != nil {
 		return fmt.Errorf("invalid komari version constraint %q: %w", constraint, err)
 	}
-	have, err := parseSemver(utils.CurrentVersion)
+	have, err := parseRunningVersion(utils.CurrentVersion)
 	if err != nil {
 		// A malformed server version must not block plugin loading.
 		return nil
@@ -39,6 +39,14 @@ func CheckKomariVersion(constraint string) error {
 		return fmt.Errorf("plugin requires komari %s, running %s", constraint, utils.CurrentVersion)
 	}
 	return nil
+}
+
+func parseRunningVersion(version string) ([3]int, error) {
+	version = strings.TrimSpace(version)
+	if suffix := strings.IndexAny(version, "-+"); suffix >= 0 {
+		version = version[:suffix]
+	}
+	return parseSemver(version)
 }
 
 func satisfies(cmp int, op string) bool {

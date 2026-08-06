@@ -50,6 +50,8 @@ func TestParseDownsamplingPolicyValidatesTierOrder(t *testing.T) {
 	policy = DefaultDownsamplingPolicy()
 	policy.RawRetention = "30min"
 	policy.Tiers[0].Interval = "1h"
+	policy.Tiers[1].Interval = "2h"
+	policy.Tiers[2].Interval = "4h"
 	parsed, err := parseDownsamplingPolicy(policy)
 	if err != nil {
 		t.Fatalf("raw retention shorter than the first interval was rejected: %v", err)

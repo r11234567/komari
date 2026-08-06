@@ -706,6 +706,7 @@ func fsMode(value goja.Value, fallback os.FileMode) os.FileMode {
 		if err == nil {
 			return os.FileMode(mode)
 		}
+		return fallback
 	}
 	return os.FileMode(value.ToInteger())
 }
