@@ -3,6 +3,7 @@ package history
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"sort"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"golang.org/x/sync/singleflight"
+	"gorm.io/gorm"
 )
 
 const (
@@ -22,6 +25,7 @@ const (
 var (
 	ErrInvalidQuery  = errors.New("history query requires a supported type and uuid or task_id")
 	ErrRangeTooLarge = errors.New("history range must be positive and no longer than 90 days")
+	queryGroup       singleflight.Group
 )
 
 type QueryRequest struct {
@@ -157,6 +161,25 @@ func chooseBucketSize(minimum time.Duration) time.Duration {
 }
 
 func Query(ctx context.Context, req QueryRequest) (*Response, error) {
+	key, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	result := queryGroup.DoChan(string(key), func() (any, error) {
+		return query(context.WithoutCancel(ctx), req)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case shared := <-result:
+		if shared.Err != nil {
+			return nil, shared.Err
+		}
+		return shared.Val.(*Response), nil
+	}
+}
+
+func query(ctx context.Context, req QueryRequest) (*Response, error) {
 	start, end, bucketSize, maxPoints, err := parseRequest(req)
 	if err != nil {
 		return nil, err
@@ -187,60 +210,11 @@ func Query(ctx context.Context, req QueryRequest) (*Response, error) {
 }
 
 func queryPing(ctx context.Context, req QueryRequest, start, end time.Time, size time.Duration, maxPoints int) ([]Series, int64, error) {
-	db := dbcore.GetReadDBInstance().WithContext(ctx).
-		Model(&models.PingRecord{}).
-		Select("client, task_id, time, value").
-		Where("time >= ? AND time <= ?", start, end)
-	if req.UUID != "" {
-		db = db.Where("client = ?", req.UUID)
-	}
-	if req.TaskID != nil {
-		db = db.Where("task_id = ?", *req.TaskID)
-	}
-	rows, err := db.Order("time ASC").Rows()
+	buckets := make(map[pingKey]*Point)
+	count, err := queryRawPingBuckets(ctx, req, start, end, size, buckets)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer rows.Close()
-
-	buckets := make(map[pingKey]*Point)
-	var count int64
-	for rows.Next() {
-		if err := ctx.Err(); err != nil {
-			return nil, 0, err
-		}
-		var client string
-		var taskID uint
-		var recorded models.LocalTime
-		var value int
-		if err := rows.Scan(&client, &taskID, &recorded, &value); err != nil {
-			return nil, 0, err
-		}
-		count++
-		key := pingKey{client: client, taskID: taskID, bucket: recorded.ToTime().Truncate(size)}
-		point := buckets[key]
-		if point == nil {
-			point = &Point{Time: key.bucket}
-			buckets[key] = point
-		}
-		point.TotalCount++
-		if value < 0 {
-			point.LossCount++
-			continue
-		}
-		firstValid := point.TotalCount-point.LossCount == 1
-		point.Avg += float64(value)
-		if firstValid || float64(value) < point.Min {
-			point.Min = float64(value)
-		}
-		if firstValid || float64(value) > point.Max {
-			point.Max = float64(value)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, err
-	}
-	rows.Close()
 
 	rollupQuery := dbcore.GetReadDBInstance().WithContext(ctx).
 		Model(&models.PingRollup{}).
@@ -260,24 +234,7 @@ func queryPing(ctx context.Context, req QueryRequest, start, end time.Time, size
 			return nil, 0, err
 		}
 		key := pingKey{client: rollup.Client, taskID: rollup.TaskID, bucket: rollup.Time.ToTime().Truncate(size)}
-		point := buckets[key]
-		if point == nil {
-			point = &Point{Time: key.bucket}
-			buckets[key] = point
-		}
-		existingValid := point.TotalCount - point.LossCount
-		rollupValid := int(rollup.TotalCount - rollup.LossCount)
-		if rollupValid > 0 {
-			if existingValid == 0 || rollup.Minimum < point.Min {
-				point.Min = rollup.Minimum
-			}
-			if existingValid == 0 || rollup.Maximum > point.Max {
-				point.Max = rollup.Maximum
-			}
-		}
-		point.TotalCount += int(rollup.TotalCount)
-		point.LossCount += int(rollup.LossCount)
-		point.Avg += rollup.ValueSum
+		mergePingBucket(buckets, key, int(rollup.TotalCount), int(rollup.LossCount), rollup.ValueSum, rollup.Minimum, rollup.Maximum)
 		count += rollup.TotalCount
 	}
 
@@ -296,6 +253,116 @@ func queryPing(ctx context.Context, req QueryRequest, start, end time.Time, size
 		series.Points = append(series.Points, *point)
 	}
 	return limitSeries(seriesMap, maxPoints), count, nil
+}
+
+func queryRawPingBuckets(ctx context.Context, req QueryRequest, start, end time.Time, size time.Duration, buckets map[pingKey]*Point) (int64, error) {
+	db := dbcore.GetReadDBInstance().WithContext(ctx).
+		Model(&models.PingRecord{}).
+		Where("time >= ? AND time <= ?", start, end)
+	if req.UUID != "" {
+		db = db.Where("client = ?", req.UUID)
+	}
+	if req.TaskID != nil {
+		db = db.Where("task_id = ?", *req.TaskID)
+	}
+	if db.Dialector.Name() == "sqlite" {
+		return queryRawPingBucketsSQLite(ctx, db, size, buckets)
+	}
+
+	rows, err := db.Select("client, task_id, time, value").Order("time ASC").Rows()
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	var count int64
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		var client string
+		var taskID uint
+		var recorded models.LocalTime
+		var value int
+		if err := rows.Scan(&client, &taskID, &recorded, &value); err != nil {
+			return 0, err
+		}
+		count++
+		key := pingKey{client: client, taskID: taskID, bucket: recorded.ToTime().Truncate(size)}
+		if value < 0 {
+			mergePingBucket(buckets, key, 1, 1, 0, 0, 0)
+			continue
+		}
+		mergePingBucket(buckets, key, 1, 0, float64(value), float64(value), float64(value))
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func queryRawPingBucketsSQLite(ctx context.Context, db *gorm.DB, size time.Duration, buckets map[pingKey]*Point) (int64, error) {
+	bucketSeconds := int64(size / time.Second)
+	rows, err := db.Select(`
+		client,
+		task_id,
+		datetime((CAST(strftime('%s', time) AS INTEGER) / ?) * ?, 'unixepoch') AS bucket_time,
+		COUNT(*) AS total_count,
+		SUM(CASE WHEN value < 0 THEN 1 ELSE 0 END) AS loss_count,
+		SUM(CASE WHEN value >= 0 THEN value ELSE 0 END) AS value_sum,
+		COALESCE(MIN(CASE WHEN value >= 0 THEN value END), 0) AS minimum,
+		COALESCE(MAX(CASE WHEN value >= 0 THEN value END), 0) AS maximum`,
+		bucketSeconds, bucketSeconds).
+		Group("client, task_id, bucket_time").
+		Order("bucket_time ASC").
+		Rows()
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	var count int64
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		var client string
+		var taskID uint
+		var recorded models.LocalTime
+		var total, loss int
+		var valueSum, minimum, maximum float64
+		if err := rows.Scan(&client, &taskID, &recorded, &total, &loss, &valueSum, &minimum, &maximum); err != nil {
+			return 0, err
+		}
+		key := pingKey{client: client, taskID: taskID, bucket: recorded.ToTime()}
+		mergePingBucket(buckets, key, total, loss, valueSum, minimum, maximum)
+		count += int64(total)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func mergePingBucket(buckets map[pingKey]*Point, key pingKey, total, loss int, valueSum, minimum, maximum float64) {
+	point := buckets[key]
+	if point == nil {
+		point = &Point{Time: key.bucket}
+		buckets[key] = point
+	}
+	existingValid := point.TotalCount - point.LossCount
+	incomingValid := total - loss
+	if incomingValid > 0 {
+		if existingValid == 0 || minimum < point.Min {
+			point.Min = minimum
+		}
+		if existingValid == 0 || maximum > point.Max {
+			point.Max = maximum
+		}
+	}
+	point.TotalCount += total
+	point.LossCount += loss
+	point.Avg += valueSum
 }
 
 func queryLoad(ctx context.Context, req QueryRequest, start, end time.Time, size time.Duration, maxPoints int) ([]Series, int64, error) {

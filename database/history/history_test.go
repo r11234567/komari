@@ -1,9 +1,14 @@
 package history
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/komari-monitor/komari/database/models"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestParseRequestBoundsPoints(t *testing.T) {
@@ -144,5 +149,44 @@ func TestSummarizePingPointsKeepsCountsBeforeSampling(t *testing.T) {
 	}
 	if summary.Avg != 14 {
 		t.Fatalf("average = %v, want 14", summary.Avg)
+	}
+}
+
+func TestQueryRawPingBucketsSQLiteAggregatesBeforeScan(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:history-ping-buckets?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`CREATE TABLE ping_records (client TEXT, task_id INTEGER, time TEXT, value INTEGER)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []int{10, 20, -1} {
+		if err := db.Exec(`INSERT INTO ping_records (client, task_id, time, value) VALUES (?, ?, ?, ?)`,
+			"node", 7, "2026-08-06 12:00:30.0000000", value).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	buckets := make(map[pingKey]*Point)
+	count, err := queryRawPingBucketsSQLite(
+		context.Background(),
+		db.Model(&models.PingRecord{}).Where(
+			"time >= ? AND time <= ?",
+			"2026-08-06 12:00:00.0000000",
+			"2026-08-06 12:01:00.0000000",
+		),
+		time.Minute,
+		buckets,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 || len(buckets) != 1 {
+		t.Fatalf("count = %d, buckets = %d; want 3 and 1", count, len(buckets))
+	}
+	for _, point := range buckets {
+		if point.TotalCount != 3 || point.LossCount != 1 || point.Avg != 30 || point.Min != 10 || point.Max != 20 {
+			t.Fatalf("unexpected aggregate: %#v", point)
+		}
 	}
 }
