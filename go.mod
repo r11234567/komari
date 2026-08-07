@@ -18,7 +18,7 @@ require (
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/image v0.41.0
-	golang.org/x/sys v0.43.0
+	golang.org/x/sys v0.45.0
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
 	gorm.io/driver/sqlite v1.5.7
@@ -27,13 +27,11 @@ require (
 
 require github.com/dop251/base64dec v0.0.0-20231022112746-c6c9f9a96217 // indirect
 
-// Misuse of ServerConfig.PublicKeyCallback may cause authorization bypass in golang.org/x/crypto #1
-// golang.org/x/crypto Vulnerable to Denial of Service (DoS) via Slow or Incomplete Key Exchange #3
-require golang.org/x/crypto v0.50.0
+// Security baseline: v0.52.0 fixes the current SSH auth bypass, deadlock, panic, and DoS advisories.
+require golang.org/x/crypto v0.52.0
 
-// HTTP Proxy bypass using IPv6 Zone IDs in golang.org/x/net #2
-// golang.org/x/net vulnerable to Cross-site Scripting #4
-require golang.org/x/net v0.53.0 // indirect
+// Security baseline: v0.55.0 fixes the current HTML parser denial-of-service advisory.
+require golang.org/x/net v0.55.0 // indirect
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
