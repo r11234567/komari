@@ -68,24 +68,34 @@ func InstallZip(zipPath string) (models.Plugin, error) {
 		return info, fmt.Errorf("failed to unload running plugin %q before reinstall: %w", info.Short, err)
 	}
 
-	dir := filepath.Join(DataDir, info.Short)
-	if err := os.RemoveAll(dir); err != nil {
+	if err := os.MkdirAll(DataDir, 0755); err != nil {
+		return info, fmt.Errorf("failed to create plugin root directory: %v", err)
+	}
+	root, err := os.OpenRoot(DataDir)
+	if err != nil {
+		return info, fmt.Errorf("failed to open plugin root directory: %v", err)
+	}
+	defer root.Close()
+	if err := root.RemoveAll(info.Short); err != nil {
 		return info, fmt.Errorf("failed to remove existing plugin directory: %v", err)
 	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := root.MkdirAll(info.Short, 0755); err != nil {
 		return info, fmt.Errorf("failed to create plugin directory: %v", err)
 	}
-	if err := extractPluginArchive(r.File, dir); err != nil {
-		_ = os.RemoveAll(dir)
+	if err := extractPluginArchive(r.File, root, info.Short); err != nil {
+		_ = root.RemoveAll(info.Short)
 		return info, err
 	}
-	if _, err := os.Stat(filepath.Join(dir, info.Entry)); err != nil {
-		_ = os.RemoveAll(dir)
+	if fileInfo, err := root.Stat(filepath.Join(info.Short, info.Entry)); err != nil || !fileInfo.Mode().IsRegular() {
+		_ = root.RemoveAll(info.Short)
 		return info, fmt.Errorf("plugin entry %s does not exist", info.Entry)
 	}
 	for _, page := range info.Pages {
-		if _, err := os.Stat(filepath.Join(dir, page.File)); err != nil {
-			_ = os.RemoveAll(dir)
+		if page.Type != models.PageTypeIframe {
+			continue
+		}
+		if fileInfo, err := root.Stat(filepath.Join(info.Short, page.File)); err != nil || !fileInfo.Mode().IsRegular() {
+			_ = root.RemoveAll(info.Short)
 			return info, fmt.Errorf("plugin page %s does not exist", page.File)
 		}
 	}
@@ -117,26 +127,30 @@ func validatePluginArchive(files []*zip.File) error {
 	return nil
 }
 
-func extractPluginArchive(files []*zip.File, dir string) error {
+func extractPluginArchive(files []*zip.File, root *os.Root, short string) error {
 	for _, f := range files {
-		path := filepath.Join(dir, f.Name)
-		if !withinDir(path, dir) {
+		name := filepath.FromSlash(f.Name)
+		if !filepath.IsLocal(name) {
 			return fmt.Errorf("plugin archive contains an invalid path %q", f.Name)
 		}
+		path := filepath.Join(short, name)
 		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(path, 0755); err != nil {
+			if err := root.MkdirAll(path, 0755); err != nil {
 				return fmt.Errorf("failed to create directory: %v", err)
 			}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		if !f.Mode().IsRegular() {
+			return fmt.Errorf("plugin archive contains an unsupported file type %q", f.Name)
+		}
+		if err := root.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return fmt.Errorf("failed to create directory: %v", err)
 		}
 		rc, err := f.Open()
 		if err != nil {
 			return fmt.Errorf("failed to open archive file: %v", err)
 		}
-		outFile, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		outFile, err := root.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 		if err != nil {
 			_ = rc.Close()
 			return fmt.Errorf("failed to create file: %v", err)

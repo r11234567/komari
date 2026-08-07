@@ -17,7 +17,7 @@ func BindingExternalAccount(c *gin.Context) {
 		api.RespondError(c, 500, "No user found: "+err.Error())
 		return
 	}
-	c.SetCookie("binding_external_account", user.UUID, 3600, "/", "", false, true)
+	api.SetCookie(c, "binding_external_account", user.UUID, 3600, true)
 	c.Redirect(302, "/api/oauth")
 }
 

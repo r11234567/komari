@@ -2,9 +2,11 @@ package accounts
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -12,9 +14,13 @@ import (
 	"github.com/komari-monitor/komari/utils"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
 
-const constantSalt = "06Wm4Jv1Hkxx"
+const (
+	legacyPasswordSalt = "06Wm4Jv1Hkxx"
+	passwordHashCost   = 12
+)
 
 // CheckPassword 检查密码是否正确
 //
@@ -27,8 +33,18 @@ func CheckPassword(username, passwd string) (uuid string, success bool) {
 		// 静默处理错误，不显示日志
 		return "", false
 	}
-	if hashPasswd(passwd) != user.Passwd {
+	valid, legacy := verifyPasswordHash(user.Passwd, passwd)
+	if !valid {
 		return "", false
+	}
+	if legacy {
+		// Upgrade legacy hashes after authentication. The conditional update avoids
+		// overwriting a password changed concurrently by another request.
+		if upgraded, err := hashPassword(passwd); err == nil {
+			_ = db.Model(&models.User{}).
+				Where("uuid = ? AND passwd = ?", user.UUID, user.Passwd).
+				Update("passwd", upgraded).Error
+		}
 	}
 	return user.UUID, true
 }
@@ -36,7 +52,11 @@ func CheckPassword(username, passwd string) (uuid string, success bool) {
 // ForceResetPassword 强制重置用户密码
 func ForceResetPassword(username, passwd string) (err error) {
 	db := dbcore.GetDBInstance()
-	result := db.Model(&models.User{}).Where("username = ?", username).Update("passwd", hashPasswd(passwd))
+	hashed, err := hashPassword(passwd)
+	if err != nil {
+		return err
+	}
+	result := db.Model(&models.User{}).Where("username = ?", username).Update("passwd", hashed)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -46,18 +66,36 @@ func ForceResetPassword(username, passwd string) (err error) {
 	return nil
 }
 
-// hashPasswd 对密码进行加盐哈希
-func hashPasswd(passwd string) string {
-	saltedPassword := passwd + constantSalt
-	hash := sha256.New()
-	hash.Write([]byte(saltedPassword))
-	hashedPassword := base64.StdEncoding.EncodeToString(hash.Sum(nil))
-	return hashedPassword
+func hashPassword(passwd string) (string, error) {
+	hashed, err := bcrypt.GenerateFromPassword([]byte(passwd), passwordHashCost)
+	if err != nil {
+		return "", fmt.Errorf("hash password: %w", err)
+	}
+	return string(hashed), nil
+}
+
+func verifyPasswordHash(stored, passwd string) (valid, legacy bool) {
+	if strings.HasPrefix(stored, "$2") {
+		return bcrypt.CompareHashAndPassword([]byte(stored), []byte(passwd)) == nil, false
+	}
+	legacyHash := legacyPasswordHash(passwd)
+	return subtle.ConstantTimeCompare([]byte(stored), []byte(legacyHash)) == 1, true
+}
+
+// legacyPasswordHash exists only to authenticate and migrate pre-LTS2 hashes.
+// New and changed passwords are always stored with bcrypt.
+func legacyPasswordHash(passwd string) string {
+	// lgtm[go/weak-sensitive-data-hashing] Compatibility verification for legacy hashes only.
+	sum := sha256.Sum256([]byte(passwd + legacyPasswordSalt))
+	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
 func CreateAccount(username, passwd string) (user models.User, err error) {
 	db := dbcore.GetDBInstance()
-	hashedPassword := hashPasswd(passwd)
+	hashedPassword, err := hashPassword(passwd)
+	if err != nil {
+		return models.User{}, err
+	}
 	user = models.User{
 		UUID:     uuid.New().String(),
 		Username: username,
@@ -93,7 +131,10 @@ func CreateDefaultAdminAccount() (username, passwd string, err error) {
 		passwd = utils.GeneratePassword()
 	}
 
-	hashedPassword := hashPasswd(passwd)
+	hashedPassword, err := hashPassword(passwd)
+	if err != nil {
+		return "", "", err
+	}
 
 	user := models.User{
 		UUID:      uuid.New().String(),
@@ -166,7 +207,11 @@ func UpdateUser(uuid string, name, password, sso_type *string) error {
 		updates["username"] = *name
 	}
 	if password != nil {
-		updates["passwd"] = hashPasswd(*password)
+		hashed, err := hashPassword(*password)
+		if err != nil {
+			return err
+		}
+		updates["passwd"] = hashed
 	}
 	if sso_type != nil {
 		updates["sso_type"] = *sso_type

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"archive/zip"
+	"net"
 	"testing"
 )
 
@@ -64,5 +65,40 @@ func TestThemeMarketI18nTextAndSourceOnlyEntry(t *testing.T) {
 	}
 	if err := validateThemeMarketTheme(theme); err != nil {
 		t.Fatalf("validateThemeMarketTheme() error = %v", err)
+	}
+}
+
+func TestMarketDownloadRejectsInternalAddresses(t *testing.T) {
+	for _, raw := range []string{
+		"127.0.0.1",
+		"10.0.0.1",
+		"100.64.0.1",
+		"169.254.169.254",
+		"192.0.2.1",
+		"::1",
+		"fc00::1",
+		"2001:db8::1",
+	} {
+		if isPublicMarketIP(net.ParseIP(raw)) {
+			t.Fatalf("internal or reserved address %s was accepted", raw)
+		}
+	}
+	if !isPublicMarketIP(net.ParseIP("1.1.1.1")) {
+		t.Fatal("public address was rejected")
+	}
+}
+
+func TestValidateMarketDownloadURL(t *testing.T) {
+	for _, raw := range []string{
+		"file:///etc/passwd",
+		"https://user@example.com/theme.zip",
+		"https://[fe80::1%25eth0]/theme.zip",
+	} {
+		if err := validateMarketDownloadURL(raw); err == nil {
+			t.Fatalf("unsafe URL %q was accepted", raw)
+		}
+	}
+	if err := validateMarketDownloadURL("https://example.com/theme.zip"); err != nil {
+		t.Fatalf("public HTTPS URL was rejected: %v", err)
 	}
 }

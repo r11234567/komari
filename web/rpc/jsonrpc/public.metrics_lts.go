@@ -206,7 +206,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		perEntityMaxPoints = max(1, maxPoints/len(entityIDs))
 	}
 	queryRequest.MaxPoints = perEntityMaxPoints
-	series := make([]ltsMetricSeries, 0, len(params.MetricKeys)*len(entityIDs))
+	series := make([]ltsMetricSeries, 0)
 	var responseStart, responseEnd time.Time
 	for _, entityID := range entityIDs {
 		if loadRetentionDays > 0 {

@@ -7,6 +7,9 @@ on:
       - 1.2.5-LTS
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build-frontend:
     runs-on: ubuntu-latest
