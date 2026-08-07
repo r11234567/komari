@@ -40,6 +40,8 @@ jobs:
             const AI_MAX_PULL_REQUESTS = 80;
             const AI_MAX_PATCH_CHARS_PER_FILE = 2200;
             const OPENAI_TIMEOUT_MS = 120000;
+            const GENERATED_NOTES_START = "<!-- generated-release-notes:start -->";
+            const GENERATED_NOTES_END = "<!-- generated-release-notes:end -->";
 
             const clean = (value) => (typeof value === "string" ? value.trim() : "");
             const isSnapshotTag = (tag) => /^Snapshot-/i.test(clean(tag));
@@ -73,6 +75,27 @@ jobs:
               }
 
               return false;
+            }
+
+            function appendGeneratedNotes(existingBody, generatedBody) {
+              const existing = clean(existingBody);
+              const generated = clean(generatedBody);
+              if (!generated) {
+                return existing;
+              }
+
+              const block = [
+                GENERATED_NOTES_START,
+                generated,
+                GENERATED_NOTES_END,
+              ].join("\n");
+              const start = existing.indexOf(GENERATED_NOTES_START);
+              const end = existing.indexOf(GENERATED_NOTES_END);
+              if (start >= 0 && end >= start) {
+                return clean(`${existing.slice(0, start)}${block}${existing.slice(end + GENERATED_NOTES_END.length)}`);
+              }
+
+              return [existing, block].filter(Boolean).join("\n\n");
             }
 
             async function resolveRelease() {
@@ -586,10 +609,11 @@ jobs:
               webReleaseSection,
             });
 
-            const body = [
+            const generatedBody = [
               releaseSummarySection,
               whatsChangedSection,
             ].filter(Boolean).join("\n\n");
+            const body = appendGeneratedNotes(release.body, generatedBody);
 
             if (clean(release.body) === clean(body)) {
               core.info(`Release notes for ${tag} are already up to date.`);
