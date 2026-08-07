@@ -1,15 +1,15 @@
-name: LTS Adaptation Snapshot
+name: Publish LTS Snapshot
 
 on:
   push:
     branches:
-      - feat/1.2.5-lts-1.4-adapt
+      - 1.2.5-LTS
   workflow_dispatch:
     inputs:
       frontend_ref:
         description: komari-web branch, tag, or commit to include
-        required: true
-        default: feat/1.2.5-lts-1.4-adapt
+        required: false
+        default: 1.2.5-LTS2-web
 
 permissions:
   contents: write
@@ -19,8 +19,10 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 concurrency:
-  group: lts-adaptation-snapshot-${{ github.ref }}
-  cancel-in-progress: true
+  # Every LTS commit gets a snapshot. Runs for older commits must not be
+  # cancelled when another commit reaches the branch.
+  group: lts-snapshot-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   prepare:
@@ -29,9 +31,9 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       docker_tag: ${{ steps.version.outputs.docker_tag }}
     steps:
-      - name: Require the LTS adaptation branch
+      - name: Require the LTS branch
         env:
-          EXPECTED_REF: refs/heads/feat/1.2.5-lts-1.4-adapt
+          EXPECTED_REF: refs/heads/1.2.5-LTS
         run: |
           set -euo pipefail
           if [ "${GITHUB_REF}" != "${EXPECTED_REF}" ]; then
@@ -43,7 +45,8 @@ jobs:
         id: version
         run: |
           set -euo pipefail
-          VERSION="Snapshot-1.2.5-LTS-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          # Snapshot-YYYYMMDD-HHMMSS in UTC+8, matching the release timezone.
+          VERSION="Snapshot-$(date -u -d '+8 hours' +%Y%m%d-%H%M%S)"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "docker_tag=${VERSION,,}" >> "$GITHUB_OUTPUT"
 
@@ -57,7 +60,7 @@ jobs:
         uses: ./.github/actions/build-frontend
         with:
           repository: https://github.com/r11234567/komari-web.git
-          ref: ${{ inputs.frontend_ref || 'feat/1.2.5-lts-1.4-adapt' }}
+          ref: ${{ inputs.frontend_ref || '1.2.5-LTS2-web' }}
           artifact-name: komari-frontend
 
       - name: Lint frontend
@@ -182,14 +185,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
-          FRONTEND_REF: ${{ inputs.frontend_ref || 'feat/1.2.5-lts-1.4-adapt' }}
+          FRONTEND_REF: ${{ inputs.frontend_ref || '1.2.5-LTS2-web' }}
         run: |
           set -euo pipefail
           gh release create "${VERSION}" \
             --repo "${GITHUB_REPOSITORY}" \
             --target "${GITHUB_SHA}" \
             --title "${VERSION}" \
-            --notes "LTS adaptation snapshot from backend ${GITHUB_SHA} and komari-web ${FRONTEND_REF}. Not for production." \
+            --notes "Automated LTS snapshot from backend ${GITHUB_SHA} and komari-web ${FRONTEND_REF}. Built at the UTC+8 timestamp in the version. Not for production." \
             --prerelease \
             artifacts/komari-* artifacts/SHA256SUMS
 
