@@ -85,8 +85,7 @@ func verifyPasswordHash(stored, passwd string) (valid, legacy bool) {
 // legacyPasswordHash exists only to authenticate and migrate pre-LTS2 hashes.
 // New and changed passwords are always stored with bcrypt.
 func legacyPasswordHash(passwd string) string {
-	// lgtm[go/weak-sensitive-data-hashing] Compatibility verification for legacy hashes only.
-	sum := sha256.Sum256([]byte(passwd + legacyPasswordSalt))
+	sum := sha256.Sum256([]byte(passwd + legacyPasswordSalt)) // lgtm[go/weak-sensitive-data-hashing]
 	return base64.StdEncoding.EncodeToString(sum[:])
 }
 

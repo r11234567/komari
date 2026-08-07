@@ -264,7 +264,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			}
 			expireSeconds := int(tempKeyExpireTime - now)
 			if expireSeconds > 0 {
-					api.SetCookie(c, "temp_key", tempKey, expireSeconds, true)
+				api.SetCookie(c, "temp_key", tempKey, expireSeconds, true)
 			}
 		}()
 		reqPath := c.Request.URL.Path

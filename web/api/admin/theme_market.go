@@ -495,8 +495,7 @@ func downloadMarketURL(rawURL string, maxSize int64) ([]byte, error) {
 	}
 	// The custom transport resolves, validates, and dials the same public IP,
 	// closing the DNS-rebinding gap left by validating before http.Client.Get.
-	// lgtm[go/request-forgery]
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // lgtm[go/request-forgery]
 	if err != nil {
 		return nil, err
 	}
@@ -538,14 +537,14 @@ func dialPublicMarketHost(ctx context.Context, dialer *net.Dialer, network, addr
 	}
 	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
-		return fmt.Errorf("failed to resolve host %q: %w", host, err)
+		return nil, fmt.Errorf("failed to resolve host %q: %w", host, err)
 	}
 	if len(ips) == 0 {
-		return fmt.Errorf("host %q did not resolve to an address", host)
+		return nil, fmt.Errorf("host %q did not resolve to an address", host)
 	}
 	for _, resolved := range ips {
 		if !isPublicMarketIP(resolved.IP) {
-			return errors.New("requests to private or internal addresses are not allowed")
+			return nil, errors.New("requests to private or internal addresses are not allowed")
 		}
 	}
 	var lastErr error
