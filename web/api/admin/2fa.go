@@ -15,7 +15,7 @@ func Generate2FA(c *gin.Context) {
 		api.RespondError(c, 500, "Failed to generate 2FA: "+err.Error())
 		return
 	}
-	c.SetCookie("2fa_secret", secret, 1800, "/", "", false, true)
+	api.SetCookie(c, "2fa_secret", secret, 1800, true)
 	c.Header("Content-Type", "image/png")
 	c.Writer.WriteHeader(200)
 	png.Encode(c.Writer, img)
@@ -38,7 +38,7 @@ func Enable2FA(c *gin.Context) {
 		api.RespondError(c, 500, "Failed to enable 2FA: "+err.Error())
 		return
 	}
-	c.SetCookie("2fa_secret", "", -1, "/", "", false, true)
+	api.SetCookie(c, "2fa_secret", "", -1, true)
 
 	api.RespondSuccess(c, "2FA enabled successfully")
 }

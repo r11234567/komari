@@ -494,6 +494,19 @@ func TestResolveFileRejectsTraversal(t *testing.T) {
 			t.Fatalf("ResolveFile(%q) should fail", bad)
 		}
 	}
+
+	outside := filepath.Join(t.TempDir(), "outside.html")
+	if err := os.WriteFile(outside, []byte("outside"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(DataDir, "feat", "pages", "outside.html")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	if file, err := OpenFile("feat", "pages/outside.html"); err == nil {
+		_ = file.Close()
+		t.Fatal("OpenFile followed a symlink outside the plugin root")
+	}
 }
 
 func TestRouteRequestContextCarriesIdentity(t *testing.T) {

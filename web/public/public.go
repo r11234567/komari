@@ -2,6 +2,7 @@ package public
 
 import (
 	"embed"
+	"io"
 	"io/fs"
 	"mime"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/web/api"
 )
 
 //go:embed defaultTheme
@@ -75,37 +77,6 @@ func replaceHTMLLanguage(htmlStr, language string) string {
 	return htmlStr
 }
 
-// isSafePath 验证路径是否在指定的基础目录内，防止路径穿透攻击
-func isSafePath(basePath, targetPath string) bool {
-	// 获取基础目录的绝对路径
-	absBase, err := filepath.Abs(basePath)
-	if err != nil {
-		return false
-	}
-
-	// 清理目标路径，移除 ../ 等
-	cleanTarget := filepath.Clean(targetPath)
-
-	// 拼接完整路径
-	fullPath := filepath.Join(absBase, cleanTarget)
-
-	// 获取绝对路径
-	absTarget, err := filepath.Abs(fullPath)
-	if err != nil {
-		return false
-	}
-
-	// 检查目标路径是否以基础路径开头
-	// 使用 filepath.Rel 更可靠地检查路径关系
-	rel, err := filepath.Rel(absBase, absTarget)
-	if err != nil {
-		return false
-	}
-
-	// 如果相对路径以 .. 开头，说明目标在基础目录之外
-	return !strings.HasPrefix(rel, "..") && rel != ".."
-}
-
 // Static 注册静态资源和 SPA 路由处理
 func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	// 初始化嵌入式文件系统，指向 defaultTheme 根目录
@@ -113,6 +84,14 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	defaultThemeFS, err := fs.Sub(PublicFS, "defaultTheme")
 	if err != nil {
 		panic("you may forget to put dist of frontend to web/public/defaultTheme/dist")
+	}
+	themeFilesDir := filepath.Join(DataDir, ThemesDir)
+	if err := os.MkdirAll(themeFilesDir, 0755); err != nil {
+		panic("failed to create theme directory: " + err.Error())
+	}
+	themeFilesRoot, err := os.OpenRoot(themeFilesDir)
+	if err != nil {
+		panic("failed to open theme directory: " + err.Error())
 	}
 
 	getConfig := func() map[string]any {
@@ -138,19 +117,18 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			if strings.Contains(themeID, "..") || strings.Contains(themeID, "/") || strings.Contains(themeID, "\\") {
 				return nil, "", false
 			}
-
-			themeBasePath := filepath.Join(DataDir, ThemesDir, themeID)
-
-			if !isSafePath(themeBasePath, cleanPath) {
+			if !filepath.IsLocal(cleanPath) {
 				return nil, "", false
 			}
-
-			localPath := filepath.Join(themeBasePath, cleanPath)
-			// 检查文件是否存在且不是目录
-			if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
-				content, err := os.ReadFile(localPath)
-				if err == nil {
-					return content, mime.TypeByExtension(filepath.Ext(localPath)), true
+			localName := filepath.Join(themeID, cleanPath)
+			file, openErr := themeFilesRoot.Open(localName)
+			if openErr == nil {
+				defer file.Close()
+				if info, statErr := file.Stat(); statErr == nil && !info.IsDir() {
+					content, readErr := io.ReadAll(file)
+					if readErr == nil {
+						return content, mime.TypeByExtension(filepath.Ext(localName)), true
+					}
 				}
 			}
 			// 本地文件不存在，或读取失败 -> 继续向下回退
@@ -286,15 +264,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			}
 			expireSeconds := int(tempKeyExpireTime - now)
 			if expireSeconds > 0 {
-				c.SetCookie(
-					"temp_key",    // key
-					tempKey,       // value
-					expireSeconds, // maxAge（秒）
-					"/",           // path
-					"",            // domain
-					false,         // secure
-					false,         // httpOnly
-				)
+				api.SetCookie(c, "temp_key", tempKey, expireSeconds, true)
 			}
 		}()
 		reqPath := c.Request.URL.Path

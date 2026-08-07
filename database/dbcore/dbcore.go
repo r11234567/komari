@@ -128,29 +128,34 @@ func unzipToDir(zipPath, dstDir string) error {
 	if err := os.MkdirAll(dstDir, 0755); err != nil {
 		return err
 	}
-	absDst, _ := filepath.Abs(dstDir)
+	root, err := os.OpenRoot(dstDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 
 	for _, f := range zr.File {
-		// 构造目标路径并做路径遍历保护
-		cleanName := filepath.Clean(f.Name)
-		targetPath := filepath.Join(absDst, cleanName)
-		if !strings.HasPrefix(targetPath, absDst+string(os.PathSeparator)) && targetPath != absDst {
+		name := filepath.FromSlash(f.Name)
+		if !filepath.IsLocal(name) {
 			return fmt.Errorf("illegal file path in zip: %s", f.Name)
 		}
 		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(targetPath, 0755); err != nil {
+			if err := root.MkdirAll(name, 0755); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		if !f.Mode().IsRegular() {
+			return fmt.Errorf("unsupported file type in zip: %s", f.Name)
+		}
+		if err := root.MkdirAll(filepath.Dir(name), 0755); err != nil {
 			return err
 		}
 		rc, err := f.Open()
 		if err != nil {
 			return err
 		}
-		out, err := os.Create(targetPath)
+		out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 		if err != nil {
 			rc.Close()
 			return err

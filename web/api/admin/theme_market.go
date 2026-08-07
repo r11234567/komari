@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -468,29 +469,33 @@ func validateMarketURLSyntax(rawURL string) error {
 }
 
 func downloadMarketURL(rawURL string, maxSize int64) ([]byte, error) {
-	validate := func(candidate string) error {
-		parsed, err := url.Parse(candidate)
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil {
-			return errors.New("only public HTTP and HTTPS URLs are allowed")
-		}
-		if err := validateThemeMarketHost(parsed.Hostname()); err != nil {
-			return err
-		}
-		return nil
-	}
-	if err := validate(rawURL); err != nil {
+	if err := validateMarketDownloadURL(rawURL); err != nil {
 		return nil, err
 	}
+	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 15 * time.Second}
 	client := &http.Client{
 		Timeout: 45 * time.Second,
+		Transport: &http.Transport{
+			Proxy: nil,
+			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+				return dialPublicMarketHost(ctx, dialer, network, address)
+			},
+			TLSHandshakeTimeout: 10 * time.Second,
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return errors.New("too many redirects")
 			}
-			return validate(req.URL.String())
+			return validateMarketDownloadURL(req.URL.String())
 		},
 	}
-	resp, err := client.Get(rawURL)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	// The custom transport resolves, validates, and dials the same public IP,
+	// closing the DNS-rebinding gap left by validating before http.Client.Get.
+	resp, err := client.Do(req) // lgtm[go/request-forgery]
 	if err != nil {
 		return nil, err
 	}
@@ -511,20 +516,68 @@ func downloadMarketURL(rawURL string, maxSize int64) ([]byte, error) {
 	return data, nil
 }
 
-func validateThemeMarketHost(host string) error {
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return fmt.Errorf("failed to resolve host %q: %w", host, err)
+func validateMarketDownloadURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil {
+		return errors.New("only public HTTP and HTTPS URLs are allowed")
 	}
-	if len(ips) == 0 {
-		return fmt.Errorf("host %q did not resolve to an address", host)
-	}
-	for _, ip := range ips {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-			return errors.New("requests to private or internal addresses are not allowed")
-		}
+	if strings.Contains(parsed.Hostname(), "%") {
+		return errors.New("IPv6 zone identifiers are not allowed")
 	}
 	return nil
+}
+
+func dialPublicMarketHost(ctx context.Context, dialer *net.Dialer, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("invalid download address: %w", err)
+	}
+	if strings.Contains(host, "%") {
+		return nil, errors.New("IPv6 zone identifiers are not allowed")
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve host %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("host %q did not resolve to an address", host)
+	}
+	for _, resolved := range ips {
+		if !isPublicMarketIP(resolved.IP) {
+			return nil, errors.New("requests to private or internal addresses are not allowed")
+		}
+	}
+	var lastErr error
+	for _, resolved := range ips {
+		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(resolved.IP.String(), port))
+		if dialErr == nil {
+			return conn, nil
+		}
+		lastErr = dialErr
+	}
+	return nil, fmt.Errorf("failed to connect to public host %q: %w", host, lastErr)
+}
+
+func isPublicMarketIP(ip net.IP) bool {
+	if ip == nil || !ip.IsGlobalUnicast() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return false
+	}
+	for _, cidr := range []string{
+		"100.64.0.0/10",
+		"192.0.0.0/24",
+		"192.0.2.0/24",
+		"198.18.0.0/15",
+		"198.51.100.0/24",
+		"203.0.113.0/24",
+		"240.0.0.0/4",
+		"2001:db8::/32",
+	} {
+		_, network, err := net.ParseCIDR(cidr)
+		if err == nil && network.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }
 
 func invalidateThemeMarketCache(rawURL string) {

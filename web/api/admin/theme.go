@@ -40,22 +40,25 @@ func UploadTheme(c *gin.Context) {
 		return
 	}
 
-	// 临时文件名
-	tempFile := filepath.Join(os.TempDir(), "uploaded_theme.zip")
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+	tempFile, err := os.CreateTemp("", "komari-upload-theme-*.zip")
+	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "保存文件失败: "+err.Error())
 		return
 	}
-	defer os.Remove(tempFile)
-
-	// 检查文件扩展名（这里假定上传的就是zip）
-	if !strings.HasSuffix(strings.ToLower(tempFile), ".zip") {
-		api.RespondError(c, http.StatusBadRequest, "只支持ZIP格式的主题文件")
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath)
+	if _, err := tempFile.Write(data); err != nil {
+		_ = tempFile.Close()
+		api.RespondError(c, http.StatusInternalServerError, "保存文件失败: "+err.Error())
+		return
+	}
+	if err := tempFile.Close(); err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "保存文件失败: "+err.Error())
 		return
 	}
 
 	// 解压ZIP文件并验证
-	themeInfo, err := extractAndValidateTheme(tempFile)
+	themeInfo, err := extractAndValidateTheme(tempPath)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -79,6 +82,12 @@ func ListThemes(c *gin.Context) {
 		api.RespondError(c, http.StatusInternalServerError, "读取主题目录失败: "+err.Error())
 		return
 	}
+	themeRoot, err := os.OpenRoot(dataDir)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "读取主题目录失败: "+err.Error())
+		return
+	}
+	defer themeRoot.Close()
 
 	var themes []models.Theme
 	seen := make(map[string]struct{})
@@ -94,8 +103,7 @@ func ListThemes(c *gin.Context) {
 	}
 	for _, entry := range entries {
 		if entry.IsDir() {
-			themeConfigPath := filepath.Join(dataDir, entry.Name(), "komari-theme.json")
-			if themeInfo, err := loadThemeConfig(themeConfigPath); err == nil {
+			if themeInfo, err := loadThemeConfig(themeRoot, entry.Name()); err == nil {
 				key := strings.ToLower(themeInfo.Short)
 				if _, exists := seen[key]; exists {
 					continue
@@ -131,16 +139,25 @@ func DeleteTheme(c *gin.Context) {
 		return
 	}
 
-	themeDir := filepath.Join("./data/theme", req.Short)
+	themeRoot, err := os.OpenRoot("./data/theme")
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "读取主题目录失败: "+err.Error())
+		return
+	}
+	defer themeRoot.Close()
 
 	// 检查主题是否存在
-	if _, err := os.Stat(themeDir); os.IsNotExist(err) {
-		api.RespondError(c, http.StatusNotFound, "主题不存在")
+	if _, err := themeRoot.Stat(req.Short); err != nil {
+		if os.IsNotExist(err) {
+			api.RespondError(c, http.StatusNotFound, "主题不存在")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "检查主题失败: "+err.Error())
 		return
 	}
 
 	// 删除主题目录
-	if err := os.RemoveAll(themeDir); err != nil {
+	if err := themeRoot.RemoveAll(req.Short); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "删除主题失败: "+err.Error())
 		return
 	}
@@ -163,11 +180,18 @@ func SetTheme(c *gin.Context) {
 			api.RespondError(c, http.StatusBadRequest, "无效的主题名称")
 			return
 		}
-		themeDir := filepath.Join("./data/theme", themeName)
-		themeConfigPath := filepath.Join(themeDir, "komari-theme.json")
-
-		if _, err := os.Stat(themeConfigPath); os.IsNotExist(err) {
-			api.RespondError(c, http.StatusNotFound, "主题不存在")
+		themeRoot, err := os.OpenRoot("./data/theme")
+		if err != nil {
+			api.RespondError(c, http.StatusInternalServerError, "读取主题目录失败: "+err.Error())
+			return
+		}
+		defer themeRoot.Close()
+		if _, err := themeRoot.Stat(filepath.Join(themeName, "komari-theme.json")); err != nil {
+			if os.IsNotExist(err) {
+				api.RespondError(c, http.StatusNotFound, "主题不存在")
+				return
+			}
+			api.RespondError(c, http.StatusInternalServerError, "检查主题失败: "+err.Error())
 			return
 		}
 	}
@@ -240,36 +264,45 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 		return themeInfo, err
 	}
 
-	// 创建主题目录
-	themeDir := filepath.Join("./data/theme", themeInfo.Short)
+	themesRoot, err := os.OpenRoot("./data/theme")
+	if err != nil {
+		return themeInfo, fmt.Errorf("打开主题根目录失败: %v", err)
+	}
+	defer themesRoot.Close()
 
-	// 如果目录已存在，先删除
-	if _, err := os.Stat(themeDir); err == nil {
-		if err := os.RemoveAll(themeDir); err != nil {
+	// 如果目录已存在，先删除。os.Root keeps all operations confined even
+	// when an existing installation contains symlinks.
+	if _, err := themesRoot.Stat(themeInfo.Short); err == nil {
+		if err := themesRoot.RemoveAll(themeInfo.Short); err != nil {
 			return themeInfo, fmt.Errorf("删除原有主题失败: %v", err)
 		}
+	} else if !os.IsNotExist(err) {
+		return themeInfo, fmt.Errorf("检查主题目录失败: %v", err)
 	}
 
-	if err := os.MkdirAll(themeDir, 0755); err != nil {
+	if err := themesRoot.MkdirAll(themeInfo.Short, 0755); err != nil {
 		return themeInfo, fmt.Errorf("创建主题目录失败: %v", err)
 	}
-
 	// 解压文件到主题目录
 	for _, f := range r.File {
-		path := filepath.Join(themeDir, f.Name)
-
-		// 安全检查，防止路径遍历攻击
-		if !strings.HasPrefix(path, filepath.Clean(themeDir)+string(os.PathSeparator)) {
-			continue
+		name := filepath.FromSlash(f.Name)
+		if !filepath.IsLocal(name) {
+			return themeInfo, fmt.Errorf("主题压缩包包含非法路径: %s", f.Name)
 		}
 
+		path := filepath.Join(themeInfo.Short, name)
 		if f.FileInfo().IsDir() {
-			os.MkdirAll(path, f.FileInfo().Mode())
+			if err := themesRoot.MkdirAll(path, 0755); err != nil {
+				return themeInfo, fmt.Errorf("创建主题目录失败: %v", err)
+			}
 			continue
+		}
+		if !f.Mode().IsRegular() {
+			return themeInfo, fmt.Errorf("主题压缩包包含不支持的文件类型: %s", f.Name)
 		}
 
 		// 创建目录
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		if err := themesRoot.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return themeInfo, fmt.Errorf("创建目录失败: %v", err)
 		}
 
@@ -279,7 +312,7 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 			return themeInfo, fmt.Errorf("打开压缩文件失败: %v", err)
 		}
 
-		outFile, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.FileInfo().Mode())
+		outFile, err := themesRoot.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 		if err != nil {
 			rc.Close()
 			return themeInfo, fmt.Errorf("创建文件失败: %v", err)
@@ -307,15 +340,20 @@ func removeThemeAliases(short string) error {
 	if err != nil {
 		return fmt.Errorf("读取主题目录失败: %v", err)
 	}
+	themeRoot, err := os.OpenRoot(dataDir)
+	if err != nil {
+		return fmt.Errorf("打开主题目录失败: %v", err)
+	}
+	defer themeRoot.Close()
 	for _, entry := range entries {
 		if !entry.IsDir() || entry.Name() == short {
 			continue
 		}
-		manifest, err := loadThemeConfig(filepath.Join(dataDir, entry.Name(), "komari-theme.json"))
+		manifest, err := loadThemeConfig(themeRoot, entry.Name())
 		if err != nil || !strings.EqualFold(manifest.Short, short) {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(dataDir, entry.Name())); err != nil {
+		if err := themeRoot.RemoveAll(entry.Name()); err != nil {
 			return fmt.Errorf("删除同名旧主题失败: %v", err)
 		}
 	}
@@ -349,11 +387,13 @@ func validateThemeArchive(files []*zip.File) error {
 	return nil
 }
 
-// loadThemeConfig 加载主题配置
-func loadThemeConfig(configPath string) (models.Theme, error) {
+// loadThemeConfig loads a manifest through a confined theme directory handle.
+func loadThemeConfig(root *os.Root, short string) (models.Theme, error) {
 	var themeInfo models.Theme
-
-	data, err := os.ReadFile(configPath)
+	if !isValidMarketShort(short) {
+		return themeInfo, fmt.Errorf("invalid theme short %q", short)
+	}
+	data, err := root.ReadFile(filepath.Join(short, "komari-theme.json"))
 	if err != nil {
 		return themeInfo, err
 	}
@@ -514,17 +554,23 @@ func UpdateTheme(c *gin.Context) {
 		return
 	}
 
-	// 检查主题是否存在
-	themeDir := filepath.Join("./data/theme", req.Short)
-	themeConfigPath := filepath.Join(themeDir, "komari-theme.json")
-
-	if _, err := os.Stat(themeConfigPath); os.IsNotExist(err) {
-		api.RespondError(c, http.StatusNotFound, "主题不存在")
+	themeRoot, err := os.OpenRoot("./data/theme")
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "读取主题目录失败: "+err.Error())
+		return
+	}
+	defer themeRoot.Close()
+	if _, err := themeRoot.Stat(filepath.Join(req.Short, "komari-theme.json")); err != nil {
+		if os.IsNotExist(err) {
+			api.RespondError(c, http.StatusNotFound, "主题不存在")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "检查主题失败: "+err.Error())
 		return
 	}
 
 	// 加载现有主题配置
-	themeInfo, err := loadThemeConfig(themeConfigPath)
+	themeInfo, err := loadThemeConfig(themeRoot, req.Short)
 	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "读取主题配置失败: "+err.Error())
 		return

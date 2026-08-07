@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -237,15 +238,23 @@ func (m *Manager) instanceFor(short string) *Instance {
 // a manager read lock through rpcHandler) without deadlocking. On failure the
 // instance is dropped and its hooks and RPC methods are cleaned up.
 func (m *Manager) load(short string) error {
+	if !validShort(short) {
+		return fmt.Errorf("invalid plugin short %q", short)
+	}
 	dir := filepath.Join(DataDir, short)
-	info, err := readManifest(dir)
+	info, err := readManifest(short)
 	if err != nil {
 		return err
 	}
 	if err := CheckKomariVersion(info.Komari); err != nil {
 		return err
 	}
-	script, err := os.ReadFile(filepath.Join(dir, info.Entry))
+	scriptFile, err := OpenFile(short, info.Entry)
+	if err != nil {
+		return fmt.Errorf("read plugin entry %s: %w", info.Entry, err)
+	}
+	script, err := io.ReadAll(scriptFile)
+	_ = scriptFile.Close()
 	if err != nil {
 		return fmt.Errorf("read plugin entry %s: %w", info.Entry, err)
 	}
@@ -418,8 +427,7 @@ func (m *Manager) closeAll() error {
 }
 
 func (m *Manager) setEnabled(short string, enabled, approved bool) error {
-	dir := filepath.Join(DataDir, short)
-	info, err := readManifest(dir)
+	info, err := readManifest(short)
 	if err != nil {
 		return err
 	}
@@ -481,7 +489,7 @@ func (m *Manager) loadAll() error {
 		if !st.Enabled || m.instanceFor(short) != nil {
 			continue
 		}
-		info, err := readManifest(filepath.Join(DataDir, short))
+		info, err := readManifest(short)
 		if err != nil {
 			errs = append(errs, m.disableWithError(short, st, err))
 			continue
@@ -504,7 +512,7 @@ func (m *Manager) loadAll() error {
 // plugin and keeps the error visible, mirroring the startup load path.
 func (m *Manager) restartPlugin(short string) error {
 	st := m.stateStore().get(short)
-	info, err := readManifest(filepath.Join(DataDir, short))
+	info, err := readManifest(short)
 	if err != nil {
 		return m.disableWithError(short, st, err)
 	}
@@ -541,7 +549,7 @@ func (m *Manager) list() []Info {
 			continue
 		}
 		short := entry.Name()
-		info, err := readManifest(filepath.Join(DataDir, short))
+		info, err := readManifest(short)
 		if err != nil {
 			continue // mirror the theme list: skip unreadable entries
 		}
@@ -561,23 +569,35 @@ func (m *Manager) list() []Info {
 // plugin directory and clears its persisted state. Registered gin route
 // slots stay inert (404) until the server restarts.
 func (m *Manager) delete(short string) error {
-	if err := m.unload(short); err != nil && !errors.Is(err, errNotLoaded) {
-		return err
-	}
 	if !validShort(short) {
 		return fmt.Errorf("invalid plugin short %q", short)
 	}
-	dir := filepath.Join(DataDir, short)
-	if _, err := os.Stat(dir); err != nil {
+	if err := m.unload(short); err != nil && !errors.Is(err, errNotLoaded) {
+		return err
+	}
+	codeRoot, err := os.OpenRoot(DataDir)
+	if err != nil {
+		return err
+	}
+	defer codeRoot.Close()
+	if _, err := codeRoot.Stat(short); err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("%w: %q", ErrNotInstalled, short)
 		}
 		return err
 	}
-	if err := os.RemoveAll(dir); err != nil {
+	if err := codeRoot.RemoveAll(short); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(filepath.Join(StorageDir, short)); err != nil {
+	if err := os.MkdirAll(StorageDir, 0755); err != nil {
+		return err
+	}
+	storageRoot, err := os.OpenRoot(StorageDir)
+	if err != nil {
+		return err
+	}
+	defer storageRoot.Close()
+	if err := storageRoot.RemoveAll(short); err != nil {
 		return err
 	}
 	m.stateStore().delete(short)
@@ -589,7 +609,7 @@ func Manifest(short string) (models.Plugin, error) {
 	if !validShort(short) {
 		return models.Plugin{}, fmt.Errorf("invalid plugin short %q", short)
 	}
-	return readManifest(filepath.Join(DataDir, short))
+	return readManifest(short)
 }
 
 // ResolvePublicFile returns the absolute path of a file that belongs to a
@@ -599,47 +619,86 @@ func Manifest(short string) (models.Plugin, error) {
 // HTML and its relative assets are reachable without exposing the whole
 // plugin directory.
 func ResolvePublicFile(short, name string) (string, error) {
-	if !validShort(short) {
-		return "", fmt.Errorf("invalid plugin short %q", short)
-	}
-	if !global.stateStore().get(short).Enabled {
-		return "", fmt.Errorf("plugin %q is not enabled", short)
-	}
-	info, err := readManifest(filepath.Join(DataDir, short))
-	if err != nil {
+	if err := validatePublicFile(short, name); err != nil {
 		return "", err
 	}
+	return ResolveFile(short, name)
+}
+
+// OpenPublicFile securely opens a public plugin file beneath DataDir.
+func OpenPublicFile(short, name string) (*os.File, error) {
+	if err := validatePublicFile(short, name); err != nil {
+		return nil, err
+	}
+	return OpenFile(short, name)
+}
+
+func validatePublicFile(short, name string) error {
+	if !validShort(short) {
+		return fmt.Errorf("invalid plugin short %q", short)
+	}
+	if !global.stateStore().get(short).Enabled {
+		return fmt.Errorf("plugin %q is not enabled", short)
+	}
+	info, err := readManifest(short)
+	if err != nil {
+		return err
+	}
 	name = filepath.Clean(strings.TrimPrefix(name, "/"))
+	if !filepath.IsLocal(name) {
+		return fmt.Errorf("invalid plugin file path %q", name)
+	}
 	for _, page := range info.Pages {
 		if page.Visibility != models.PageVisibilityPublic || page.Type != models.PageTypeIframe {
 			continue
 		}
 		dir := filepath.Dir(page.File)
 		if dir == "." || name == dir || strings.HasPrefix(name, dir+string(os.PathSeparator)) {
-			return ResolveFile(short, name)
+			return nil
 		}
 	}
-	return "", fmt.Errorf("plugin page %q is not public", name)
+	return fmt.Errorf("plugin page %q is not public", name)
 }
 
 // ResolveFile returns the absolute path of a file inside an installed plugin
 // directory, rejecting traversal. Used to serve injected plugin pages.
 func ResolveFile(short, name string) (string, error) {
-	if !validShort(short) {
-		return "", fmt.Errorf("invalid plugin short %q", short)
-	}
-	if !filepath.IsLocal(name) {
-		return "", fmt.Errorf("invalid plugin file path %q", name)
-	}
-	dir := filepath.Join(DataDir, short)
-	full := filepath.Join(dir, name)
-	if !withinDir(full, dir) {
-		return "", fmt.Errorf("invalid plugin file path %q", name)
-	}
-	if _, err := os.Stat(full); err != nil {
+	file, err := OpenFile(short, name)
+	if err != nil {
 		return "", err
 	}
-	return full, nil
+	_ = file.Close()
+	return filepath.Join(DataDir, short, name), nil
+}
+
+// OpenFile resolves and opens a plugin file through an os.Root. The returned
+// handle remains valid after the root is closed and cannot escape DataDir via
+// traversal or symlinks.
+func OpenFile(short, name string) (*os.File, error) {
+	if !validShort(short) {
+		return nil, fmt.Errorf("invalid plugin short %q", short)
+	}
+	if !filepath.IsLocal(name) {
+		return nil, fmt.Errorf("invalid plugin file path %q", name)
+	}
+	root, err := os.OpenRoot(DataDir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	file, err := root.Open(filepath.Join(short, name))
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("plugin file path %q is not a regular file", name)
+	}
+	return file, nil
 }
 
 // hooksOf returns a snapshot of the hooks with the given kind.

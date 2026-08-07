@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -49,10 +50,16 @@ func UploadPlugin(c *gin.Context) {
 // used by injected plugin admin pages.
 func ServePluginFile(c *gin.Context) {
 	name := strings.TrimPrefix(c.Param("filepath"), "/")
-	full, err := plugin.ResolveFile(c.Param("short"), name)
+	file, err := plugin.OpenFile(c.Param("short"), name)
 	if err != nil {
 		c.Status(http.StatusNotFound)
 		return
 	}
-	c.File(full)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	http.ServeContent(c.Writer, c.Request, filepath.Base(name), info.ModTime(), file)
 }

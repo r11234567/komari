@@ -466,7 +466,7 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	}
 	var taskID *uint
 	if params.TaskID != "" {
-		parsed, parseErr := strconv.ParseUint(params.TaskID, 10, 64)
+		parsed, parseErr := strconv.ParseUint(params.TaskID, 10, strconv.IntSize)
 		if parseErr != nil {
 			return nil, rpc.MakeError(rpc.InvalidParams, "Invalid task_id parameter", nil)
 		}
