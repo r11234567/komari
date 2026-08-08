@@ -132,6 +132,38 @@ func TestGetClientTrafficInRangeSumsPersistedDeltasAcrossCounterReset(t *testing
 	assert.Equal(t, int64(175), used)
 }
 
+func TestGetClientTrafficInRangeRejectsPollutedPersistedDeltas(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	assert.NoError(t, err)
+	assert.NoError(t, db.AutoMigrate(&models.Record{}))
+	assert.NoError(t, db.Table("records_long_term").AutoMigrate(&models.Record{}))
+
+	clientUUID := "client-polluted-deltas"
+	start := time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)
+	assert.NoError(t, db.Create(&models.Record{
+		Client: clientUUID, Time: models.FromTime(start.Add(-time.Minute)),
+		NetTotalUp: 1000, NetTotalDown: 2000,
+	}).Error)
+
+	records := []models.Record{
+		{
+			Client: clientUUID, Time: models.FromTime(start),
+			NetTotalUp: 1100, NetTotalDown: 2100, TrafficUp: 1100, TrafficDown: 2100,
+		},
+		{
+			Client: clientUUID, Time: models.FromTime(start.Add(15 * time.Minute)),
+			NetTotalUp: 1090, NetTotalDown: 2200, TrafficUp: 1090, TrafficDown: 100,
+		},
+	}
+	for _, record := range records {
+		assert.NoError(t, db.Table("records_long_term").Create(&record).Error)
+	}
+
+	used, err := getClientTrafficInRangeWithDB(db, clientUUID, "sum", start, start.Add(30*time.Minute))
+	assert.NoError(t, err)
+	assert.Equal(t, int64(300), used)
+}
+
 func TestGetClientTrafficInRangeFallsBackForPersistedZeroDeltas(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	assert.NoError(t, err)

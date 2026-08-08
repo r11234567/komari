@@ -219,8 +219,8 @@ func SendTrafficReport(cadence TrafficReportCadence) (TrafficReportResult, error
 	return result, nil
 }
 
-// getClientTrafficInRange 查询某客户端在指定时间段内的流量增量
-// 通过累加持久化的精确流量增量字段计算用量
+// getClientTrafficInRange 查询某客户端在指定时间段内的流量增量。
+// 报告通过相邻累计计数器重算，避免历史 traffic_* 派生字段中的异常值。
 func getClientTrafficInRange(clientUUID string, trafficType string, start, end time.Time) (int64, error) {
 	return getClientTrafficInRangeWithDB(dbcore.GetReadDBInstance(), clientUUID, trafficType, start, end)
 }
@@ -363,11 +363,20 @@ func sumTrafficDeltas(records []trafficDeltaRecord, previous *trafficDeltaRecord
 	var totalDown int64
 
 	for i := range records {
-		up := records[i].TrafficUp
-		down := records[i].TrafficDown
+		var up int64
+		var down int64
 		if previous != nil {
-			up = trafficDeltaOrFallback(up, records[i].NetTotalUp, previous.NetTotalUp)
-			down = trafficDeltaOrFallback(down, records[i].NetTotalDown, previous.NetTotalDown)
+			up = trafficDeltaForReport(records[i].TrafficUp, records[i].NetTotalUp, previous.NetTotalUp)
+			down = trafficDeltaForReport(records[i].TrafficDown, records[i].NetTotalDown, previous.NetTotalDown)
+		} else {
+			// Very old records may not contain cumulative counters. Keep their
+			// persisted deltas as a compatibility fallback only in that case.
+			if records[i].NetTotalUp == 0 {
+				up = records[i].TrafficUp
+			}
+			if records[i].NetTotalDown == 0 {
+				down = records[i].TrafficDown
+			}
 		}
 		totalUp += up
 		totalDown += down
@@ -377,8 +386,8 @@ func sumTrafficDeltas(records []trafficDeltaRecord, previous *trafficDeltaRecord
 	return totalUp, totalDown
 }
 
-func trafficDeltaOrFallback(storedDelta, currentTotal, previousTotal int64) int64 {
-	if storedDelta > 0 {
+func trafficDeltaForReport(storedDelta, currentTotal, previousTotal int64) int64 {
+	if currentTotal == 0 && previousTotal == 0 {
 		return storedDelta
 	}
 	return utils.ComputeTrafficDelta(currentTotal, previousTotal)

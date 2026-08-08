@@ -139,6 +139,38 @@ func TestSaveClientReportToDBStoresCachedTrafficDeltaAfterCounterReset(t *testin
 	assert.Equal(t, int64(55), saved.TrafficDown)
 }
 
+func TestSaveClientReportToDBIgnoresSmallCounterRegression(t *testing.T) {
+	resetReportCache(t)
+	db := openReportCacheTestDB(t)
+
+	clientUUID := "client-cached-counter-regression"
+	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, db.Create(&models.Record{
+		Client:       clientUUID,
+		Time:         models.FromTime(now.Add(-2 * time.Minute)),
+		NetTotalUp:   1000,
+		NetTotalDown: 2000,
+	}).Error)
+
+	Records.Set(clientUUID, []v1.Report{
+		{
+			UpdatedAt: now.Add(-30 * time.Second),
+			Network:   v1.NetworkReport{TotalUp: 1100, TotalDown: 2100},
+		},
+		{
+			UpdatedAt: now.Add(-10 * time.Second),
+			Network:   v1.NetworkReport{TotalUp: 1090, TotalDown: 2200},
+		},
+	}, cache.DefaultExpiration)
+
+	require.NoError(t, saveClientReportToDB(db, now))
+
+	var saved models.Record
+	require.NoError(t, db.Where("client = ? AND time = ?", clientUUID, models.FromTime(now)).First(&saved).Error)
+	assert.Equal(t, int64(100), saved.TrafficUp)
+	assert.Equal(t, int64(200), saved.TrafficDown)
+}
+
 func TestSaveClientReportToDBSumsCachedTrafficWithoutPersistedBaseline(t *testing.T) {
 	resetReportCache(t)
 	db := openReportCacheTestDB(t)
