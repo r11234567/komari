@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -645,20 +644,29 @@ func TestChildProcessPermissionAndExecution(t *testing.T) {
 	}
 	denied.Close()
 
-	command := "printf child"
-	if runtime.GOOS == "windows" {
-		command = "echo child"
-	}
 	allowed, err := New(`
-		function verify(command) {
+		function verify(command, environment) {
 			const childProcess = require("child_process");
-			const syncOutput = childProcess.execSync(command, { encoding: "utf8" }).trim();
-			return new Promise((resolve) => {
-				const child = childProcess.spawn(command, [], { shell: true, encoding: "utf8" });
+			const arguments = ["-test.run=^TestNodeChildProcessHelper$"];
+			const syncOutput = childProcess.execFileSync(command, arguments, {
+				env: environment,
+				encoding: "utf8",
+			}).trim();
+			return new Promise((resolve, reject) => {
+				const child = childProcess.spawn(command, arguments, {
+					env: environment,
+					encoding: "utf8",
+				});
 				let output = "";
 				child.stdout.on("data", (chunk) => output += String(chunk));
-				child.on("close", (code) => resolve(code === 0 && syncOutput === "child" && output.trim() === "child"));
-				child.on("error", () => resolve(false));
+				child.on("close", (code) => {
+					if (code === 0 && syncOutput === "child" && output.trim() === "child") {
+						resolve(true);
+						return;
+					}
+					reject(new Error(JSON.stringify({ code, syncOutput, output })));
+				});
+				child.on("error", reject);
 			});
 		}
 	`, Options{NodeJS: true, AllowExec: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 5 * time.Second})
@@ -666,7 +674,7 @@ func TestChildProcessPermissionAndExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer allowed.Close()
-	if err := allowed.Call("verify", command); err != nil {
+	if err := allowed.Call("verify", os.Args[0], childHelperEnvironment("child")); err != nil {
 		t.Fatalf("child_process execution failed: %v", err)
 	}
 }
@@ -930,6 +938,9 @@ func TestNodeChildProcessHelper(t *testing.T) {
 		os.Exit(0)
 	case "echo":
 		_, _ = io.Copy(os.Stdout, os.Stdin)
+		os.Exit(0)
+	case "child":
+		_, _ = io.WriteString(os.Stdout, "child")
 		os.Exit(0)
 	default:
 		os.Exit(2)
