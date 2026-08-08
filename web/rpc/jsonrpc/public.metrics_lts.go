@@ -47,6 +47,8 @@ type ltsMetricSeries struct {
 type ltsMetricQueryParams struct {
 	MetricKeys  []string `json:"metric_keys"`
 	EntityID    string   `json:"entity_id"`
+	EntityIDs   []string `json:"entity_ids"`
+	UUID        string   `json:"uuid"`
 	Hours       float64  `json:"hours"`
 	Start       string   `json:"start"`
 	End         string   `json:"end"`
@@ -172,10 +174,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 	if len(params.MetricKeys) == 0 {
 		return nil, rpc.MakeError(rpc.InvalidParams, "metric_keys are required", nil)
 	}
-	if !isLoginFromCtx(ctx) && isHiddenClient(params.EntityID) {
-		return nil, rpc.MakeError(rpc.NotFound, "client not found", nil)
-	}
-	entityIDs, entityErr := ltsMetricEntityIDs(ctx, params.EntityID)
+	entityIDs, entityErr := ltsMetricEntityIDs(ctx, params.EntityID, params.EntityIDs)
 	if entityErr != nil {
 		return nil, entityErr
 	}
@@ -265,21 +264,48 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 	}, nil
 }
 
-func ltsMetricEntityIDs(ctx context.Context, requested string) ([]string, *rpc.JsonRpcError) {
-	if requested != "" {
-		return []string{requested}, nil
-	}
+func ltsMetricEntityIDs(ctx context.Context, requested string, requestedMany []string) ([]string, *rpc.JsonRpcError) {
 	clientList, err := clients.GetAllClientBasicInfo()
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to retrieve client information: "+err.Error(), nil)
 	}
 	isLogin := isLoginFromCtx(ctx)
-	entityIDs := make([]string, 0, len(clientList))
+	visible := make(map[string]struct{}, len(clientList))
 	for _, client := range clientList {
 		if client.Hidden && !isLogin {
 			continue
 		}
-		entityIDs = append(entityIDs, client.UUID)
+		visible[client.UUID] = struct{}{}
+	}
+
+	requestedIDs := append([]string(nil), requestedMany...)
+	if requested != "" {
+		requestedIDs = append([]string{requested}, requestedIDs...)
+	}
+	if len(requestedIDs) == 0 {
+		entityIDs := make([]string, 0, len(visible))
+		for _, client := range clientList {
+			if _, ok := visible[client.UUID]; ok {
+				entityIDs = append(entityIDs, client.UUID)
+			}
+		}
+		return entityIDs, nil
+	}
+
+	entityIDs := make([]string, 0, len(requestedIDs))
+	seen := make(map[string]struct{}, len(requestedIDs))
+	for _, entityID := range requestedIDs {
+		if entityID == "" {
+			continue
+		}
+		if _, ok := visible[entityID]; !ok {
+			return nil, rpc.MakeError(rpc.NotFound, "client not found", nil)
+		}
+		if _, duplicate := seen[entityID]; duplicate {
+			continue
+		}
+		seen[entityID] = struct{}{}
+		entityIDs = append(entityIDs, entityID)
 	}
 	return entityIDs, nil
 }
@@ -639,10 +665,11 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 	if err := req.BindParams(&params); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid Ping statistics query: "+err.Error(), nil)
 	}
-	if !isLoginFromCtx(ctx) && isHiddenClient(params.EntityID) {
-		return nil, rpc.MakeError(rpc.NotFound, "client not found", nil)
+	requestedEntity := params.EntityID
+	if requestedEntity == "" {
+		requestedEntity = params.UUID
 	}
-	entityIDs, entityErr := ltsMetricEntityIDs(ctx, params.EntityID)
+	entityIDs, entityErr := ltsMetricEntityIDs(ctx, requestedEntity, params.EntityIDs)
 	if entityErr != nil {
 		return nil, entityErr
 	}

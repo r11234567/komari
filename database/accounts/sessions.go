@@ -1,6 +1,7 @@
 package accounts
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/geoip"
 	"github.com/komari-monitor/komari/utils/messageSender"
+	"gorm.io/gorm"
 )
 
 // GetAllSessions 获取所有会话
@@ -27,7 +29,6 @@ func GetAllSessions() (sessions []models.Session, err error) {
 
 // CreateSession 创建新会话
 func CreateSession(uuid string, expires int, userAgent, ip, login_method string) (string, error) {
-	db := dbcore.GetDBInstance()
 	session := utils.GenerateRandomString(32)
 
 	sessionRecord := models.Session{
@@ -57,7 +58,9 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 		}
 	}()
 
-	err := db.Create(&sessionRecord).Error
+	err := dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Create(&sessionRecord).Error
+	})
 	if err != nil {
 		return "", err
 	}
@@ -94,51 +97,46 @@ func GetUserBySession(session string) (models.User, error) {
 
 // DeleteSession 删除指定会话
 func DeleteSession(session string) (err error) {
-	db := dbcore.GetDBInstance()
-	result := db.Where("session = ?", session).Delete(&models.Session{})
-	if result.Error != nil {
-		return result.Error
-	}
-	return nil
+	return dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Where("session = ?", session).Delete(&models.Session{}).Error
+	})
 }
 
 func DeleteAllSessions() error {
-	db := dbcore.GetDBInstance()
-	result := db.Where("1 = 1").Delete(&models.Session{})
-	if result.Error != nil {
-		return result.Error
-	}
-	return nil
+	return dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Where("1 = 1").Delete(&models.Session{}).Error
+	})
 }
 
 func UpdateLatestOnline(session string) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", session).Update("latest_online", time.Now()).Error
+	return dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Model(&models.Session{}).Where("session = ?", session).Update("latest_online", time.Now()).Error
+	})
 }
 
 func UpdateLatestUserAgent(session, userAgent string) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", session).Update("latest_user_agent", userAgent).Error
+	return dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Model(&models.Session{}).Where("session = ?", session).Update("latest_user_agent", userAgent).Error
+	})
 }
 func UpdateLatestIp(session, ip string) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", session).Update("latest_ip", ip).Error
+	return dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Model(&models.Session{}).Where("session = ?", session).Update("latest_ip", ip).Error
+	})
 }
 
 func UpdateLatest(session, useragent, ip string) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", session).Updates(map[string]interface{}{
-		"latest_online":     time.Now(),
-		"latest_user_agent": useragent,
-		"latest_ip":         ip,
-	}).Error
+	return dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Model(&models.Session{}).Where("session = ?", session).Updates(map[string]interface{}{
+			"latest_online":     time.Now(),
+			"latest_user_agent": useragent,
+			"latest_ip":         ip,
+		}).Error
+	})
 }
 
 func RemoveExpiredSessions() error {
-	db := dbcore.GetDBInstance()
-	result := db.Where("expires < ?", time.Now()).Delete(&models.Session{})
-	if result.Error != nil {
-		return result.Error
-	}
-	return nil
+	return dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Where("expires < ?", time.Now()).Delete(&models.Session{}).Error
+	})
 }

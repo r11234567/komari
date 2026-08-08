@@ -1,6 +1,7 @@
 package notifier
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"reflect"
@@ -14,6 +15,7 @@ import (
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/pkg/corn"
 	"github.com/komari-monitor/komari/utils/messageSender"
+	"gorm.io/gorm"
 )
 
 // LoadNotificationService 管理定时器和任务
@@ -222,8 +224,9 @@ func sendLoadNotification(clientUUIDs []string, task models.LoadNotification) {
 
 // updateLastNotified 更新最后通知时间
 func updateLastNotified(taskId uint, notifyTime time.Time) {
-	db := dbcore.GetDBInstance()
-	if err := db.Model(&models.LoadNotification{}).Where("id = ?", taskId).Update("last_notified", notifyTime).Error; err != nil {
+	if err := dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Model(&models.LoadNotification{}).Where("id = ?", taskId).Update("last_notified", notifyTime).Error
+	}); err != nil {
 		log.Printf("Failed to update last_notified for task %d: %v", taskId, err)
 	}
 }

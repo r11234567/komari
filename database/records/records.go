@@ -17,26 +17,31 @@ import (
 )
 
 func RecordOne(rec models.Record) error {
-	db := dbcore.GetDBInstance()
-	return db.Create(&rec).Error
+	return dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Create(&rec).Error
+	})
 }
 
 func RecordGPU(rec models.GPURecord) error {
-	db := dbcore.GetDBInstance()
-	return db.Create(&rec).Error
+	return dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Create(&rec).Error
+	})
 }
 
 func DeleteAll() error {
-	db := dbcore.GetDBInstance()
-	for _, table := range []string{
-		"resource_rollups", "gpu_rollups", "records_long_term",
-		"gpu_records_long_term", "gpu_records", "records",
-	} {
-		if err := db.Exec("DELETE FROM " + table).Error; err != nil {
-			return err
-		}
-	}
-	return nil
+	return dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Transaction(func(tx *gorm.DB) error {
+			for _, table := range []string{
+				"resource_rollups", "gpu_rollups", "records_long_term",
+				"gpu_records_long_term", "gpu_records", "records",
+			} {
+				if err := tx.Exec("DELETE FROM " + table).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	})
 }
 
 // GetGPURecordsByClientAndTime 获取GPU记录数据

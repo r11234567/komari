@@ -1,11 +1,22 @@
 package jsonrpc
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/komari-monitor/komari/database/history"
 )
+
+func TestLTSMetricQueryParamsAcceptRanThemeAliases(t *testing.T) {
+	var params ltsMetricQueryParams
+	if err := json.Unmarshal([]byte(`{"entity_ids":["node-a","node-b"],"uuid":"node-a"}`), &params); err != nil {
+		t.Fatal(err)
+	}
+	if len(params.EntityIDs) != 2 || params.EntityIDs[0] != "node-a" || params.UUID != "node-a" {
+		t.Fatalf("Ran aliases were not decoded: %#v", params)
+	}
+}
 
 func TestLTSMetricRangeAcceptsFractionalHours(t *testing.T) {
 	start, end, err := ltsMetricRange(ltsMetricQueryParams{Hours: 10.0 / 60.0})

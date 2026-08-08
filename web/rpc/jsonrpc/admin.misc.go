@@ -126,8 +126,12 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 }
 
 func adminClearAllRecords(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	records.DeleteAll()
-	tasks.DeleteAllPingRecords()
+	if err := records.DeleteAll(); err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to clear resource records: "+err.Error(), nil)
+	}
+	if err := tasks.DeleteAllPingRecords(); err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to clear ping records: "+err.Error(), nil)
+	}
 	actor, ip := auditActor(ctx)
 	auditlog.Log(ip, actor, "clear all records", "info")
 	return nil, nil

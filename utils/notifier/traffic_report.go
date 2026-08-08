@@ -52,7 +52,7 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 		return
 	}
 
-	db := dbcore.GetDBInstance()
+	db := dbcore.GetReadDBInstance()
 	now := time.Now()
 
 	// 计算时间范围
@@ -63,10 +63,10 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 	case daily:
 		yesterday := now.AddDate(0, 0, -1)
 		start = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, yesterday.Location())
-		end = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 0, yesterday.Location())
+		end = start.AddDate(0, 0, 1)
 		eventType = messageevent.DReport
 		label = "daily"
-		suffix = "昨日流量"
+		suffix = fmt.Sprintf("（%s）流量", start.Format("2006-01-02"))
 	case weekly:
 		weekday := int(now.Weekday())
 		if weekday == 0 {
@@ -75,19 +75,18 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 		lastMonday := now.AddDate(0, 0, -(weekday-1)-7)
 		lastSunday := lastMonday.AddDate(0, 0, 6)
 		start = time.Date(lastMonday.Year(), lastMonday.Month(), lastMonday.Day(), 0, 0, 0, 0, lastMonday.Location())
-		end = time.Date(lastSunday.Year(), lastSunday.Month(), lastSunday.Day(), 23, 59, 59, 0, lastSunday.Location())
+		end = time.Date(lastSunday.Year(), lastSunday.Month(), lastSunday.Day(), 0, 0, 0, 0, lastSunday.Location()).AddDate(0, 0, 1)
 		eventType = messageevent.WReport
 		label = "weekly"
-		suffix = "上周流量"
+		suffix = fmt.Sprintf("（%s 至 %s）流量", start.Format("2006-01-02"), end.Add(-time.Nanosecond).Format("2006-01-02"))
 	case monthly:
 		firstOfThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 		firstOfLastMonth := firstOfThisMonth.AddDate(0, -1, 0)
-		lastDayOfLastMonth := firstOfThisMonth.Add(-time.Second)
 		start = firstOfLastMonth
-		end = lastDayOfLastMonth
+		end = firstOfThisMonth
 		eventType = messageevent.MReport
 		label = "monthly"
-		suffix = "上个月流量"
+		suffix = fmt.Sprintf("（%s）流量", start.Format("2006-01"))
 	default:
 		return
 	}
@@ -173,7 +172,7 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 // getClientTrafficInRange 查询某客户端在指定时间段内的流量增量
 // 通过累加持久化的精确流量增量字段计算用量
 func getClientTrafficInRange(clientUUID string, trafficType string, start, end time.Time) (int64, error) {
-	return getClientTrafficInRangeWithDB(dbcore.GetDBInstance(), clientUUID, trafficType, start, end)
+	return getClientTrafficInRangeWithDB(dbcore.GetReadDBInstance(), clientUUID, trafficType, start, end)
 }
 
 type trafficDeltaRecord struct {
@@ -188,7 +187,7 @@ func getClientTrafficInRangeWithDB(db *gorm.DB, clientUUID string, trafficType s
 	var recentRecords []trafficDeltaRecord
 	if err := db.Table("records").
 		Select("time, net_total_up, net_total_down, traffic_up, traffic_down").
-		Where("client = ? AND time >= ? AND time <= ?", clientUUID, models.FromTime(start), models.FromTime(end)).
+		Where("client = ? AND time >= ? AND time < ?", clientUUID, models.FromTime(start), models.FromTime(end)).
 		Find(&recentRecords).Error; err != nil {
 		return 0, err
 	}
@@ -196,7 +195,7 @@ func getClientTrafficInRangeWithDB(db *gorm.DB, clientUUID string, trafficType s
 	var longTermRecords []trafficDeltaRecord
 	if err := db.Table("records_long_term").
 		Select("time, net_total_up, net_total_down, traffic_up, traffic_down").
-		Where("client = ? AND time >= ? AND time <= ?", clientUUID, models.FromTime(start), models.FromTime(end)).
+		Where("client = ? AND time >= ? AND time < ?", clientUUID, models.FromTime(start), models.FromTime(end)).
 		Find(&longTermRecords).Error; err != nil {
 		return 0, err
 	}
@@ -217,6 +216,9 @@ func getClientTrafficInRangeWithDB(db *gorm.DB, clientUUID string, trafficType s
 }
 
 func mergeTrafficRecords(recentRecords, longTermRecords []trafficDeltaRecord) []trafficDeltaRecord {
+	recentRecords = deduplicateTrafficRecords(recentRecords)
+	longTermRecords = deduplicateTrafficRecords(longTermRecords)
+
 	rawSlots := make(map[time.Time]struct{}, len(recentRecords))
 	for _, record := range recentRecords {
 		rawSlots[record.Time.ToTime().Truncate(15*time.Minute)] = struct{}{}
@@ -242,6 +244,29 @@ func mergeTrafficRecords(recentRecords, longTermRecords []trafficDeltaRecord) []
 	}
 
 	return records
+}
+
+// Old compaction versions could insert the same client/time slot more than
+// once because the legacy history table has no composite unique key. Reports
+// must count a persisted slot once even when such rows are still present.
+func deduplicateTrafficRecords(records []trafficDeltaRecord) []trafficDeltaRecord {
+	byTime := make(map[int64]trafficDeltaRecord, len(records))
+	for _, record := range records {
+		key := record.Time.ToTime().UnixNano()
+		existing, ok := byTime[key]
+		if !ok || trafficRecordMagnitude(record) > trafficRecordMagnitude(existing) {
+			byTime[key] = record
+		}
+	}
+	result := make([]trafficDeltaRecord, 0, len(byTime))
+	for _, record := range byTime {
+		result = append(result, record)
+	}
+	return result
+}
+
+func trafficRecordMagnitude(record trafficDeltaRecord) int64 {
+	return max(record.TrafficUp, 0) + max(record.TrafficDown, 0)
 }
 
 func getPreviousTrafficDeltaRecord(db *gorm.DB, clientUUID string, before time.Time) (*trafficDeltaRecord, error) {

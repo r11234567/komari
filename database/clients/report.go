@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -169,7 +170,6 @@ func ReportVerify(report v1.Report) error {
 
 // SaveClientReport 保存客户端报告到 Record 表
 func SaveClientReport(clientUUID string, report v1.Report) (err error) {
-	db := dbcore.GetDBInstance()
 	lock := getReportSaveLock(clientUUID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -180,9 +180,11 @@ func SaveClientReport(clientUUID string, report v1.Report) (err error) {
 
 	// 保存GPU详细记录到独立表
 	currentTime := time.Now()
+	gpuRecords := make([]models.GPURecord, 0)
 	if report.GPU != nil && len(report.GPU.DetailedInfo) > 0 {
+		gpuRecords = make([]models.GPURecord, 0, len(report.GPU.DetailedInfo))
 		for idx, gpu := range report.GPU.DetailedInfo {
-			gpuRecord := models.GPURecord{
+			gpuRecords = append(gpuRecords, models.GPURecord{
 				Client:      clientUUID,
 				Time:        models.FromTime(currentTime),
 				DeviceIndex: idx,
@@ -191,10 +193,7 @@ func SaveClientReport(clientUUID string, report v1.Report) (err error) {
 				MemUsed:     gpu.MemoryUsed,
 				Utilization: float32(gpu.Utilization),
 				Temperature: gpu.Temperature,
-			}
-			if err := db.Create(&gpuRecord).Error; err != nil {
-				return fmt.Errorf("failed to save GPU record: %w", err)
-			}
+			})
 		}
 	}
 
@@ -229,22 +228,30 @@ func SaveClientReport(clientUUID string, report v1.Report) (err error) {
 		//Uptime:         report.Uptime,
 	}
 
-	// 使用事务确保 Record 和 ClientsInfo 一致性
-	err = db.Transaction(func(tx *gorm.DB) error {
-		previous, err := getLatestTrafficRecord(tx, clientUUID)
-		if err != nil {
-			return fmt.Errorf("failed to load previous Record: %w", err)
-		}
-		if previous != nil {
-			Record.TrafficUp = utils.ComputeTrafficDelta(report.Network.TotalUp, previous.NetTotalUp)
-			Record.TrafficDown = utils.ComputeTrafficDelta(report.Network.TotalDown, previous.NetTotalDown)
-		}
+	// GPU 与负载记录作为一个前台写事务进入 SQLite 写入队列，避免绕过
+	// maintenance gate 后与历史压缩、Ping 写入争抢数据库锁。
+	err = dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Transaction(func(tx *gorm.DB) error {
+			if len(gpuRecords) > 0 {
+				if err := tx.Create(&gpuRecords).Error; err != nil {
+					return fmt.Errorf("failed to save GPU records: %w", err)
+				}
+			}
 
-		// 保存 Record
-		if err := tx.Create(&Record).Error; err != nil {
-			return fmt.Errorf("failed to save Record: %w", err)
-		}
-		return nil
+			previous, err := getLatestTrafficRecord(tx, clientUUID)
+			if err != nil {
+				return fmt.Errorf("failed to load previous Record: %w", err)
+			}
+			if previous != nil {
+				Record.TrafficUp = utils.ComputeTrafficDelta(report.Network.TotalUp, previous.NetTotalUp)
+				Record.TrafficDown = utils.ComputeTrafficDelta(report.Network.TotalDown, previous.NetTotalDown)
+			}
+
+			if err := tx.Create(&Record).Error; err != nil {
+				return fmt.Errorf("failed to save Record: %w", err)
+			}
+			return nil
+		})
 	})
 
 	if err != nil {

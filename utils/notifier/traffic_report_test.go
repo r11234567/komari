@@ -41,6 +41,43 @@ func TestGetClientTrafficInRangeAvoidsOverlappingRawAndLongTermRows(t *testing.T
 	assert.Equal(t, int64(380), used)
 }
 
+func TestGetClientTrafficInRangeCountsDuplicateLongTermSlotOnce(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	assert.NoError(t, err)
+	assert.NoError(t, db.AutoMigrate(&models.Record{}))
+	assert.NoError(t, db.Table("records_long_term").AutoMigrate(&models.Record{}))
+
+	clientUUID := "client-duplicate-long-term"
+	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	record := models.Record{
+		Client: clientUUID, Time: models.FromTime(start.Add(15 * time.Minute)),
+		TrafficUp: 100, TrafficDown: 200,
+	}
+	assert.NoError(t, db.Table("records_long_term").Create(&record).Error)
+	assert.NoError(t, db.Table("records_long_term").Create(&record).Error)
+
+	used, err := getClientTrafficInRangeWithDB(db, clientUUID, "sum", start, start.Add(time.Hour))
+	assert.NoError(t, err)
+	assert.Equal(t, int64(300), used)
+}
+
+func TestGetClientTrafficInRangeUsesExclusiveEnd(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	assert.NoError(t, err)
+	assert.NoError(t, db.AutoMigrate(&models.Record{}))
+	assert.NoError(t, db.Table("records_long_term").AutoMigrate(&models.Record{}))
+
+	clientUUID := "client-exclusive-end"
+	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+	assert.NoError(t, db.Create(&models.Record{Client: clientUUID, Time: models.FromTime(end.Add(-time.Second)), TrafficUp: 10}).Error)
+	assert.NoError(t, db.Create(&models.Record{Client: clientUUID, Time: models.FromTime(end), TrafficUp: 90}).Error)
+
+	used, err := getClientTrafficInRangeWithDB(db, clientUUID, "up", start, end)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(10), used)
+}
+
 func TestGetClientTrafficInRangeNormalizesLongTermSlotForOverlap(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	assert.NoError(t, err)

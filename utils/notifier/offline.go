@@ -1,6 +1,7 @@
 package notifier
 
 import (
+	"context"
 	"log"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/renewal"
+	"gorm.io/gorm"
 )
 
 // notificationState 保存单个客户端的通知状态。
@@ -117,8 +119,9 @@ func OfflineNotification(clientID string, endedConnectionID int64) {
 		}()
 
 		// 更新数据库中的最后通知时间
-		db := dbcore.GetDBInstance()
-		if err := db.Model(&models.OfflineNotification{}).Where("client = ?", clientID).Update("last_notified", now).Error; err != nil {
+		if err := dbcore.Write(context.Background(), func(db *gorm.DB) error {
+			return db.Model(&models.OfflineNotification{}).Where("client = ?", clientID).Update("last_notified", now).Error
+		}); err != nil {
 			log.Printf("Failed to update last_notified for client %s: %v", clientID, err)
 		}
 	}(now, endedConnectionID)
