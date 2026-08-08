@@ -144,7 +144,7 @@ func TestLTSPingMetricSeriesReturnsRequestedLatencyAndLoss(t *testing.T) {
 func TestLTSPingMetricSeriesHonorsRequestedKeys(t *testing.T) {
 	result := &history.Response{
 		Resolution: "1m",
-		Series: []history.Series{{Kind: "ping", TaskID: 1}},
+		Series:     []history.Series{{Kind: "ping", TaskID: 1}},
 	}
 	series := ltsPingMetricSeries(
 		result,
