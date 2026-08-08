@@ -75,7 +75,10 @@ func TestLimitTotalPointsUsesResponseWideBudget(t *testing.T) {
 		{Kind: "ping", Client: "b", Points: testPoints(10)},
 		{Kind: "ping", Client: "c", Points: testPoints(10)},
 	}
-	limited := limitTotalPoints(series, 8)
+	limited, resolution := limitTotalPoints(series, 8)
+	if resolution <= 0 {
+		t.Fatalf("effective resolution = %s, want a coarser interval", resolution)
+	}
 	total := 0
 	for _, item := range limited {
 		total += len(item.Points)
@@ -106,7 +109,7 @@ func TestLimitTotalPointsAlignsTimestamps(t *testing.T) {
 		{Kind: "ping", Client: "a", Points: pointsA},
 		{Kind: "ping", Client: "b", Points: pointsB},
 	}
-	limited := limitTotalPoints(series, 20)
+	limited, _ := limitTotalPoints(series, 20)
 
 	if len(limited) != 2 {
 		t.Fatalf("series count changed")

@@ -86,6 +86,7 @@ var ltsMetricDefinitions = []struct {
 	{"connections.tcp", "TCP Connections", "count", "load"},
 	{"connections.udp", "UDP Connections", "count", "load"},
 	{"ping.latency_ms", "Ping", "ms", "ping"},
+	{"ping.loss", "Ping Loss", "", "ping"},
 }
 
 const ltsMetricRetentionConfigKey = "metric_retention_days_by_name"
@@ -241,7 +242,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				if responseEnd.IsZero() || result.End.After(responseEnd) {
 					responseEnd = result.End
 				}
-				series = append(series, ltsPingMetricSeries(result, entityID, pingRetentionDays)...)
+				series = append(series, ltsPingMetricSeries(result, requested, entityID, retention)...)
 			}
 		}
 	}
@@ -508,32 +509,46 @@ func ltsGPUMetricValue(key string, metrics map[string]float64) float64 {
 	}
 }
 
-func ltsPingMetricSeries(result *history.Response, entityID string, retentionDays int) []ltsMetricSeries {
+func ltsPingMetricSeries(result *history.Response, requested map[string]bool, entityID string, retention map[string]int) []ltsMetricSeries {
 	interval := ltsResolutionSeconds(result.Resolution)
-	series := make([]ltsMetricSeries, 0, len(result.Series))
-	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	series := make([]ltsMetricSeries, 0, len(result.Series)*2)
 	for _, source := range result.Series {
 		if source.Kind != "ping" {
 			continue
 		}
-		points := make([]ltsMetricPoint, 0, len(source.Points))
-		for _, point := range source.Points {
-			if retentionDays <= 0 || point.Time.Before(cutoff) {
+		tags := map[string]string{"task_id": strconv.FormatUint(uint64(source.TaskID), 10)}
+		for _, definition := range ltsMetricDefinitions {
+			if definition.source != "ping" || !requested[definition.key] {
 				continue
 			}
-			var value *float64
-			if point.TotalCount > point.LossCount {
-				average := point.Avg
-				value = &average
+			retentionDays := retention[definition.key]
+			cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+			points := make([]ltsMetricPoint, 0, len(source.Points))
+			for _, point := range source.Points {
+				if retentionDays <= 0 || point.Time.Before(cutoff) {
+					continue
+				}
+				var value *float64
+				switch definition.key {
+				case "ping.latency_ms":
+					if point.TotalCount > point.LossCount {
+						average := point.Avg
+						value = &average
+					}
+				case "ping.loss":
+					if point.TotalCount > 0 {
+						loss := float64(point.LossCount) / float64(point.TotalCount)
+						value = &loss
+					}
+				}
+				points = append(points, ltsMetricPoint{Time: point.Time, Value: value, Count: point.TotalCount})
 			}
-			points = append(points, ltsMetricPoint{Time: point.Time, Value: value, Count: point.TotalCount})
+			series = append(series, ltsMetricSeries{
+				MetricKey: definition.key, EntityID: entityID, Type: "gauge", Unit: definition.unit,
+				RetentionDays: float64(retentionDays), Downsampled: result.Sampled, DownsampleAlgorithm: "avg",
+				IntervalSeconds: interval, Tags: tags, Count: len(points), Points: points,
+			})
 		}
-		series = append(series, ltsMetricSeries{
-			MetricKey: "ping.latency_ms", EntityID: entityID, Type: "gauge", Unit: "ms",
-			RetentionDays: float64(retentionDays), Downsampled: result.Sampled, DownsampleAlgorithm: "avg",
-			IntervalSeconds: interval, Tags: map[string]string{"task_id": strconv.FormatUint(uint64(source.TaskID), 10)},
-			Count: len(points), Points: points,
-		})
 	}
 	return series
 }

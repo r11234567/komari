@@ -9,6 +9,7 @@ import (
 	"github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/utils/messageSender"
+	"github.com/komari-monitor/komari/utils/notifier"
 	"gorm.io/gorm/clause"
 )
 
@@ -31,8 +32,26 @@ func init() {
 	reg("editTrafficReportNotifications", adminEditTrafficReport, "Edit traffic report notifications")
 	reg("enableTrafficReportNotifications", adminEnableTrafficReport, "Enable traffic report notifications")
 	reg("disableTrafficReportNotifications", adminDisableTrafficReport, "Disable traffic report notifications")
+	reg("sendTrafficReportNow", adminSendTrafficReportNow, "Send and verify a traffic report immediately")
 	// send notification
 	reg("sendNotification", adminSendNotification, "Send a notification")
+}
+
+func adminSendTrafficReportNow(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var params struct {
+		Cadence notifier.TrafficReportCadence `json:"cadence"`
+	}
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request data: "+err.Error(), nil)
+	}
+	if !params.Cadence.Valid() {
+		return nil, rpc.MakeError(rpc.InvalidParams, "cadence must be daily, weekly, or monthly", nil)
+	}
+	result, err := notifier.SendTrafficReport(params.Cadence)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to send traffic report: "+err.Error(), nil)
+	}
+	return result, nil
 }
 
 // adminSendNotification 发送一条通知。仅供外部（插件/脚本）通过 RPC 调用，
