@@ -201,7 +201,8 @@ func query(ctx context.Context, req QueryRequest) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	response.Series, effectiveResolution := limitTotalPoints(response.Series, maxPoints)
+	limitedSeries, effectiveResolution := limitTotalPoints(response.Series, maxPoints)
+	response.Series = limitedSeries
 	if effectiveResolution > bucketSize {
 		response.Resolution = effectiveResolution.String()
 	}
