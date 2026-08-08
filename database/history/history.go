@@ -201,7 +201,11 @@ func query(ctx context.Context, req QueryRequest) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	response.Series = limitTotalPoints(response.Series, maxPoints)
+	limitedSeries, effectiveResolution := limitTotalPoints(response.Series, maxPoints)
+	response.Series = limitedSeries
+	if effectiveResolution > bucketSize {
+		response.Resolution = effectiveResolution.String()
+	}
 	for _, series := range response.Series {
 		response.ReturnedPoints += len(series.Points)
 	}
@@ -642,9 +646,9 @@ func weightedPingPointPercentile(values []weightedPingPoint, percentile float64)
 	return values[len(values)-1].value
 }
 
-func limitTotalPoints(series []Series, maxPoints int) []Series {
+func limitTotalPoints(series []Series, maxPoints int) ([]Series, time.Duration) {
 	if maxPoints <= 0 || len(series) == 0 {
-		return series
+		return series, 0
 	}
 	total := 0
 	var start, end time.Time
@@ -662,7 +666,7 @@ func limitTotalPoints(series []Series, maxPoints int) []Series {
 		}
 	}
 	if total <= maxPoints {
-		return series
+		return series, 0
 	}
 
 	// Compute the effective bucket size needed to stay within budget while keeping all series aligned.
@@ -725,7 +729,7 @@ func limitTotalPoints(series []Series, maxPoints int) []Series {
 		}
 	}
 
-	return series
+	return series, targetInterval
 }
 
 // rebucketPoints re-aggregates points onto a coarser aligned time grid.

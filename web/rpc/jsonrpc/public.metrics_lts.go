@@ -47,6 +47,8 @@ type ltsMetricSeries struct {
 type ltsMetricQueryParams struct {
 	MetricKeys  []string `json:"metric_keys"`
 	EntityID    string   `json:"entity_id"`
+	EntityIDs   []string `json:"entity_ids"`
+	UUID        string   `json:"uuid"`
 	Hours       float64  `json:"hours"`
 	Start       string   `json:"start"`
 	End         string   `json:"end"`
@@ -84,6 +86,7 @@ var ltsMetricDefinitions = []struct {
 	{"connections.tcp", "TCP Connections", "count", "load"},
 	{"connections.udp", "UDP Connections", "count", "load"},
 	{"ping.latency_ms", "Ping", "ms", "ping"},
+	{"ping.loss", "Ping Loss", "", "ping"},
 }
 
 const ltsMetricRetentionConfigKey = "metric_retention_days_by_name"
@@ -172,10 +175,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 	if len(params.MetricKeys) == 0 {
 		return nil, rpc.MakeError(rpc.InvalidParams, "metric_keys are required", nil)
 	}
-	if !isLoginFromCtx(ctx) && isHiddenClient(params.EntityID) {
-		return nil, rpc.MakeError(rpc.NotFound, "client not found", nil)
-	}
-	entityIDs, entityErr := ltsMetricEntityIDs(ctx, params.EntityID)
+	entityIDs, entityErr := ltsMetricEntityIDs(ctx, params.EntityID, params.EntityIDs)
 	if entityErr != nil {
 		return nil, entityErr
 	}
@@ -242,7 +242,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				if responseEnd.IsZero() || result.End.After(responseEnd) {
 					responseEnd = result.End
 				}
-				series = append(series, ltsPingMetricSeries(result, entityID, pingRetentionDays)...)
+				series = append(series, ltsPingMetricSeries(result, requested, entityID, retention)...)
 			}
 		}
 	}
@@ -265,21 +265,48 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 	}, nil
 }
 
-func ltsMetricEntityIDs(ctx context.Context, requested string) ([]string, *rpc.JsonRpcError) {
-	if requested != "" {
-		return []string{requested}, nil
-	}
+func ltsMetricEntityIDs(ctx context.Context, requested string, requestedMany []string) ([]string, *rpc.JsonRpcError) {
 	clientList, err := clients.GetAllClientBasicInfo()
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to retrieve client information: "+err.Error(), nil)
 	}
 	isLogin := isLoginFromCtx(ctx)
-	entityIDs := make([]string, 0, len(clientList))
+	visible := make(map[string]struct{}, len(clientList))
 	for _, client := range clientList {
 		if client.Hidden && !isLogin {
 			continue
 		}
-		entityIDs = append(entityIDs, client.UUID)
+		visible[client.UUID] = struct{}{}
+	}
+
+	requestedIDs := append([]string(nil), requestedMany...)
+	if requested != "" {
+		requestedIDs = append([]string{requested}, requestedIDs...)
+	}
+	if len(requestedIDs) == 0 {
+		entityIDs := make([]string, 0, len(visible))
+		for _, client := range clientList {
+			if _, ok := visible[client.UUID]; ok {
+				entityIDs = append(entityIDs, client.UUID)
+			}
+		}
+		return entityIDs, nil
+	}
+
+	entityIDs := make([]string, 0, len(requestedIDs))
+	seen := make(map[string]struct{}, len(requestedIDs))
+	for _, entityID := range requestedIDs {
+		if entityID == "" {
+			continue
+		}
+		if _, ok := visible[entityID]; !ok {
+			return nil, rpc.MakeError(rpc.NotFound, "client not found", nil)
+		}
+		if _, duplicate := seen[entityID]; duplicate {
+			continue
+		}
+		seen[entityID] = struct{}{}
+		entityIDs = append(entityIDs, entityID)
 	}
 	return entityIDs, nil
 }
@@ -482,32 +509,46 @@ func ltsGPUMetricValue(key string, metrics map[string]float64) float64 {
 	}
 }
 
-func ltsPingMetricSeries(result *history.Response, entityID string, retentionDays int) []ltsMetricSeries {
+func ltsPingMetricSeries(result *history.Response, requested map[string]bool, entityID string, retention map[string]int) []ltsMetricSeries {
 	interval := ltsResolutionSeconds(result.Resolution)
-	series := make([]ltsMetricSeries, 0, len(result.Series))
-	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	series := make([]ltsMetricSeries, 0, len(result.Series)*2)
 	for _, source := range result.Series {
 		if source.Kind != "ping" {
 			continue
 		}
-		points := make([]ltsMetricPoint, 0, len(source.Points))
-		for _, point := range source.Points {
-			if retentionDays <= 0 || point.Time.Before(cutoff) {
+		tags := map[string]string{"task_id": strconv.FormatUint(uint64(source.TaskID), 10)}
+		for _, definition := range ltsMetricDefinitions {
+			if definition.source != "ping" || !requested[definition.key] {
 				continue
 			}
-			var value *float64
-			if point.TotalCount > point.LossCount {
-				average := point.Avg
-				value = &average
+			retentionDays := retention[definition.key]
+			cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+			points := make([]ltsMetricPoint, 0, len(source.Points))
+			for _, point := range source.Points {
+				if retentionDays <= 0 || point.Time.Before(cutoff) {
+					continue
+				}
+				var value *float64
+				switch definition.key {
+				case "ping.latency_ms":
+					if point.TotalCount > point.LossCount {
+						average := point.Avg
+						value = &average
+					}
+				case "ping.loss":
+					if point.TotalCount > 0 {
+						loss := float64(point.LossCount) / float64(point.TotalCount)
+						value = &loss
+					}
+				}
+				points = append(points, ltsMetricPoint{Time: point.Time, Value: value, Count: point.TotalCount})
 			}
-			points = append(points, ltsMetricPoint{Time: point.Time, Value: value, Count: point.TotalCount})
+			series = append(series, ltsMetricSeries{
+				MetricKey: definition.key, EntityID: entityID, Type: "gauge", Unit: definition.unit,
+				RetentionDays: float64(retentionDays), Downsampled: result.Sampled, DownsampleAlgorithm: "avg",
+				IntervalSeconds: interval, Tags: tags, Count: len(points), Points: points,
+			})
 		}
-		series = append(series, ltsMetricSeries{
-			MetricKey: "ping.latency_ms", EntityID: entityID, Type: "gauge", Unit: "ms",
-			RetentionDays: float64(retentionDays), Downsampled: result.Sampled, DownsampleAlgorithm: "avg",
-			IntervalSeconds: interval, Tags: map[string]string{"task_id": strconv.FormatUint(uint64(source.TaskID), 10)},
-			Count: len(points), Points: points,
-		})
 	}
 	return series
 }
@@ -639,10 +680,11 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 	if err := req.BindParams(&params); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid Ping statistics query: "+err.Error(), nil)
 	}
-	if !isLoginFromCtx(ctx) && isHiddenClient(params.EntityID) {
-		return nil, rpc.MakeError(rpc.NotFound, "client not found", nil)
+	requestedEntity := params.EntityID
+	if requestedEntity == "" {
+		requestedEntity = params.UUID
 	}
-	entityIDs, entityErr := ltsMetricEntityIDs(ctx, params.EntityID)
+	entityIDs, entityErr := ltsMetricEntityIDs(ctx, requestedEntity, params.EntityIDs)
 	if entityErr != nil {
 		return nil, entityErr
 	}

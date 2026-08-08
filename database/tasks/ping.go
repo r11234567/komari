@@ -14,7 +14,6 @@ import (
 
 // AddPingTask 创建延迟监测任务。defaultOn 表示新加入的服务器是否自动开启此监测。
 func AddPingTask(clients []string, defaultOn bool, name string, target, task_type string, interval int) (uint, error) {
-	db := dbcore.GetDBInstance()
 	normalizedClients := normalizePingClients(models.StringArray(clients))
 	task := models.PingTask{
 		Clients:   normalizedClients,
@@ -24,21 +23,20 @@ func AddPingTask(clients []string, defaultOn bool, name string, target, task_typ
 		Target:    target,
 		Interval:  interval,
 	}
-	err := db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(&task).Error; err != nil {
-			return err
-		}
-
-		// Append by id to avoid races between concurrent create requests.
-		result := tx.Model(&models.PingTask{}).Where("id = ?", task.Id).Update("weight", int(task.Id))
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return gorm.ErrRecordNotFound
-		}
-
-		return nil
+	err := dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Create(&task).Error; err != nil {
+				return err
+			}
+			result := tx.Model(&models.PingTask{}).Where("id = ?", task.Id).Update("weight", int(task.Id))
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 0 {
+				return gorm.ErrRecordNotFound
+			}
+			return nil
+		})
 	})
 	if err != nil {
 		return 0, err
@@ -48,36 +46,50 @@ func AddPingTask(clients []string, defaultOn bool, name string, target, task_typ
 }
 
 func DeletePingTask(id []uint) error {
-	db := dbcore.GetDBInstance()
-	result := db.Where("id IN ?", id).Delete(&models.PingTask{})
-	if result.RowsAffected == 0 {
+	var rowsAffected int64
+	err := dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		result := db.Where("id IN ?", id).Delete(&models.PingTask{})
+		rowsAffected = result.RowsAffected
+		return result.Error
+	})
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
 		return gorm.ErrRecordNotFound
 	}
-	ReloadPingSchedule()
-	return result.Error
+	return ReloadPingSchedule()
 }
 
 // EditPingTask 批量更新延迟监测任务配置。
 func EditPingTask(tasks []*models.PingTask) error {
-	db := dbcore.GetDBInstance()
-	for _, task := range tasks {
-		task.Clients = normalizePingClients(task.Clients)
-		// 使用 map 显式更新，避免 GORM struct Updates 跳过 false/0/空切片等零值。
-		updates := map[string]interface{}{
-			"name":        task.Name,
-			"clients":     task.Clients,
-			"all_clients": task.DefaultOn,
-			"type":        task.Type,
-			"target":      task.Target,
-			"interval":    task.Interval,
-		}
-		result := db.Model(&models.PingTask{}).Where("id = ?", task.Id).Updates(updates)
-		if result.RowsAffected == 0 {
-			return gorm.ErrRecordNotFound
-		}
+	err := dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Transaction(func(tx *gorm.DB) error {
+			for _, task := range tasks {
+				task.Clients = normalizePingClients(task.Clients)
+				updates := map[string]interface{}{
+					"name":        task.Name,
+					"clients":     task.Clients,
+					"all_clients": task.DefaultOn,
+					"type":        task.Type,
+					"target":      task.Target,
+					"interval":    task.Interval,
+				}
+				result := tx.Model(&models.PingTask{}).Where("id = ?", task.Id).Updates(updates)
+				if result.Error != nil {
+					return result.Error
+				}
+				if result.RowsAffected == 0 {
+					return gorm.ErrRecordNotFound
+				}
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return err
 	}
-	ReloadPingSchedule()
-	return nil
+	return ReloadPingSchedule()
 }
 
 // normalizePingClients 保持 clients 字段序列化为 JSON 数组，避免空值变成 null。
@@ -108,18 +120,19 @@ func GetPingTasksByClient(uuid string) []models.PingTask {
 }
 
 func UpdatePingTaskOrder(order map[uint]int) error {
-	db := dbcore.GetDBInstance()
-	err := db.Transaction(func(tx *gorm.DB) error {
-		for id, weight := range order {
-			result := tx.Model(&models.PingTask{}).Where("id = ?", id).Update("weight", weight)
-			if result.Error != nil {
-				return result.Error
+	err := dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Transaction(func(tx *gorm.DB) error {
+			for id, weight := range order {
+				result := tx.Model(&models.PingTask{}).Where("id = ?", id).Update("weight", weight)
+				if result.Error != nil {
+					return result.Error
+				}
+				if result.RowsAffected == 0 {
+					return gorm.ErrRecordNotFound
+				}
 			}
-			if result.RowsAffected == 0 {
-				return gorm.ErrRecordNotFound
-			}
-		}
-		return nil
+			return nil
+		})
 	})
 	if err != nil {
 		return err
@@ -217,32 +230,34 @@ func AddDefaultOnClientUUID(uuid string) error {
 	if uuid == "" {
 		return nil
 	}
-	db := dbcore.GetDBInstance()
-	var tasks []models.PingTask
-	if err := db.Where("all_clients = ?", true).Find(&tasks).Error; err != nil {
-		return err
-	}
-	if len(tasks) == 0 {
-		return nil
-	}
 	changed := false
-	for _, task := range tasks {
-		exists := false
-		for _, c := range task.Clients {
-			if c == uuid {
-				exists = true
-				break
+	if err := dbcore.Write(context.Background(), func(db *gorm.DB) error {
+		return db.Transaction(func(tx *gorm.DB) error {
+			var tasks []models.PingTask
+			if err := tx.Where("all_clients = ?", true).Find(&tasks).Error; err != nil {
+				return err
 			}
-		}
-		if exists {
-			continue
-		}
-		next := append(models.StringArray{}, task.Clients...)
-		next = append(next, uuid)
-		if err := db.Model(&models.PingTask{}).Where("id = ?", task.Id).Update("clients", next).Error; err != nil {
-			return err
-		}
-		changed = true
+			for _, task := range tasks {
+				exists := false
+				for _, client := range task.Clients {
+					if client == uuid {
+						exists = true
+						break
+					}
+				}
+				if exists {
+					continue
+				}
+				next := append(append(models.StringArray{}, task.Clients...), uuid)
+				if err := tx.Model(&models.PingTask{}).Where("id = ?", task.Id).Update("clients", next).Error; err != nil {
+					return err
+				}
+				changed = true
+			}
+			return nil
+		})
+	}); err != nil {
+		return err
 	}
 	if changed {
 		return ReloadPingSchedule()

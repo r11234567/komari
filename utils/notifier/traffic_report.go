@@ -22,21 +22,21 @@ import (
 func InitTrafficReportSchedule() {
 	// 日报：每天凌晨 0 点
 	if err := corn.AddFunc("traffic-report-daily", "0 0 0 * * *", func() {
-		sendTrafficReport(true, false, false)
+		runScheduledTrafficReport(TrafficReportDaily)
 	}); err != nil {
 		log.Println("Failed to register daily traffic report job:", err)
 	}
 
 	// 周报：每周一凌晨 0 点 (dow=1)
 	if err := corn.AddFunc("traffic-report-weekly", "0 0 0 * * 1", func() {
-		sendTrafficReport(false, true, false)
+		runScheduledTrafficReport(TrafficReportWeekly)
 	}); err != nil {
 		log.Println("Failed to register weekly traffic report job:", err)
 	}
 
 	// 月报：每月 1 日凌晨 0 点
 	if err := corn.AddFunc("traffic-report-monthly", "0 0 0 1 * *", func() {
-		sendTrafficReport(false, false, true)
+		runScheduledTrafficReport(TrafficReportMonthly)
 	}); err != nil {
 		log.Println("Failed to register monthly traffic report job:", err)
 	}
@@ -44,30 +44,80 @@ func InitTrafficReportSchedule() {
 	log.Println("Traffic report schedules registered: daily, weekly, monthly")
 }
 
-// sendTrafficReport 汇聚所有启用了指定报告类型的服务器流量，合并成一条通知发送
-func sendTrafficReport(daily, weekly, monthly bool) {
-	// 检查全局通知开关
-	enabled, err := config.GetAs[bool](config.NotificationEnabledKey, false)
-	if err != nil || !enabled {
+type TrafficReportCadence string
+
+const (
+	TrafficReportDaily   TrafficReportCadence = "daily"
+	TrafficReportWeekly  TrafficReportCadence = "weekly"
+	TrafficReportMonthly TrafficReportCadence = "monthly"
+)
+
+func (cadence TrafficReportCadence) Valid() bool {
+	switch cadence {
+	case TrafficReportDaily, TrafficReportWeekly, TrafficReportMonthly:
+		return true
+	default:
+		return false
+	}
+}
+
+type TrafficReportResult struct {
+	Sent          bool                 `json:"sent"`
+	Cadence       TrafficReportCadence `json:"cadence"`
+	Start         time.Time            `json:"start"`
+	End           time.Time            `json:"end"`
+	ClientCount   int                  `json:"client_count"`
+	FailedClients int                  `json:"failed_clients"`
+	Message       string               `json:"message,omitempty"`
+	Reason        string               `json:"reason,omitempty"`
+	Warnings      []string             `json:"warnings,omitempty"`
+}
+
+func runScheduledTrafficReport(cadence TrafficReportCadence) {
+	result, err := SendTrafficReport(cadence)
+	if err != nil {
+		log.Printf("Failed to send %s traffic report: %v", cadence, err)
 		return
 	}
+	for _, warning := range result.Warnings {
+		log.Printf("Traffic report warning (%s): %s", cadence, warning)
+	}
+}
 
-	db := dbcore.GetDBInstance()
+// SendTrafficReport runs the same report path used by the scheduler. It is
+// exported so an authenticated admin RPC can trigger and verify one report.
+func SendTrafficReport(cadence TrafficReportCadence) (TrafficReportResult, error) {
+	result := TrafficReportResult{Cadence: cadence}
+	if !cadence.Valid() {
+		return result, fmt.Errorf("unsupported traffic report cadence %q", cadence)
+	}
+
+	// 检查全局通知开关
+	enabled, err := config.GetAs[bool](config.NotificationEnabledKey, false)
+	if err != nil {
+		return result, fmt.Errorf("read notification setting: %w", err)
+	}
+	if !enabled {
+		result.Reason = "notifications are disabled"
+		return result, nil
+	}
+
+	db := dbcore.GetReadDBInstance()
 	now := time.Now()
 
 	// 计算时间范围
 	var start, end time.Time
-	var eventType, label, suffix string
+	var eventType, suffix, emoji string
 
-	switch {
-	case daily:
+	switch cadence {
+	case TrafficReportDaily:
 		yesterday := now.AddDate(0, 0, -1)
 		start = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, yesterday.Location())
-		end = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 0, yesterday.Location())
+		end = start.AddDate(0, 0, 1)
 		eventType = messageevent.DReport
-		label = "daily"
-		suffix = "昨日流量"
-	case weekly:
+		suffix = fmt.Sprintf("（%s）流量", start.Format("2006-01-02"))
+		emoji = "📊"
+	case TrafficReportWeekly:
 		weekday := int(now.Weekday())
 		if weekday == 0 {
 			weekday = 7
@@ -75,39 +125,40 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 		lastMonday := now.AddDate(0, 0, -(weekday-1)-7)
 		lastSunday := lastMonday.AddDate(0, 0, 6)
 		start = time.Date(lastMonday.Year(), lastMonday.Month(), lastMonday.Day(), 0, 0, 0, 0, lastMonday.Location())
-		end = time.Date(lastSunday.Year(), lastSunday.Month(), lastSunday.Day(), 23, 59, 59, 0, lastSunday.Location())
+		end = time.Date(lastSunday.Year(), lastSunday.Month(), lastSunday.Day(), 0, 0, 0, 0, lastSunday.Location()).AddDate(0, 0, 1)
 		eventType = messageevent.WReport
-		label = "weekly"
-		suffix = "上周流量"
-	case monthly:
+		suffix = fmt.Sprintf("（%s 至 %s）流量", start.Format("2006-01-02"), end.Add(-time.Nanosecond).Format("2006-01-02"))
+		emoji = "📈"
+	case TrafficReportMonthly:
 		firstOfThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 		firstOfLastMonth := firstOfThisMonth.AddDate(0, -1, 0)
-		lastDayOfLastMonth := firstOfThisMonth.Add(-time.Second)
 		start = firstOfLastMonth
-		end = lastDayOfLastMonth
+		end = firstOfThisMonth
 		eventType = messageevent.MReport
-		label = "monthly"
-		suffix = "上个月流量"
+		suffix = fmt.Sprintf("（%s）流量", start.Format("2006-01"))
+		emoji = "📅"
 	default:
-		return
+		return result, fmt.Errorf("unsupported traffic report cadence %q", cadence)
 	}
+	result.Start, result.End = start, end
 
 	// 查询所有启用该类型报告的服务器配置
 	var notifications []models.TrafficReportNotification
 	query := db.Model(&models.TrafficReportNotification{}).Where("enable = ?", true)
-	if daily {
+	switch cadence {
+	case TrafficReportDaily:
 		query = query.Where("daily = ?", true)
-	} else if weekly {
+	case TrafficReportWeekly:
 		query = query.Where("weekly = ?", true)
-	} else if monthly {
+	case TrafficReportMonthly:
 		query = query.Where("monthly = ?", true)
 	}
 	if err := query.Find(&notifications).Error; err != nil {
-		log.Printf("Failed to query traffic report notifications (%s): %v", label, err)
-		return
+		return result, fmt.Errorf("query %s traffic report notifications: %w", cadence, err)
 	}
 	if len(notifications) == 0 {
-		return
+		result.Reason = "no clients enabled for this cadence"
+		return result, nil
 	}
 
 	// 获取客户端信息
@@ -117,8 +168,7 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 	}
 	var clientList []models.Client
 	if err := db.Where("uuid IN ?", clientUUIDs).Find(&clientList).Error; err != nil {
-		log.Printf("Failed to query clients for traffic report (%s): %v", label, err)
-		return
+		return result, fmt.Errorf("query clients for %s traffic report: %w", cadence, err)
 	}
 	clientMap := make(map[string]models.Client, len(clientList))
 	for _, c := range clientList {
@@ -131,33 +181,30 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 	for _, n := range notifications {
 		c, ok := clientMap[n.Client]
 		if !ok {
+			result.FailedClients++
+			result.Warnings = append(result.Warnings, fmt.Sprintf("client %s: configuration not found", n.Client))
 			continue
 		}
 
 		used, err := getClientTrafficInRange(n.Client, c.TrafficLimitType, start, end)
 		if err != nil {
-			log.Printf("Failed to compute traffic for client %s (%s): %v", n.Client, label, err)
+			result.FailedClients++
+			result.Warnings = append(result.Warnings, fmt.Sprintf("client %s: %v", n.Client, err))
 			continue
 		}
 
 		lines = append(lines, fmt.Sprintf("%s%s：%s", c.Name, suffix, humanBytes(used)))
 		eventClients = append(eventClients, c)
 	}
+	result.ClientCount = len(eventClients)
 
 	if len(lines) == 0 {
-		return
+		result.Reason = "no client traffic could be computed"
+		return result, nil
 	}
 
 	message := strings.Join(lines, "\n")
-	var emoji string
-	switch {
-	case daily:
-		emoji = "📊"
-	case weekly:
-		emoji = "📈"
-	case monthly:
-		emoji = "📅"
-	}
+	result.Message = message
 
 	if err := messageSender.SendNotification(models.EventMessage{
 		Event:   eventType,
@@ -166,14 +213,16 @@ func sendTrafficReport(daily, weekly, monthly bool) {
 		Emoji:   emoji,
 		Message: message,
 	}); err != nil {
-		log.Printf("Failed to send %s traffic report: %v", label, err)
+		return result, fmt.Errorf("send %s traffic report: %w", cadence, err)
 	}
+	result.Sent = true
+	return result, nil
 }
 
-// getClientTrafficInRange 查询某客户端在指定时间段内的流量增量
-// 通过累加持久化的精确流量增量字段计算用量
+// getClientTrafficInRange 查询某客户端在指定时间段内的流量增量。
+// 报告通过相邻累计计数器重算，避免历史 traffic_* 派生字段中的异常值。
 func getClientTrafficInRange(clientUUID string, trafficType string, start, end time.Time) (int64, error) {
-	return getClientTrafficInRangeWithDB(dbcore.GetDBInstance(), clientUUID, trafficType, start, end)
+	return getClientTrafficInRangeWithDB(dbcore.GetReadDBInstance(), clientUUID, trafficType, start, end)
 }
 
 type trafficDeltaRecord struct {
@@ -188,7 +237,7 @@ func getClientTrafficInRangeWithDB(db *gorm.DB, clientUUID string, trafficType s
 	var recentRecords []trafficDeltaRecord
 	if err := db.Table("records").
 		Select("time, net_total_up, net_total_down, traffic_up, traffic_down").
-		Where("client = ? AND time >= ? AND time <= ?", clientUUID, models.FromTime(start), models.FromTime(end)).
+		Where("client = ? AND time >= ? AND time < ?", clientUUID, models.FromTime(start), models.FromTime(end)).
 		Find(&recentRecords).Error; err != nil {
 		return 0, err
 	}
@@ -196,7 +245,7 @@ func getClientTrafficInRangeWithDB(db *gorm.DB, clientUUID string, trafficType s
 	var longTermRecords []trafficDeltaRecord
 	if err := db.Table("records_long_term").
 		Select("time, net_total_up, net_total_down, traffic_up, traffic_down").
-		Where("client = ? AND time >= ? AND time <= ?", clientUUID, models.FromTime(start), models.FromTime(end)).
+		Where("client = ? AND time >= ? AND time < ?", clientUUID, models.FromTime(start), models.FromTime(end)).
 		Find(&longTermRecords).Error; err != nil {
 		return 0, err
 	}
@@ -217,6 +266,9 @@ func getClientTrafficInRangeWithDB(db *gorm.DB, clientUUID string, trafficType s
 }
 
 func mergeTrafficRecords(recentRecords, longTermRecords []trafficDeltaRecord) []trafficDeltaRecord {
+	recentRecords = deduplicateTrafficRecords(recentRecords)
+	longTermRecords = deduplicateTrafficRecords(longTermRecords)
+
 	rawSlots := make(map[time.Time]struct{}, len(recentRecords))
 	for _, record := range recentRecords {
 		rawSlots[record.Time.ToTime().Truncate(15*time.Minute)] = struct{}{}
@@ -242,6 +294,29 @@ func mergeTrafficRecords(recentRecords, longTermRecords []trafficDeltaRecord) []
 	}
 
 	return records
+}
+
+// Old compaction versions could insert the same client/time slot more than
+// once because the legacy history table has no composite unique key. Reports
+// must count a persisted slot once even when such rows are still present.
+func deduplicateTrafficRecords(records []trafficDeltaRecord) []trafficDeltaRecord {
+	byTime := make(map[int64]trafficDeltaRecord, len(records))
+	for _, record := range records {
+		key := record.Time.ToTime().UnixNano()
+		existing, ok := byTime[key]
+		if !ok || trafficRecordMagnitude(record) > trafficRecordMagnitude(existing) {
+			byTime[key] = record
+		}
+	}
+	result := make([]trafficDeltaRecord, 0, len(byTime))
+	for _, record := range byTime {
+		result = append(result, record)
+	}
+	return result
+}
+
+func trafficRecordMagnitude(record trafficDeltaRecord) int64 {
+	return max(record.TrafficUp, 0) + max(record.TrafficDown, 0)
 }
 
 func getPreviousTrafficDeltaRecord(db *gorm.DB, clientUUID string, before time.Time) (*trafficDeltaRecord, error) {
@@ -288,11 +363,20 @@ func sumTrafficDeltas(records []trafficDeltaRecord, previous *trafficDeltaRecord
 	var totalDown int64
 
 	for i := range records {
-		up := records[i].TrafficUp
-		down := records[i].TrafficDown
+		var up int64
+		var down int64
 		if previous != nil {
-			up = trafficDeltaOrFallback(up, records[i].NetTotalUp, previous.NetTotalUp)
-			down = trafficDeltaOrFallback(down, records[i].NetTotalDown, previous.NetTotalDown)
+			up = trafficDeltaForReport(records[i].TrafficUp, records[i].NetTotalUp, previous.NetTotalUp)
+			down = trafficDeltaForReport(records[i].TrafficDown, records[i].NetTotalDown, previous.NetTotalDown)
+		} else {
+			// Very old records may not contain cumulative counters. Keep their
+			// persisted deltas as a compatibility fallback only in that case.
+			if records[i].NetTotalUp == 0 {
+				up = records[i].TrafficUp
+			}
+			if records[i].NetTotalDown == 0 {
+				down = records[i].TrafficDown
+			}
 		}
 		totalUp += up
 		totalDown += down
@@ -302,8 +386,8 @@ func sumTrafficDeltas(records []trafficDeltaRecord, previous *trafficDeltaRecord
 	return totalUp, totalDown
 }
 
-func trafficDeltaOrFallback(storedDelta, currentTotal, previousTotal int64) int64 {
-	if storedDelta > 0 {
+func trafficDeltaForReport(storedDelta, currentTotal, previousTotal int64) int64 {
+	if currentTotal == 0 && previousTotal == 0 {
 		return storedDelta
 	}
 	return utils.ComputeTrafficDelta(currentTotal, previousTotal)

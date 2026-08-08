@@ -36,6 +36,7 @@ func TestComputeTrafficDelta(t *testing.T) {
 		{name: "monotonic counter uses difference", current: 250, previous: 200, want: 50},
 		{name: "same counter", current: 100, previous: 100, want: 0},
 		{name: "counter reset uses current", current: 15, previous: 250, want: 15},
+		{name: "small counter regression is ignored", current: 240, previous: 250, want: 0},
 		{name: "negative current remains guarded", current: -1, previous: 100, want: 0},
 		{name: "negative previous remains guarded", current: 15, previous: -1, want: 0},
 	}

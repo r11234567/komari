@@ -31,14 +31,25 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       docker_tag: ${{ steps.version.outputs.docker_tag }}
     steps:
-      - name: Require the LTS branch
+      - name: Validate snapshot source
         env:
           EXPECTED_REF: refs/heads/1.2.5-LTS
         run: |
           set -euo pipefail
-          if [ "${GITHUB_REF}" != "${EXPECTED_REF}" ]; then
-            echo "Run this workflow from ${EXPECTED_REF}; current ref is ${GITHUB_REF}."
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" != "${EXPECTED_REF}" ]; then
+            echo "Automatic LTS snapshots must run from ${EXPECTED_REF}; current ref is ${GITHUB_REF}."
             exit 1
+          fi
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            case "${GITHUB_REF}" in
+              refs/heads/*)
+                echo "Manual snapshot requested from ${GITHUB_REF}."
+                ;;
+              *)
+                echo "Manual LTS snapshots must target a branch; current ref is ${GITHUB_REF}."
+                exit 1
+                ;;
+            esac
           fi
 
       - name: Generate snapshot version

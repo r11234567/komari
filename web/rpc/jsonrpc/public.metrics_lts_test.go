@@ -1,11 +1,22 @@
 package jsonrpc
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/komari-monitor/komari/database/history"
 )
+
+func TestLTSMetricQueryParamsAcceptRanThemeAliases(t *testing.T) {
+	var params ltsMetricQueryParams
+	if err := json.Unmarshal([]byte(`{"entity_ids":["node-a","node-b"],"uuid":"node-a"}`), &params); err != nil {
+		t.Fatal(err)
+	}
+	if len(params.EntityIDs) != 2 || params.EntityIDs[0] != "node-a" || params.UUID != "node-a" {
+		t.Fatalf("Ran aliases were not decoded: %#v", params)
+	}
+}
 
 func TestLTSMetricRangeAcceptsFractionalHours(t *testing.T) {
 	start, end, err := ltsMetricRange(ltsMetricQueryParams{Hours: 10.0 / 60.0})
@@ -89,5 +100,59 @@ func TestLimitLTSMetricPointsUsesTotalBudget(t *testing.T) {
 		if !timestampsA[pt.Time.Unix()] {
 			t.Fatalf("series have misaligned timestamps: %s not in first series", pt.Time)
 		}
+	}
+}
+
+func TestLTSPingMetricSeriesReturnsRequestedLatencyAndLoss(t *testing.T) {
+	now := time.Now()
+	result := &history.Response{
+		Resolution: "1m",
+		Series: []history.Series{{
+			Kind: "ping", TaskID: 7,
+			Points: []history.Point{
+				{Time: now.Add(-time.Minute), Avg: 30, TotalCount: 4, LossCount: 1},
+				{Time: now, TotalCount: 2, LossCount: 2},
+			},
+		}},
+	}
+	series := ltsPingMetricSeries(
+		result,
+		map[string]bool{"ping.latency_ms": true, "ping.loss": true},
+		"node-a",
+		map[string]int{"ping.latency_ms": 30, "ping.loss": 30},
+	)
+	if len(series) != 2 {
+		t.Fatalf("series count = %d, want 2", len(series))
+	}
+	byKey := make(map[string]ltsMetricSeries, len(series))
+	for _, item := range series {
+		byKey[item.MetricKey] = item
+	}
+	latency := byKey["ping.latency_ms"]
+	loss := byKey["ping.loss"]
+	if latency.Points[0].Value == nil || *latency.Points[0].Value != 30 || latency.Points[1].Value != nil {
+		t.Fatalf("unexpected latency points: %#v", latency.Points)
+	}
+	if loss.Points[0].Value == nil || *loss.Points[0].Value != 0.25 || loss.Points[1].Value == nil || *loss.Points[1].Value != 1 {
+		t.Fatalf("unexpected loss points: %#v", loss.Points)
+	}
+	if loss.Tags["task_id"] != "7" || loss.IntervalSeconds != 60 {
+		t.Fatalf("unexpected loss metadata: %#v", loss)
+	}
+}
+
+func TestLTSPingMetricSeriesHonorsRequestedKeys(t *testing.T) {
+	result := &history.Response{
+		Resolution: "1m",
+		Series:     []history.Series{{Kind: "ping", TaskID: 1}},
+	}
+	series := ltsPingMetricSeries(
+		result,
+		map[string]bool{"ping.loss": true},
+		"node-a",
+		map[string]int{"ping.loss": 30},
+	)
+	if len(series) != 1 || series[0].MetricKey != "ping.loss" {
+		t.Fatalf("unexpected series: %#v", series)
 	}
 }

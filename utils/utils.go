@@ -152,7 +152,15 @@ func ComputeTrafficDelta(current, previous int64) int64 {
 	if current >= previous {
 		return current - previous
 	}
-	return current
+
+	// Network counters can move backwards slightly when interfaces disappear,
+	// counters are sampled concurrently, or an agent changes its interface set.
+	// Treat only a substantial drop as a reset; otherwise counting the current
+	// lifetime total would turn a small wobble into gigabytes of fake traffic.
+	if current <= previous/2 {
+		return current
+	}
+	return 0
 }
 
 // AverageGPUReports 使用与 AverageReport 相同的聚合逻辑处理GPU数据
