@@ -178,16 +178,12 @@ func InspectSQLiteMigration(ctx context.Context, cfg Config) (SQLiteMigrationSum
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+t.rollupBlocks+` WHERE axis_id IS NULL OR codec != ? OR digest_codec != ?`, sqliteV4SharedRollupBlockCodec, sqliteV4StructuredRollupDigestCodec).Scan(&summary.LegacyAxisBlocks); err != nil {
 		return SQLiteMigrationSummary{}, fmt.Errorf("metric: count legacy SQLite V4 axis blocks: %w", err)
 	}
-	var autoVacuum int
-	if err := db.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&autoVacuum); err != nil {
-		return SQLiteMigrationSummary{}, fmt.Errorf("metric: inspect SQLite auto-vacuum mode: %w", err)
-	}
 	var userVersion int
 	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&userVersion); err != nil {
 		return SQLiteMigrationSummary{}, fmt.Errorf("metric: inspect SQLite migration version: %w", err)
 	}
 	summary.DigestHandoffRequired = userVersion < sqliteStorageVersionCurrent
-	summary.Required = summary.LegacyBlocks > 0 || summary.LegacyDigestBlocks > 0 || summary.LegacyAxisBlocks > 0 || summary.LegacyPointAxisBlocks > 0 || summary.DigestHandoffRequired || autoVacuum != 2
+	summary.Required = summary.LegacyBlocks > 0 || summary.LegacyDigestBlocks > 0 || summary.LegacyAxisBlocks > 0 || summary.LegacyPointAxisBlocks > 0 || summary.DigestHandoffRequired
 	if !summary.Required {
 		summary.Layout = "current"
 	}
