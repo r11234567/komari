@@ -18,7 +18,7 @@ import (
 
 const (
 	legacyMonitoringMigrationDoneKey = "migration_legacy_monitoring_to_metric_store_done"
-	legacyMonitoringBatchSize        = 500
+	legacyMonitoringBatchSize        = 100
 )
 
 var legacyMonitoringTables = []string{"records", "records_long_term", "gpu_records", "ping_records"}

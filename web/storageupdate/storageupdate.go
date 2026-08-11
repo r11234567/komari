@@ -11,6 +11,7 @@ import (
 	"github.com/komari-monitor/komari/database/metricstore"
 	appconfig "github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/metric"
+	"github.com/komari-monitor/komari/pkg/migrationutil"
 	"github.com/komari-monitor/komari/web/api"
 	publicapi "github.com/komari-monitor/komari/web/api/public"
 	jsonrpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
@@ -148,7 +149,12 @@ func (c *Controller) run() {
 	c.status.Error = ""
 	c.mu.Unlock()
 
-	err := c.migrate(context.Background(), c.onProgress)
+	ctx := context.Background()
+	pacer := migrationutil.NewPacer(0.5)
+	err := c.migrate(ctx, func(progress metric.MigrationProgress) {
+		c.onProgress(progress)
+		_ = pacer.Pace(ctx)
+	})
 	c.mu.Lock()
 	c.running = false
 	c.endedAt = time.Now()

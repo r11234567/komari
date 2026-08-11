@@ -28,9 +28,8 @@ const (
 // the already migrated points.
 func (s *Store) migrateSQLiteStorageV4(ctx context.Context) error {
 	s.reportMigrationProgress(MigrationPhasePreparing, 0, 1, 0)
-	// V3 is an internal normalization step here. Defer its physical rewrite
-	// until V4 has been validated and committed so an upgrade performs only one
-	// full-database vacuum.
+	// V3 is an internal normalization step here. Physical space reclamation is
+	// intentionally left to the explicit database maintenance action.
 	if err := s.migrateSQLiteStorageV3(ctx, false); err != nil {
 		return err
 	}
@@ -157,13 +156,6 @@ func (s *Store) migrateSQLiteStorageV4(ctx context.Context) error {
 	if skippedBlocks > 0 {
 		log.Printf("metric: deferred %d readable rollup blocks that could not yet be converted to shared-axis storage", skippedBlocks)
 	}
-	s.reportMigrationProgress(MigrationPhaseReclaiming, 0, 1, pointSourceCount+rollupSourceCount+tierBuckets+pingBuckets+sharedBuckets)
-	if err := s.fullSQLiteVacuum(ctx); err != nil {
-		// The V4 transaction is already fully validated and committed. A failed
-		// physical rewrite does not invalidate the logical migration.
-		log.Printf("metric: SQLite V4 post-migration vacuum skipped: %v", err)
-	}
-	s.reportMigrationProgress(MigrationPhaseReclaiming, 1, 1, pointSourceCount+rollupSourceCount+tierBuckets+pingBuckets+sharedBuckets)
 	if err := s.markSQLiteStorageCurrent(ctx); err != nil {
 		return err
 	}
@@ -199,13 +191,6 @@ func (s *Store) ensureSQLiteStorageV4(ctx context.Context) error {
 	if err := s.ensureSQLiteV8PingColumns(ctx); err != nil {
 		return err
 	}
-	var pendingSharedBlocks int64
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+s.tables.rollupBlocks+
-		" WHERE axis_id IS NULL OR codec != ? OR digest_codec != ?",
-		sqliteV4SharedRollupBlockCodec, sqliteV4StructuredRollupDigestCodec,
-	).Scan(&pendingSharedBlocks); err != nil {
-		return fmt.Errorf("metric: count pending shared-axis blocks: %w", err)
-	}
 	tierBuckets, err := s.migrateSQLiteV7TierHandoff(ctx, time.Now().UTC())
 	if err != nil {
 		return err
@@ -225,18 +210,8 @@ func (s *Store) ensureSQLiteStorageV4(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var autoVacuum int
-	if err := s.db.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&autoVacuum); err != nil {
-		return fmt.Errorf("metric: inspect SQLite auto-vacuum mode: %w", err)
-	}
-	if tierBuckets > 0 || pingBuckets > 0 || sharedBlocks > 0 || pointAxisBlocks > 0 || autoVacuum != 2 {
-		preserved := tierBuckets + pingBuckets + sharedBuckets + pointAxisPoints
-		s.reportMigrationProgress(MigrationPhaseReclaiming, 0, 1, preserved)
-		if err := s.fullSQLiteVacuum(ctx); err != nil {
-			return fmt.Errorf("metric: vacuum SQLite V4 rollup storage after codec migration: %w", err)
-		}
-		s.reportMigrationProgress(MigrationPhaseReclaiming, 1, 1, preserved)
-		log.Printf("metric: migrated %d tier-handoff buckets and %d shared-axis blocks (%d buckets); reclaimed database space", tierBuckets, sharedBlocks, sharedBuckets)
+	if tierBuckets > 0 || pingBuckets > 0 || sharedBlocks > 0 || pointAxisBlocks > 0 {
+		log.Printf("metric: migrated %d tier-handoff buckets, %d shared-axis rollup blocks (%d buckets), and %d shared-axis point blocks (%d points); physical space reclamation is deferred", tierBuckets, sharedBlocks, sharedBuckets, pointAxisBlocks, pointAxisPoints)
 	}
 	return nil
 }

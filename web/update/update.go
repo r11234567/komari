@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
 	appconfig "github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/metric"
+	"github.com/komari-monitor/komari/pkg/migrationutil"
 	"github.com/komari-monitor/komari/pkg/migrations"
 	"github.com/komari-monitor/komari/web/api"
 	publicapi "github.com/komari-monitor/komari/web/api/public"
@@ -234,6 +234,7 @@ func (c *Controller) start(ctx *gin.Context) {
 
 func (c *Controller) runMigration(cfg metricstore.MetricStoreConfig, legacyRetentionDays int) {
 	ctx := context.Background()
+	pacer := migrationutil.NewPacer(0.5)
 	store, err := metricstore.OpenStoreForMigrationWithProgress(ctx, &cfg, legacyRetentionDays, func(progress metric.MigrationProgress) {
 		c.mu.Lock()
 		c.status.Phase = "storage_" + progress.Phase
@@ -244,6 +245,7 @@ func (c *Controller) runMigration(cfg metricstore.MetricStoreConfig, legacyReten
 			c.status.StorageProgress = float64(progress.Current) / float64(progress.Total) * 100
 		}
 		c.mu.Unlock()
+		_ = pacer.Pace(ctx)
 	})
 	if err != nil {
 		c.failTarget(err, cfg.DSN, "connecting")
@@ -270,6 +272,7 @@ func (c *Controller) runMigration(cfg metricstore.MetricStoreConfig, legacyReten
 			c.status.Progress = float64(progress.SourceRowsDone) / float64(progress.SourceRowsTotal) * 100
 		}
 		c.mu.Unlock()
+		_ = pacer.Pace(ctx)
 	})
 	if err != nil {
 		c.failTarget(err, cfg.DSN, "migrating")
@@ -280,15 +283,8 @@ func (c *Controller) runMigration(cfg metricstore.MetricStoreConfig, legacyReten
 	c.status.Phase = "finalizing"
 	c.status.Progress = 100
 	c.mu.Unlock()
-	finalizePhase := "finalizing"
-	if err := migrations.CompleteLegacyMonitoringMigration(c.db, func() error {
-		finalizePhase = "vacuuming"
-		c.mu.Lock()
-		c.status.Phase = finalizePhase
-		c.mu.Unlock()
-		return dbcore.ReclaimSpace(ctx)
-	}); err != nil {
-		c.failTarget(err, cfg.DSN, finalizePhase)
+	if err := migrations.CompleteLegacyMonitoringMigration(c.db, nil); err != nil {
+		c.failTarget(err, cfg.DSN, "finalizing")
 		return
 	}
 

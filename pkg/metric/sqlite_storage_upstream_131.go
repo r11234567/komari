@@ -7,7 +7,7 @@ import (
 	"math"
 )
 
-const upstream131CopyBatchSize = 5000
+const upstream131CopyBatchSize = 500
 
 var upstream131DefinitionColumns = []string{
 	"name", "type", "unit", "description", "retention_days", "metadata",
