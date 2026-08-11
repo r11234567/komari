@@ -776,11 +776,11 @@ func (s *Store) collectSeriesPhysicalGroups(ctx context.Context, query Aggregate
 	q := query.Query.normalized()
 	now = now.UTC()
 	collectRaw := func(raw Query) (map[rollupKey]*rollupBucket, error) {
-		if s.sqliteStorageV4 && !needDigest {
+		if s.sqliteStorageV4 {
 			groups := make(map[rollupKey]*rollupBucket)
 			dashboardQuery := query
 			dashboardQuery.Query = raw
-			if err := s.foldSQLiteV4RawDashboardSnapshot(ctx, dashboardQuery, groups); err != nil {
+			if err := s.foldSQLiteV4RawAggregateSnapshot(ctx, dashboardQuery, groups, needDigest); err != nil {
 				return nil, err
 			}
 			return groups, nil
@@ -837,6 +837,17 @@ func (s *Store) seriesPhysical(ctx context.Context, query AggregateQuery, now ti
 	}
 	policy := s.cfg.RollupPolicy
 	if !policy.Enabled() {
+		if s.sqliteStorageV4 && query.Aggregation != AggRate && query.Aggregation != aggPingLossRate {
+			groups, err := s.collectSeriesPhysicalGroups(ctx, query, now, isPercentile(query.Aggregation))
+			if err != nil {
+				return nil, err
+			}
+			points, err := rollupGroupsToPoints(groups, query)
+			if err != nil {
+				return nil, err
+			}
+			return pageBuckets(points, query.BucketLimit, query.BucketOffset), nil
+		}
 		return s.Aggregate(ctx, query)
 	}
 	q := query.Query.normalized()
@@ -963,10 +974,10 @@ func (s *Store) collectSeriesAcrossHandoffTiers(ctx context.Context, query Aggre
 	if rawStart <= q.End.UnixNano() {
 		rawQuery := q
 		rawQuery.Start = time.Unix(0, rawStart).UTC()
-		if s.sqliteStorageV4 && hasWatermark && !needDigest {
+		if s.sqliteStorageV4 && hasWatermark {
 			dashboardQuery := query
 			dashboardQuery.Query = rawQuery
-			if err := s.foldSQLiteV4RawDashboardSnapshot(ctx, dashboardQuery, groups); err != nil {
+			if err := s.foldSQLiteV4RawAggregateSnapshot(ctx, dashboardQuery, groups, needDigest); err != nil {
 				return nil, err
 			}
 		} else {

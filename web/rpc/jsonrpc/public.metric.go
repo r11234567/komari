@@ -2,6 +2,7 @@ package jsonrpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -17,7 +18,12 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
-const defaultMetricQueryPoints = 500
+const (
+	defaultMetricQueryPoints   = 500
+	maxMetricQueryPoints       = 10_000
+	historicalQueryTimeout     = 20 * time.Second
+	maxRawMetricQueryRange     = time.Hour
+)
 
 func init() {
 	regPublic("listMetricDefinitions", publicListMetricDefinitions, "List public metric definitions")
@@ -157,6 +163,8 @@ func publicListMetricDefinitions(ctx context.Context, _ *rpc.JsonRpcRequest) (an
 }
 
 func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	ctx, cancel := context.WithTimeout(ctx, historicalQueryTimeout)
+	defer cancel()
 	var params publicMetricQueryParams
 	if err := req.BindParams(&params); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
@@ -221,7 +229,13 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 			return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
 		}
 		metricDownsample := resolveMetricDownsample(metricKey, params)
+		if !metricDownsample && end.Sub(start) > maxRawMetricQueryRange {
+			return nil, rpc.MakeError(rpc.InvalidParams, "raw metric queries are limited to 1 hour; enable downsampling for longer ranges", nil)
+		}
 		algorithm := resolveMetricAggregation(metricKey, params)
+		if algorithm == metric.AggRate && end.Sub(start) > maxRawMetricQueryRange {
+			return nil, rpc.MakeError(rpc.InvalidParams, "rate metric queries are limited to 1 hour", nil)
+		}
 		metricFillEmpty := resolveMetricFillEmpty(params)
 
 		interval := time.Duration(0)
@@ -275,11 +289,11 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 
 	aggregateResults, err := store.SeriesBatch(ctx, aggregateQueries, now)
 	if err != nil {
-		return nil, rpc.MakeError(rpc.InvalidParams, "Failed to query metrics: "+err.Error(), nil)
+		return nil, metricQueryError(err, "Failed to query metrics")
 	}
 	rawResults, err := store.QueryBatch(ctx, rawQueries)
 	if err != nil {
-		return nil, rpc.MakeError(rpc.InvalidParams, "Failed to query metrics: "+err.Error(), nil)
+		return nil, metricQueryError(err, "Failed to query metrics")
 	}
 	series := make([]publicMetricSeries, 0, len(plans))
 	for _, plan := range plans {
@@ -322,6 +336,8 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 }
 
 func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	ctx, cancel := context.WithTimeout(ctx, historicalQueryTimeout)
+	defer cancel()
 	var params publicPingMetricStatsParams
 	if err := req.BindParams(&params); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
@@ -390,7 +406,7 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 	}
 	summaries, err := store.PingSeriesSummaryBatch(ctx, queries, now)
 	if err != nil {
-		return nil, rpc.MakeError(rpc.InternalError, "Failed to query ping stats: "+err.Error(), nil)
+		return nil, metricQueryError(err, "Failed to query ping stats")
 	}
 	stats := make([]publicPingMetricTaskStats, 0)
 	for index, entityID := range entityIDs {
@@ -654,7 +670,20 @@ func resolveMetricMaxPoints(metricKey string, params publicMetricQueryParams) (i
 	if maxPoints <= 0 {
 		return 0, fmt.Errorf("max points for %s must be a positive integer", metricKey)
 	}
+	if maxPoints > maxMetricQueryPoints {
+		return 0, fmt.Errorf("max points for %s cannot exceed %d", metricKey, maxMetricQueryPoints)
+	}
 	return maxPoints, nil
+}
+
+func metricQueryError(err error, message string) *rpc.JsonRpcError {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return rpc.MakeError(rpc.DeadlineExceeded, message+": query timed out", nil)
+	}
+	if errors.Is(err, context.Canceled) {
+		return rpc.MakeError(rpc.Cancelled, message+": query cancelled", nil)
+	}
+	return rpc.MakeError(rpc.InternalError, message+": "+err.Error(), nil)
 }
 
 func resolveMetricAggregation(metricKey string, params publicMetricQueryParams) metric.Aggregation {

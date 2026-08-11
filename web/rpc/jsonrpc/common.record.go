@@ -18,6 +18,8 @@ func init() {
 }
 
 func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	ctx, cancel := context.WithTimeout(ctx, historicalQueryTimeout)
+	defer cancel()
 	meta := rpc.MetaFromContext(ctx)
 	var params struct {
 		Type     string     `json:"type"`      // "load" | "ping"; default "load"
@@ -92,9 +94,9 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			queryMaxCount = -1
 		}
 		// fetch load records
-		recs, err := getLoadRecordsCombined(params.UUID, startTime, endTime, params.LoadType, queryMaxCount)
+		recs, err := getLoadRecordsCombined(ctx, params.UUID, startTime, endTime, params.LoadType, queryMaxCount)
 		if err != nil {
-			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch records", err.Error())
+			return nil, metricQueryError(err, "Failed to fetch records")
 		}
 		// hidden filter on non-admin
 		if !isAdmin {
@@ -178,9 +180,9 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		if taskId == 0 {
 			taskId = -1
 		}
-		recs, err := tasks.GetPingRecords(params.UUID, taskId, startTime, endTime)
+		recs, err := tasks.GetPingRecordsContext(ctx, params.UUID, taskId, startTime, endTime)
 		if err != nil {
-			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch ping records", err.Error())
+			return nil, metricQueryError(err, "Failed to fetch ping records")
 		}
 		// hidden filter
 		if !isAdmin {
@@ -438,13 +440,13 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 
 // getLoadRecordsCombined fetches records for a client or all clients within a time range,
 // combining recent short-term table and long-term table with 15-min grouping for recent part.
-func getLoadRecordsCombined(uuid string, start, end time.Time, loadType string, maxCount int) ([]models.Record, error) {
+func getLoadRecordsCombined(ctx context.Context, uuid string, start, end time.Time, loadType string, maxCount int) ([]models.Record, error) {
 	// prefer the existing function when uuid provided
 	if uuid != "" {
-		return recordsdb.GetRecordsByClientAndTimeForLoadTypeMaxPoints(uuid, start, end, loadType, maxCount)
+		return recordsdb.GetRecordsByClientAndTimeForLoadTypeMaxPointsContext(ctx, uuid, start, end, loadType, maxCount)
 	}
 	// 所有客户端：统一通过 records 包查询，启用 metric store 时自动走 metric store
-	return recordsdb.GetRecordsByTimeForLoadTypeMaxPoints(start, end, loadType, maxCount)
+	return recordsdb.GetRecordsByTimeForLoadTypeMaxPointsContext(ctx, start, end, loadType, maxCount)
 }
 
 // ---------- downsampling helpers ----------

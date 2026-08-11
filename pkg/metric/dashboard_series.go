@@ -50,18 +50,22 @@ func (s *Store) DashboardSeries(ctx context.Context, query AggregateQuery, now t
 }
 
 func (s *Store) foldSQLiteV4RawDashboardSnapshot(ctx context.Context, query AggregateQuery, groups map[rollupKey]*rollupBucket) error {
+	return s.foldSQLiteV4RawAggregateSnapshot(ctx, query, groups, false)
+}
+
+func (s *Store) foldSQLiteV4RawAggregateSnapshot(ctx context.Context, query AggregateQuery, groups map[rollupKey]*rollupBucket, needDigest bool) error {
 	tx, err := s.reader().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := s.foldSQLiteV4RawDashboard(ctx, tx, query, groups); err != nil {
+	if err := s.foldSQLiteV4RawAggregate(ctx, tx, query, groups, needDigest); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func (s *Store) foldSQLiteV4RawDashboard(ctx context.Context, q querier, query AggregateQuery, groups map[rollupKey]*rollupBucket) error {
+func (s *Store) foldSQLiteV4RawAggregate(ctx context.Context, q querier, query AggregateQuery, groups map[rollupKey]*rollupBucket, needDigest bool) error {
 	filter := query.Query.normalized()
 	series, err := s.sqliteV4MatchingSeries(ctx, q, filter.MetricName, filter.EntityID, filter.Tags)
 	if err != nil || len(series) == 0 {
@@ -166,7 +170,7 @@ func (s *Store) foldSQLiteV4RawDashboard(ctx context.Context, q querier, query A
 		key := foldedRollupKey(series.entityID, series.tagsHash, bucketNano, query.PreserveSeries)
 		bucket := groups[key]
 		if bucket == nil {
-			bucket = newRollupBucketWithDigest(s.cfg.RollupPolicy.compression(), false)
+			bucket = newRollupBucketWithDigest(s.cfg.RollupPolicy.compression(), needDigest)
 			bucket.tagsHash = series.tagsHash
 			bucket.tagsJSON = series.tagsJSON
 			groups[key] = bucket

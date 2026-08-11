@@ -82,6 +82,16 @@ func (s *Store) seriesBatchWithinGate(ctx context.Context, queries []AggregateQu
 	for _, key := range order {
 		group := groups[key]
 		if group.rawOnly {
+			if s.sqliteStorageV4 && !group.hasRate {
+				buckets, err := s.collectSeriesPhysicalGroups(ctx, group.query, now, group.needDigest)
+				if err != nil {
+					return nil, err
+				}
+				if err := s.buildSeriesBatchGroup(result, physical, virtualLoss, group, nil, buckets); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			rawGroups = append(rawGroups, group)
 			rawQueries = append(rawQueries, group.query.Query)
 		}

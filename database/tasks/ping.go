@@ -257,5 +257,9 @@ func AddDefaultOnClientUUID(uuid string) error {
 }
 
 func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
-	return metricstore.GetPingRecords(context.Background(), uuid, taskId, start, end)
+	return GetPingRecordsContext(context.Background(), uuid, taskId, start, end)
+}
+
+func GetPingRecordsContext(ctx context.Context, uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
+	return metricstore.GetPingRecords(ctx, uuid, taskId, start, end)
 }

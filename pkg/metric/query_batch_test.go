@@ -2,6 +2,7 @@ package metric
 
 import (
 	"context"
+	"math"
 	"reflect"
 	"testing"
 	"time"
@@ -126,5 +127,71 @@ func TestQueryBatchEmptyInput(t *testing.T) {
 	}
 	if got == nil || len(got) != 0 {
 		t.Fatalf("empty query batch = %#v, want non-nil empty slice", got)
+	}
+}
+
+func TestSeriesBatchStreamsSQLiteRawPointsWhenRollupsDisabled(t *testing.T) {
+	ctx := context.Background()
+	store := newRollupStore(t, RollupPolicy{})
+	if !store.sqliteStorageV4 {
+		t.Fatal("test requires SQLite V4 storage")
+	}
+	if err := store.CreateMetric(ctx, Definition{Name: "stream.cpu", Type: TypeGauge, RetentionDays: 7}); err != nil {
+		t.Fatal(err)
+	}
+
+	base := time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC)
+	points := make([]Point, 0, 60)
+	for index := 0; index < 60; index++ {
+		points = append(points, Point{
+			MetricName: "stream.cpu",
+			EntityID:   "node-a",
+			Timestamp:  base.Add(time.Duration(index) * time.Minute),
+			Value:      float64(index % 10),
+		})
+	}
+	if err := store.WriteBatch(ctx, points); err != nil {
+		t.Fatal(err)
+	}
+
+	baseQuery := AggregateQuery{
+		Query: Query{
+			MetricName: "stream.cpu",
+			EntityID:   "node-a",
+			Start:      base,
+			End:        base.Add(59 * time.Minute),
+			Order:      OrderAsc,
+		},
+		Interval:       10 * time.Minute,
+		PreserveSeries: true,
+	}
+	avgQuery := baseQuery
+	avgQuery.Aggregation = AggAvg
+	p99Query := baseQuery
+	p99Query.Aggregation = AggP99
+
+	scanCounts := make(map[string]int)
+	observed := withMetricBatchScanObserver(ctx, func(kind string) { scanCounts[kind]++ })
+	got, err := store.SeriesBatch(observed, []AggregateQuery{avgQuery, p99Query}, base.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || len(got[0]) != 6 || len(got[1]) != 6 {
+		t.Fatalf("unexpected streamed bucket counts: %#v", got)
+	}
+	for index, point := range got[0] {
+		if point.Count != 10 || math.Abs(point.Value-4.5) > 1e-9 {
+			t.Fatalf("avg bucket %d = %#v, want count=10 value=4.5", index, point)
+		}
+	}
+	for index, point := range got[1] {
+		if point.Count != 10 || point.Value < 8 || point.Value > 9 {
+			t.Fatalf("p99 bucket %d = %#v, want count=10 value in [8,9]", index, point)
+		}
+	}
+	for _, kind := range []string{"raw_sqlite_series", "raw_sqlite_blocks", "raw_sqlite_hot"} {
+		if count := scanCounts[kind]; count != 0 {
+			t.Fatalf("%s scans = %d, want 0; aggregate query loaded raw points", kind, count)
+		}
 	}
 }

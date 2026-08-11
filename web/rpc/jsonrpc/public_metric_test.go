@@ -1,7 +1,9 @@
 package jsonrpc
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -287,5 +289,34 @@ func TestMetricDownsampleIntervalCeilsToStandardInterval(t *testing.T) {
 	got = metricDownsampleInterval(1000*24*time.Hour, 10)
 	if got != 100*24*time.Hour {
 		t.Fatalf("ranges beyond the standard table should ceil to whole days, got %s", got)
+	}
+}
+
+func TestResolveMetricMaxPointsRejectsOversizedQueries(t *testing.T) {
+	if _, err := resolveMetricMaxPoints("cpu.usage", publicMetricQueryParams{MaxPoints: maxMetricQueryPoints + 1}); err == nil {
+		t.Fatal("expected oversized max_points to be rejected")
+	}
+	got, err := resolveMetricMaxPoints("cpu.usage", publicMetricQueryParams{MaxPoints: maxMetricQueryPoints})
+	if err != nil || got != maxMetricQueryPoints {
+		t.Fatalf("max allowed points = %d, %v; want %d", got, err, maxMetricQueryPoints)
+	}
+}
+
+func TestMetricQueryErrorMapsContextTermination(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		code int
+	}{
+		{name: "deadline", err: context.DeadlineExceeded, code: rpc.DeadlineExceeded},
+		{name: "cancelled", err: context.Canceled, code: rpc.Cancelled},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := metricQueryError(errors.Join(errors.New("query failed"), test.err), "metrics")
+			if got.Code != test.code {
+				t.Fatalf("error code = %d, want %d", got.Code, test.code)
+			}
+		})
 	}
 }
