@@ -457,6 +457,14 @@ func TestStaticKeepsSystemUIAndPublicThemeResourcesIsolated(t *testing.T) {
 		t.Fatal("public theme content leaked into the system UI")
 	}
 
+	upgradePage := request("/admin/update/1.2.7")
+	if upgradePage.Code != http.StatusOK {
+		t.Fatalf("dotted system UI route status=%d", upgradePage.Code)
+	}
+	if !strings.Contains(upgradePage.Body.String(), "/system-assets/") {
+		t.Fatal("dotted system UI route did not return the system application")
+	}
+
 	entries, err := fs.Glob(PublicFS, "systemUI/dist/assets/entry-*.js")
 	if err != nil || len(entries) == 0 {
 		t.Fatalf("find embedded system UI entry: %v", err)

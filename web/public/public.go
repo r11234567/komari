@@ -585,7 +585,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			return
 		}
 
-		if ext := filepath.Ext(reqPath); ext != "" && ext != ".html" {
+		if ext := filepath.Ext(reqPath); !isPrivateApplicationPath(reqPath) && ext != "" && ext != ".html" {
 			c.Status(http.StatusNotFound)
 			return
 		}
