@@ -132,9 +132,6 @@ func Run(ctx Context) error {
 	if err := migrateDeprecatedMetricRetentionConfig(db); err != nil {
 		return err
 	}
-	if err := migrateRemovedCompatibilityConfig(db); err != nil {
-		return err
-	}
 	if err := markTimestampMigrationDone(db); err != nil {
 		return fmt.Errorf("mark UTC timestamp migration done: %w", err)
 	}
@@ -147,16 +144,6 @@ func migrateDeprecatedMetricRetentionConfig(db *gorm.DB) error {
 		return nil
 	}
 	return db.Delete(&appconfig.ConfigItem{}, "key = ?", "metric_retention_days").Error
-}
-
-func migrateRemovedCompatibilityConfig(db *gorm.DB) error {
-	if !db.Migrator().HasTable(&appconfig.ConfigItem{}) {
-		return nil
-	}
-	return db.Delete(&appconfig.ConfigItem{}, "key IN ?", []string{
-		"nezha_compat_enabled",
-		"nezha_compat_listen",
-	}).Error
 }
 
 // MigrateTrafficResetDayFromTags adopts the legacy <TRD:n> convention without

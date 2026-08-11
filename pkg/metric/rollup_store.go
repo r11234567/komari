@@ -120,6 +120,11 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		written, err := s.compactMetricOnce(ctx, metricName, now, policy, obsoleteIntervals)
 		if err == nil {
+			if s.externalPointBlocks {
+				if _, sealErr := s.sealExternalPointBlocks(ctx, metricName, now.Add(-sqliteV4HotWindow)); sealErr != nil {
+					return written, sealErr
+				}
+			}
 			if err := s.incrementalSQLiteVacuum(ctx, 256); err != nil {
 				log.Printf("metric: incremental SQLite vacuum skipped: %v", err)
 			}
@@ -351,6 +356,34 @@ func (s *Store) oldestRawTimestampBeforeTx(ctx context.Context, tx *sql.Tx, metr
 			"SELECT MIN(v.ts_nano) FROM %s v JOIN %s s ON s.id = v.series_id WHERE s.metric_name = ? AND v.ts_nano < ?",
 			s.tables.pointValues, s.tables.series,
 		), metricName, beforeNano).Scan(&hotMin); err != nil {
+			return time.Time{}, false, err
+		}
+		minimum := int64(0)
+		found := false
+		for _, candidate := range []sql.NullInt64{blockMin, hotMin} {
+			if candidate.Valid && (!found || candidate.Int64 < minimum) {
+				minimum = candidate.Int64
+				found = true
+			}
+		}
+		if !found {
+			return time.Time{}, false, nil
+		}
+		return time.Unix(0, minimum).UTC(), true, nil
+	}
+	if s.externalPointBlocks {
+		var blockMin, hotMin sql.NullInt64
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf(
+			`SELECT MIN(b.start_nano) FROM %s b JOIN %s s ON s.id = b.series_id
+			 WHERE s.metric_name = %s AND b.start_nano < %s`,
+			s.tables.pointBlocks, s.tables.series, s.dialect.placeholder(1), s.dialect.placeholder(2)),
+			metricName, beforeNano).Scan(&blockMin); err != nil {
+			return time.Time{}, false, err
+		}
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf(
+			`SELECT MIN(ts_nano) FROM %s WHERE metric_name = %s AND ts_nano < %s`,
+			s.tables.points, s.dialect.placeholder(1), s.dialect.placeholder(2)),
+			metricName, beforeNano).Scan(&hotMin); err != nil {
 			return time.Time{}, false, err
 		}
 		minimum := int64(0)
@@ -733,6 +766,44 @@ func (s *Store) buildFinestTierRange(ctx context.Context, q querier, metricName 
 		}
 		return out, nil
 	}
+	if s.externalPointBlocks {
+		startNano := int64(math.MinInt64)
+		if !start.IsZero() {
+			startNano = start.UTC().UnixNano()
+		}
+		endNano := int64(math.MaxInt64)
+		if !before.IsZero() {
+			if before.UTC().UnixNano() <= startNano {
+				return out, nil
+			}
+			endNano = before.UTC().UnixNano() - 1
+		}
+		points, err := s.queryExternalPointBlocks(ctx, q, Query{
+			MetricName: metricName,
+			Start:      time.Unix(0, startNano).UTC(),
+			End:        time.Unix(0, endNano).UTC(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, point := range points {
+			hash, canonical, err := tagsFingerprint(point.Tags)
+			if err != nil {
+				return nil, err
+			}
+			ts := point.Timestamp.UnixNano()
+			key := rollupKey{entityID: point.EntityID, tagsHash: hash, bucket: floorDivNano(ts, size)}
+			stored := out[key]
+			if stored == nil {
+				stored = newRollupBucket(comp)
+				stored.tagsHash = hash
+				stored.tagsJSON = canonical
+				out[key] = stored
+			}
+			stored.addMetricPoint(metricName, point.Value, ts)
+		}
+		return out, nil
+	}
 	args := []any{metricName}
 	where := "metric_name = " + s.dialect.placeholder(1)
 	if !start.IsZero() {
@@ -1060,6 +1131,9 @@ func (s *Store) DeleteBeforeTx(ctx context.Context, metricName string, before ti
 	if s.sqliteStorageV4 {
 		beforeNano := before.UTC().UnixNano()
 		return s.deleteSQLiteV4PointsTx(ctx, tx, Query{MetricName: metricName}, &beforeNano)
+	}
+	if s.externalPointBlocks {
+		return s.deleteExternalPointsBeforeTx(ctx, tx, metricName, before.UTC().UnixNano())
 	}
 	where := fmt.Sprintf(`metric_name = %s AND ts_nano < %s`, s.dialect.placeholder(1), s.dialect.placeholder(2))
 	return s.deleteRows(ctx, tx, s.tables.points, where, metricName, before.UTC().UnixNano())

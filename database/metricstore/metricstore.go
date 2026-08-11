@@ -43,11 +43,12 @@ const (
 // 注意：metric store 现在始终启用（旧的 metric_store_enabled 开关已废弃）。
 // 未显式配置时默认使用 SQLite（./data/metrics.db）。
 type MetricStoreConfig struct {
-	Driver       string `json:"metric_db_driver" default:"sqlite"`         // 数据库类型: sqlite, mysql, postgresql
-	DSN          string `json:"metric_db_dsn" default:"./data/metrics.db"` // 数据库连接串
-	TablePrefix  string `json:"metric_table_prefix" default:"metric_"`     // 表名前缀
-	MaxOpenConns int    `json:"metric_max_open_conns" default:"25"`        // 最大连接数
-	MaxIdleConns int    `json:"metric_max_idle_conns" default:"5"`         // 最大空闲连接数
+	Driver              string `json:"metric_db_driver" default:"sqlite"`              // 数据库类型: sqlite, mysql, postgresql
+	DSN                 string `json:"metric_db_dsn" default:"./data/metrics.db"`      // 数据库连接串
+	DownsamplingEnabled bool   `json:"metric_downsampling_enabled" default:"false"`    // 是否允许删除已进入 rollup 的原始点
+	TablePrefix         string `json:"metric_table_prefix" default:"metric_"`          // 表名前缀
+	MaxOpenConns        int    `json:"metric_max_open_conns" default:"25"`             // 最大连接数
+	MaxIdleConns        int    `json:"metric_max_idle_conns" default:"5"`              // 最大空闲连接数
 }
 
 // MetricStoreConfigKeys 配置键
@@ -57,8 +58,9 @@ const (
 	MetricStoreEnabledKey = "metric_store_enabled" // Deprecated: metric store 始终启用
 	MetricDBDriverKey     = "metric_db_driver"
 	MetricDBDSNKey        = "metric_db_dsn"
-	// MetricDownsamplingEnabledKey is retained only to normalize databases
-	// created by releases that allowed downsampling to be disabled.
+	// MetricDownsamplingEnabledKey controls whether compaction may remove raw
+	// points after materializing the three query rollup tiers. It defaults to
+	// false so migrations preserve every source sample.
 	MetricDownsamplingEnabledKey = "metric_downsampling_enabled"
 	MetricTablePrefixKey         = "metric_table_prefix"
 	MetricMaxOpenConnsKey        = "metric_max_open_conns"
@@ -85,7 +87,7 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 	}
 	resources := detectSQLiteResourceProfile()
 	opts = append(opts, metric.WithHeavyReadConcurrency(resources.HeavyReadConcurrent))
-	opts = append(opts, metric.WithRollupPolicy(defaultRollupPolicy()))
+	opts = append(opts, metric.WithRollupPolicy(rollupPolicy(cfg.DownsamplingEnabled)))
 
 	switch driver {
 	case metric.DriverSQLite:
@@ -134,8 +136,16 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 }
 
 func defaultRollupPolicy() metric.RollupPolicy {
+	return rollupPolicy(true)
+}
+
+func rollupPolicy(downsamplingEnabled bool) metric.RollupPolicy {
+	rawRetention := time.Duration(0)
+	if downsamplingEnabled {
+		rawRetention = DefaultRollupRawRetention
+	}
 	return metric.RollupPolicy{
-		RawRetention: DefaultRollupRawRetention,
+		RawRetention: rawRetention,
 		Tiers: []metric.RollupTier{
 			{Interval: DefaultRollupFinestTier, Retention: 48 * time.Hour},
 			{Interval: 5 * time.Minute, Retention: 14 * 24 * time.Hour},

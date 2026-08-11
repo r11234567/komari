@@ -72,6 +72,16 @@ func (s *Store) queryBatchWithinGate(ctx context.Context, queries []Query, virtu
 	for _, group := range groups {
 		if s.sqliteStorageV4 {
 			err = s.querySQLiteV4BatchGroup(ctx, group, queries, virtualLoss, result)
+		} else if s.externalPointBlocks {
+			for _, index := range group.indices {
+				query := queries[index]
+				query.Limit = 0
+				query.Offset = 0
+				result[index], err = s.queryExternalPointBlocks(ctx, s.reader(), query)
+				if err != nil {
+					break
+				}
+			}
 		} else {
 			err = s.queryRelationalBatchGroup(ctx, group, queries, virtualLoss, result)
 		}

@@ -82,6 +82,9 @@ type Store struct {
 	// sqlitePingMerged reports that ping.loss is a virtual projection over the
 	// single physical ping.latency_ms series introduced by SQLite format V8.
 	sqlitePingMerged bool
+	// externalPointBlocks enables the lossless hot-row/cold-block layout used by
+	// MySQL and PostgreSQL. Relational rows remain the write buffer.
+	externalPointBlocks bool
 }
 
 // IsVirtualMetric reports whether a public metric is projected from another
@@ -682,6 +685,9 @@ func (s *Store) DeleteMetric(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if _, err := s.deleteExternalSeriesTx(ctx, tx, Query{MetricName: name}); err != nil {
+		return err
+	}
 	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.watermarks, s.dialect.placeholder(1)), name); err != nil {
 		return err
 	}
@@ -781,6 +787,9 @@ func (s *Store) SetMetricRetention(ctx context.Context, name string, retentionDa
 		return Definition{}, fmt.Errorf("%w: metric %q", ErrNotFound, name)
 	}
 	if retentionDays == 0 {
+		if _, err := s.deleteExternalSeriesTx(ctx, tx, Query{MetricName: name}); err != nil {
+			return Definition{}, err
+		}
 		if s.sqliteStorageV4 {
 			if _, err := s.deleteSQLiteV4PointsTx(ctx, tx, Query{MetricName: name}, nil); err != nil {
 				return Definition{}, err
@@ -828,6 +837,9 @@ func (s *Store) DeleteMetricData(ctx context.Context, name string) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if _, err := s.deleteExternalSeriesTx(ctx, tx, Query{MetricName: name}); err != nil {
+		return err
+	}
 	if s.sqliteStorageV4 {
 		if _, err := s.deleteSQLiteV4PointsTx(ctx, tx, Query{MetricName: name}, nil); err != nil {
 			return err
@@ -887,6 +899,9 @@ func (s *Store) DeleteMetricDataIfDisabled(ctx context.Context, name string) (bo
 	if retentionDays != 0 {
 		return false, nil
 	}
+	if _, err := s.deleteExternalSeriesTx(ctx, tx, Query{MetricName: name}); err != nil {
+		return false, err
+	}
 	if s.sqliteStorageV4 {
 		if _, err := s.deleteSQLiteV4PointsTx(ctx, tx, Query{MetricName: name}, nil); err != nil {
 			return false, err
@@ -932,6 +947,13 @@ func (s *Store) DeleteEntity(ctx context.Context, entityID string) (int64, error
 	defer func() { _ = tx.Rollback() }()
 
 	var total int64
+	if s.externalPointBlocks {
+		n, err := s.deleteExternalSeriesTx(ctx, tx, Query{EntityID: entityID})
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
 	if s.sqliteStorageV4 {
 		n, err := s.deleteSQLiteV4PointsTx(ctx, tx, Query{EntityID: entityID}, nil)
 		if err != nil {
@@ -989,6 +1011,13 @@ func (s *Store) DeleteSeries(ctx context.Context, filter Query) (int64, error) {
 	defer func() { _ = tx.Rollback() }()
 
 	var total int64
+	if s.externalPointBlocks {
+		n, err := s.deleteExternalSeriesTx(ctx, tx, filter)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
 	if s.sqliteStorageV4 {
 		n, err := s.deleteSQLiteV4PointsTx(ctx, tx, filter, nil)
 		if err != nil {
@@ -1263,6 +1292,9 @@ func (s *Store) Query(ctx context.Context, query Query) ([]Point, error) {
 		}
 		return restoreVirtualPingLossPoints(points), nil
 	}
+	if s.externalPointBlocks {
+		return s.queryExternalPointBlocks(ctx, s.reader(), query)
+	}
 	where, args := s.buildWhere(query)
 	order := "ASC"
 	if query.Order == OrderDesc {
@@ -1386,6 +1418,14 @@ func (s *Store) AllEntityIDs(ctx context.Context) ([]string, error) {
 	var sqlText string
 	if s.sqliteStorageV3 {
 		sqlText = fmt.Sprintf(`SELECT DISTINCT entity_id FROM %s ORDER BY entity_id ASC`, s.tables.series)
+	} else if s.externalPointBlocks {
+		sqlText = fmt.Sprintf(`SELECT entity_id FROM (
+			SELECT entity_id FROM %s
+			UNION
+			SELECT entity_id FROM %s
+			UNION
+			SELECT entity_id FROM %s
+		) AS metric_entities ORDER BY entity_id ASC`, s.tables.points, s.tables.rollups, s.tables.series)
 	} else {
 		sqlText = fmt.Sprintf(`SELECT entity_id FROM (
 			SELECT entity_id FROM %s
@@ -1445,6 +1485,20 @@ func (s *Store) MetricTagValues(ctx context.Context, metricName, tagName string)
 			WHERE metric_name = %s AND %s IS NOT NULL AND %s <> ''
 			ORDER BY tag_value ASC`, expression, s.tables.series, placeholder, expression, expression)
 		args = []any{metricName}
+	} else if s.externalPointBlocks {
+		secondPlaceholder := s.dialect.placeholder(2)
+		thirdPlaceholder := s.dialect.placeholder(3)
+		sqlText = fmt.Sprintf(`SELECT DISTINCT tag_value FROM (
+			SELECT %s AS tag_value FROM %s WHERE metric_name = %s
+			UNION
+			SELECT %s AS tag_value FROM %s WHERE metric_name = %s
+			UNION
+			SELECT %s AS tag_value FROM %s WHERE metric_name = %s
+		) AS metric_tags WHERE tag_value IS NOT NULL AND tag_value <> '' ORDER BY tag_value ASC`,
+			expression, s.tables.points, placeholder,
+			expression, s.tables.rollups, secondPlaceholder,
+			expression, s.tables.series, thirdPlaceholder)
+		args = []any{metricName, metricName, metricName}
 	} else {
 		secondPlaceholder := s.dialect.placeholder(2)
 		sqlText = fmt.Sprintf(`SELECT DISTINCT tag_value FROM (
@@ -1505,6 +1559,16 @@ func (s *Store) Latest(ctx context.Context, metricName, entityID string, limit i
 			return points, err
 		}
 		return restoreVirtualPingLossPoints(points), nil
+	}
+	if s.externalPointBlocks {
+		return s.queryExternalPointBlocks(ctx, s.reader(), Query{
+			MetricName: metricName,
+			EntityID:   entityID,
+			Start:      time.Unix(0, math.MinInt64).UTC(),
+			End:        time.Unix(0, math.MaxInt64).UTC(),
+			Order:      OrderDesc,
+			Limit:      limit,
+		})
 	}
 	// Dedicated query rather than a full-range Query: no synthetic time bounds,
 	// and the index on (metric_name, entity_id, ts_nano) serves the ORDER BY.
@@ -1571,6 +1635,23 @@ func (s *Store) LatestBefore(ctx context.Context, metricName, entityID string, b
 	var latest Point
 	var err error
 	found := false
+	if s.externalPointBlocks && beforeNano > math.MinInt64 {
+		points, queryErr := s.queryExternalPointBlocks(ctx, s.reader(), Query{
+			MetricName: metricName,
+			EntityID:   entityID,
+			Start:      time.Unix(0, math.MinInt64).UTC(),
+			End:        time.Unix(0, beforeNano-1).UTC(),
+			Order:      OrderDesc,
+			Limit:      1,
+		})
+		if queryErr != nil {
+			return Point{}, false, queryErr
+		}
+		if len(points) > 0 {
+			latest = points[0]
+			found = true
+		}
+	}
 	if s.sqliteStorageV4 && beforeNano > math.MinInt64 {
 		points, queryErr := s.querySQLiteV4Snapshot(ctx, Query{
 			MetricName: metricName,
@@ -1588,7 +1669,7 @@ func (s *Store) LatestBefore(ctx context.Context, metricName, entityID string, b
 			found = true
 		}
 	}
-	if !s.sqliteStorageV4 {
+	if !s.sqliteStorageV4 && !s.externalPointBlocks {
 		rawSQL := fmt.Sprintf(
 			`SELECT metric_name, entity_id, ts_nano, value, tags, labels FROM %s
 		 WHERE metric_name = %s AND entity_id = %s AND ts_nano < %s
@@ -1697,7 +1778,7 @@ func (s *Store) Aggregate(ctx context.Context, query AggregateQuery) ([]Aggregat
 	// a time bucket so large ranges don't pull every raw point into memory.
 	// Percentiles, first/last and rate need the ordered raw series, so those fall
 	// back to the in-memory aggregator.
-	if valueExpr, ok := sqlAggValueExpr(s.cfg.Driver, query.Aggregation); ok && !s.sqliteStorageV4 {
+	if valueExpr, ok := sqlAggValueExpr(s.cfg.Driver, query.Aggregation); ok && !s.sqliteStorageV4 && !s.externalPointBlocks {
 		return s.aggregateInSQL(ctx, query, valueExpr)
 	}
 	// In-memory fallback. Strip the embedded raw-point Limit/Offset so the full

@@ -37,6 +37,7 @@ import (
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/web/api"
 	installweb "github.com/komari-monitor/komari/web/install"
+	"github.com/komari-monitor/komari/web/nezha"
 	"github.com/komari-monitor/komari/web/oauth"
 	frontendpublic "github.com/komari-monitor/komari/web/public"
 	"github.com/komari-monitor/komari/web/router"
@@ -132,10 +133,11 @@ func (a *App) Bootstrap() error {
 // of settings saved by older upstream, stable, fix, or snapshot releases.
 // Per-metric retention values are deliberately left untouched.
 func normalizeMetricStorageSettings() error {
-	return config.SetMany(map[string]any{
-		config.LowResourceModeKey:                false,
-		metricstore.MetricDownsamplingEnabledKey: true,
-	})
+	if err := config.Set(config.LowResourceModeKey, false); err != nil {
+		return err
+	}
+	_, err := config.GetAs[bool](metricstore.MetricDownsamplingEnabledKey, false)
+	return err
 }
 
 // InitStores 初始化独立存储组件（metric store）并执行 metrics 迁移。
@@ -507,6 +509,16 @@ func (a *App) StartBackground() error {
 		cloudflared.Shutdown()
 		return nil
 	})
+	if a.settings.NezhaCompatEnabled {
+		if err := nezha.StartNezhaCompat(a.settings.NezhaCompatListen); err != nil {
+			logger.Errorf("nezha-compat", "failed to start: %v", err)
+			auditlog.EventLog("error", fmt.Sprintf("Nezha compatibility service failed to start: %v", err))
+		}
+	}
+	a.addCleanup("nezha-compat", func(context.Context) error {
+		_ = nezha.StopNezhaCompat()
+		return nil
+	})
 	return nil
 }
 
@@ -541,6 +553,29 @@ func (a *App) registerReloadHandlers(cors *security.CorsController) {
 	a.reload.Register("message-sender", func(event config.ConfigEvent) {
 		if event.IsChanged(config.NotificationMethodKey) {
 			go messageSender.Initialize()
+		}
+	})
+
+	a.reload.Register("nezha-compat", func(event config.ConfigEvent) {
+		enabledChanged, enabled := config.IsChangedT[bool](event, config.NezhaCompatEnabledKey)
+		listenChanged := event.IsChanged(config.NezhaCompatListenKey)
+		if !enabledChanged && !listenChanged {
+			return
+		}
+		if !enabledChanged {
+			enabled, _ = config.GetAs[bool](config.NezhaCompatEnabledKey, false)
+		}
+		if !enabled {
+			_ = nezha.StopNezhaCompat()
+			return
+		}
+		if listenChanged {
+			_ = nezha.StopNezhaCompat()
+		}
+		listen, _ := config.GetAs[string](config.NezhaCompatListenKey, "0.0.0.0:5555")
+		if err := nezha.StartNezhaCompat(listen); err != nil {
+			logger.Errorf("nezha-compat", "failed to reload: %v", err)
+			auditlog.EventLog("error", fmt.Sprintf("Nezha compatibility service failed to reload: %v", err))
 		}
 	})
 

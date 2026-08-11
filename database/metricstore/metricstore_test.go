@@ -58,7 +58,7 @@ func TestCompactableMetricDefinitionsExcludeVirtualPingLoss(t *testing.T) {
 	}
 }
 
-func TestBuildMetricConfigEnablesDefaultRollupPolicy(t *testing.T) {
+func TestBuildMetricConfigPreservesRawPointsByDefault(t *testing.T) {
 	cfg, err := buildMetricConfig(&MetricStoreConfig{
 		Driver:      "sqlite",
 		DSN:         ":memory:",
@@ -70,8 +70,8 @@ func TestBuildMetricConfigEnablesDefaultRollupPolicy(t *testing.T) {
 	if !cfg.RollupPolicy.Enabled() {
 		t.Fatal("expected default rollup policy to be enabled")
 	}
-	if cfg.RollupPolicy.RawRetention != DefaultRollupRawRetention {
-		t.Fatalf("raw retention = %s, want %s", cfg.RollupPolicy.RawRetention, DefaultRollupRawRetention)
+	if cfg.RollupPolicy.RawRetention != 0 {
+		t.Fatalf("raw retention = %s, want unlimited", cfg.RollupPolicy.RawRetention)
 	}
 }
 
@@ -90,7 +90,7 @@ func TestBuildMetricConfigLeavesFinalRetentionToMetricDefinition(t *testing.T) {
 	}
 }
 
-func TestBuildMetricConfigAlwaysEnablesDownsampling(t *testing.T) {
+func TestBuildMetricConfigKeepsRollupTiersWhenDownsamplingIsDisabled(t *testing.T) {
 	cfg, err := buildMetricConfig(&MetricStoreConfig{
 		Driver: "sqlite",
 		DSN:    ":memory:",
@@ -100,6 +100,23 @@ func TestBuildMetricConfigAlwaysEnablesDownsampling(t *testing.T) {
 	}
 	if !cfg.RollupPolicy.Enabled() {
 		t.Fatal("expected rollup policy to remain enabled")
+	}
+	if cfg.RollupPolicy.RawRetention != 0 {
+		t.Fatalf("raw retention = %s, want unlimited", cfg.RollupPolicy.RawRetention)
+	}
+}
+
+func TestRollupPolicyEnablesRawExpiryOnlyWhenRequested(t *testing.T) {
+	disabled := rollupPolicy(false)
+	enabled := rollupPolicy(true)
+	if disabled.RawRetention != 0 {
+		t.Fatalf("disabled raw retention = %s, want unlimited", disabled.RawRetention)
+	}
+	if enabled.RawRetention != DefaultRollupRawRetention {
+		t.Fatalf("enabled raw retention = %s, want %s", enabled.RawRetention, DefaultRollupRawRetention)
+	}
+	if !reflect.DeepEqual(disabled.Tiers, enabled.Tiers) {
+		t.Fatal("toggling raw expiry must not change the three rollup tiers")
 	}
 }
 

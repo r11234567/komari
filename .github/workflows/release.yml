@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       web_ref:
-        description: Branch or tag in nuomiiiii/komari-web
+        description: Branch or tag in r11234567/komari-web
         required: true
         default: main
         type: string

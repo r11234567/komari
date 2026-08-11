@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/metric"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
@@ -31,9 +33,68 @@ import (
 func init() {
 	reg("listMetricDefinitions", adminListMetricDefinitions, "List metric definitions and retention policies")
 	reg("updateMetricDefinition", adminUpdateMetricDefinition, "Update a metric definition")
+	reg("getDownsamplingPolicy", adminGetDownsamplingPolicy, "Get the three-tier metric downsampling policy")
+	reg("setDownsamplingPolicy", adminSetDownsamplingPolicy, "Enable or disable three-tier metric downsampling")
 	reg("getMetricMigrationStatus", adminGetMetricMigrationStatus, "Get metrics store migration status (SQLite -> MySQL/PostgreSQL)")
 	reg("startMetricMigration", adminStartMetricMigration, "Start migrating metrics data from source SQLite to the current MySQL/PostgreSQL target")
 	reg("cancelMetricMigration", adminCancelMetricMigration, "Cancel the currently running metrics store migration")
+}
+
+type downsamplingPolicyResponse struct {
+	Enabled      bool `json:"enabled"`
+	RawRetention string `json:"raw_retention"`
+	Tiers        []downsamplingTierResponse `json:"tiers"`
+}
+
+type downsamplingTierResponse struct {
+	Interval  string `json:"interval"`
+	Retention string `json:"retention"`
+}
+
+func currentDownsamplingPolicy() (downsamplingPolicyResponse, error) {
+	enabled, err := config.GetAs[bool](metricstore.MetricDownsamplingEnabledKey, false)
+	if err != nil {
+		return downsamplingPolicyResponse{}, err
+	}
+	policy := downsamplingPolicyResponse{Enabled: enabled, RawRetention: "15min"}
+	policy.Tiers = []downsamplingTierResponse{
+		{Interval: "1min", Retention: "48h"},
+		{Interval: "5min", Retention: "14d"},
+		{Interval: "1h", Retention: "metric retention"},
+	}
+	return policy, nil
+}
+
+func adminGetDownsamplingPolicy(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	policy, err := currentDownsamplingPolicy()
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to load downsampling policy: "+err.Error(), nil)
+	}
+	return policy, nil
+}
+
+func adminSetDownsamplingPolicy(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var params struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid downsampling policy: "+err.Error(), nil)
+	}
+	if err := config.Set(metricstore.MetricDownsamplingEnabledKey, params.Enabled); err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to save downsampling policy: "+err.Error(), nil)
+	}
+	reloadCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := metricstore.Reload(reloadCtx); err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Policy saved but metric store reload failed: "+err.Error(), nil)
+	}
+	actor, ip := auditActor(ctx)
+	auditlog.Log(ip, actor, fmt.Sprintf("set metric downsampling enabled=%t", params.Enabled), "warn")
+	policy, err := currentDownsamplingPolicy()
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to reload downsampling policy: "+err.Error(), nil)
+	}
+	return policy, nil
 }
 
 type metricDefinitionResponse struct {

@@ -196,7 +196,77 @@ func runSQLIntegration(t *testing.T, name string, cfg Config, expectSQLPercentil
 	if err := store.Ping(ctx); err != nil {
 		t.Fatalf("store unusable after space reclaim: %v", err)
 	}
+	assertExternalColdBlockSemantics(t, ctx, store)
 	assertSQLBatchReadSemantics(t, ctx, store)
+}
+
+func assertExternalColdBlockSemantics(t *testing.T, ctx context.Context, store *Store) {
+	t.Helper()
+	store.cfg.RollupPolicy = RollupPolicy{
+		Tiers: []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
+	}
+	if err := store.CreateMetric(ctx, Definition{Name: "cold.cpu", Type: TypeGauge, RetentionDays: 7}); err != nil {
+		t.Fatalf("create cold-block metric: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Minute)
+	base := now.Add(-2 * time.Hour)
+	points := []Point{
+		{MetricName: "cold.cpu", EntityID: "node-cold", Timestamp: base, Value: 10, Tags: map[string]string{"scope": "cold"}},
+		{MetricName: "cold.cpu", EntityID: "node-cold", Timestamp: base.Add(time.Minute), Value: 20, Tags: map[string]string{"scope": "cold"}},
+		{MetricName: "cold.cpu", EntityID: "node-cold", Timestamp: base.Add(2 * time.Minute), Value: 30, Tags: map[string]string{"scope": "cold"}},
+	}
+	if err := store.WriteBatch(ctx, points); err != nil {
+		t.Fatalf("write cold-block points: %v", err)
+	}
+	if _, err := store.CompactMetric(ctx, "cold.cpu", now); err != nil {
+		t.Fatalf("compact cold-block points: %v", err)
+	}
+	var hotCount, blockCount int
+	if err := store.db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE metric_name = %s", store.tables.points, store.dialect.placeholder(1)),
+		"cold.cpu").Scan(&hotCount); err != nil {
+		t.Fatalf("count cold-block hot rows: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT COUNT(*) FROM %s b JOIN %s s ON s.id = b.series_id WHERE s.metric_name = %s`,
+		store.tables.pointBlocks, store.tables.series, store.dialect.placeholder(1)), "cold.cpu").Scan(&blockCount); err != nil {
+		t.Fatalf("count cold blocks: %v", err)
+	}
+	if hotCount != 0 || blockCount == 0 {
+		t.Fatalf("cold-block seal left hot=%d blocks=%d, want hot=0 and blocks>0", hotCount, blockCount)
+	}
+	got, err := store.Query(ctx, Query{
+		MetricName: "cold.cpu", EntityID: "node-cold", Start: base.Add(-time.Second), End: base.Add(3 * time.Minute),
+		Tags: map[string]string{"scope": "cold"}, Order: OrderAsc,
+	})
+	if err != nil {
+		t.Fatalf("query cold-block points: %v", err)
+	}
+	if !reflect.DeepEqual(pointValues(got), []float64{10, 20, 30}) {
+		t.Fatalf("cold-block values = %v, want [10 20 30]", pointValues(got))
+	}
+	latest, err := store.Latest(ctx, "cold.cpu", "node-cold", 1)
+	if err != nil || len(latest) != 1 || latest[0].Value != 30 {
+		t.Fatalf("cold-block latest = %#v, err %v", latest, err)
+	}
+	deleted, err := store.DeleteBefore(ctx, "cold.cpu", base.Add(2*time.Minute))
+	if err != nil || deleted != 2 {
+		t.Fatalf("delete cold-block prefix = %d, err %v; want 2", deleted, err)
+	}
+	remaining, err := store.Query(ctx, Query{
+		MetricName: "cold.cpu", EntityID: "node-cold", Start: base, End: base.Add(3 * time.Minute),
+	})
+	if err != nil || len(remaining) != 1 || remaining[0].Value != 30 {
+		t.Fatalf("remaining cold-block points = %#v, err %v", remaining, err)
+	}
+}
+
+func pointValues(points []Point) []float64 {
+	values := make([]float64, len(points))
+	for index, point := range points {
+		values[index] = point.Value
+	}
+	return values
 }
 
 func assertSQLBatchReadSemantics(t *testing.T, ctx context.Context, store *Store) {
@@ -291,7 +361,14 @@ func dropIntegrationTables(t *testing.T, store *Store, prefix string) {
 	if strings.TrimSpace(prefix) == "" {
 		t.Fatal("refusing to drop tables with empty prefix")
 	}
-	for _, name := range []string{prefix + "rollups", prefix + "points", prefix + "definitions"} {
+	for _, name := range []string{
+		prefix + "point_blocks",
+		prefix + "series",
+		prefix + "rollups",
+		prefix + "points",
+		prefix + "compaction_watermarks",
+		prefix + "definitions",
+	} {
 		if _, err := store.db.Exec("DROP TABLE IF EXISTS " + name); err != nil {
 			t.Fatalf("drop integration table %s: %v", name, err)
 		}

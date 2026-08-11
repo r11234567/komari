@@ -139,7 +139,7 @@ func TestRunRemovesDeprecatedMetricRetentionConfig(t *testing.T) {
 	}
 }
 
-func TestRunRemovesCompatibilityConfig(t *testing.T) {
+func TestRunPreservesCompatibilityConfig(t *testing.T) {
 	db := openTestDB(t, "migrations_remove_compatibility_config")
 	if err := db.AutoMigrate(&appconfig.ConfigItem{}); err != nil {
 		t.Fatalf("migrate config item table: %v", err)
@@ -164,8 +164,8 @@ func TestRunRemovesCompatibilityConfig(t *testing.T) {
 	}).Count(&count).Error; err != nil {
 		t.Fatalf("count removed config: %v", err)
 	}
-	if count != 0 {
-		t.Fatalf("removed compatibility config remains: %d", count)
+	if count != 2 {
+		t.Fatalf("compatibility config count = %d; want 2", count)
 	}
 	if err := db.First(&appconfig.ConfigItem{}, "key = ?", "sitename").Error; err != nil {
 		t.Fatalf("unrelated config was removed: %v", err)

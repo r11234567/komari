@@ -76,8 +76,8 @@ func TestNormalizeMetricStorageSettingsOverridesLegacyValues(t *testing.T) {
 		t.Fatalf("low resource mode = %t, err %v; want false", lowResource, err)
 	}
 	downsampling, err := config.GetAs[bool](metricstore.MetricDownsamplingEnabledKey)
-	if err != nil || !downsampling {
-		t.Fatalf("downsampling = %t, err %v; want true", downsampling, err)
+	if err != nil || downsampling {
+		t.Fatalf("downsampling = %t, err %v; want preserved false", downsampling, err)
 	}
 	retention, err := config.GetAs[int]("metric_retention_days")
 	if err != nil || retention != 37 {
