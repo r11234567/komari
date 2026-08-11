@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -58,7 +57,7 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	if summary.LoadRows != 2 || summary.GPURows != 1 || summary.LatencyRows != 2 || summary.MonitoringRows != 5 {
 		t.Fatalf("unexpected legacy monitoring summary: %#v", summary)
 	}
-	if summary.EstimatedPoints != 23 || summary.RetentionDays < 1 {
+	if summary.EstimatedPoints != 38 || summary.RetentionDays < 1 {
 		t.Fatalf("unexpected legacy point estimate or retention: %#v", summary)
 	}
 
@@ -82,7 +81,7 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("migrate legacy monitoring with progress: %v", err)
 	}
-	if lastProgress.SourceRowsDone != 5 || lastProgress.SourceRowsTotal != 5 || lastProgress.WrittenPoints != 23 {
+	if lastProgress.SourceRowsDone != 5 || lastProgress.SourceRowsTotal != 5 || lastProgress.WrittenPoints != 38 {
 		t.Fatalf("unexpected final migration progress: %#v", lastProgress)
 	}
 
@@ -101,11 +100,11 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	}
 
 	hour := base.Truncate(time.Hour)
-	cpuPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricCPU, EntityID: "client-a", Start: hour.Add(-time.Second), End: hour.Add(time.Hour)})
+	cpuPoints, err := metricStore.Query(ctx, metric.Query{MetricName: metricstore.MetricCPU, EntityID: "client-a", Start: hour.Add(-time.Second), End: hour.Add(time.Hour), Order: metric.OrderAsc})
 	if err != nil {
 		t.Fatalf("query cpu points: %v", err)
 	}
-	if len(cpuPoints) != 1 || math.Abs(cpuPoints[0].Value-22) > 1e-9 || !cpuPoints[0].Timestamp.Equal(hour) {
+	if len(cpuPoints) != 2 || cpuPoints[0].Value != 12.5 || cpuPoints[1].Value != 22.5 || !cpuPoints[0].Timestamp.Equal(base) || !cpuPoints[1].Timestamp.Equal(base.Add(time.Minute)) {
 		t.Fatalf("unexpected cpu points: %#v", cpuPoints)
 	}
 
@@ -231,63 +230,6 @@ func TestStaleCompletionMarkerRecoversExactPingHistory(t *testing.T) {
 	}
 	if len(points) != 2 || points[0].Value != 36 || points[1].Value != -1 {
 		t.Fatalf("recovered ping history lost precision: %#v", points)
-	}
-}
-
-func TestLegacyHourlyP95PreservesHoursAndTaggedSeries(t *testing.T) {
-	ctx := context.Background()
-	metricDB, err := sql.Open("sqlite3", "file:"+filepath.ToSlash(filepath.Join(t.TempDir(), "hourly-p95.db"))+"?mode=rwc")
-	if err != nil {
-		t.Fatalf("open metric db: %v", err)
-	}
-	store, err := metric.Open(ctx, metric.SQLite("", metric.WithDB(metricDB)))
-	if err != nil {
-		t.Fatalf("open metric store: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = store.Close()
-		_ = metricDB.Close()
-	})
-	if err := store.UpsertMetric(ctx, metric.Definition{Name: "test.p95", Type: metric.TypeGauge, RetentionDays: 1}); err != nil {
-		t.Fatalf("create test metric: %v", err)
-	}
-
-	base := time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC)
-	aggregator := &legacyHourlyP95Aggregator{store: store}
-	inputs := [][]metric.Point{
-		{{MetricName: "test.p95", EntityID: "node-a", Timestamp: base.Add(time.Minute), Value: 10, Tags: map[string]string{"task_id": "1"}}},
-		{{MetricName: "test.p95", EntityID: "node-a", Timestamp: base.Add(2 * time.Minute), Value: 20, Tags: map[string]string{"task_id": "1"}}},
-		{{MetricName: "test.p95", EntityID: "node-a", Timestamp: base.Add(time.Hour), Value: 30, Tags: map[string]string{"task_id": "1"}}},
-		{{MetricName: "test.p95", EntityID: "node-a", Timestamp: base.Add(time.Minute), Value: 100, Tags: map[string]string{"task_id": "2"}}},
-	}
-	for _, points := range inputs {
-		if _, err := aggregator.Add(ctx, points); err != nil {
-			t.Fatalf("add aggregate input: %v", err)
-		}
-	}
-	if _, err := aggregator.Flush(ctx); err != nil {
-		t.Fatalf("flush aggregate input: %v", err)
-	}
-
-	taskOne, err := store.Query(ctx, metric.Query{
-		MetricName: "test.p95", EntityID: "node-a", Start: base.Add(-time.Second), End: base.Add(2 * time.Hour),
-		Tags: map[string]string{"task_id": "1"}, Order: metric.OrderAsc,
-	})
-	if err != nil {
-		t.Fatalf("query task one: %v", err)
-	}
-	if len(taskOne) != 2 || math.Abs(taskOne[0].Value-19.5) > 1e-9 || taskOne[1].Value != 30 {
-		t.Fatalf("unexpected task one aggregates: %#v", taskOne)
-	}
-	taskTwo, err := store.Query(ctx, metric.Query{
-		MetricName: "test.p95", EntityID: "node-a", Start: base.Add(-time.Second), End: base.Add(2 * time.Hour),
-		Tags: map[string]string{"task_id": "2"}, Order: metric.OrderAsc,
-	})
-	if err != nil {
-		t.Fatalf("query task two: %v", err)
-	}
-	if len(taskTwo) != 1 || taskTwo[0].Value != 100 || !taskTwo[0].Timestamp.Equal(base) {
-		t.Fatalf("unexpected task two aggregates: %#v", taskTwo)
 	}
 }
 

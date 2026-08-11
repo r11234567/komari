@@ -67,8 +67,8 @@ func TestBuildMetricConfigPreservesRawPointsByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build metric config: %v", err)
 	}
-	if !cfg.RollupPolicy.Enabled() {
-		t.Fatal("expected default rollup policy to be enabled")
+	if cfg.RollupPolicy.Enabled() {
+		t.Fatal("default config unexpectedly enabled downsampling")
 	}
 	if cfg.RollupPolicy.RawRetention != 0 {
 		t.Fatalf("raw retention = %s, want unlimited", cfg.RollupPolicy.RawRetention)
@@ -77,8 +77,9 @@ func TestBuildMetricConfigPreservesRawPointsByDefault(t *testing.T) {
 
 func TestBuildMetricConfigLeavesFinalRetentionToMetricDefinition(t *testing.T) {
 	cfg, err := buildMetricConfig(&MetricStoreConfig{
-		Driver: "sqlite",
-		DSN:    ":memory:",
+		Driver:              "sqlite",
+		DSN:                 ":memory:",
+		DownsamplingEnabled: true,
 	}, false)
 	if err != nil {
 		t.Fatalf("build metric config: %v", err)
@@ -90,7 +91,7 @@ func TestBuildMetricConfigLeavesFinalRetentionToMetricDefinition(t *testing.T) {
 	}
 }
 
-func TestBuildMetricConfigKeepsRollupTiersWhenDownsamplingIsDisabled(t *testing.T) {
+func TestBuildMetricConfigDisablesRollupTiersWhenDownsamplingIsDisabled(t *testing.T) {
 	cfg, err := buildMetricConfig(&MetricStoreConfig{
 		Driver: "sqlite",
 		DSN:    ":memory:",
@@ -98,8 +99,8 @@ func TestBuildMetricConfigKeepsRollupTiersWhenDownsamplingIsDisabled(t *testing.
 	if err != nil {
 		t.Fatalf("build metric config: %v", err)
 	}
-	if !cfg.RollupPolicy.Enabled() {
-		t.Fatal("expected rollup policy to remain enabled")
+	if cfg.RollupPolicy.Enabled() {
+		t.Fatal("downsampling-disabled config unexpectedly retained rollup tiers")
 	}
 	if cfg.RollupPolicy.RawRetention != 0 {
 		t.Fatalf("raw retention = %s, want unlimited", cfg.RollupPolicy.RawRetention)
@@ -109,14 +110,17 @@ func TestBuildMetricConfigKeepsRollupTiersWhenDownsamplingIsDisabled(t *testing.
 func TestRollupPolicyEnablesRawExpiryOnlyWhenRequested(t *testing.T) {
 	disabled := rollupPolicy(false)
 	enabled := rollupPolicy(true)
+	if disabled.Enabled() || len(disabled.Tiers) != 0 {
+		t.Fatalf("disabled policy unexpectedly has rollup tiers: %#v", disabled)
+	}
 	if disabled.RawRetention != 0 {
 		t.Fatalf("disabled raw retention = %s, want unlimited", disabled.RawRetention)
 	}
 	if enabled.RawRetention != DefaultRollupRawRetention {
 		t.Fatalf("enabled raw retention = %s, want %s", enabled.RawRetention, DefaultRollupRawRetention)
 	}
-	if !reflect.DeepEqual(disabled.Tiers, enabled.Tiers) {
-		t.Fatal("toggling raw expiry must not change the three rollup tiers")
+	if reflect.DeepEqual(disabled.Tiers, enabled.Tiers) || len(enabled.Tiers) != 3 {
+		t.Fatal("enabled policy must define the three rollup tiers")
 	}
 }
 

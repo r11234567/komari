@@ -45,7 +45,7 @@ const (
 type MetricStoreConfig struct {
 	Driver              string `json:"metric_db_driver" default:"sqlite"`           // 数据库类型: sqlite, mysql, postgresql
 	DSN                 string `json:"metric_db_dsn" default:"./data/metrics.db"`   // 数据库连接串
-	DownsamplingEnabled bool   `json:"metric_downsampling_enabled" default:"false"` // 是否允许删除已进入 rollup 的原始点
+	DownsamplingEnabled bool   `json:"metric_downsampling_enabled" default:"false"` // 是否启用三级降采样并删除已汇总的原始点
 	TablePrefix         string `json:"metric_table_prefix" default:"metric_"`       // 表名前缀
 	MaxOpenConns        int    `json:"metric_max_open_conns" default:"25"`          // 最大连接数
 	MaxIdleConns        int    `json:"metric_max_idle_conns" default:"5"`           // 最大空闲连接数
@@ -58,9 +58,9 @@ const (
 	MetricStoreEnabledKey = "metric_store_enabled" // Deprecated: metric store 始终启用
 	MetricDBDriverKey     = "metric_db_driver"
 	MetricDBDSNKey        = "metric_db_dsn"
-	// MetricDownsamplingEnabledKey controls whether compaction may remove raw
-	// points after materializing the three query rollup tiers. It defaults to
-	// false so migrations preserve every source sample.
+	// MetricDownsamplingEnabledKey controls the three query rollup tiers and
+	// expiry of raw points. It defaults to false so no rollups are generated and
+	// migrations preserve every source sample.
 	MetricDownsamplingEnabledKey = "metric_downsampling_enabled"
 	MetricTablePrefixKey         = "metric_table_prefix"
 	MetricMaxOpenConnsKey        = "metric_max_open_conns"
@@ -140,12 +140,11 @@ func defaultRollupPolicy() metric.RollupPolicy {
 }
 
 func rollupPolicy(downsamplingEnabled bool) metric.RollupPolicy {
-	rawRetention := time.Duration(0)
-	if downsamplingEnabled {
-		rawRetention = DefaultRollupRawRetention
+	if !downsamplingEnabled {
+		return metric.RollupPolicy{}
 	}
 	return metric.RollupPolicy{
-		RawRetention: rawRetention,
+		RawRetention: DefaultRollupRawRetention,
 		Tiers: []metric.RollupTier{
 			{Interval: DefaultRollupFinestTier, Retention: 48 * time.Hour},
 			{Interval: 5 * time.Minute, Retention: 14 * 24 * time.Hour},
