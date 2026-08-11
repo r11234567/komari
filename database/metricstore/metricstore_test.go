@@ -24,12 +24,17 @@ func TestDefaultRollupPolicy(t *testing.T) {
 	if policy.RawRetention != DefaultRollupRawRetention {
 		t.Fatalf("raw retention = %s, want %s", policy.RawRetention, DefaultRollupRawRetention)
 	}
-	if len(policy.Tiers) != 3 {
-		t.Fatalf("expected 3 rollup tiers, got %d", len(policy.Tiers))
+	if len(policy.Tiers) != 4 {
+		t.Fatalf("expected 3 configurable rollup tiers plus terminal tier, got %d", len(policy.Tiers))
 	}
 
-	wantIntervals := []time.Duration{time.Minute, 5 * time.Minute, time.Hour}
-	wantRetentions := []time.Duration{48 * time.Hour, 14 * 24 * time.Hour, 14 * 24 * time.Hour}
+	wantIntervals := []time.Duration{time.Minute, 5 * time.Minute, time.Hour, 24 * time.Hour}
+	wantRetentions := []time.Duration{
+		DefaultRollupMinuteRetentionMinutes * time.Minute,
+		DefaultRollupFiveMinuteRetentionMinutes * time.Minute,
+		DefaultRollupHourRetentionHours * time.Hour,
+		defaultRollupTerminalRetention,
+	}
 	for i := range wantIntervals {
 		if policy.Tiers[i].Interval != wantIntervals[i] {
 			t.Fatalf("tier %d interval = %s, want %s", i, policy.Tiers[i].Interval, wantIntervals[i])
@@ -84,7 +89,7 @@ func TestBuildMetricConfigLeavesFinalRetentionToMetricDefinition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build metric config: %v", err)
 	}
-	wantRollupRetention := 14 * 24 * time.Hour
+	wantRollupRetention := defaultRollupTerminalRetention
 	lastTier := cfg.RollupPolicy.Tiers[len(cfg.RollupPolicy.Tiers)-1]
 	if lastTier.Retention != wantRollupRetention {
 		t.Fatalf("rollup retention = %s, want %s", lastTier.Retention, wantRollupRetention)
@@ -119,8 +124,86 @@ func TestRollupPolicyEnablesRawExpiryOnlyWhenRequested(t *testing.T) {
 	if enabled.RawRetention != DefaultRollupRawRetention {
 		t.Fatalf("enabled raw retention = %s, want %s", enabled.RawRetention, DefaultRollupRawRetention)
 	}
-	if reflect.DeepEqual(disabled.Tiers, enabled.Tiers) || len(enabled.Tiers) != 3 {
+	if reflect.DeepEqual(disabled.Tiers, enabled.Tiers) || len(enabled.Tiers) != 4 {
 		t.Fatal("enabled policy must define the three rollup tiers")
+	}
+}
+
+func TestBuildMetricConfigUsesCustomRollupRetention(t *testing.T) {
+	cfg, err := buildMetricConfig(&MetricStoreConfig{
+		Driver:                           "sqlite",
+		DSN:                              ":memory:",
+		DownsamplingEnabled:              true,
+		RollupMinuteRetentionMinutes:     30,
+		RollupFiveMinuteRetentionMinutes: 150,
+		RollupHourRetentionHours:         300,
+	}, false)
+	if err != nil {
+		t.Fatalf("build metric config: %v", err)
+	}
+	want := []time.Duration{30 * time.Minute, 150 * time.Minute, 300 * time.Hour}
+	for i, retention := range want {
+		if cfg.RollupPolicy.Tiers[i].Retention != retention {
+			t.Fatalf("tier %d retention = %s, want %s", i, cfg.RollupPolicy.Tiers[i].Retention, retention)
+		}
+	}
+}
+
+func TestBuildMetricConfigRejectsInvalidRollupRetention(t *testing.T) {
+	tests := []MetricStoreConfig{
+		{
+			Driver:                       "sqlite",
+			DSN:                          ":memory:",
+			DownsamplingEnabled:          true,
+			RollupMinuteRetentionMinutes: -1,
+		},
+		{
+			Driver:                           "sqlite",
+			DSN:                              ":memory:",
+			DownsamplingEnabled:              true,
+			RollupMinuteRetentionMinutes:     120,
+			RollupFiveMinuteRetentionMinutes: 60,
+			RollupHourRetentionHours:         600,
+		},
+		{
+			Driver:                           "sqlite",
+			DSN:                              ":memory:",
+			DownsamplingEnabled:              true,
+			RollupMinuteRetentionMinutes:     30,
+			RollupFiveMinuteRetentionMinutes: 150,
+			RollupHourRetentionHours:         1,
+		},
+	}
+	for i, cfg := range tests {
+		if _, err := buildMetricConfig(&cfg, false); err == nil {
+			t.Fatalf("case %d: expected invalid rollup retention error", i)
+		}
+	}
+}
+
+func TestConfigFromFingerprintPreservesDownsamplingPolicy(t *testing.T) {
+	base := &MetricStoreConfig{
+		DownsamplingEnabled:              true,
+		RollupMinuteRetentionMinutes:     30,
+		RollupFiveMinuteRetentionMinutes: 150,
+		RollupHourRetentionHours:         300,
+		TablePrefix:                      "metrics_",
+		MaxOpenConns:                     11,
+		MaxIdleConns:                     4,
+	}
+
+	got, err := configFromFingerprint(
+		"mysql|user:password@tcp(host:3306)/metrics",
+		base,
+	)
+	if err != nil {
+		t.Fatalf("config from fingerprint: %v", err)
+	}
+	if got.DownsamplingEnabled != base.DownsamplingEnabled ||
+		got.RollupMinuteRetentionMinutes != base.RollupMinuteRetentionMinutes ||
+		got.RollupFiveMinuteRetentionMinutes != base.RollupFiveMinuteRetentionMinutes ||
+		got.RollupHourRetentionHours != base.RollupHourRetentionHours {
+		t.Fatalf("downsampling policy was not preserved: %#v", got)
 	}
 }
 

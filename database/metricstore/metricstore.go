@@ -30,12 +30,16 @@ var ErrCompactInProgress = errors.New("metric store compact already in progress"
 const (
 	// DefaultRollupRawRetention keeps a short hot raw window; older samples are
 	// served from rollups after compaction.
-	DefaultRollupRawRetention   = 15 * time.Minute
-	DefaultRollupFinestTier     = time.Minute
-	externalStoreInitTimeout    = 30 * time.Second
-	checkpointRetryTimeout      = time.Second
-	backgroundCheckpointTimeout = 10 * time.Second
-	metricWALCheckpointLimit    = 64 * 1024 * 1024
+	DefaultRollupRawRetention                 = 15 * time.Minute
+	DefaultRollupFinestTier                   = time.Minute
+	DefaultRollupMinuteRetentionMinutes     = 600
+	DefaultRollupFiveMinuteRetentionMinutes = 3000
+	DefaultRollupHourRetentionHours         = 600
+	defaultRollupTerminalRetention          = 100 * 365 * 24 * time.Hour
+	externalStoreInitTimeout                  = 30 * time.Second
+	checkpointRetryTimeout                    = time.Second
+	backgroundCheckpointTimeout              = 10 * time.Second
+	metricWALCheckpointLimit                  = 64 * 1024 * 1024
 )
 
 // MetricStoreConfig 保存 metric store 配置。
@@ -43,12 +47,15 @@ const (
 // 注意：metric store 现在始终启用（旧的 metric_store_enabled 开关已废弃）。
 // 未显式配置时默认使用 SQLite（./data/metrics.db）。
 type MetricStoreConfig struct {
-	Driver              string `json:"metric_db_driver" default:"sqlite"`           // 数据库类型: sqlite, mysql, postgresql
-	DSN                 string `json:"metric_db_dsn" default:"./data/metrics.db"`   // 数据库连接串
-	DownsamplingEnabled bool   `json:"metric_downsampling_enabled" default:"false"` // 是否启用三级降采样并删除已汇总的原始点
-	TablePrefix         string `json:"metric_table_prefix" default:"metric_"`       // 表名前缀
-	MaxOpenConns        int    `json:"metric_max_open_conns" default:"25"`          // 最大连接数
-	MaxIdleConns        int    `json:"metric_max_idle_conns" default:"5"`           // 最大空闲连接数
+	Driver                           string `json:"metric_db_driver" default:"sqlite"`                          // 数据库类型: sqlite, mysql, postgresql
+	DSN                              string `json:"metric_db_dsn" default:"./data/metrics.db"`                  // 数据库连接串
+	DownsamplingEnabled              bool   `json:"metric_downsampling_enabled" default:"false"`                // 是否启用三级降采样并删除已汇总的原始点
+	RollupMinuteRetentionMinutes     int    `json:"metric_rollup_minute_retention_minutes" default:"600"`       // 1 分钟桶保留分钟数
+	RollupFiveMinuteRetentionMinutes int    `json:"metric_rollup_five_minute_retention_minutes" default:"3000"` // 5 分钟桶保留分钟数
+	RollupHourRetentionHours         int    `json:"metric_rollup_hour_retention_hours" default:"600"`           // 1 小时桶保留小时数
+	TablePrefix                      string `json:"metric_table_prefix" default:"metric_"`                      // 表名前缀
+	MaxOpenConns                     int    `json:"metric_max_open_conns" default:"25"`                         // 最大连接数
+	MaxIdleConns                     int    `json:"metric_max_idle_conns" default:"5"`                          // 最大空闲连接数
 }
 
 // MetricStoreConfigKeys 配置键
@@ -62,6 +69,9 @@ const (
 	// expiry of raw points. It defaults to false so no rollups are generated and
 	// migrations preserve every source sample.
 	MetricDownsamplingEnabledKey = "metric_downsampling_enabled"
+	MetricRollupMinuteRetentionMinutesKey     = "metric_rollup_minute_retention_minutes"
+	MetricRollupFiveMinuteRetentionMinutesKey = "metric_rollup_five_minute_retention_minutes"
+	MetricRollupHourRetentionHoursKey         = "metric_rollup_hour_retention_hours"
 	MetricTablePrefixKey         = "metric_table_prefix"
 	MetricMaxOpenConnsKey        = "metric_max_open_conns"
 	MetricMaxIdleConnsKey        = "metric_max_idle_conns"
@@ -87,7 +97,11 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 	}
 	resources := detectSQLiteResourceProfile()
 	opts = append(opts, metric.WithHeavyReadConcurrency(resources.HeavyReadConcurrent))
-	opts = append(opts, metric.WithRollupPolicy(rollupPolicy(cfg.DownsamplingEnabled)))
+	policy, err := rollupPolicyFromConfig(cfg)
+	if err != nil {
+		return metric.Config{}, err
+	}
+	opts = append(opts, metric.WithRollupPolicy(policy))
 
 	switch driver {
 	case metric.DriverSQLite:
@@ -136,21 +150,79 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 }
 
 func defaultRollupPolicy() metric.RollupPolicy {
-	return rollupPolicy(true)
+	policy, _ := rollupPolicyFromConfig(&MetricStoreConfig{DownsamplingEnabled: true})
+	return policy
 }
 
 func rollupPolicy(downsamplingEnabled bool) metric.RollupPolicy {
-	if !downsamplingEnabled {
-		return metric.RollupPolicy{}
+	policy, _ := rollupPolicyFromConfig(&MetricStoreConfig{DownsamplingEnabled: downsamplingEnabled})
+	return policy
+}
+
+func rollupPolicyFromConfig(cfg *MetricStoreConfig) (metric.RollupPolicy, error) {
+	if cfg == nil {
+		return metric.RollupPolicy{}, fmt.Errorf("metric store config is nil")
 	}
-	return metric.RollupPolicy{
+	if !cfg.DownsamplingEnabled {
+		return metric.RollupPolicy{}, nil
+	}
+
+	minuteRetention := cfg.RollupMinuteRetentionMinutes
+	fiveMinuteRetention := cfg.RollupFiveMinuteRetentionMinutes
+	hourRetention := cfg.RollupHourRetentionHours
+	if minuteRetention == 0 {
+		minuteRetention = DefaultRollupMinuteRetentionMinutes
+	}
+	if fiveMinuteRetention == 0 {
+		fiveMinuteRetention = DefaultRollupFiveMinuteRetentionMinutes
+	}
+	if hourRetention == 0 {
+		hourRetention = DefaultRollupHourRetentionHours
+	}
+	if minuteRetention <= 0 || fiveMinuteRetention <= 0 || hourRetention <= 0 {
+		return metric.RollupPolicy{}, fmt.Errorf("metric rollup retention values must be positive integers")
+	}
+
+	minuteDuration, err := checkedRollupDuration(minuteRetention, time.Minute)
+	if err != nil {
+		return metric.RollupPolicy{}, err
+	}
+	fiveMinuteDuration, err := checkedRollupDuration(fiveMinuteRetention, time.Minute)
+	if err != nil {
+		return metric.RollupPolicy{}, err
+	}
+	hourDuration, err := checkedRollupDuration(hourRetention, time.Hour)
+	if err != nil {
+		return metric.RollupPolicy{}, err
+	}
+
+	policy := metric.RollupPolicy{
 		RawRetention: DefaultRollupRawRetention,
 		Tiers: []metric.RollupTier{
-			{Interval: DefaultRollupFinestTier, Retention: 48 * time.Hour},
-			{Interval: 5 * time.Minute, Retention: 14 * 24 * time.Hour},
-			{Interval: time.Hour, Retention: 14 * 24 * time.Hour},
+			{Interval: DefaultRollupFinestTier, Retention: minuteDuration},
+			{Interval: 5 * time.Minute, Retention: fiveMinuteDuration},
+			{Interval: time.Hour, Retention: hourDuration},
+			{Interval: 24 * time.Hour, Retention: defaultRollupTerminalRetention},
 		},
 	}
+	if err := policy.Validate(); err != nil {
+		return metric.RollupPolicy{}, fmt.Errorf("invalid metric rollup retention policy: %w", err)
+	}
+	return policy, nil
+}
+
+// ValidateDownsamplingPolicy validates the configurable three-tier retention
+// ladder without opening or changing the active metric store.
+func ValidateDownsamplingPolicy(cfg *MetricStoreConfig) error {
+	_, err := rollupPolicyFromConfig(cfg)
+	return err
+}
+
+func checkedRollupDuration(value int, unit time.Duration) (time.Duration, error) {
+	if value <= 0 || int64(value) > int64((time.Duration(1<<63-1))/unit) {
+		return 0, fmt.Errorf("metric rollup retention value is outside the supported range")
+	}
+	return time.Duration(value) * unit, nil
 }
 
 // ResolveDriverFromConfig 根据 DSN 自动推断 metrics 数据库类型；当 DSN 不能可靠

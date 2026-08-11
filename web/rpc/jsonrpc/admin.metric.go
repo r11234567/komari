@@ -34,16 +34,19 @@ func init() {
 	reg("listMetricDefinitions", adminListMetricDefinitions, "List metric definitions and retention policies")
 	reg("updateMetricDefinition", adminUpdateMetricDefinition, "Update a metric definition")
 	reg("getDownsamplingPolicy", adminGetDownsamplingPolicy, "Get the three-tier metric downsampling policy")
-	reg("setDownsamplingPolicy", adminSetDownsamplingPolicy, "Enable or disable three-tier metric downsampling")
+	reg("setDownsamplingPolicy", adminSetDownsamplingPolicy, "Configure three-tier metric downsampling")
 	reg("getMetricMigrationStatus", adminGetMetricMigrationStatus, "Get metrics store migration status (SQLite -> MySQL/PostgreSQL)")
 	reg("startMetricMigration", adminStartMetricMigration, "Start migrating metrics data from source SQLite to the current MySQL/PostgreSQL target")
 	reg("cancelMetricMigration", adminCancelMetricMigration, "Cancel the currently running metrics store migration")
 }
 
 type downsamplingPolicyResponse struct {
-	Enabled      bool                       `json:"enabled"`
-	RawRetention string                     `json:"raw_retention"`
-	Tiers        []downsamplingTierResponse `json:"tiers"`
+	Enabled                          bool                       `json:"enabled"`
+	RawRetention                     string                     `json:"raw_retention"`
+	MinuteRetentionMinutes           int                        `json:"minute_retention_minutes"`
+	FiveMinuteRetentionMinutes       int                        `json:"five_minute_retention_minutes"`
+	HourRetentionHours               int                        `json:"hour_retention_hours"`
+	Tiers                            []downsamplingTierResponse `json:"tiers"`
 }
 
 type downsamplingTierResponse struct {
@@ -52,15 +55,21 @@ type downsamplingTierResponse struct {
 }
 
 func currentDownsamplingPolicy() (downsamplingPolicyResponse, error) {
-	enabled, err := config.GetAs[bool](metricstore.MetricDownsamplingEnabledKey, false)
+	cfg, err := config.GetManyAs[metricstore.MetricStoreConfig]()
 	if err != nil {
 		return downsamplingPolicyResponse{}, err
 	}
-	policy := downsamplingPolicyResponse{Enabled: enabled, RawRetention: "15min"}
+	policy := downsamplingPolicyResponse{
+		Enabled:                    cfg.DownsamplingEnabled,
+		RawRetention:               metricstore.DefaultRollupRawRetention.String(),
+		MinuteRetentionMinutes:     cfg.RollupMinuteRetentionMinutes,
+		FiveMinuteRetentionMinutes: cfg.RollupFiveMinuteRetentionMinutes,
+		HourRetentionHours:         cfg.RollupHourRetentionHours,
+	}
 	policy.Tiers = []downsamplingTierResponse{
-		{Interval: "1min", Retention: "48h"},
-		{Interval: "5min", Retention: "14d"},
-		{Interval: "1h", Retention: "metric retention"},
+		{Interval: "1m", Retention: (time.Duration(cfg.RollupMinuteRetentionMinutes) * time.Minute).String()},
+		{Interval: "5m", Retention: (time.Duration(cfg.RollupFiveMinuteRetentionMinutes) * time.Minute).String()},
+		{Interval: "1h", Retention: (time.Duration(cfg.RollupHourRetentionHours) * time.Hour).String()},
 	}
 	return policy, nil
 }
@@ -75,12 +84,37 @@ func adminGetDownsamplingPolicy(_ context.Context, _ *rpc.JsonRpcRequest) (any, 
 
 func adminSetDownsamplingPolicy(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
-		Enabled bool `json:"enabled"`
+		Enabled                    bool `json:"enabled"`
+		MinuteRetentionMinutes     *int `json:"minute_retention_minutes"`
+		FiveMinuteRetentionMinutes *int `json:"five_minute_retention_minutes"`
+		HourRetentionHours         *int `json:"hour_retention_hours"`
 	}
 	if err := req.BindParams(&params); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid downsampling policy: "+err.Error(), nil)
 	}
-	if err := config.Set(metricstore.MetricDownsamplingEnabledKey, params.Enabled); err != nil {
+	cfg, err := config.GetManyAs[metricstore.MetricStoreConfig]()
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to load downsampling policy: "+err.Error(), nil)
+	}
+	cfg.DownsamplingEnabled = params.Enabled
+	if params.MinuteRetentionMinutes != nil {
+		cfg.RollupMinuteRetentionMinutes = *params.MinuteRetentionMinutes
+	}
+	if params.FiveMinuteRetentionMinutes != nil {
+		cfg.RollupFiveMinuteRetentionMinutes = *params.FiveMinuteRetentionMinutes
+	}
+	if params.HourRetentionHours != nil {
+		cfg.RollupHourRetentionHours = *params.HourRetentionHours
+	}
+	if err := metricstore.ValidateDownsamplingPolicy(cfg); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid downsampling policy: "+err.Error(), nil)
+	}
+	if err := config.SetMany(map[string]any{
+		metricstore.MetricDownsamplingEnabledKey:              cfg.DownsamplingEnabled,
+		metricstore.MetricRollupMinuteRetentionMinutesKey:     cfg.RollupMinuteRetentionMinutes,
+		metricstore.MetricRollupFiveMinuteRetentionMinutesKey: cfg.RollupFiveMinuteRetentionMinutes,
+		metricstore.MetricRollupHourRetentionHoursKey:         cfg.RollupHourRetentionHours,
+	}); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to save downsampling policy: "+err.Error(), nil)
 	}
 	reloadCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -89,7 +123,13 @@ func adminSetDownsamplingPolicy(ctx context.Context, req *rpc.JsonRpcRequest) (a
 		return nil, rpc.MakeError(rpc.InternalError, "Policy saved but metric store reload failed: "+err.Error(), nil)
 	}
 	actor, ip := auditActor(ctx)
-	auditlog.Log(ip, actor, fmt.Sprintf("set metric downsampling enabled=%t", params.Enabled), "warn")
+	auditlog.Log(ip, actor, fmt.Sprintf(
+		"set metric downsampling enabled=%t retention=%dm/%dm/%dh",
+		params.Enabled,
+		cfg.RollupMinuteRetentionMinutes,
+		cfg.RollupFiveMinuteRetentionMinutes,
+		cfg.RollupHourRetentionHours,
+	), "warn")
 	policy, err := currentDownsamplingPolicy()
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to reload downsampling policy: "+err.Error(), nil)
