@@ -204,6 +204,8 @@ func runSQLIntegration(t *testing.T, name string, cfg Config, expectSQLPercentil
 
 func assertExternalColdBlockSemantics(t *testing.T, ctx context.Context, store *Store) {
 	t.Helper()
+	originalPolicy := store.cfg.RollupPolicy
+	defer func() { store.cfg.RollupPolicy = originalPolicy }()
 	store.cfg.RollupPolicy = RollupPolicy{
 		Tiers: []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
 	}
