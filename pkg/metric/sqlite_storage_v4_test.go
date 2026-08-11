@@ -249,6 +249,9 @@ func TestSQLiteStorageV4ReducesV3FileSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := store.ReclaimSpace(ctx); err != nil {
+		t.Fatalf("manually reclaim migrated V4 database: %v", err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -661,6 +664,9 @@ func TestSQLiteStorageV4ReducesRollupDominatedDatabase(t *testing.T) {
 	rows, err := store.scanRollupRowsBetween(ctx, "history", "node-00", map[string]string{"task": "public"}, time.Minute.Nanoseconds(), base.UnixNano(), base.Add(24*time.Hour-time.Minute).UnixNano(), true)
 	if err != nil || len(rows) != bucketsPerEntity {
 		t.Fatalf("query rollup-dominated V4 database: count=%d err=%v", len(rows), err)
+	}
+	if err := store.ReclaimSpace(ctx); err != nil {
+		t.Fatalf("manually reclaim rollup-dominated V4 database: %v", err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)

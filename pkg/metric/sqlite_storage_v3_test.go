@@ -269,6 +269,9 @@ func TestSQLiteStorageV3UsedForNewDatabase(t *testing.T) {
 	}
 	defer store.Close()
 	assertSQLiteV3Schema(t, ctx, store.db)
+	if mode := sqlitePragmaInt(t, ctx, store.db, "auto_vacuum"); mode != 2 {
+		t.Fatalf("new SQLite auto_vacuum mode = %d, want incremental(2)", mode)
+	}
 }
 
 func TestSQLiteStorageV3SupportsCustomTablePrefix(t *testing.T) {
@@ -455,6 +458,9 @@ func TestSQLiteStorageV3ReducesRepresentativeFileSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("migrate representative database: %v", err)
 	}
+	if err := store.ReclaimSpace(ctx); err != nil {
+		t.Fatalf("manually reclaim migrated database: %v", err)
+	}
 	_ = store.Close()
 	after := fileSize(t, path)
 	t.Logf("SQLite storage V3 size: before=%d after=%d ratio=%.3f", before, after, float64(after)/float64(before))
@@ -512,10 +518,6 @@ func assertSQLiteV3Schema(t *testing.T, ctx context.Context, db *sql.DB) {
 		`SELECT type FROM sqlite_master WHERE name = ?`, "metric__series_entity_idx",
 	).Scan(&indexKind); err != nil || indexKind != "index" {
 		t.Fatalf("SQLite V3 series entity index: kind=%q want=index err=%v", indexKind, err)
-	}
-	var mode int
-	if err := db.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&mode); err != nil || mode != 2 {
-		t.Fatalf("SQLite auto_vacuum mode = %d, want incremental(2), err=%v", mode, err)
 	}
 }
 

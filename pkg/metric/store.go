@@ -330,6 +330,10 @@ func prepareSQLiteConfig(cfg Config) (Config, error) {
 		if err := ensureSQLiteDir(cfg.DSN); err != nil {
 			return cfg, err
 		}
+		// New files can enable incremental auto-vacuum before the first table is
+		// created. Existing files keep their current mode until an administrator
+		// explicitly runs the blocking space-reclamation action.
+		cfg.DSN = setSQLiteDSNParam(cfg.DSN, "_auto_vacuum", "incremental")
 		cfg.DSN = appendSQLiteDSNParam(cfg.DSN, "_busy_timeout", fmt.Sprintf("%d", durationMillis(cfg.SQLite.BusyTimeout)))
 	}
 	return cfg, nil
