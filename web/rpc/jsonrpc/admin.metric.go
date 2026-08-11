@@ -41,12 +41,12 @@ func init() {
 }
 
 type downsamplingPolicyResponse struct {
-	Enabled                          bool                       `json:"enabled"`
-	RawRetention                     string                     `json:"raw_retention"`
-	MinuteRetentionMinutes           int                        `json:"minute_retention_minutes"`
-	FiveMinuteRetentionMinutes       int                        `json:"five_minute_retention_minutes"`
-	HourRetentionHours               int                        `json:"hour_retention_hours"`
-	Tiers                            []downsamplingTierResponse `json:"tiers"`
+	Enabled                    bool                       `json:"enabled"`
+	RawRetention               string                     `json:"raw_retention"`
+	MinuteRetentionMinutes     int                        `json:"minute_retention_minutes"`
+	FiveMinuteRetentionMinutes int                        `json:"five_minute_retention_minutes"`
+	HourRetentionHours         int                        `json:"hour_retention_hours"`
+	Tiers                      []downsamplingTierResponse `json:"tiers"`
 }
 
 type downsamplingTierResponse struct {

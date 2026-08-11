@@ -30,16 +30,16 @@ var ErrCompactInProgress = errors.New("metric store compact already in progress"
 const (
 	// DefaultRollupRawRetention keeps a short hot raw window; older samples are
 	// served from rollups after compaction.
-	DefaultRollupRawRetention                 = 15 * time.Minute
-	DefaultRollupFinestTier                   = time.Minute
+	DefaultRollupRawRetention               = 15 * time.Minute
+	DefaultRollupFinestTier                 = time.Minute
 	DefaultRollupMinuteRetentionMinutes     = 600
 	DefaultRollupFiveMinuteRetentionMinutes = 3000
 	DefaultRollupHourRetentionHours         = 600
 	defaultRollupTerminalRetention          = 100 * 365 * 24 * time.Hour
-	externalStoreInitTimeout                  = 30 * time.Second
-	checkpointRetryTimeout                    = time.Second
-	backgroundCheckpointTimeout              = 10 * time.Second
-	metricWALCheckpointLimit                  = 64 * 1024 * 1024
+	externalStoreInitTimeout                = 30 * time.Second
+	checkpointRetryTimeout                  = time.Second
+	backgroundCheckpointTimeout             = 10 * time.Second
+	metricWALCheckpointLimit                = 64 * 1024 * 1024
 )
 
 // MetricStoreConfig 保存 metric store 配置。
@@ -68,13 +68,13 @@ const (
 	// MetricDownsamplingEnabledKey controls the three query rollup tiers and
 	// expiry of raw points. It defaults to false so no rollups are generated and
 	// migrations preserve every source sample.
-	MetricDownsamplingEnabledKey = "metric_downsampling_enabled"
+	MetricDownsamplingEnabledKey              = "metric_downsampling_enabled"
 	MetricRollupMinuteRetentionMinutesKey     = "metric_rollup_minute_retention_minutes"
 	MetricRollupFiveMinuteRetentionMinutesKey = "metric_rollup_five_minute_retention_minutes"
 	MetricRollupHourRetentionHoursKey         = "metric_rollup_hour_retention_hours"
-	MetricTablePrefixKey         = "metric_table_prefix"
-	MetricMaxOpenConnsKey        = "metric_max_open_conns"
-	MetricMaxIdleConnsKey        = "metric_max_idle_conns"
+	MetricTablePrefixKey                      = "metric_table_prefix"
+	MetricMaxOpenConnsKey                     = "metric_max_open_conns"
+	MetricMaxIdleConnsKey                     = "metric_max_idle_conns"
 	// MigrationTargetKey 记录上一次成功完成启动迁移的目标指纹（driver+dsn）。
 	// 当目标发生变化（例如从 SQLite 切换到 MySQL/PostgreSQL）时，启动迁移会
 	// 重新执行，把上一个目标库的数据搬运到新的目标 metrics 库。
