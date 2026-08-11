@@ -18,12 +18,10 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
-const (
-	defaultMetricQueryPoints	= 500
-	maxMetricQueryPoints		= 10_000
-	historicalQueryTimeout		= 20 * time.Second
-	maxRawMetricQueryRange		= time.Hour
-)
+const defaultMetricQueryPoints = 500
+const maxMetricQueryPoints = 10_000
+const historicalQueryTimeout = 20 * time.Second
+const maxRawMetricQueryRange = time.Hour
 
 func init() {
 	regPublic("listMetricDefinitions", publicListMetricDefinitions, "List public metric definitions")
