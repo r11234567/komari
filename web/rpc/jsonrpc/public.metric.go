@@ -19,10 +19,10 @@ import (
 )
 
 const (
-	defaultMetricQueryPoints   = 500
-	maxMetricQueryPoints       = 10_000
-	historicalQueryTimeout     = 20 * time.Second
-	maxRawMetricQueryRange     = time.Hour
+	defaultMetricQueryPoints	= 500
+	maxMetricQueryPoints		= 10_000
+	historicalQueryTimeout		= 20 * time.Second
+	maxRawMetricQueryRange		= time.Hour
 )
 
 func init() {
