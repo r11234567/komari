@@ -104,23 +104,45 @@ jobs:
       - name: Run backend regression suite
         run: go test ./...
 
-  build-linux:
+  build-binaries:
     needs: [prepare, build-frontend]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - goarch: amd64
+          - goos: linux
+            goarch: amd64
             zig_target: x86_64-linux-musl
-          - goarch: arm64
+            extension: ""
+          - goos: linux
+            goarch: arm64
             zig_target: aarch64-linux-musl
-          - goarch: 386
+            extension: ""
+          - goos: linux
+            goarch: 386
             zig_target: x86-linux-musl
-          - goarch: riscv64
+            extension: ""
+          - goos: linux
+            goarch: riscv64
             zig_target: riscv64-linux-musl
-          - goarch: loong64
+            extension: ""
+          - goos: linux
+            goarch: loong64
             zig_target: loongarch64-linux-musl
+            extension: ""
+          - goos: windows
+            goarch: amd64
+            zig_target: x86_64-windows-gnu
+            extension: .exe
+          - goos: windows
+            goarch: arm64
+            zig_target: aarch64-windows-gnu
+            extension: .exe
+          - goos: windows
+            goarch: 386
+            zig_target: x86-windows-gnu
+            extension: .exe
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -136,10 +158,10 @@ jobs:
       - name: Install Zig cross-compiler toolchain
         uses: ./.github/actions/setup-zig
 
-      - name: Build Linux binary
+      - name: Build binary
         env:
           VERSION: ${{ needs.prepare.outputs.app_version }}
-          GOOS: linux
+          GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
           CC: zig cc -target ${{ matrix.zig_target }}
@@ -150,16 +172,16 @@ jobs:
           version_hash="${GITHUB_SHA::7}"
           go build -trimpath \
             -ldflags="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${version_hash}" \
-            -o "komari-linux-${GOARCH}"
+            -o "komari-${GOOS}-${GOARCH}${{ matrix.extension }}"
 
-      - name: Upload Linux binary artifact
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: komari-linux-${{ matrix.goarch }}
-          path: komari-linux-${{ matrix.goarch }}
+          name: komari-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: komari-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.extension }}
 
   publish-docker:
-    needs: [prepare, test-backend, build-linux]
+    needs: [prepare, test-backend, build-binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -230,7 +252,7 @@ jobs:
           done
 
   publish-release:
-    needs: [prepare, publish-docker, build-linux]
+    needs: [prepare, publish-docker, build-binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -245,6 +267,13 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Download Windows binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: komari-windows-*
+          path: release-assets
+          merge-multiple: true
+
       - name: Generate checksums and update manifest
         env:
           VERSION: ${{ needs.prepare.outputs.app_version }}
@@ -252,19 +281,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sha256sum komari-linux-* | sort -k2 > SHA256SUMS
+          sha256sum komari-linux-* komari-windows-* | sort -k2 > SHA256SUMS
           node <<'NODE'
           const crypto = require("crypto");
           const fs = require("fs");
           const files = fs.readdirSync(".")
-            .filter((name) => /^komari-linux-[A-Za-z0-9]+$/.test(name))
+            .filter((name) => /^komari-(linux|windows)-[A-Za-z0-9]+(?:\.exe)?$/.test(name))
             .sort();
           const assets = files.map((name) => {
             const content = fs.readFileSync(name);
+            const match = name.match(/^komari-(linux|windows)-([A-Za-z0-9]+)(?:\.exe)?$/);
             return {
               name,
-              os: "linux",
-              arch: name.replace("komari-linux-", ""),
+              os: match[1],
+              arch: match[2],
               size: content.length,
               sha256: crypto.createHash("sha256").update(content).digest("hex"),
             };
@@ -314,6 +344,7 @@ jobs:
 
           gh release upload "${SNAPSHOT_TAG}" \
             release-assets/komari-linux-* \
+            release-assets/komari-windows-* \
             release-assets/SHA256SUMS \
             release-assets/komari-update.json \
             --repo "${GITHUB_REPOSITORY}" \

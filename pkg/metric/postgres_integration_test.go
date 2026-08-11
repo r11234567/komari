@@ -308,7 +308,11 @@ func assertSQLBatchReadSemantics(t *testing.T, ctx context.Context, store *Store
 			Aggregation: aggregation, Interval: 2 * time.Minute, PreserveSeries: true,
 		})
 	}
-	assertSQLSeriesBatchMatches(t, ctx, store, rawQueries, base.Add(10*time.Minute), "raw_relational", 1)
+	rawScanKind := "raw_relational"
+	if store.externalPointBlocks {
+		rawScanKind = "raw_external"
+	}
+	assertSQLSeriesBatchMatches(t, ctx, store, rawQueries, base.Add(10*time.Minute), rawScanKind, 1)
 
 	now := base.Add(2 * time.Hour)
 	if _, err := store.Compact(ctx, now); err != nil {

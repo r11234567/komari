@@ -73,14 +73,22 @@ func (s *Store) queryBatchWithinGate(ctx context.Context, queries []Query, virtu
 		if s.sqliteStorageV4 {
 			err = s.querySQLiteV4BatchGroup(ctx, group, queries, virtualLoss, result)
 		} else if s.externalPointBlocks {
+			cached := make(map[string][]Point)
 			for _, index := range group.indices {
 				query := queries[index]
 				query.Limit = 0
 				query.Offset = 0
-				result[index], err = s.queryExternalPointBlocks(ctx, s.reader(), query)
-				if err != nil {
-					break
+				key := query.MetricName + "\x00" + query.EntityID
+				points, ok := cached[key]
+				if !ok {
+					observeMetricBatchScan(ctx, "raw_external")
+					points, err = s.queryExternalPointBlocks(ctx, s.reader(), query)
+					if err != nil {
+						break
+					}
+					cached[key] = points
 				}
+				result[index] = append([]Point(nil), points...)
 			}
 		} else {
 			err = s.queryRelationalBatchGroup(ctx, group, queries, virtualLoss, result)
