@@ -33,12 +33,15 @@ func TestThemeNavigationRejectsExternalAndTraversalRoutes(t *testing.T) {
 	}
 }
 
-func TestBundledThemeNavigationKeepsNezhaAndLegacyFallbackRoutes(t *testing.T) {
-	if got := bundledThemeNavigation(DefaultTheme).ServerDetailURL("node-a", 9); got != "/server/node-a?ping_task=9" {
+func TestBundledThemeNavigationKeepsOfficialAndNezhaRoutes(t *testing.T) {
+	if got := bundledThemeNavigation(LegacyLiteDefaultTheme).ServerDetailURL("node-a", 9); got != "/server/node-a?ping_task=9" {
 		t.Fatalf("Nezha detail URL = %q", got)
 	}
-	if got := bundledThemeNavigation(DefaultTheme).ServerNetworkURL("node-a"); got != "/server/node-a?view=network" {
+	if got := bundledThemeNavigation(LegacyLiteDefaultTheme).ServerNetworkURL("node-a"); got != "/server/node-a?view=network" {
 		t.Fatalf("Nezha network URL = %q", got)
+	}
+	if got := bundledThemeNavigation(DefaultTheme).ServerDetailURL("node-a", 9); got != "/instance/node-a" {
+		t.Fatalf("official default detail URL = %q", got)
 	}
 	if got := bundledThemeNavigation("unknown").ServerDetailURL("node-a", 9); got != "/instance/node-a" {
 		t.Fatalf("legacy third-party theme detail URL = %q", got)

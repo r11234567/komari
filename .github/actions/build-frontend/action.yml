@@ -1,5 +1,5 @@
-name: Build system UI
-description: Clone komari-web, build the theme-independent system UI, and optionally upload it as an artifact.
+name: Build Komari web bundles
+description: Build the isolated system UI and the official default public theme, then optionally upload both as an artifact.
 
 inputs:
   node-version:
@@ -23,7 +23,7 @@ runs:
       with:
         node-version: ${{ inputs.node-version }}
 
-    - name: Clone and build system UI
+    - name: Clone and build Komari web bundles
       shell: bash
       run: |
         set -euxo pipefail
@@ -37,7 +37,7 @@ runs:
         npm ci
         npm run lint
         npm test
-        VITE_SYSTEM_UI_BUILD=1 VITE_BASE_URL=/system-assets/ npm run build
+        npm run build:system
         cd ..
 
         rm -rf web/public/systemUI
@@ -45,6 +45,18 @@ runs:
         cp -r komari-web/dist web/public/systemUI/
 
         grep -F '/system-assets/' web/public/systemUI/dist/index.html
+
+        cd komari-web
+        npm run build
+        cd ..
+
+        rm -rf web/public/bundledThemes/default
+        mkdir -p web/public/bundledThemes/default
+        cp komari-web/komari-theme.json web/public/bundledThemes/default/
+        cp -r komari-web/dist web/public/bundledThemes/default/
+
+        grep -F '/assets/' web/public/bundledThemes/default/dist/index.html
+        test -f web/public/bundledThemes/default/komari-theme.json
         test -f web/public/bundledThemes/nezha/komari-theme.json
         test -f web/public/bundledThemes/nezha/dist/index.html
         test -f web/public/rescueTheme/dist/index.html
@@ -54,7 +66,8 @@ runs:
       shell: bash
       run: |
         set -euxo pipefail
-        tar -czf "$RUNNER_TEMP/${{ inputs.artifact-name }}.tar.gz" -C web/public/systemUI .
+        tar -czf "$RUNNER_TEMP/${{ inputs.artifact-name }}.tar.gz" \
+          -C web/public systemUI bundledThemes/default
 
     - name: Upload frontend artifact
       if: ${{ inputs.artifact-name != '' }}

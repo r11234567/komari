@@ -91,13 +91,13 @@ func parseThemeNavigation(data []byte) (ThemeNavigation, bool) {
 
 func bundledThemeNavigation(themeID string) ThemeNavigation {
 	switch strings.TrimSpace(themeID) {
-	case DefaultTheme:
+	case LegacyLiteDefaultTheme:
 		return ThemeNavigation{
 			serverDetailTemplate:  "/server/{uuid}",
 			serverNetworkTemplate: "/server/{uuid}?view=network",
 			pingTaskParameter:     "ping_task",
 		}
-	case LegacyDefaultTheme:
+	case DefaultTheme:
 		return ThemeNavigation{serverDetailTemplate: "/instance/{uuid}"}
 	default:
 		// Existing Komari themes traditionally use /instance/:uuid. Themes with

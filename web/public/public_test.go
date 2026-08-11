@@ -243,7 +243,7 @@ func TestCustomHTMLIsLimitedToPublicPages(t *testing.T) {
 	}
 }
 
-func TestEnsureBundledThemesUsesNezhaForNewInstall(t *testing.T) {
+func TestEnsureBundledThemesUsesOfficialDefaultForNewInstall(t *testing.T) {
 	t.Chdir(t.TempDir())
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
@@ -262,18 +262,21 @@ func TestEnsureBundledThemesUsesNezhaForNewInstall(t *testing.T) {
 		t.Fatalf("active theme = %q, want %q", active, DefaultTheme)
 	}
 	if !IsLocalThemeUsable(DefaultTheme) {
-		t.Fatal("bundled Nezha theme was not installed")
+		t.Fatal("bundled official default theme was not installed")
+	}
+	if !IsLocalThemeUsable(LegacyLiteDefaultTheme) {
+		t.Fatal("bundled Nezha theme was not retained as an optional theme")
 	}
 }
 
-func TestEnsureBundledThemesMigratesLegacyDefaultToNezha(t *testing.T) {
+func TestEnsureBundledThemesMigratesLiteDefaultToOfficialTheme(t *testing.T) {
 	t.Chdir(t.TempDir())
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	config.SetDb(db)
-	if err := config.Set(config.ThemeKey, LegacyDefaultTheme); err != nil {
+	if err := config.Set(config.ThemeKey, LegacyLiteDefaultTheme); err != nil {
 		t.Fatal(err)
 	}
 
@@ -288,10 +291,10 @@ func TestEnsureBundledThemesMigratesLegacyDefaultToNezha(t *testing.T) {
 		t.Fatalf("active theme = %q, want %q", active, DefaultTheme)
 	}
 	if !IsLocalThemeUsable(DefaultTheme) {
-		t.Fatal("legacy migration did not install the bundled Nezha theme")
+		t.Fatal("Lite migration did not install the official default theme")
 	}
-	if IsLocalThemeUsable("komari-classic") {
-		t.Fatal("legacy migration unexpectedly installed the independent Classic theme")
+	if !IsLocalThemeUsable(LegacyLiteDefaultTheme) {
+		t.Fatal("Lite migration did not retain Nezha as an optional theme")
 	}
 }
 
@@ -321,7 +324,7 @@ func TestEnsureBundledThemesRepairsRestoreWithoutThemeFiles(t *testing.T) {
 	}
 }
 
-func TestEnsureBundledThemesRefreshesExistingNezhaOnce(t *testing.T) {
+func TestEnsureBundledThemesRefreshesExistingDefaultOnce(t *testing.T) {
 	t.Chdir(t.TempDir())
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
@@ -333,7 +336,7 @@ func TestEnsureBundledThemesRefreshesExistingNezhaOnce(t *testing.T) {
 	if err := os.MkdirAll(staleDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(DataDir, ThemesDir, DefaultTheme, "komari-theme.json"), []byte(`{"short":"nezha"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(DataDir, ThemesDir, DefaultTheme, "komari-theme.json"), []byte(`{"short":"default"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(staleDir, IndexFile), []byte("stale-theme-index"), 0o644); err != nil {
@@ -341,7 +344,7 @@ func TestEnsureBundledThemesRefreshesExistingNezhaOnce(t *testing.T) {
 	}
 	if err := config.SetMany(map[string]any{
 		config.ThemeKey:         DefaultTheme,
-		themeBundleMigrationKey: 1,
+		themeBundleMigrationKey: currentThemeBundleMigration - 1,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +357,7 @@ func TestEnsureBundledThemesRefreshesExistingNezhaOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(index) == "stale-theme-index" {
-		t.Fatal("existing Nezha theme was not refreshed")
+		t.Fatal("existing official default theme was not refreshed")
 	}
 	migration, err := config.GetAs[int](themeBundleMigrationKey, 0)
 	if err != nil || migration != currentThemeBundleMigration {
@@ -376,7 +379,7 @@ func TestEnsureBundledThemesRefreshesExistingNezhaOnce(t *testing.T) {
 	}
 }
 
-func TestEnsureBundledThemesDoesNotReinstallDeletedNezha(t *testing.T) {
+func TestEnsureBundledThemesDoesNotReinstallDeletedDefaultAfterMigration(t *testing.T) {
 	t.Chdir(t.TempDir())
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
@@ -396,7 +399,7 @@ func TestEnsureBundledThemesDoesNotReinstallDeletedNezha(t *testing.T) {
 	}
 	if err := config.SetMany(map[string]any{
 		config.ThemeKey:         "third-party",
-		themeBundleMigrationKey: 1,
+		themeBundleMigrationKey: currentThemeBundleMigration,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +408,7 @@ func TestEnsureBundledThemesDoesNotReinstallDeletedNezha(t *testing.T) {
 		t.Fatal(err)
 	}
 	if IsLocalThemeUsable(DefaultTheme) {
-		t.Fatal("deleted Nezha theme was reinstalled for a third-party active theme")
+		t.Fatal("deleted default theme was reinstalled for a third-party active theme")
 	}
 	active, err := config.GetAs[string](config.ThemeKey)
 	if err != nil || active != "third-party" {

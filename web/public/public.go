@@ -33,12 +33,12 @@ var PublicFS embed.FS
 
 // 常量定义
 const (
-	DataDir            = "./data"
-	ThemesDir          = "theme"
-	FaviconFile        = "favicon.ico"
-	DefaultTheme       = "nezha"
-	LegacyDefaultTheme = "default"
-	LanguageCookieName = "language"
+	DataDir                = "./data"
+	ThemesDir              = "theme"
+	FaviconFile            = "favicon.ico"
+	DefaultTheme           = "default"
+	LegacyLiteDefaultTheme = "nezha"
+	LanguageCookieName     = "language"
 
 	// 主题内部结构定义
 	DistDir   = "dist"       // 静态资源存放目录
@@ -47,7 +47,7 @@ const (
 
 const themeBundleMigrationKey = "theme_bundle_migration_v1"
 
-const currentThemeBundleMigration = 3
+const currentThemeBundleMigration = 4
 
 const themeChangeReloadScript = `<script>(()=>{window.addEventListener("storage",(event)=>{if(event.key==="komari-active-theme-changed"){window.location.reload();}});})();</script>`
 
@@ -84,7 +84,7 @@ func injectCustomHTML(htmlStr, customHead, customBody string) string {
 func renderPublicDocumentTitle(htmlStr, title string) string {
 	title = strings.TrimSpace(title)
 	if title == "" {
-		title = "Komari Lite"
+		title = "Komari Monitor"
 	}
 
 	titleTag := "<title>" + html.EscapeString(title) + "</title>"
@@ -351,28 +351,28 @@ func EnsureBundledThemes() error {
 	if currentTheme == "" {
 		currentTheme = DefaultTheme
 	}
-	if currentTheme == LegacyDefaultTheme {
-		currentTheme = DefaultTheme
-	}
-	if migrated < 1 {
-		if err := installEmbeddedTheme("bundledThemes/nezha", DefaultTheme); err != nil {
-			return fmt.Errorf("install bundled Nezha theme: %w", err)
+	if migrated < currentThemeBundleMigration {
+		replaceDefault := migrated > 0 && IsLocalThemeUsable(DefaultTheme)
+		if err := installEmbeddedThemeWithReplace("bundledThemes/default", DefaultTheme, replaceDefault); err != nil {
+			return fmt.Errorf("install bundled default theme: %w", err)
 		}
-	}
-	// The first decoupled snapshot installed Nezha as a managed theme but did
-	// not refresh that copy on later Komari upgrades. Replace an existing copy
-	// once so deployments do not keep an old router/API bundle indefinitely.
-	// A user who deleted Nezha and selected another theme keeps that choice.
-	if migrated >= 1 && migrated < currentThemeBundleMigration && IsLocalThemeUsable(DefaultTheme) {
-		if err := installEmbeddedThemeWithReplace("bundledThemes/nezha", DefaultTheme, true); err != nil {
-			return fmt.Errorf("refresh bundled Nezha theme: %w", err)
+		if migrated < 1 {
+			if err := installEmbeddedTheme("bundledThemes/nezha", LegacyLiteDefaultTheme); err != nil {
+				return fmt.Errorf("install bundled Nezha theme: %w", err)
+			}
+		}
+		// Snapshots up to migration 3 selected Nezha automatically. Move those
+		// installations back to the official Komari theme while retaining Nezha
+		// as an optional managed theme.
+		if currentTheme == LegacyLiteDefaultTheme {
+			currentTheme = DefaultTheme
 		}
 	}
 	if !IsLocalThemeUsable(currentTheme) {
 		currentTheme = localThemeFallback()
 		if currentTheme == "" {
-			if err := installEmbeddedTheme("bundledThemes/nezha", DefaultTheme); err != nil {
-				return fmt.Errorf("restore bundled Nezha theme: %w", err)
+			if err := installEmbeddedTheme("bundledThemes/default", DefaultTheme); err != nil {
+				return fmt.Errorf("restore bundled default theme: %w", err)
 			}
 			currentTheme = DefaultTheme
 		}
@@ -390,7 +390,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			config.DescriptionKey: "A simple server monitor tool.",
 			config.CustomHeadKey:  "",
 			config.CustomBodyKey:  "",
-			config.SitenameKey:    "Komari Lite",
+			config.SitenameKey:    "Komari Monitor",
 			config.ThemeKey:       DefaultTheme,
 		})
 		return cfg

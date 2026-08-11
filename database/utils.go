@@ -33,7 +33,7 @@ func GetPublicInfo() (map[string]interface{}, error) {
 
 	// Apply defaults only when a key is missing.
 	if !hasKey("sitename") {
-		cst.Sitename = "Komari Lite"
+		cst.Sitename = "Komari Monitor"
 	}
 	if !hasKey("description") {
 		cst.Description = "Komari Monitor, a simple server monitoring tool."
@@ -48,7 +48,7 @@ func GetPublicInfo() (map[string]interface{}, error) {
 	// Fallback defaults if we couldn't enumerate keys.
 	if allErr != nil {
 		if cst.Sitename == "" {
-			cst.Sitename = "Komari Lite"
+			cst.Sitename = "Komari Monitor"
 		}
 		if cst.Description == "" {
 			cst.Description = "Komari Monitor, a simple server monitoring tool."

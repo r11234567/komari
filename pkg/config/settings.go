@@ -10,7 +10,7 @@ const (
 
 type Settings struct {
 	ID                     uint   `json:"id,omitempty"`                                        // 1
-	Sitename               string `json:"sitename" default:"Komari Lite"`                      // 站点名称，默认 "Komari Lite"
+	Sitename               string `json:"sitename" default:"Komari Monitor"`                   // 站点名称，默认 "Komari Monitor"
 	Description            string `json:"description" default:"A simple server monitor tool."` // 站点描述
 	AdminDefaultPageSize   int    `json:"admin_default_page_size" default:"10"`                // 后台列表默认每页条数
 	ReduceMotion           bool   `json:"reduce_motion" default:"false"`                       // 减少后台界面动态效果
