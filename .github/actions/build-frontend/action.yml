@@ -19,7 +19,7 @@ runs:
   using: composite
   steps:
     - name: Setup Node.js
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v5
       with:
         node-version: ${{ inputs.node-version }}
 
@@ -35,6 +35,8 @@ runs:
         fi
         cd komari-web
         npm ci
+        npm run lint
+        npm test
         VITE_SYSTEM_UI_BUILD=1 VITE_BASE_URL=/system-assets/ npm run build
         cd ..
 

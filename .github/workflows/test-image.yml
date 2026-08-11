@@ -1,0 +1,132 @@
+name: Publish Test Image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: test-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Build frontend artifact
+        uses: ./.github/actions/build-frontend
+        with:
+          artifact-name: komari-frontend
+
+  binaries:
+    needs: frontend
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            zig_target: x86_64-linux-musl
+          - goarch: arm64
+            zig_target: aarch64-linux-musl
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Restore frontend artifact
+        uses: ./.github/actions/restore-frontend
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install Zig
+        uses: ./.github/actions/setup-zig
+
+      - name: Build Linux binary
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+          CC: zig cc -target ${{ matrix.zig_target }}
+          GIN_MODE: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="main-${GITHUB_SHA::7}"
+          go build -trimpath \
+            -ldflags="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${version} -X github.com/komari-monitor/komari/utils.VersionHash=${GITHUB_SHA::7}" \
+            -o "komari-linux-${GOARCH}"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-image-linux-${{ matrix.goarch }}
+          path: komari-linux-${{ matrix.goarch }}
+
+  publish:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-image-linux-*
+          path: .
+          merge-multiple: true
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:test
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:test-${{ github.sha }}
+          provenance: false
+
+      - name: Verify platforms and version
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${IMAGE_NAME}:test-${GITHUB_SHA}"
+          expected_version="main-${GITHUB_SHA::7}"
+          expected_hash="${GITHUB_SHA::7}"
+          manifest="$(docker buildx imagetools inspect "${image}")"
+          echo "${manifest}"
+          grep -F 'Platform:  linux/amd64' <<<"${manifest}"
+          grep -F 'Platform:  linux/arm64' <<<"${manifest}"
+          for platform in linux/amd64 linux/arm64; do
+            docker pull --platform "${platform}" "${image}"
+            output="$(docker run --rm --platform "${platform}" "${image}" /app/komari version --json)"
+            echo "${output}"
+            grep -F "\"version\":\"${expected_version}\"" <<<"${output}"
+            grep -F "\"hash\":\"${expected_hash}\"" <<<"${output}"
+          done

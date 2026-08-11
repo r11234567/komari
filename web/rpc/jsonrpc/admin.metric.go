@@ -41,8 +41,8 @@ func init() {
 }
 
 type downsamplingPolicyResponse struct {
-	Enabled      bool `json:"enabled"`
-	RawRetention string `json:"raw_retention"`
+	Enabled      bool                       `json:"enabled"`
+	RawRetention string                     `json:"raw_retention"`
 	Tiers        []downsamplingTierResponse `json:"tiers"`
 }
 

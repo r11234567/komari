@@ -9,7 +9,7 @@ on:
         type: string
   push:
     branches:
-      - Snapshot
+      - main
 
 permissions:
   contents: read
@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 1
 
@@ -36,7 +36,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          snapshot_branch="Snapshot"
+          snapshot_branch="main"
           if [ "${GITHUB_REF}" != "refs/heads/${snapshot_branch}" ]; then
             echo "This workflow only publishes refs/heads/${snapshot_branch}. Current ref: ${GITHUB_REF}" >&2
             exit 1
@@ -78,26 +78,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Build frontend artifact
         uses: ./.github/actions/build-frontend
         with:
           artifact-name: komari-frontend
-          ref: Snapshot
+          ref: main
 
   test-backend:
     needs: build-frontend
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Restore frontend artifact
         uses: ./.github/actions/restore-frontend
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -123,13 +123,13 @@ jobs:
             zig_target: loongarch64-linux-musl
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Restore frontend artifact
         uses: ./.github/actions/restore-frontend
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -166,7 +166,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Ensure commit is still current
         shell: bash
@@ -236,7 +236,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download Linux binaries
         uses: actions/download-artifact@v4
