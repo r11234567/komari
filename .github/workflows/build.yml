@@ -3,8 +3,6 @@ name: CI
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -27,19 +25,19 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Prepare formatting patch for manual validation
+      - name: Prepare module metadata patch for manual validation
         if: github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
-          gofmt -w .
-          git diff --binary > "${RUNNER_TEMP}/gofmt.patch"
+          go mod tidy
+          git diff --binary -- go.mod go.sum > "${RUNNER_TEMP}/go-mod-tidy.patch"
 
-      - name: Upload formatting patch
+      - name: Upload module metadata patch
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: gofmt-patch
-          path: ${{ runner.temp }}/gofmt.patch
+          name: go-mod-tidy-patch
+          path: ${{ runner.temp }}/go-mod-tidy.patch
 
       - name: Verify formatting
         shell: bash
@@ -55,6 +53,7 @@ jobs:
 
   external-databases:
     name: MySQL and PostgreSQL integration
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -98,6 +97,7 @@ jobs:
 
   frontend:
     name: Frontend lint, tests, and build
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

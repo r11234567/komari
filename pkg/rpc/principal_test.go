@@ -104,4 +104,3 @@ func TestCheckPrincipal(t *testing.T) {
 		})
 	}
 }
-

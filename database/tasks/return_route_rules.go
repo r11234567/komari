@@ -22,15 +22,15 @@ import (
 )
 
 const (
-	returnRouteRuleSchemaVersion      = 1
-	returnRouteRuleExternalPath       = "./data/return-route-signatures.json"
-	returnRouteBGPExternalPath        = "./data/return-route-bgp-prefixes.json"
-	returnRouteBGPDefaultURL          = "https://raw.githubusercontent.com/nuomiiiii/komari/main/database/tasks/return_route_bgp_prefixes.json"
-	returnRouteRulePollInterval       = 2 * time.Second
-	returnRouteBGPRefreshInterval     = 2 * time.Hour
-	returnRouteRuleMaxSize            = 2 << 20
-	returnRouteBGPRuleMaxSize         = 16 << 20
-	returnRouteBGPDownloadTimeout     = 30 * time.Second
+	returnRouteRuleSchemaVersion  = 1
+	returnRouteRuleExternalPath   = "./data/return-route-signatures.json"
+	returnRouteBGPExternalPath    = "./data/return-route-bgp-prefixes.json"
+	returnRouteBGPDefaultURL      = "https://raw.githubusercontent.com/nuomiiiii/komari/main/database/tasks/return_route_bgp_prefixes.json"
+	returnRouteRulePollInterval   = 2 * time.Second
+	returnRouteBGPRefreshInterval = 2 * time.Hour
+	returnRouteRuleMaxSize        = 2 << 20
+	returnRouteBGPRuleMaxSize     = 16 << 20
+	returnRouteBGPDownloadTimeout = 30 * time.Second
 )
 
 var (
@@ -65,23 +65,23 @@ type ReturnRouteBGPRuleDocument struct {
 }
 
 type ReturnRouteRuleStatus struct {
-	Source             string     `json:"source"`
-	RuleVersion        string     `json:"rule_version"`
-	SchemaVersion      int        `json:"schema_version"`
-	LoadedAt           time.Time  `json:"loaded_at"`
-	LastAttemptAt      time.Time  `json:"last_attempt_at"`
-	ExternalPath       string     `json:"external_path"`
-	ASNRuleCount       int        `json:"asn_rule_count"`
-	ManualCIDRCount    int        `json:"manual_cidr_count"`
-	BGPCIDRCount       int        `json:"bgp_cidr_count"`
-	CIDRRuleCount      int        `json:"cidr_rule_count"`
-	LastError          string     `json:"last_error"`
-	Watching           bool       `json:"watching"`
-	BGPSourceURL       string     `json:"bgp_source_url"`
-	BGPGeneratedAt     *time.Time `json:"bgp_generated_at,omitempty"`
-	BGPLoadedAt        *time.Time `json:"bgp_loaded_at,omitempty"`
-	BGPNextRefreshAt   *time.Time `json:"bgp_next_refresh_at,omitempty"`
-	BGPLastError       string     `json:"bgp_last_error"`
+	Source           string     `json:"source"`
+	RuleVersion      string     `json:"rule_version"`
+	SchemaVersion    int        `json:"schema_version"`
+	LoadedAt         time.Time  `json:"loaded_at"`
+	LastAttemptAt    time.Time  `json:"last_attempt_at"`
+	ExternalPath     string     `json:"external_path"`
+	ASNRuleCount     int        `json:"asn_rule_count"`
+	ManualCIDRCount  int        `json:"manual_cidr_count"`
+	BGPCIDRCount     int        `json:"bgp_cidr_count"`
+	CIDRRuleCount    int        `json:"cidr_rule_count"`
+	LastError        string     `json:"last_error"`
+	Watching         bool       `json:"watching"`
+	BGPSourceURL     string     `json:"bgp_source_url"`
+	BGPGeneratedAt   *time.Time `json:"bgp_generated_at,omitempty"`
+	BGPLoadedAt      *time.Time `json:"bgp_loaded_at,omitempty"`
+	BGPNextRefreshAt *time.Time `json:"bgp_next_refresh_at,omitempty"`
+	BGPLastError     string     `json:"bgp_last_error"`
 }
 
 type ReturnRouteRuleView struct {

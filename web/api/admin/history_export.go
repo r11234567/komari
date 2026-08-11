@@ -440,14 +440,14 @@ func getHistoryExportRetention(c *gin.Context) {
 	if store != nil {
 		if definitions, err := store.ListMetrics(c.Request.Context()); err == nil {
 			for _, definition := range definitions {
-			hours := definition.RetentionDays * 24
-			if definition.Name == metricstore.MetricPingLatency || definition.Name == metricstore.MetricPingLoss {
-				if hours > pingHours {
-					pingHours = hours
+				hours := definition.RetentionDays * 24
+				if definition.Name == metricstore.MetricPingLatency || definition.Name == metricstore.MetricPingLoss {
+					if hours > pingHours {
+						pingHours = hours
+					}
+				} else if hours > resourceHours {
+					resourceHours = hours
 				}
-			} else if hours > resourceHours {
-				resourceHours = hours
-			}
 			}
 		}
 	}

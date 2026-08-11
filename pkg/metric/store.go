@@ -1953,6 +1953,21 @@ func (s *Store) DeleteBefore(ctx context.Context, metricName string, before time
 		}
 		return deleted, nil
 	}
+	if s.externalPointBlocks {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return 0, err
+		}
+		defer func() { _ = tx.Rollback() }()
+		deleted, err := s.deleteExternalPointsBeforeTx(ctx, tx, metricName, before.UTC().UnixNano())
+		if err != nil {
+			return deleted, err
+		}
+		if err := tx.Commit(); err != nil {
+			return deleted, err
+		}
+		return deleted, nil
+	}
 	args := []any{before.UTC().UnixNano()}
 	where := "ts_nano < " + s.dialect.placeholder(1)
 	if strings.TrimSpace(metricName) != "" {
