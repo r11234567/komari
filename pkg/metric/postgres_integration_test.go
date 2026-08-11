@@ -134,6 +134,7 @@ func runSQLIntegration(t *testing.T, name string, cfg Config, expectSQLPercentil
 			EntityID:   "api-1",
 			Start:      base,
 			End:        base.Add(5 * time.Minute),
+			Tags:       map[string]string{"region.zone": "ap-1"},
 		},
 		Aggregation:  AggAvg,
 		Interval:     2 * time.Minute,
@@ -143,7 +144,7 @@ func runSQLIntegration(t *testing.T, name string, cfg Config, expectSQLPercentil
 	if err != nil {
 		t.Fatalf("avg aggregate: %v", err)
 	}
-	if len(avgBuckets) != 1 || avgBuckets[0].Value != 35 || avgBuckets[0].Count != 2 {
+	if len(avgBuckets) != 1 || avgBuckets[0].Value != 30 || avgBuckets[0].Count != 1 {
 		t.Fatalf("unexpected bucket-paged avg aggregate: %#v", avgBuckets)
 	}
 
@@ -153,6 +154,7 @@ func runSQLIntegration(t *testing.T, name string, cfg Config, expectSQLPercentil
 			EntityID:   "api-1",
 			Start:      base,
 			End:        base.Add(5 * time.Minute),
+			Tags:       map[string]string{"region.zone": "ap-1"},
 		},
 		Aggregation: AggP95,
 		Interval:    10 * time.Minute,
@@ -160,7 +162,7 @@ func runSQLIntegration(t *testing.T, name string, cfg Config, expectSQLPercentil
 	if err != nil {
 		t.Fatalf("p95 aggregate: %v", err)
 	}
-	if len(p95Buckets) != 1 || p95Buckets[0].Count != 4 || p95Buckets[0].Value <= 38 {
+	if len(p95Buckets) != 1 || p95Buckets[0].Count != 3 || p95Buckets[0].Value <= 28 {
 		t.Fatalf("unexpected p95 aggregate: %#v", p95Buckets)
 	}
 	if _, ok := sqlAggValueExpr(cfg.Driver, AggP95); ok != expectSQLPercentile {
