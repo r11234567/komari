@@ -116,7 +116,7 @@ func installedThemes() ([]models.Theme, error) {
 			continue
 		}
 		theme, err := loadThemeConfig(filepath.Join("./data/theme", entry.Name(), "komari-theme.json"))
-		if err != nil || theme.Short != entry.Name() || !isValidThemeShort(theme.Short) {
+		if err != nil || theme.Short != entry.Name() || !isThemeShort(theme.Short) {
 			continue
 		}
 		themes = append(themes, theme)
@@ -289,7 +289,7 @@ func SetTheme(c *gin.Context) {
 		return
 	}
 
-	if !isValidThemeShort(themeName) {
+	if !isThemeShort(themeName) {
 		api.RespondError(c, http.StatusBadRequest, "无效的主题名称")
 		return
 	}
@@ -492,7 +492,7 @@ func loadThemeConfig(configPath string) (models.Theme, error) {
 
 // isValidThemeShort 验证主题short字段格式
 func isValidThemeShort(short string) bool {
-	if short == "" || short == "default" {
+	if short == "" || short == public.DefaultTheme {
 		return false
 	}
 
@@ -504,6 +504,13 @@ func isValidThemeShort(short string) bool {
 	}
 
 	return true
+}
+
+// isThemeShort also accepts the embedded official default theme for listing
+// and activation. Upload, update, and delete paths continue using the stricter
+// validator so the built-in theme cannot be overwritten or removed through the API.
+func isThemeShort(short string) bool {
+	return short == public.DefaultTheme || isValidThemeShort(short)
 }
 
 // downloadThemeFromURL 从URL下载主题文件

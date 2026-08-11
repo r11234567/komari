@@ -58,6 +58,15 @@ func TestIsValidThemeShort_PathTraversal(t *testing.T) {
 	}
 }
 
+func TestIsThemeShortAllowsBundledDefault(t *testing.T) {
+	if !isThemeShort("default") {
+		t.Fatal("installed default theme should be selectable")
+	}
+	if isValidThemeShort("default") {
+		t.Fatal("default theme should remain protected from mutation")
+	}
+}
+
 func themeArchive(t *testing.T, files map[string]string) []byte {
 	t.Helper()
 	var buffer bytes.Buffer
