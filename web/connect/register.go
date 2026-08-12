@@ -35,7 +35,7 @@ func Register(r *gin.Engine) {
 		newHandler(configv1connect.NewConfigServiceHandler(&configService{}, opts...)),
 		newHandler(deploymentv1connect.NewDeploymentServiceHandler(&deploymentService{}, opts...)),
 		newHandler(reportv1connect.NewAgentReportServiceHandler(&reportService{}, opts...)),
-		newHandler(metricsv1connect.NewMetricsServiceHandler(&unimplementedMetricsService{}, opts...)),
+		newHandler(metricsv1connect.NewMetricsServiceHandler(&metricsService{}, opts...)),
 		newHandler(execv1connect.NewExecutionServiceHandler(&unimplementedExecutionService{}, opts...)),
 		newHandler(websshv1connect.NewWebSSHServiceHandler(&unimplementedWebSSHService{}, opts...)),
 		newHandler(agentv1connect.NewAgentEventServiceHandler(&unimplementedAgentEventService{}, opts...)),

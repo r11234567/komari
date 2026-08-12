@@ -69,6 +69,7 @@ func protoReportToLegacy(report *reportv1.AgentReport) legacyv1.Report {
 			result.Load.Load15 = report.Resources.LoadAverage[2]
 		}
 	}
+	result.Message = report.DiagnosticMessage
 	for _, network := range report.NetworkInterfaces {
 		result.Network.TotalUp += int64FromUint64(network.BytesSent)
 		result.Network.TotalDown += int64FromUint64(network.BytesReceived)
