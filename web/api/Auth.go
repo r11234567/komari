@@ -108,13 +108,20 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 
 		path := c.Request.URL.Path
 		if strings.HasPrefix(path, "/komari.") {
+			// Public site metadata must remain reachable so the browser can render
+			// the login/private-site state before it has a session.
+			if path == "/komari.browser.v1.BrowserService/GetPublicInfo" ||
+				path == "/komari.browser.v1.BrowserService/GetThemeContract" {
+				c.Next()
+				return
+			}
 			privateSite, err := config.GetAs[bool](config.PrivateSiteKey, false)
 			if err != nil {
 				RespondError(c, http.StatusInternalServerError, "Failed to get configuration.")
 				c.Abort()
 				return
 			}
-			if privateSite && !hasTempAccess(c) {
+			if privateSite && !HasTempAccess(c) {
 				RespondError(c, http.StatusUnauthorized, "Private site is enabled, please login first.")
 				c.Abort()
 				return
@@ -150,7 +157,7 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 		}
 
 		// 临时访问许可
-		if hasTempAccess(c) {
+		if HasTempAccess(c) {
 			c.Next()
 			return
 		}
@@ -160,7 +167,10 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 	}
 }
 
-func hasTempAccess(c *gin.Context) bool {
+// HasTempAccess reports whether the request carries a valid temporary share
+// cookie. Transport adapters use the same check to populate canonical RPC
+// context metadata.
+func HasTempAccess(c *gin.Context) bool {
 	tempKey, err := c.Cookie("temp_key")
 	if err != nil {
 		return false

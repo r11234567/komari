@@ -63,12 +63,13 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 			principal = api.IdentifyPrincipal(c)
 		}
 		meta := &rpc.ContextMeta{
-			Principal:  principal,
-			Permission: principal.PrimaryRole(),
-			UserUUID:   principal.UserUUID,
-			ClientUUID: principal.ClientUUID,
-			RemoteIP:   c.ClientIP(),
-			UserAgent:  c.Request.UserAgent(),
+			Principal:      principal,
+			Permission:     principal.PrimaryRole(),
+			UserUUID:       principal.UserUUID,
+			ClientUUID:     principal.ClientUUID,
+			RemoteIP:       c.ClientIP(),
+			UserAgent:      c.Request.UserAgent(),
+			TempShareValid: api.HasTempAccess(c),
 		}
 		c.Request = c.Request.WithContext(rpc.NewContextWithMeta(c.Request.Context(), meta))
 		handler.ServeHTTP(c.Writer, c.Request)
