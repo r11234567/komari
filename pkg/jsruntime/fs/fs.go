@@ -706,6 +706,9 @@ func fsMode(value goja.Value, fallback os.FileMode) os.FileMode {
 		if err == nil {
 			return os.FileMode(mode)
 		}
+		// writeFile accepts an encoding string in the same option position.
+		// It must not be coerced to mode 0000 for newly created files.
+		return fallback
 	}
 	return os.FileMode(value.ToInteger())
 }

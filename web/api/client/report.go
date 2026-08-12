@@ -17,6 +17,7 @@ import (
 	"github.com/komari-monitor/komari/utils/notifier"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/connection"
 )
 
 const (
