@@ -51,10 +51,10 @@ func (s *browserService) GetPublicInfo(ctx context.Context, _ *connect.Request[b
 		DisablePasswordLogin:   boolValue(info, "disable_password_login"),
 		OauthProvider:          stringValue(info, "oauth_provider"),
 		OauthEnabled:           boolValue(info, "oauth_enable"),
-		MetricRetentionDays: uint32(max(intValue(info, "record_preserve_time")/24, 0)),
-		PrivateSite:         boolValue(info, "private_site") && !isTemporaryShare(ctx),
-		ThemeSettings:       themeSettings,
-		VisitorAuditEnabled: boolValue(info, "visitor_audit_enabled"),
+		MetricRetentionDays:   uint32(max(intValue(info, "record_preserve_time")/24, 0)),
+		PrivateSite:           boolValue(info, "private_site") && !isTemporaryShare(ctx),
+		ThemeSettings:         themeSettings,
+		VisitorAuditEnabled:   boolValue(info, "visitor_audit_enabled"),
 	}), nil
 }
 
