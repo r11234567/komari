@@ -144,10 +144,10 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 // assembled from several committed chunks.
 const (
 	metricCompactionChunkWindow   = 5 * time.Minute
-	metricCompactionSeriesBatch   = 64
+	metricCompactionSeriesBatch   = 8
 	metricCompactionChunksPerStep = 16
 	metricCompactionVacuumEvery   = 16
-	metricCompactionWriterYield   = time.Millisecond
+	metricCompactionMinYield      = 5 * time.Millisecond
 )
 
 // compactMetricIncrementalInChunks commits old upgrade data in bounded ranges.
@@ -165,6 +165,7 @@ func (s *Store) compactMetricIncrementalInChunks(ctx context.Context, metricName
 	total := 0
 	chunksSinceVacuum := 0
 	for {
+		chunkStarted := time.Now()
 		written, completed, err := s.compactMetricIncrementalChunk(ctx, metricName, now, policy, obsoleteIntervals)
 		if err != nil {
 			return total, err
@@ -173,8 +174,15 @@ func (s *Store) compactMetricIncrementalInChunks(ctx context.Context, metricName
 		chunksSinceVacuum++
 		stepLimitReached := s.sqliteStorageV4 && chunksSinceVacuum >= metricCompactionChunksPerStep
 		if (completed || stepLimitReached) && s.sqliteStorageV4 {
-			if err := s.sealSQLiteV4MetricInBatches(ctx, metricName, now.Add(-sqliteV4HotWindow).UnixNano()); err != nil {
-				return total, err
+			sealBefore := now.Add(-sqliteV4HotWindow).UnixNano()
+			var sealErr error
+			if policy.PreserveRaw {
+				sealErr = s.sealSQLiteV4RollupsInBatches(ctx, metricName, sealBefore)
+			} else {
+				sealErr = s.sealSQLiteV4MetricInBatches(ctx, metricName, sealBefore)
+			}
+			if sealErr != nil {
+				return total, sealErr
 			}
 		}
 		if completed || chunksSinceVacuum >= metricCompactionVacuumEvery {
@@ -186,14 +194,17 @@ func (s *Store) compactMetricIncrementalInChunks(ctx context.Context, metricName
 		if completed || stepLimitReached {
 			return total, nil
 		}
-		if err := yieldCompactionWriter(ctx); err != nil {
+		if err := yieldCompactionWriter(ctx, time.Since(chunkStarted)); err != nil {
 			return total, err
 		}
 	}
 }
 
-func yieldCompactionWriter(ctx context.Context) error {
-	timer := time.NewTimer(metricCompactionWriterYield)
+func yieldCompactionWriter(ctx context.Context, delay time.Duration) error {
+	if delay < metricCompactionMinYield {
+		delay = metricCompactionMinYield
+	}
+	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -304,14 +315,16 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 }
 
 // sealSQLiteV4MetricInBatches drains existing hot point and rollup backlogs in
-// bounded transactions. Each committed batch is independently durable, while
-// a failed batch leaves its hot rows intact for the next compaction cycle.
+// bounded transactions for destructive retention policies. PreserveRaw uses
+// sealSQLiteV4RollupsInBatches so retained raw history is never repeatedly
+// decoded and rewritten while live reports are waiting for SQLite's writer.
 func (s *Store) sealSQLiteV4MetricInBatches(ctx context.Context, metricName string, beforeNano int64) error {
 	pointSeries, err := s.sqliteV4PointSeriesIDsBefore(ctx, s.db, metricName, beforeNano)
 	if err != nil {
 		return err
 	}
 	for start := 0; start < len(pointSeries); start += metricCompactionSeriesBatch {
+		batchStarted := time.Now()
 		end := start + metricCompactionSeriesBatch
 		if end > len(pointSeries) {
 			end = len(pointSeries)
@@ -328,17 +341,21 @@ func (s *Store) sealSQLiteV4MetricInBatches(ctx context.Context, metricName stri
 			return err
 		}
 		if end < len(pointSeries) {
-			if err := yieldCompactionWriter(ctx); err != nil {
+			if err := yieldCompactionWriter(ctx, time.Since(batchStarted)); err != nil {
 				return err
 			}
 		}
 	}
+	return s.sealSQLiteV4RollupsInBatches(ctx, metricName, beforeNano)
+}
 
+func (s *Store) sealSQLiteV4RollupsInBatches(ctx context.Context, metricName string, beforeNano int64) error {
 	rollupSeries, err := s.sqliteV4MatchingSeries(ctx, s.db, metricName, "", nil)
 	if err != nil {
 		return err
 	}
 	for start := 0; start < len(rollupSeries); start += metricCompactionSeriesBatch {
+		batchStarted := time.Now()
 		end := start + metricCompactionSeriesBatch
 		if end > len(rollupSeries) {
 			end = len(rollupSeries)
@@ -355,7 +372,7 @@ func (s *Store) sealSQLiteV4MetricInBatches(ctx context.Context, metricName stri
 			return err
 		}
 		if end < len(rollupSeries) {
-			if err := yieldCompactionWriter(ctx); err != nil {
+			if err := yieldCompactionWriter(ctx, time.Since(batchStarted)); err != nil {
 				return err
 			}
 		}

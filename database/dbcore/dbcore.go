@@ -15,7 +15,6 @@ import (
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/migrations"
 	logger "github.com/komari-monitor/komari/utils/log"
-	"github.com/komari-monitor/komari/utils/safepath"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -127,32 +126,33 @@ func unzipToDir(zipPath, dstDir string) error {
 	if err := os.MkdirAll(dstDir, 0755); err != nil {
 		return err
 	}
+	root, err := os.OpenRoot(dstDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	for _, f := range zr.File {
-		targetPath, err := safepath.JoinUnder(dstDir, f.Name)
-		if err != nil {
-			return fmt.Errorf("illegal file path in zip %q: %w", f.Name, err)
-		}
+		name := filepath.Clean(filepath.FromSlash(f.Name))
 		mode := f.Mode()
 		if !f.FileInfo().IsDir() && !mode.IsRegular() {
 			return fmt.Errorf("unsupported non-regular file in zip: %s", f.Name)
 		}
 		if f.FileInfo().IsDir() {
-			// lgtm[go/zipslip] targetPath was resolved by safepath.JoinUnder and
-			// archive symlinks and special files are rejected above.
-			if err := os.MkdirAll(targetPath, 0755); err != nil {
+			if err := root.MkdirAll(name, 0755); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-			return err
+		if parent := filepath.Dir(name); parent != "." {
+			if err := root.MkdirAll(parent, 0755); err != nil {
+				return err
+			}
 		}
 		rc, err := f.Open()
 		if err != nil {
 			return err
 		}
-		// lgtm[go/zipslip]
-		out, err := os.Create(targetPath)
+		out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 		if err != nil {
 			rc.Close()
 			return err

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"io"
 	"io/fs"
 	"log"
 	"mime"
@@ -19,7 +20,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/pkg/config"
-	"github.com/komari-monitor/komari/utils/safepath"
 	websecurity "github.com/komari-monitor/komari/web/security"
 )
 
@@ -207,18 +207,24 @@ func localThemeFileContent(themeID, relativePath string) ([]byte, string, bool) 
 		return nil, "", false
 	}
 	themeBasePath := filepath.Join(DataDir, ThemesDir, themeID)
-	localPath, err := safepath.JoinUnder(themeBasePath, strings.TrimPrefix(relativePath, "/"))
+	themeRoot, err := os.OpenRoot(themeBasePath)
 	if err != nil {
 		return nil, "", false
 	}
-	// lgtm[go/path-injection] localPath is confined to the selected theme by
-	// safepath.JoinUnder after strict theme ID validation.
-	if info, statErr := os.Stat(localPath); statErr == nil && !info.IsDir() {
-		// lgtm[go/path-injection]
-		content, readErr := os.ReadFile(localPath)
-		if readErr == nil {
-			return content, contentTypeForPath(localPath), true
-		}
+	defer themeRoot.Close()
+	cleanPath := filepath.Clean(filepath.FromSlash(strings.TrimPrefix(relativePath, "/")))
+	file, err := themeRoot.Open(cleanPath)
+	if err != nil {
+		return nil, "", false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.IsDir() {
+		return nil, "", false
+	}
+	content, err := io.ReadAll(file)
+	if err == nil {
+		return content, contentTypeForPath(cleanPath), true
 	}
 	return nil, "", false
 }

@@ -246,6 +246,13 @@ func TestIncrementalCompactionPreservesRawWithoutDuplicatingRollups(t *testing.T
 
 func assertPreservedRawAndRollups(t *testing.T, ctx context.Context, store *Store, base time.Time, wantRaw []Point) {
 	t.Helper()
+	var pointBlocks int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM metric_point_blocks`).Scan(&pointBlocks); err != nil {
+		t.Fatal(err)
+	}
+	if pointBlocks != 0 {
+		t.Fatalf("preserve-raw compaction created %d point blocks", pointBlocks)
+	}
 	raw, err := store.Query(ctx, Query{
 		MetricName: "preserved",
 		EntityID:   "node-a",

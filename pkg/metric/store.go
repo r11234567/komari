@@ -354,9 +354,21 @@ func ensureSQLiteDir(dsn string) error {
 	if strings.IndexByte(dir, 0) >= 0 || filepath.Clean(dir) == string(filepath.Separator) {
 		return fmt.Errorf("metric: unsafe SQLite database directory")
 	}
-	// lgtm[go/path-injection] The DSN is administrator configuration; root and
-	// NUL paths are rejected before creating only its parent directory.
-	return os.MkdirAll(dir, 0755)
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	volumeRoot := filepath.VolumeName(absDir) + string(filepath.Separator)
+	relative, err := filepath.Rel(volumeRoot, absDir)
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(volumeRoot)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return root.MkdirAll(relative, 0755)
 }
 
 // sqliteFilePath extracts the filesystem path portion of a SQLite DSN, dropping

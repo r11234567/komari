@@ -35,6 +35,7 @@ var reportTrafficStates sync.Map
 const (
 	reportBatchInterval         = 3 * time.Second
 	reportBatchQueueSize        = 4096
+	reportBatchMaxReports       = 64
 	reportBatchWriteTimeout     = 10 * time.Second
 	reportTrafficRateMultiplier = int64(4)
 	reportTrafficRateAllowance  = int64(64 * 1024 * 1024)
@@ -256,6 +257,9 @@ func writePendingReports(ctx context.Context, pending *[]v1.Report) error {
 		return nil
 	}
 	batchSize := len(*pending)
+	if batchSize > reportBatchMaxReports {
+		batchSize = reportBatchMaxReports
+	}
 	for len(*pending) > 0 {
 		if batchSize > len(*pending) {
 			batchSize = len(*pending)

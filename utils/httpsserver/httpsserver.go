@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -74,6 +75,29 @@ type manualProvider struct {
 	hash     string
 }
 
+const maxCertificateFileSize = 16 << 20
+
+func readCertificateFile(filePath string) ([]byte, error) {
+	root, err := os.OpenRoot(filepath.Dir(filePath))
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	file, err := root.Open(filepath.Base(filePath))
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxCertificateFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxCertificateFileSize {
+		return nil, fmt.Errorf("certificate file exceeds %d bytes", maxCertificateFileSize)
+	}
+	return data, nil
+}
+
 func newManualProvider(certPath, keyPath string) (*manualProvider, error) {
 	p := &manualProvider{certPath: certPath, keyPath: keyPath}
 	if _, err := p.reload(); err != nil {
@@ -100,14 +124,11 @@ func (p *manualProvider) Metadata() certificateMetadata {
 }
 
 func (p *manualProvider) reload() (bool, error) {
-	// lgtm[go/path-injection] These administrator-only paths are normalized and
-	// the content must parse as a matching X.509 certificate and private key.
-	certPEM, err := os.ReadFile(p.certPath)
+	certPEM, err := readCertificateFile(p.certPath)
 	if err != nil {
 		return false, fmt.Errorf("read certificate: %w", err)
 	}
-	// lgtm[go/path-injection]
-	keyPEM, err := os.ReadFile(p.keyPath)
+	keyPEM, err := readCertificateFile(p.keyPath)
 	if err != nil {
 		return false, fmt.Errorf("read private key: %w", err)
 	}
@@ -663,9 +684,13 @@ func certificatePairAvailable(certPath, keyPath string) (bool, error) {
 		if item.path == "" {
 			return false, nil
 		}
-		// lgtm[go/path-injection] The normalized administrator path is only
-		// inspected here and is subsequently accepted only as valid PEM material.
-		if _, err := os.Stat(item.path); err != nil {
+		root, err := os.OpenRoot(filepath.Dir(item.path))
+		if err != nil {
+			return false, fmt.Errorf("open %s directory: %w", item.label, err)
+		}
+		_, err = root.Stat(filepath.Base(item.path))
+		_ = root.Close()
+		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return false, nil
 			}

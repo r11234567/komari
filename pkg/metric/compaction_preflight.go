@@ -53,11 +53,13 @@ func (s *Store) incrementalCompactionPending(ctx context.Context, metricName str
 	}
 
 	sealBefore := now.Add(-sqliteV4HotWindow).UnixNano()
-	pending, err := s.sqliteV4MetricPointRowsBefore(ctx, metricName, sealBefore, false)
-	if err != nil || pending {
-		return pending, err
+	if !policy.PreserveRaw {
+		pending, err := s.sqliteV4MetricPointRowsBefore(ctx, metricName, sealBefore, false)
+		if err != nil || pending {
+			return pending, err
+		}
 	}
-	pending, err = s.sqliteV4MetricRollupSealPending(ctx, metricName, sealBefore)
+	pending, err := s.sqliteV4MetricRollupSealPending(ctx, metricName, sealBefore)
 	if err != nil || pending {
 		return pending, err
 	}
