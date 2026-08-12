@@ -84,7 +84,7 @@ jobs:
         uses: ./.github/actions/build-frontend
         with:
           artifact-name: komari-frontend
-          ref: 1.4.6
+          ref: 1.4.7
 
   test-backend:
     needs: build-frontend

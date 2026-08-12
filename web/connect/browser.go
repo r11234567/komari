@@ -3,6 +3,7 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -131,6 +132,63 @@ func (s *browserService) GetThemeContract(context.Context, *connect.Request[brow
 	}), nil
 }
 
+func (s *browserService) WatchAgentStatus(ctx context.Context, req *connect.Request[browserv1.WatchAgentStatusRequest], stream *connect.ServerStream[browserv1.WatchAgentStatusResponse]) error {
+	meta := rpc.MetaFromContext(ctx)
+	isAdmin := meta != nil && meta.Principal != nil && meta.Principal.HasRole(rpc.RoleAdmin)
+	showGuestIP, _ := config.GetAs[bool](config.SendIpAddrToGuestKey, false)
+	requested := stringSet(req.Msg.AgentIds)
+	last := make(map[string]string)
+
+	for {
+		items, err := clients.GetAllClientBasicInfo()
+		if err != nil {
+			return connectError(connect.CodeInternal, err)
+		}
+		latest := agent_runtime.GetLatestReport()
+		online := stringSet(agent_runtime.GetAllOnlineUUIDs())
+		for _, item := range items {
+			if item.Hidden && !isAdmin || len(requested) > 0 && !requested[item.UUID] {
+				continue
+			}
+			report := latest[item.UUID]
+			summary := browserSummary(item, report, online[item.UUID], isAdmin, showGuestIP)
+			version := browserStatusVersion(summary, report)
+			if last[item.UUID] == version {
+				continue
+			}
+			if err := stream.Send(&browserv1.WatchAgentStatusResponse{
+				Agent:        summary,
+				LatestReport: legacyReportToProto(item, report, isAdmin),
+			}); err != nil {
+				return err
+			}
+			last[item.UUID] = version
+		}
+
+		timer := time.NewTimer(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return connectError(connect.CodeCanceled, ctx.Err())
+		case <-timer.C:
+		}
+	}
+}
+
+func browserStatusVersion(summary *browserv1.AgentSummary, report *legacyv1.Report) string {
+	updated := ""
+	if report != nil {
+		updated = report.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return strings.Join([]string{
+		summary.AgentId,
+		summary.Status.String(),
+		updated,
+		fmt.Sprintf("%.6f", summary.CpuPercent),
+		fmt.Sprintf("%.6f", summary.MemoryPercent),
+	}, "|")
+}
+
 func browserSummary(client models.Client, report *legacyv1.Report, online, includePrivate, showGuestIP bool) *browserv1.AgentSummary {
 	result := &browserv1.AgentSummary{
 		AgentId:   client.UUID,
@@ -225,6 +283,9 @@ func legacyReportToProto(client models.Client, report *legacyv1.Report, includeP
 			SwapUsedBytes:        uint64(max(report.Swap.Used, 0)),
 			SwapTotalBytes:       uint64(max(report.Swap.Total, 0)),
 			LoadAverage:          []float64{report.Load.Load1, report.Load.Load5, report.Load.Load15},
+			ProcessCount:         uint64(max(report.Process, 0)),
+			TcpConnectionCount:   uint64(max(report.Connections.TCP, 0)),
+			UdpConnectionCount:   uint64(max(report.Connections.UDP, 0)),
 		},
 		Metadata: &reportv1.AgentMetadata{},
 	}
@@ -235,7 +296,11 @@ func legacyReportToProto(client models.Client, report *legacyv1.Report, includeP
 		result.Resources.MemoryPercent = float64(report.Ram.Used) * 100 / float64(report.Ram.Total)
 	}
 	result.NetworkInterfaces = []*reportv1.NetworkInterface{{
-		Name: "aggregate", BytesSent: uint64(max(report.Network.TotalUp, 0)), BytesReceived: uint64(max(report.Network.TotalDown, 0)),
+		Name:                   "aggregate",
+		BytesSent:              uint64(max(report.Network.TotalUp, 0)),
+		BytesReceived:          uint64(max(report.Network.TotalDown, 0)),
+		BytesSentPerSecond:     uint64(max(report.Network.Up, 0)),
+		BytesReceivedPerSecond: uint64(max(report.Network.Down, 0)),
 	}}
 	result.Disks = []*reportv1.DiskInfo{{
 		MountPoint: "aggregate", TotalBytes: uint64(max(report.Disk.Total, 0)), UsedBytes: uint64(max(report.Disk.Used, 0)),
