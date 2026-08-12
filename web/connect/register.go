@@ -15,6 +15,7 @@ import (
 	execv1connect "github.com/r11234567/komari-proto/gen/go/komari/exec/v1/execv1connect"
 	metricsv1connect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
 	reportv1connect "github.com/r11234567/komari-proto/gen/go/komari/report/v1/reportv1connect"
+	rescuev1connect "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1/rescuev1connect"
 	websshv1connect "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1/websshv1connect"
 )
 
@@ -36,6 +37,7 @@ func Register(r *gin.Engine) {
 		newHandler(deploymentv1connect.NewDeploymentServiceHandler(&deploymentService{}, opts...)),
 		newHandler(reportv1connect.NewAgentReportServiceHandler(&reportService{}, opts...)),
 		newHandler(metricsv1connect.NewMetricsServiceHandler(&metricsService{}, opts...)),
+		newHandler(rescuev1connect.NewRescueServiceHandler(&rescueService{}, opts...)),
 		newHandler(execv1connect.NewExecutionServiceHandler(&unimplementedExecutionService{}, opts...)),
 		newHandler(websshv1connect.NewWebSSHServiceHandler(&unimplementedWebSSHService{}, opts...)),
 		newHandler(agentv1connect.NewAgentEventServiceHandler(&unimplementedAgentEventService{}, opts...)),

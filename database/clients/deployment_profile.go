@@ -20,6 +20,11 @@ import (
 const defaultReportInterval = 3.0
 
 const (
+	AgentRuntimeIdentityPrivileged  = "root-or-administrator"
+	AgentRuntimeIdentityCurrentUser = "current-user"
+)
+
+const (
 	DeploymentDeliverySaved           = "saved"
 	DeploymentDeliverySent            = "sent"
 	DeploymentDeliveryApplied         = "applied"
@@ -31,19 +36,23 @@ const (
 )
 
 type DeploymentDeliveryState struct {
-	Revision   uint64     `json:"revision"`
-	Status     string     `json:"status"`
-	Error      string     `json:"error,omitempty"`
-	SavedAt    time.Time  `json:"saved_at"`
-	UpdatedAt  *time.Time `json:"updated_at,omitempty"`
-	SentAt     *time.Time `json:"sent_at,omitempty"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	Revision        uint64     `json:"revision"`
+	AppliedRevision uint64     `json:"applied_revision"`
+	Status          string     `json:"status"`
+	Error           string     `json:"error,omitempty"`
+	SavedAt         time.Time  `json:"saved_at"`
+	UpdatedAt       *time.Time `json:"updated_at,omitempty"`
+	SentAt          *time.Time `json:"sent_at,omitempty"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
 }
 
 // DeploymentProfile contains both runtime-manageable settings and values that
 // are retained solely to regenerate an installation command.
 type DeploymentProfile struct {
 	Platform                 string  `json:"platform"`
+	RuntimeIdentity          string  `json:"runtime_identity"`
+	RescueEnabled            bool    `json:"rescue_enabled"`
+	RescueConfigureFirewall  bool    `json:"rescue_configure_firewall"`
 	DisableWebSSH            bool    `json:"disable_web_ssh"`
 	DisableAutoUpdate        bool    `json:"disable_auto_update"`
 	IgnoreUnsafeCert         bool    `json:"ignore_unsafe_cert"`
@@ -75,7 +84,11 @@ type DeploymentProfile struct {
 // the explicit field, including false.
 func (profile *DeploymentProfile) UnmarshalJSON(data []byte) error {
 	type profileAlias DeploymentProfile
-	decoded := profileAlias{RemoteControlEnabled: true}
+	decoded := profileAlias{
+		RemoteControlEnabled:    true,
+		RuntimeIdentity:         AgentRuntimeIdentityPrivileged,
+		RescueConfigureFirewall: true,
+	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
@@ -84,7 +97,12 @@ func (profile *DeploymentProfile) UnmarshalJSON(data []byte) error {
 }
 
 func defaultDeploymentProfile(client models.Client) DeploymentProfile {
-	profile := DeploymentProfile{Platform: "linux", RemoteControlEnabled: true}
+	profile := DeploymentProfile{
+		Platform:                "linux",
+		RuntimeIdentity:         AgentRuntimeIdentityPrivileged,
+		RemoteControlEnabled:    true,
+		RescueConfigureFirewall: true,
+	}
 	if client.TrafficResetDay != nil && *client.TrafficResetDay > 0 {
 		profile.EnableMonthRotate = true
 		profile.MonthRotate = *client.TrafficResetDay
@@ -155,20 +173,26 @@ func getDeploymentProfile(db *gorm.DB, clientUUID string) (DeploymentProfile, bo
 }
 
 func SaveDeploymentProfile(clientUUID string, profile DeploymentProfile) (DeploymentProfile, error) {
-	profile, _, _, err := saveDeploymentProfileForDispatch(dbcore.GetDBInstance(), clientUUID, profile)
+	profile, _, _, err := saveDeploymentProfileForDispatch(dbcore.GetDBInstance(), clientUUID, profile, false)
 	return profile, err
 }
 
 func SaveDeploymentProfileForDispatch(clientUUID string, profile DeploymentProfile) (DeploymentProfile, DeploymentDeliveryState, bool, error) {
-	return saveDeploymentProfileForDispatch(dbcore.GetDBInstance(), clientUUID, profile)
+	return saveDeploymentProfileForDispatch(dbcore.GetDBInstance(), clientUUID, profile, false)
+}
+
+// SaveDeploymentProfileForDispatchForced creates a new desired revision when
+// forceDispatch is true, even if the normalized runtime values are identical.
+func SaveDeploymentProfileForDispatchForced(clientUUID string, profile DeploymentProfile, forceDispatch bool) (DeploymentProfile, DeploymentDeliveryState, bool, error) {
+	return saveDeploymentProfileForDispatch(dbcore.GetDBInstance(), clientUUID, profile, forceDispatch)
 }
 
 func saveDeploymentProfile(db *gorm.DB, clientUUID string, profile DeploymentProfile) (DeploymentProfile, error) {
-	profile, _, _, err := saveDeploymentProfileForDispatch(db, clientUUID, profile)
+	profile, _, _, err := saveDeploymentProfileForDispatch(db, clientUUID, profile, false)
 	return profile, err
 }
 
-func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile DeploymentProfile) (DeploymentProfile, DeploymentDeliveryState, bool, error) {
+func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile DeploymentProfile, forceDispatch bool) (DeploymentProfile, DeploymentDeliveryState, bool, error) {
 	if err := normalizeDeploymentProfile(&profile); err != nil {
 		return DeploymentProfile{}, DeploymentDeliveryState{}, false, err
 	}
@@ -197,7 +221,7 @@ func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile De
 			}
 			existingFound = false
 		}
-		runtimeChanged = !existingFound
+		runtimeChanged = !existingFound || forceDispatch
 		if existingFound {
 			var previous DeploymentProfile
 			if err := json.Unmarshal([]byte(existing.Config), &previous); err != nil {
@@ -212,7 +236,7 @@ func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile De
 			} else {
 				previous.MonthRotate = 0
 			}
-			runtimeChanged = !reflect.DeepEqual(previous.RuntimeConfig(), profile.RuntimeConfig()) ||
+			runtimeChanged = forceDispatch || !reflect.DeepEqual(previous.RuntimeConfig(), profile.RuntimeConfig()) ||
 				existing.DeliveryStatus == DeploymentDeliveryFailed
 		}
 
@@ -220,6 +244,7 @@ func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile De
 			Client:            clientUUID,
 			Config:            string(encoded),
 			Revision:          existing.Revision,
+			AppliedRevision:   existing.AppliedRevision,
 			DeliveryStatus:    existing.DeliveryStatus,
 			DeliveryError:     existing.DeliveryError,
 			SavedAt:           &now,
@@ -245,7 +270,7 @@ func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile De
 		if err := tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "client"}},
 			DoUpdates: clause.Assignments(map[string]any{
-				"config": row.Config, "revision": row.Revision,
+				"config": row.Config, "revision": row.Revision, "applied_revision": row.AppliedRevision,
 				"delivery_status": row.DeliveryStatus, "delivery_error": row.DeliveryError,
 				"saved_at":            row.SavedAt,
 				"delivery_updated_at": row.DeliveryUpdatedAt, "sent_at": row.SentAt,
@@ -266,6 +291,23 @@ func MarkDeploymentConfigSent(clientUUID string, revision uint64) (bool, error) 
 	return markDeploymentConfigSent(dbcore.GetDBInstance(), clientUUID, revision)
 }
 
+func MarkDeploymentConfigUnavailable(clientUUID string, revision uint64, upgradeRequired bool) (bool, error) {
+	if revision == 0 {
+		return false, nil
+	}
+	status := DeploymentDeliveryOffline
+	if upgradeRequired {
+		status = DeploymentDeliveryUpgradeRequired
+	}
+	now := time.Now().UTC()
+	result := dbcore.GetDBInstance().Model(&models.ClientDeploymentProfile{}).
+		Where("client = ? AND revision = ? AND delivery_status = ?", clientUUID, revision, DeploymentDeliverySaved).
+		Updates(map[string]any{
+			"delivery_status": status, "delivery_error": "", "delivery_updated_at": now,
+		})
+	return result.RowsAffected > 0, result.Error
+}
+
 func markDeploymentConfigSent(db *gorm.DB, clientUUID string, revision uint64) (bool, error) {
 	if revision == 0 {
 		return false, nil
@@ -273,7 +315,7 @@ func markDeploymentConfigSent(db *gorm.DB, clientUUID string, revision uint64) (
 	now := time.Now().UTC()
 	result := db.Model(&models.ClientDeploymentProfile{}).
 		Where("client = ? AND revision = ? AND delivery_status IN ?", clientUUID, revision,
-			[]string{DeploymentDeliverySaved, DeploymentDeliverySent}).
+			[]string{DeploymentDeliverySaved, DeploymentDeliverySent, DeploymentDeliveryOffline, DeploymentDeliveryUpgradeRequired}).
 		Updates(map[string]any{
 			"delivery_status": DeploymentDeliverySent,
 			"delivery_error":  "", "delivery_updated_at": now, "sent_at": now,
@@ -304,13 +346,40 @@ func CompleteDeploymentConfigDelivery(clientUUID string, revision uint64, status
 		deliveryError = ""
 	}
 	now := time.Now().UTC()
+	updates := map[string]any{
+		"delivery_status": status, "delivery_error": deliveryError,
+		"delivery_updated_at": now, "finished_at": now,
+	}
+	if status == DeploymentDeliveryApplied {
+		updates["applied_revision"] = revision
+	}
 	result := dbcore.GetDBInstance().Model(&models.ClientDeploymentProfile{}).
 		Where("client = ? AND revision = ?", clientUUID, revision).
+		Updates(updates)
+	return result.RowsAffected > 0, result.Error
+}
+
+// RecordAppliedDeploymentRevision accepts an Agent's observed applied revision
+// even when a newer desired revision already exists. It advances monotonically
+// and only closes delivery when the observed revision is the current desired one.
+func RecordAppliedDeploymentRevision(clientUUID string, revision uint64) (bool, error) {
+	if revision == 0 {
+		return false, fmt.Errorf("revision is required")
+	}
+	now := time.Now().UTC()
+	result := dbcore.GetDBInstance().Model(&models.ClientDeploymentProfile{}).
+		Where("client = ? AND revision >= ? AND applied_revision < ?", clientUUID, revision, revision).
+		Updates(map[string]any{"applied_revision": revision, "updated_at": now})
+	if result.Error != nil || result.RowsAffected == 0 {
+		return result.RowsAffected > 0, result.Error
+	}
+	closed := dbcore.GetDBInstance().Model(&models.ClientDeploymentProfile{}).
+		Where("client = ? AND revision = ? AND applied_revision = ?", clientUUID, revision, revision).
 		Updates(map[string]any{
-			"delivery_status": status, "delivery_error": deliveryError,
+			"delivery_status": DeploymentDeliveryApplied, "delivery_error": "",
 			"delivery_updated_at": now, "finished_at": now,
 		})
-	return result.RowsAffected > 0, result.Error
+	return true, closed.Error
 }
 
 func completeDeploymentConfig(db *gorm.DB, clientUUID string, result v2.ConfigResultParams) (bool, error) {
@@ -331,12 +400,16 @@ func completeDeploymentConfig(db *gorm.DB, clientUUID string, result v2.ConfigRe
 		errorMessage = ""
 	}
 	now := time.Now().UTC()
+	updates := map[string]any{
+		"delivery_status": result.Status, "delivery_error": errorMessage,
+		"delivery_updated_at": now, "finished_at": now,
+	}
+	if result.Status == DeploymentDeliveryApplied {
+		updates["applied_revision"] = result.Revision
+	}
 	update := db.Model(&models.ClientDeploymentProfile{}).
 		Where("client = ? AND revision = ?", clientUUID, result.Revision).
-		Updates(map[string]any{
-			"delivery_status": result.Status, "delivery_error": errorMessage,
-			"delivery_updated_at": now, "finished_at": now,
-		})
+		Updates(updates)
 	return update.RowsAffected > 0, update.Error
 }
 
@@ -357,7 +430,7 @@ func deploymentDeliveryState(stored models.ClientDeploymentProfile) DeploymentDe
 		status = DeploymentDeliverySaved
 	}
 	return DeploymentDeliveryState{
-		Revision: stored.Revision, Status: status, Error: stored.DeliveryError,
+		Revision: stored.Revision, AppliedRevision: stored.AppliedRevision, Status: status, Error: stored.DeliveryError,
 		SavedAt: deploymentSavedAt(stored), UpdatedAt: stored.DeliveryUpdatedAt,
 		SentAt: stored.SentAt, FinishedAt: stored.FinishedAt,
 	}
@@ -376,6 +449,18 @@ func normalizeDeploymentProfile(profile *DeploymentProfile) error {
 	case "linux", "windows", "macos", "docker":
 	default:
 		return fmt.Errorf("platform must be linux, windows, macos, or docker")
+	}
+	profile.RuntimeIdentity = strings.ToLower(strings.TrimSpace(profile.RuntimeIdentity))
+	if profile.RuntimeIdentity == "" {
+		profile.RuntimeIdentity = AgentRuntimeIdentityPrivileged
+	}
+	switch profile.RuntimeIdentity {
+	case AgentRuntimeIdentityPrivileged, AgentRuntimeIdentityCurrentUser:
+	default:
+		return fmt.Errorf("runtime_identity must be root-or-administrator or current-user")
+	}
+	if profile.RescueEnabled && profile.RemoteControlEnabled {
+		return fmt.Errorf("rescue helper requires remote control to be disabled")
 	}
 
 	var err error
@@ -448,8 +533,9 @@ func normalizeProfileText(field, value string, maxLength int) (string, error) {
 	return value, nil
 }
 
-// RuntimeConfig intentionally contains none of the seven installation-only
-// options retained by DeploymentProfile.
+// RuntimeConfig contains only settings that an already-installed Agent may
+// apply. All privilege, remote-control, rescue and other installation settings
+// deliberately require reinstalling the Agent.
 func (profile DeploymentProfile) RuntimeConfig() v2.ConfigParams {
 	interval := defaultReportInterval
 	if profile.EnableInterval {
@@ -472,24 +558,25 @@ func (profile DeploymentProfile) RuntimeConfig() v2.ConfigParams {
 		includeMountpoints = profile.IncludeMountpoints
 	}
 	memoryIncludeCache := profile.MemoryIncludeCache
-	enableGPU := profile.EnableGPU
 	detailedGPU := profile.DetailedGPU
-	remoteControlEnabled := profile.RemoteControlEnabled
 	return v2.ConfigParams{
-		MonthRotate:          &monthRotate,
-		Interval:             &interval,
-		IncludeNics:          &includeNics,
-		ExcludeNics:          &excludeNics,
-		IncludeMountpoints:   &includeMountpoints,
-		MemoryIncludeCache:   &memoryIncludeCache,
-		EnableGPU:            &enableGPU,
-		DetailedGPU:          &detailedGPU,
-		RemoteControlEnabled: &remoteControlEnabled,
+		MonthRotate:        &monthRotate,
+		Interval:           &interval,
+		IncludeNics:        &includeNics,
+		ExcludeNics:        &excludeNics,
+		IncludeMountpoints: &includeMountpoints,
+		MemoryIncludeCache: &memoryIncludeCache,
+		DetailedGPU:        &detailedGPU,
 	}
 }
 
 func deploymentProfileFromRuntime(platform string, config v2.ConfigParams) (DeploymentProfile, error) {
-	profile := DeploymentProfile{Platform: deploymentPlatformFromAgent(platform)}
+	profile := DeploymentProfile{
+		Platform:                deploymentPlatformFromAgent(platform),
+		RuntimeIdentity:         AgentRuntimeIdentityPrivileged,
+		RemoteControlEnabled:    true,
+		RescueConfigureFirewall: true,
+	}
 	if config.MonthRotate != nil {
 		if *config.MonthRotate < 0 || *config.MonthRotate > 31 {
 			return DeploymentProfile{}, fmt.Errorf("month_rotate must be 0 or a day from 1 to 31")
@@ -519,6 +606,8 @@ func deploymentProfileFromRuntime(platform string, config v2.ConfigParams) (Depl
 	if config.MemoryIncludeCache != nil {
 		profile.MemoryIncludeCache = *config.MemoryIncludeCache
 	}
+	// These legacy report fields describe the installed Agent. They are adopted
+	// for display only and are never returned by RuntimeConfig for online apply.
 	if config.EnableGPU != nil {
 		profile.EnableGPU = *config.EnableGPU
 	}
@@ -579,6 +668,7 @@ func adoptDeploymentRuntimeConfig(db *gorm.DB, clientUUID, platform string, conf
 		row := models.ClientDeploymentProfile{Client: clientUUID, Config: string(encoded)}
 		now := time.Now().UTC()
 		row.Revision = 1
+		row.AppliedRevision = 1
 		row.DeliveryStatus = DeploymentDeliveryApplied
 		row.SavedAt = &now
 		row.DeliveryUpdatedAt = &now
@@ -612,6 +702,7 @@ func adoptDeploymentRuntimeConfig(db *gorm.DB, clientUUID, platform string, conf
 				}
 				if existing.Revision != revision || existing.DeliveryStatus != DeploymentDeliveryApplied || existing.DeliveryError != "" {
 					updates["revision"] = revision
+					updates["applied_revision"] = revision
 					updates["delivery_status"] = DeploymentDeliveryApplied
 					updates["delivery_error"] = ""
 					updates["delivery_updated_at"] = now

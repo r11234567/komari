@@ -56,10 +56,8 @@ func deliveryState(status string) commonv1.DeliveryState {
 
 func runtimeToProto(config legacyv2.ConfigParams) *configv1.RuntimeConfig {
 	result := &configv1.RuntimeConfig{
-		MemoryIncludeCache:   config.MemoryIncludeCache,
-		EnableGpu:            config.EnableGPU,
-		DetailedGpu:          config.DetailedGPU,
-		RemoteControlEnabled: config.RemoteControlEnabled,
+		MemoryIncludeCache: config.MemoryIncludeCache,
+		DetailedGpu:        config.DetailedGPU,
 	}
 	if config.IncludeNics != nil {
 		result.IncludeNics = splitList(*config.IncludeNics, ",")
@@ -83,6 +81,9 @@ func runtimeToProto(config legacyv2.ConfigParams) *configv1.RuntimeConfig {
 func applyRuntime(profile *clients.DeploymentProfile, runtime *configv1.RuntimeConfig) error {
 	if runtime == nil {
 		return errors.New("runtime config is required")
+	}
+	if runtime.EnableGpu != nil || runtime.RemoteControlEnabled != nil {
+		return errors.New("GPU enablement and remote control are install-only settings and require reinstalling the Agent")
 	}
 	if runtime.ReportInterval != nil {
 		if err := runtime.ReportInterval.CheckValid(); err != nil {
@@ -108,14 +109,8 @@ func applyRuntime(profile *clients.DeploymentProfile, runtime *configv1.RuntimeC
 	if runtime.MemoryIncludeCache != nil {
 		profile.MemoryIncludeCache = *runtime.MemoryIncludeCache
 	}
-	if runtime.EnableGpu != nil {
-		profile.EnableGPU = *runtime.EnableGpu
-	}
 	if runtime.DetailedGpu != nil {
 		profile.DetailedGPU = *runtime.DetailedGpu
-	}
-	if runtime.RemoteControlEnabled != nil {
-		profile.RemoteControlEnabled = *runtime.RemoteControlEnabled
 	}
 	return nil
 }
@@ -131,19 +126,40 @@ func deploymentToProto(agentID string, profile clients.DeploymentProfile) *deplo
 			IgnoreUnsafeCertificate: profile.IgnoreUnsafeCert,
 			EnableGithubProxy:       profile.EnableGHProxy,
 			GithubProxy:             profile.GHProxy,
+			RuntimeIdentity:         runtimeIdentityToProto(profile.RuntimeIdentity),
+			EnableGpu:               profile.EnableGPU,
+			RemoteControlEnabled:    profile.RemoteControlEnabled,
+			DisableWebSsh:           profile.DisableWebSSH,
+			GetIpAddressFromNic:     profile.GetIPAddrFromNIC,
+			Rescue: &deploymentv1.RescueInstallConfig{
+				Enabled:           profile.RescueEnabled,
+				ConfigureFirewall: profile.RescueConfigureFirewall,
+			},
 		},
 		Runtime: runtimeToProto(profile.RuntimeConfig()),
 	}
 }
 
+func runtimeIdentityToProto(identity string) deploymentv1.AgentRuntimeIdentity {
+	if identity == clients.AgentRuntimeIdentityCurrentUser {
+		return deploymentv1.AgentRuntimeIdentity_AGENT_RUNTIME_IDENTITY_CURRENT_USER
+	}
+	return deploymentv1.AgentRuntimeIdentity_AGENT_RUNTIME_IDENTITY_ROOT_OR_ADMINISTRATOR
+}
+
+func runtimeIdentityFromProto(identity deploymentv1.AgentRuntimeIdentity) string {
+	if identity == deploymentv1.AgentRuntimeIdentity_AGENT_RUNTIME_IDENTITY_CURRENT_USER {
+		return clients.AgentRuntimeIdentityCurrentUser
+	}
+	return clients.AgentRuntimeIdentityPrivileged
+}
+
 func deliveryToProto(state clients.DeploymentDeliveryState) *deploymentv1.ConfigDelivery {
 	result := &deploymentv1.ConfigDelivery{
 		DesiredRevision: state.Revision,
+		AppliedRevision: state.AppliedRevision,
 		State:           deliveryState(state.Status),
 		SavedAt:         timestamppb.New(state.SavedAt),
-	}
-	if state.Status == clients.DeploymentDeliveryApplied {
-		result.AppliedRevision = state.Revision
 	}
 	if state.Error != "" {
 		result.Error = &commonv1.ErrorDetail{Code: "CONFIG_REJECTED", Message: state.Error}

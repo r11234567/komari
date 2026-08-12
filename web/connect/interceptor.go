@@ -28,6 +28,7 @@ func newPolicyInterceptor() *policyInterceptor {
 		exec    = "/komari.exec.v1.ExecutionService/"
 		webssh  = "/komari.webssh.v1.WebSSHService/"
 		events  = "/komari.agent.v1.AgentEventService/"
+		rescue  = "/komari.rescue.v1.RescueService/"
 	)
 	policies := map[string]procedurePolicy{}
 	add := func(prefix, role string, timeout time.Duration, methods ...string) {
@@ -54,6 +55,10 @@ func newPolicyInterceptor() *policyInterceptor {
 	add(webssh, rpc.RoleAdmin, 15*time.Second, "CloseSession")
 	add(events, rpc.RoleClient, 30*time.Second, "PublishEvent", "AcknowledgeEvent")
 	add(events, rpc.RoleClient, 30*time.Minute, "SubscribeEvents")
+	add(rescue, rpc.RoleAdmin, 30*time.Second, "GetRescueStatus", "CreateRescueSession", "CancelRescueSession")
+	add(rescue, rpc.RoleAdmin, 30*time.Minute, "WatchRescueSession")
+	add(rescue, rpc.RoleClient, 30*time.Minute, "LeaseRescueSessions")
+	add(rescue, rpc.RoleClient, 30*time.Second, "ReportRescueEvent", "ReportRescueStatus")
 	return &policyInterceptor{policies: policies}
 }
 

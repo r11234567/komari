@@ -7,6 +7,8 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/clients"
+	deploymentapp "github.com/komari-monitor/komari/web/deployment"
+	"github.com/komari-monitor/komari/web/rescueapp"
 	deploymentv1 "github.com/r11234567/komari-proto/gen/go/komari/deployment/v1"
 	deploymentv1connect "github.com/r11234567/komari-proto/gen/go/komari/deployment/v1/deploymentv1connect"
 )
@@ -23,9 +25,14 @@ func (s *deploymentService) GetDeployment(_ context.Context, req *connect.Reques
 	if err != nil {
 		return nil, connectError(connect.CodeNotFound, errors.New("agent not found"))
 	}
+	rescueStatus, err := rescueapp.GetStatus(req.Msg.AgentId)
+	if err != nil {
+		return nil, connectError(connect.CodeInternal, err)
+	}
 	return connect.NewResponse(&deploymentv1.GetDeploymentResponse{
-		Profile:  deploymentToProto(req.Msg.AgentId, profile),
-		Delivery: deliveryToProto(state),
+		Profile:      deploymentToProto(req.Msg.AgentId, profile),
+		Delivery:     deliveryToProto(state),
+		RescueHelper: rescueStatus,
 	}), nil
 }
 
@@ -48,19 +55,28 @@ func (s *deploymentService) SaveDeploymentProfile(_ context.Context, req *connec
 		profile.ServiceName = install.ServiceName
 		profile.DisableAutoUpdate = install.DisableAutoUpdate
 		profile.IgnoreUnsafeCert = install.IgnoreUnsafeCertificate
+		profile.EnableGPU = install.EnableGpu
+		profile.RemoteControlEnabled = install.RemoteControlEnabled
+		profile.DisableWebSSH = install.DisableWebSsh
+		profile.GetIPAddrFromNIC = install.GetIpAddressFromNic
 		profile.EnableGHProxy = install.EnableGithubProxy
 		profile.GHProxy = install.GithubProxy
+		profile.RuntimeIdentity = runtimeIdentityFromProto(install.RuntimeIdentity)
+		if install.Rescue != nil {
+			profile.RescueEnabled = install.Rescue.Enabled
+			profile.RescueConfigureFirewall = install.Rescue.ConfigureFirewall
+		}
 	}
 	if err := applyRuntime(&profile, req.Msg.Profile.Runtime); err != nil {
 		return nil, connectError(connect.CodeInvalidArgument, err)
 	}
-	stored, delivery, _, err := clients.SaveDeploymentProfileForDispatch(req.Msg.AgentId, profile)
+	result, err := deploymentapp.Save(req.Msg.AgentId, profile, req.Msg.ForceDispatch)
 	if err != nil {
 		return nil, connectError(connect.CodeInvalidArgument, err)
 	}
 	return connect.NewResponse(&deploymentv1.SaveDeploymentProfileResponse{
-		Profile:  deploymentToProto(req.Msg.AgentId, stored),
-		Delivery: deliveryToProto(delivery),
+		Profile:  deploymentToProto(req.Msg.AgentId, result.Profile),
+		Delivery: deliveryToProto(result.Delivery),
 	}), nil
 }
 

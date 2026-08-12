@@ -27,6 +27,7 @@ func TestDeploymentProfileRuntimeConfigExcludesInstallationOnlyFields(t *testing
 		ServiceName:             "custom-agent",
 		EnableInterval:          true,
 		Interval:                15,
+		EnableGPU:               true,
 		DetailedGPU:             true,
 		RemoteControlEnabled:    true,
 	}
@@ -46,6 +47,8 @@ func TestDeploymentProfileRuntimeConfigExcludesInstallationOnlyFields(t *testing
 		"ghproxy",
 		"dir",
 		"service_name",
+		"enable_gpu",
+		"remote_control_enabled",
 	} {
 		if strings.Contains(payload, forbidden) {
 			t.Fatalf("runtime config contains installation-only field %q: %s", forbidden, payload)
@@ -54,8 +57,8 @@ func TestDeploymentProfileRuntimeConfigExcludesInstallationOnlyFields(t *testing
 	if !strings.Contains(payload, `"interval":15`) {
 		t.Fatalf("runtime config is missing interval: %s", payload)
 	}
-	if !strings.Contains(payload, `"detailed_gpu":true`) || !strings.Contains(payload, `"remote_control_enabled":true`) {
-		t.Fatalf("runtime config is missing Connect-only fields: %s", payload)
+	if !strings.Contains(payload, `"detailed_gpu":true`) {
+		t.Fatalf("runtime config is missing detailed GPU monitoring: %s", payload)
 	}
 }
 
@@ -268,7 +271,7 @@ func TestDeploymentConfigDeliveryTracksOnlyRuntimeChangesAndRejectsStaleResults(
 	}
 
 	profile := DeploymentProfile{Platform: "linux", EnableInterval: true, Interval: 10}
-	_, state, runtimeChanged, err := saveDeploymentProfileForDispatch(db, "node-delivery", profile)
+	_, state, runtimeChanged, err := saveDeploymentProfileForDispatch(db, "node-delivery", profile, false)
 	if err != nil {
 		t.Fatalf("save initial profile: %v", err)
 	}
@@ -286,7 +289,7 @@ func TestDeploymentConfigDeliveryTracksOnlyRuntimeChangesAndRejectsStaleResults(
 	}
 
 	profile.DisableWebSSH = true
-	_, state, runtimeChanged, err = saveDeploymentProfileForDispatch(db, "node-delivery", profile)
+	_, state, runtimeChanged, err = saveDeploymentProfileForDispatch(db, "node-delivery", profile, false)
 	if err != nil {
 		t.Fatalf("save installation-only change: %v", err)
 	}
@@ -295,7 +298,7 @@ func TestDeploymentConfigDeliveryTracksOnlyRuntimeChangesAndRejectsStaleResults(
 	}
 
 	profile.Interval = 20
-	_, state, runtimeChanged, err = saveDeploymentProfileForDispatch(db, "node-delivery", profile)
+	_, state, runtimeChanged, err = saveDeploymentProfileForDispatch(db, "node-delivery", profile, false)
 	if err != nil {
 		t.Fatalf("save runtime change: %v", err)
 	}
@@ -317,7 +320,7 @@ func TestDeploymentConfigDeliveryTracksOnlyRuntimeChangesAndRejectsStaleResults(
 		t.Fatalf("complete revision 2 = %v, %v", completed, err)
 	}
 
-	_, state, runtimeChanged, err = saveDeploymentProfileForDispatch(db, "node-delivery", profile)
+	_, state, runtimeChanged, err = saveDeploymentProfileForDispatch(db, "node-delivery", profile, false)
 	if err != nil {
 		t.Fatalf("retry failed profile: %v", err)
 	}

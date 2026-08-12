@@ -8,6 +8,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	deploymentapp "github.com/komari-monitor/komari/web/deployment"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	configv1connect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -22,12 +23,12 @@ func (s *configService) GetDesiredConfig(ctx context.Context, req *connect.Reque
 	if err != nil {
 		return nil, err
 	}
-	profile, saved, state, err := clients.GetDeploymentProfileWithDelivery(agentID)
+	profile, saved, state, err := deploymentapp.GetDesired(agentID, req.Msg.AppliedRevision)
 	if err != nil {
 		return nil, connectError(connect.CodeInternal, err)
 	}
 	response := &configv1.GetDesiredConfigResponse{DeliveryState: deliveryState(state.Status)}
-	if saved && state.Revision > req.Msg.AppliedRevision {
+	if saved {
 		response.Desired = &configv1.DesiredConfig{
 			AgentId: agentID, Revision: state.Revision, Runtime: runtimeToProto(profile.RuntimeConfig()),
 			SavedAt: timestamppb.New(state.SavedAt),
@@ -80,15 +81,36 @@ func (s *configService) UpdateDesiredConfig(ctx context.Context, req *connect.Re
 	if err := applyRuntime(&profile, req.Msg.Runtime); err != nil {
 		return nil, connectError(connect.CodeInvalidArgument, err)
 	}
-	stored, delivery, _, err := clients.SaveDeploymentProfileForDispatch(req.Msg.AgentId, profile)
+	result, err := deploymentapp.Save(req.Msg.AgentId, profile, req.Msg.ForceDispatch)
 	if err != nil {
 		return nil, connectError(connect.CodeInvalidArgument, err)
 	}
 	return connect.NewResponse(&configv1.UpdateDesiredConfigResponse{
 		Desired: &configv1.DesiredConfig{
-			AgentId: req.Msg.AgentId, Revision: delivery.Revision,
-			Runtime: runtimeToProto(stored.RuntimeConfig()), SavedAt: timestamppb.New(delivery.SavedAt),
+			AgentId: req.Msg.AgentId, Revision: result.Delivery.Revision,
+			Runtime: runtimeToProto(result.Profile.RuntimeConfig()), SavedAt: timestamppb.New(result.Delivery.SavedAt),
 		},
-		DeliveryState: deliveryState(delivery.Status),
+		DeliveryState: deliveryState(result.Delivery.Status),
 	}), nil
+}
+
+func (s *configService) WatchDesiredConfig(ctx context.Context, req *connect.Request[configv1.WatchDesiredConfigRequest], stream *connect.ServerStream[configv1.WatchDesiredConfigResponse]) error {
+	agentID, err := requireAgent(rpc.MetaFromContext(ctx), req.Msg.AgentId)
+	if err != nil {
+		return err
+	}
+	profile, found, state, err := deploymentapp.WaitForDesired(ctx, agentID, req.Msg.AfterRevision)
+	if err != nil {
+		return connectError(connect.CodeCanceled, err)
+	}
+	if !found {
+		return nil
+	}
+	if err := stream.Send(&configv1.WatchDesiredConfigResponse{Desired: &configv1.DesiredConfig{
+		AgentId: agentID, Revision: state.Revision, Runtime: runtimeToProto(profile.RuntimeConfig()), SavedAt: timestamppb.New(state.SavedAt),
+	}}); err != nil {
+		return err
+	}
+	_, _ = clients.MarkDeploymentConfigSent(agentID, state.Revision)
+	return nil
 }

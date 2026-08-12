@@ -6,9 +6,11 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	legacyv1 "github.com/komari-monitor/komari/protocol/v1"
 	clientapi "github.com/komari-monitor/komari/web/api/client"
+	"github.com/komari-monitor/komari/web/rescueapp"
 	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
 	reportv1connect "github.com/r11234567/komari-proto/gen/go/komari/report/v1/reportv1connect"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -33,6 +35,18 @@ func (s *reportService) SubmitReport(ctx context.Context, req *connect.Request[r
 			return nil, ctx.Err()
 		}
 		return nil, connectError(connect.CodeInvalidArgument, err)
+	}
+	if metadata := req.Msg.Report.Metadata; metadata != nil {
+		if metadata.AppliedConfigRevision > 0 {
+			if _, err := clients.RecordAppliedDeploymentRevision(agentID, metadata.AppliedConfigRevision); err != nil {
+				return nil, connectError(connect.CodeInternal, err)
+			}
+		}
+		if metadata.RescueHelper != nil {
+			if err := rescueapp.ReportStatus(agentID, metadata.RescueHelper); err != nil {
+				return nil, connectError(connect.CodeInvalidArgument, err)
+			}
+		}
 	}
 	return connect.NewResponse(&reportv1.SubmitReportResponse{
 		Accepted:           true,
