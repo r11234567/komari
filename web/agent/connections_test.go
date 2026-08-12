@@ -55,12 +55,14 @@ func TestRecordReportKeepsLatestAndShortRecentWindow(t *testing.T) {
 func TestDeleteConnectedClientsClearsAllRuntimeState(t *testing.T) {
 	mu.Lock()
 	previousConnected := connectedClients
-	previousProtocols := connectedClientV2
+	previousProtocols := connectedClientProtocol
+	previousCapabilities := v2Capabilities
 	previousPresence := presenceOnly
 	previousLatest := latestReport
 	previousRecent := recentReports
 	connectedClients = make(map[string]*connection.SafeConn)
-	connectedClientV2 = make(map[string]bool)
+	connectedClientProtocol = make(map[string]int)
+	v2Capabilities = make(map[string]map[string]bool)
 	presenceOnly = make(map[string]struct {
 		id     int64
 		expire time.Time
@@ -71,7 +73,8 @@ func TestDeleteConnectedClientsClearsAllRuntimeState(t *testing.T) {
 	t.Cleanup(func() {
 		mu.Lock()
 		connectedClients = previousConnected
-		connectedClientV2 = previousProtocols
+		connectedClientProtocol = previousProtocols
+		v2Capabilities = previousCapabilities
 		presenceOnly = previousPresence
 		latestReport = previousLatest
 		recentReports = previousRecent
@@ -98,5 +101,37 @@ func TestDeleteConnectedClientsClearsAllRuntimeState(t *testing.T) {
 	}
 	if events := TakeV2Events("node-a", nil, 16); len(events) != 0 {
 		t.Fatalf("deleted client still has queued events: %#v", events)
+	}
+}
+
+func TestV2ConfigRequiresExplicitCapability(t *testing.T) {
+	mu.Lock()
+	previousProtocols := connectedClientProtocol
+	previousCapabilities := v2Capabilities
+	connectedClientProtocol = make(map[string]int)
+	v2Capabilities = make(map[string]map[string]bool)
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		connectedClientProtocol = previousProtocols
+		v2Capabilities = previousCapabilities
+		mu.Unlock()
+	})
+
+	SetClientProtocolVersion("legacy", 2)
+	SetV2Capabilities("legacy", []string{"ping", "terminal"})
+	if SupportsV2Config("legacy") || !IsV2ConfigUpgradeRequired("legacy") {
+		t.Fatal("legacy v2 Agent without agent.config was treated as config-capable")
+	}
+
+	SetV2Capabilities("legacy", []string{"ping", v2.MethodAgentConfig})
+	if !SupportsV2Config("legacy") || IsV2ConfigUpgradeRequired("legacy") {
+		t.Fatal("explicit agent.config capability was not honored")
+	}
+
+	SetClientProtocolVersion("connect", 3)
+	SetV2Capabilities("connect", []string{v2.MethodAgentConfig})
+	if !IsConnectClient("connect") || IsV2Client("connect") || SupportsV2Config("connect") || IsV2ConfigUpgradeRequired("connect") {
+		t.Fatal("Connect Agent leaked into the legacy v2 capability adapter")
 	}
 }

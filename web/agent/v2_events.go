@@ -52,7 +52,7 @@ func DispatchV2Event(uuid, method string, params any) bool {
 }
 
 func DispatchV2Config(uuid string, params v2.ConfigParams) (v2.Event, bool, bool) {
-	if !IsV2Client(uuid) {
+	if !SupportsV2Config(uuid) {
 		return v2.Event{}, false, false
 	}
 	event := EnqueueV2Event(uuid, v2.MethodAgentConfig, params)
@@ -89,7 +89,7 @@ func IsAgentOnline(uuid string) bool {
 	if GetConnectedClients()[uuid] != nil {
 		return true
 	}
-	return IsV2Client(uuid)
+	return hasLivePresence(uuid)
 }
 
 func EnqueueV2Event(uuid, method string, params any) v2.Event {

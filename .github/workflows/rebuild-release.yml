@@ -19,7 +19,7 @@ on:
       frontend_ref:
         description: komari-web branch or tag to build.
         required: true
-        default: main
+        default: 1.4.6
         type: string
 
 permissions:

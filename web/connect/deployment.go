@@ -12,6 +12,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/pkg/config"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	deploymentapp "github.com/komari-monitor/komari/web/deployment"
 	"github.com/komari-monitor/komari/web/rescueapp"
 	deploymentv1 "github.com/r11234567/komari-proto/gen/go/komari/deployment/v1"
@@ -37,7 +38,7 @@ func (s *deploymentService) GenerateInstallCommand(_ context.Context, req *conne
 	if err != nil {
 		return nil, connectError(connect.CodeNotFound, errors.New("agent not found"))
 	}
-	endpoint, err := deploymentEndpoint()
+	endpoint, err := deploymentEndpoint(req)
 	if err != nil {
 		return nil, connectError(connect.CodeFailedPrecondition, err)
 	}
@@ -54,14 +55,22 @@ func (s *deploymentService) GenerateInstallCommand(_ context.Context, req *conne
 	}), nil
 }
 
-func deploymentEndpoint() (string, error) {
+func deploymentEndpoint(req *connect.Request[deploymentv1.GenerateInstallCommandRequest]) (string, error) {
 	value, err := config.GetAs[string](config.ScriptDomainKey, "")
 	if err != nil {
 		return "", fmt.Errorf("read script domain: %w", err)
 	}
-	value = strings.TrimRight(strings.TrimSpace(value), "/")
+	return normalizeDeploymentEndpoint(value, req.Header().Get("Origin"))
+}
+
+func normalizeDeploymentEndpoint(configured, requestOrigin string) (string, error) {
+	value := strings.TrimRight(strings.TrimSpace(configured), "/")
+	if value == "" {
+		value = strings.TrimRight(strings.TrimSpace(requestOrigin), "/")
+	}
 	parsed, parseErr := url.Parse(value)
-	if parseErr != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+	if parseErr != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return "", errors.New("configure an HTTP(S) script domain before generating install commands")
 	}
 	return value, nil
@@ -153,6 +162,10 @@ func (s *deploymentService) GetDeployment(_ context.Context, req *connect.Reques
 	rescueStatus, err := rescueapp.GetStatus(req.Msg.AgentId)
 	if err != nil {
 		return nil, connectError(connect.CodeInternal, err)
+	}
+	if state.Revision > state.AppliedRevision && agent_runtime.IsAgentOnline(req.Msg.AgentId) && agent_runtime.IsV2ConfigUpgradeRequired(req.Msg.AgentId) {
+		state.Status = clients.DeploymentDeliveryUpgradeRequired
+		state.Error = "this Agent does not declare agent.config support; reinstall a Connect-compatible Agent"
 	}
 	return connect.NewResponse(&deploymentv1.GetDeploymentResponse{
 		Profile:      deploymentToProto(req.Msg.AgentId, profile),

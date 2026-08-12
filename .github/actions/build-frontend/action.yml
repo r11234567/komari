@@ -10,7 +10,7 @@ inputs:
     default: https://github.com/r11234567/komari-web
   ref:
     description: Optional komari-web ref to build. Uses the repository default branch when empty.
-    default: 1.4.5
+    default: 1.4.6
   artifact-name:
     description: Optional artifact name for the packed system UI.
     default: ""

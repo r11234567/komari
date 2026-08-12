@@ -2,19 +2,22 @@ package agent
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/komari-monitor/komari/database/metricstore"
 	v1 "github.com/komari-monitor/komari/protocol/v1"
+	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/web/connection"
 )
 
 var (
-	connectedClients  = make(map[string]*connection.SafeConn)
-	connectedClientV2 = make(map[string]bool)
-	latestReport      = make(map[string]*v1.Report)
-	recentReports     = make(map[string][]v1.Report)
+	connectedClients        = make(map[string]*connection.SafeConn)
+	connectedClientProtocol = make(map[string]int)
+	v2Capabilities          = make(map[string]map[string]bool)
+	latestReport            = make(map[string]*v1.Report)
+	recentReports           = make(map[string][]v1.Report)
 	// presenceOnly stores online state for non-WebSocket agents.
 	// value keeps connectionID and a soft expiration to avoid flicker
 	presenceOnly = make(map[string]struct {
@@ -52,13 +55,51 @@ func SetClientProtocolVersion(uuid string, version int) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	connectedClientV2[uuid] = version >= 2
+	connectedClientProtocol[uuid] = version
+	if version != 2 {
+		delete(v2Capabilities, uuid)
+	}
 }
 
 func IsV2Client(uuid string) bool {
 	mu.RLock()
 	defer mu.RUnlock()
-	return connectedClientV2[uuid]
+	return connectedClientProtocol[uuid] == 2
+}
+
+func IsConnectClient(uuid string) bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	return connectedClientProtocol[uuid] >= 3
+}
+
+// SetV2Capabilities records capabilities declared by a legacy v2 Agent.
+// Protocol version alone does not imply support for an optional event.
+func SetV2Capabilities(uuid string, capabilities []string) {
+	if metricstore.EntityWritesBlocked(uuid) {
+		return
+	}
+	values := make(map[string]bool, len(capabilities))
+	for _, capability := range capabilities {
+		if capability = strings.TrimSpace(capability); capability != "" {
+			values[capability] = true
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	v2Capabilities[uuid] = values
+}
+
+func SupportsV2Config(uuid string) bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	return connectedClientProtocol[uuid] == 2 && v2Capabilities[uuid][v2.MethodAgentConfig]
+}
+
+func IsV2ConfigUpgradeRequired(uuid string) bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	return connectedClientProtocol[uuid] == 2 && !v2Capabilities[uuid][v2.MethodAgentConfig]
 }
 
 func DeleteClientConditionally(uuid string, connToRemove *connection.SafeConn) {
@@ -68,14 +109,16 @@ func DeleteClientConditionally(uuid string, connToRemove *connection.SafeConn) {
 	// 检查当前 map 里的 conn 是否就是要删除的这一个
 	if currentConn, exists := connectedClients[uuid]; exists && currentConn == connToRemove {
 		delete(connectedClients, uuid)
-		delete(connectedClientV2, uuid)
+		delete(connectedClientProtocol, uuid)
+		delete(v2Capabilities, uuid)
 	}
 }
 func DeleteConnectedClients(uuid string) {
 	mu.Lock()
 	conn := connectedClients[uuid]
 	delete(connectedClients, uuid)
-	delete(connectedClientV2, uuid)
+	delete(connectedClientProtocol, uuid)
+	delete(v2Capabilities, uuid)
 	delete(presenceOnly, uuid)
 	delete(latestReport, uuid)
 	delete(recentReports, uuid)
@@ -99,6 +142,13 @@ func KeepAlivePresence(uuid string, connectionID int64, ttl time.Duration) {
 		id     int64
 		expire time.Time
 	}{id: connectionID, expire: time.Now().Add(ttl)}
+}
+
+func hasLivePresence(uuid string) bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	presence, ok := presenceOnly[uuid]
+	return ok && presence.expire.After(time.Now())
 }
 
 var defaultPresenceTTL = 20 * time.Second

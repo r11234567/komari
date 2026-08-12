@@ -116,6 +116,7 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 		}
 		refreshPostPresence(uuid)
 		agent_runtime.SetClientProtocolVersion(uuid, 2)
+		agent_runtime.SetV2Capabilities(uuid, params.Capabilities)
 		timeout := 0 * time.Second
 		if allowWait {
 			timeout = 25 * time.Second

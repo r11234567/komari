@@ -85,6 +85,11 @@ func Save(agentID string, profile clients.DeploymentProfile, forceDispatch bool)
 	if connectOnline {
 		return result, nil
 	}
+	// Unary Connect Agents poll GetDesiredConfig. Keep the state saved until
+	// their next poll marks the revision sent and their ACK closes delivery.
+	if agent_runtime.IsConnectClient(agentID) && agent_runtime.IsAgentOnline(agentID) {
+		return result, nil
+	}
 	legacyConfig := stored.RuntimeConfig()
 	legacyConfig.Revision = delivery.Revision
 	_, sent, supported := agent_runtime.DispatchV2Config(agentID, legacyConfig)

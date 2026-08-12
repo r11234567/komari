@@ -40,3 +40,23 @@ func TestDeploymentCommandRejectsRescueOnMacOS(t *testing.T) {
 		t.Fatal("deploymentCommand() accepted rescue mode on macOS")
 	}
 }
+
+func TestNormalizeDeploymentEndpointUsesRequestOriginWhenSettingIsEmpty(t *testing.T) {
+	endpoint, err := normalizeDeploymentEndpoint("", "https://monitor.example.com/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if endpoint != "https://monitor.example.com" {
+		t.Fatalf("endpoint = %q", endpoint)
+	}
+}
+
+func TestNormalizeDeploymentEndpointPrefersConfiguredDomain(t *testing.T) {
+	endpoint, err := normalizeDeploymentEndpoint("https://agents.example.com/", "https://monitor.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if endpoint != "https://agents.example.com" {
+		t.Fatalf("endpoint = %q", endpoint)
+	}
+}
