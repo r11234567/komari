@@ -4,7 +4,6 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/utils/requestscheme"
 )
 
 // SetSensitiveCookie applies the same transport and browser protections to
@@ -15,7 +14,7 @@ func SetSensitiveCookie(c *gin.Context, name, value string, maxAge int) {
 		Value:    value,
 		Path:     "/",
 		MaxAge:   maxAge,
-		Secure:   requestscheme.IsHTTPS(c.Request),
+		Secure:   true,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
