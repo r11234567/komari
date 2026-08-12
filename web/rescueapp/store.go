@@ -138,6 +138,16 @@ func ValidateHelper(agentID, helperInstanceID string) error {
 	return nil
 }
 
+// ClearConnectionError removes a stale transport error once the same helper
+// successfully establishes a new lease stream.
+func ClearConnectionError(agentID, helperInstanceID string) error {
+	return dbcore.GetDBInstance().Model(&models.ClientRescueHelper{}).
+		Where("client = ? AND helper_instance_id = ? AND error_code = ?", agentID, sanitize(helperInstanceID, 128), "HELPER_CONNECTION").
+		Updates(map[string]any{
+			"error_code": "", "error_message": "", "observed_at": time.Now().UTC(),
+		}).Error
+}
+
 func Create(agentID string, action rescuev1.RescueAction, arguments []string, timeout *durationpb.Duration, maxOutput uint64, idempotencyKey string) (*rescuev1.RescueSession, error) {
 	profile, saved, err := clients.GetDeploymentProfile(agentID)
 	if err != nil {

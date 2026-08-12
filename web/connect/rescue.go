@@ -20,6 +20,8 @@ type rescueService struct {
 	rescuev1connect.UnimplementedRescueServiceHandler
 }
 
+const rescueLeaseHeartbeatInterval = 20 * time.Second
+
 func (s *rescueService) GetRescueStatus(_ context.Context, req *connect.Request[rescuev1.GetRescueStatusRequest]) (*connect.Response[rescuev1.GetRescueStatusResponse], error) {
 	if req.Msg.AgentId == "" {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("agent ID is required"))
@@ -121,6 +123,9 @@ func (s *rescueService) LeaseRescueSessions(ctx context.Context, req *connect.Re
 	if err := rescueapp.ValidateHelper(agentID, req.Msg.HelperInstanceId); err != nil {
 		return connectError(connect.CodeFailedPrecondition, err)
 	}
+	if err := rescueapp.ClearConnectionError(agentID, req.Msg.HelperInstanceId); err != nil {
+		return connectError(connect.CodeInternal, err)
+	}
 	for {
 		currentSignal := rescueapp.WaitSignal("lease:" + agentID)
 		assignment, err := rescueapp.NextAssignment(agentID, req.Msg.HelperInstanceId, req.Msg.AfterAssignmentId)
@@ -130,10 +135,15 @@ func (s *rescueService) LeaseRescueSessions(ctx context.Context, req *connect.Re
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return connectError(connect.CodeInternal, err)
 		}
+		heartbeat := time.NewTimer(rescueLeaseHeartbeatInterval)
 		select {
 		case <-ctx.Done():
+			heartbeat.Stop()
 			return connectError(connect.CodeCanceled, ctx.Err())
 		case <-currentSignal:
+			heartbeat.Stop()
+		case <-heartbeat.C:
+			return stream.Send(&rescuev1.LeaseRescueSessionsResponse{})
 		}
 	}
 }
