@@ -150,7 +150,7 @@ func (s *Store) queryRelationalBatchGroup(ctx context.Context, group rawBatchGro
 }
 
 func (s *Store) queryRelationalBatchChunk(ctx context.Context, group rawBatchGroup, queries []Query, virtualLoss []bool, result [][]Point, metricNames, entityIDs []string, entityWildcard bool) error {
-	args := make([]any, 0, 2+len(metricNames)+len(entityIDs)+len(group.tags))
+	args := make([]any, 0)
 	args = append(args, group.key.start, group.key.end)
 	parts := []string{
 		"ts_nano >= " + s.dialect.placeholder(1),
@@ -233,7 +233,7 @@ func (s *Store) querySQLiteV4BatchGroup(ctx context.Context, group rawBatchGroup
 func (s *Store) sqliteV4RawBatchSeries(ctx context.Context, q querier, group rawBatchGroup, queries []Query) ([]rawBatchSeries, error) {
 	metricNames := uniqueBatchStrings(group.indices, func(index int) string { return queries[index].MetricName })
 	entityIDs, hasWildcard := uniqueBatchEntities(group.indices, queries)
-	args := make([]any, 0, len(metricNames)+len(entityIDs)+len(group.tags))
+	args := make([]any, 0)
 	parts := []string{"metric_name IN (" + appendBatchSQLiteInClause(&args, metricNames) + ")"}
 	if !hasWildcard {
 		parts = append(parts, "entity_id IN ("+appendBatchSQLiteInClause(&args, entityIDs)+")")

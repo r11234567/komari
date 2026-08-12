@@ -307,7 +307,7 @@ func writeReportBatch(ctx context.Context, reports []v1.Report) ([]v1.Report, er
 
 	prepared := make([]v1.Report, len(reports))
 	copy(prepared, reports)
-	points := make([]metric.Point, 0, len(reports)*20)
+	points := make([]metric.Point, 0)
 	pendingStates := make(map[*reportTrafficState]reportTrafficValues)
 	for i, report := range prepared {
 		stateValue, _ := reportTrafficStates.LoadOrStore(report.UUID, &reportTrafficState{})

@@ -22,7 +22,7 @@ import (
 // 杂项 admin RPC2 方法：会话管理、设置、客户端排序。
 
 func parseUintKey(s string) (uint, error) {
-	v, err := strconv.ParseUint(s, 10, 64)
+	v, err := strconv.ParseUint(s, 10, strconv.IntSize)
 	return uint(v), err
 }
 

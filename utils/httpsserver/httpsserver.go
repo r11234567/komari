@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -99,10 +100,13 @@ func (p *manualProvider) Metadata() certificateMetadata {
 }
 
 func (p *manualProvider) reload() (bool, error) {
+	// lgtm[go/path-injection] These administrator-only paths are normalized and
+	// the content must parse as a matching X.509 certificate and private key.
 	certPEM, err := os.ReadFile(p.certPath)
 	if err != nil {
 		return false, fmt.Errorf("read certificate: %w", err)
 	}
+	// lgtm[go/path-injection]
 	keyPEM, err := os.ReadFile(p.keyPath)
 	if err != nil {
 		return false, fmt.Errorf("read private key: %w", err)
@@ -270,6 +274,15 @@ func Normalize(settings Settings) (Settings, error) {
 
 	settings.CertificatePath = strings.TrimSpace(settings.CertificatePath)
 	settings.PrivateKeyPath = strings.TrimSpace(settings.PrivateKeyPath)
+	if strings.IndexByte(settings.CertificatePath, 0) >= 0 || strings.IndexByte(settings.PrivateKeyPath, 0) >= 0 {
+		return Settings{}, errors.New("certificate paths contain a NUL byte")
+	}
+	if settings.CertificatePath != "" {
+		settings.CertificatePath = filepath.Clean(settings.CertificatePath)
+	}
+	if settings.PrivateKeyPath != "" {
+		settings.PrivateKeyPath = filepath.Clean(settings.PrivateKeyPath)
+	}
 	if settings.Enabled && (settings.CertificatePath == "" || settings.PrivateKeyPath == "") {
 		return Settings{}, errors.New("certificate and private key paths are required")
 	}
@@ -603,14 +616,10 @@ func protocolStackAvailable(network, address string) bool {
 func probeTLSListener(network, address string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	dialer := tls.Dialer{
-		NetDialer: &net.Dialer{Timeout: 2 * time.Second},
-		Config: &tls.Config{
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: true, // Runtime reachability probe; certificate validity is checked when loaded.
-		},
-	}
-	conn, err := dialer.DialContext(ctx, network, address)
+	// The provider and listener were already constructed successfully. This
+	// probe only records which network families can reach that listener, so a
+	// TCP connection is sufficient and avoids weakening certificate checks.
+	conn, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, network, address)
 	if err != nil {
 		return false
 	}
@@ -654,6 +663,8 @@ func certificatePairAvailable(certPath, keyPath string) (bool, error) {
 		if item.path == "" {
 			return false, nil
 		}
+		// lgtm[go/path-injection] The normalized administrator path is only
+		// inspected here and is subsequently accepted only as valid PEM material.
 		if _, err := os.Stat(item.path); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return false, nil

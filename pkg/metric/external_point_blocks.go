@@ -81,8 +81,8 @@ func (s *Store) migrateExternalPointBlocks(ctx context.Context) error {
 }
 
 func (s *Store) matchingExternalPointSeries(ctx context.Context, q querier, query Query) ([]externalPointSeries, error) {
-	args := make([]any, 0, 2+len(query.Tags))
-	parts := make([]string, 0, 2+len(query.Tags))
+	args := make([]any, 0)
+	parts := make([]string, 0)
 	if strings.TrimSpace(query.MetricName) != "" {
 		args = append(args, query.MetricName)
 		parts = append(parts, "metric_name = "+s.dialect.placeholder(len(args)))

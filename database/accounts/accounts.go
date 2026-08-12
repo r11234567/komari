@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -42,8 +44,19 @@ func CheckPassword(username, passwd string) (uuid string, success bool) {
 		// 静默处理错误，不显示日志
 		return "", false
 	}
-	if hashPasswd(passwd) != user.Passwd {
+	if strings.HasPrefix(user.Passwd, "$2") {
+		if bcrypt.CompareHashAndPassword([]byte(user.Passwd), []byte(passwd)) != nil {
+			return "", false
+		}
+		return user.UUID, true
+	}
+	legacy := legacyPasswordHash(passwd)
+	if subtle.ConstantTimeCompare([]byte(legacy), []byte(user.Passwd)) != 1 {
 		return "", false
+	}
+	// Upgrade old fixed-salt SHA-256 credentials after a successful login.
+	if upgraded, err := hashPassword(passwd); err == nil {
+		_ = db.Model(&models.User{}).Where("uuid = ? AND passwd = ?", user.UUID, user.Passwd).Update("passwd", upgraded).Error
 	}
 	return user.UUID, true
 }
@@ -51,7 +64,11 @@ func CheckPassword(username, passwd string) (uuid string, success bool) {
 // ForceResetPassword 强制重置用户密码
 func ForceResetPassword(username, passwd string) (err error) {
 	db := dbcore.GetDBInstance()
-	result := db.Model(&models.User{}).Where("username = ?", username).Update("passwd", hashPasswd(passwd))
+	hashed, err := hashPassword(passwd)
+	if err != nil {
+		return err
+	}
+	result := db.Model(&models.User{}).Where("username = ?", username).Update("passwd", hashed)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -61,10 +78,18 @@ func ForceResetPassword(username, passwd string) (err error) {
 	return nil
 }
 
-// hashPasswd 对密码进行加盐哈希
-func hashPasswd(passwd string) string {
+func hashPassword(passwd string) (string, error) {
+	hashed, err := bcrypt.GenerateFromPassword([]byte(passwd), bcrypt.DefaultCost)
+	return string(hashed), err
+}
+
+// legacyPasswordHash only verifies and upgrades credentials created before the
+// bcrypt migration. New and reset passwords never use this representation.
+func legacyPasswordHash(passwd string) string {
 	saltedPassword := passwd + constantSalt
 	hash := sha256.New()
+	// lgtm[go/weak-sensitive-data-hashing] Compatibility verification for an
+	// existing one-way hash; successful verification is immediately rehashed.
 	hash.Write([]byte(saltedPassword))
 	hashedPassword := base64.StdEncoding.EncodeToString(hash.Sum(nil))
 	return hashedPassword
@@ -75,7 +100,10 @@ func CreateAccount(username, passwd string) (user models.User, err error) {
 }
 
 func CreateAccountWithDB(db *gorm.DB, username, passwd string) (user models.User, err error) {
-	hashedPassword := hashPasswd(passwd)
+	hashedPassword, err := hashPassword(passwd)
+	if err != nil {
+		return models.User{}, err
+	}
 	user = models.User{
 		UUID:     uuid.New().String(),
 		Username: username,
@@ -154,7 +182,11 @@ func UpdateUser(uuid string, name, password, sso_type *string) error {
 		updates["username"] = *name
 	}
 	if password != nil {
-		updates["passwd"] = hashPasswd(*password)
+		hashed, err := hashPassword(*password)
+		if err != nil {
+			return err
+		}
+		updates["passwd"] = hashed
 	}
 	if sso_type != nil {
 		updates["sso_type"] = *sso_type

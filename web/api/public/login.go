@@ -8,8 +8,8 @@ import (
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/pkg/config"
-	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/security"
 
 	"github.com/gin-gonic/gin"
 )
@@ -23,15 +23,7 @@ type LoginRequest struct {
 const sessionCookieMaxAge = 2592000
 
 func setSessionCookie(c *gin.Context, value string, maxAge int) {
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name:     "session_token",
-		Value:    value,
-		Path:     "/",
-		MaxAge:   maxAge,
-		Secure:   utils.GetScheme(c) == "https",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
+	security.SetSensitiveCookie(c, "session_token", value, maxAge)
 }
 
 func Login(c *gin.Context) {

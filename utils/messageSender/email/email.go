@@ -93,6 +93,12 @@ func (e *EmailSender) SendTextMessage(message, title string) error {
 	if e.Addition.Host == "" || e.Addition.Sender == "" || e.Addition.Username == "" || e.Addition.Password == "" || e.Addition.Receiver == "" {
 		return fmt.Errorf("email sending is not fully configured")
 	}
+	if strings.ContainsAny(title, "\r\n") {
+		return fmt.Errorf("email title contains a line break")
+	}
+	if strings.ContainsAny(e.Addition.Host, "\r\n") {
+		return fmt.Errorf("email host contains a line break")
+	}
 
 	// 使用更宽松的认证方式,优先尝试 PLAIN,如果失败则尝试 LOGIN
 	// 这样可以兼容更多的 SMTP 服务器,包括微软邮箱、网易邮箱等
@@ -115,41 +121,26 @@ func (e *EmailSender) SendTextMessage(message, title string) error {
 	}
 
 	// Parse sender address (for MAIL FROM and header)
-	var senderAddr string
-	var senderHeader string
-	if addr, err := mail.ParseAddress(e.Addition.Sender); err == nil {
-		senderAddr = addr.Address
-		senderHeader = addr.String()
-	} else {
-		// Fallback: use raw string
-		senderAddr = e.Addition.Sender
-		senderHeader = e.Addition.Sender
+	sender, err := mail.ParseAddress(e.Addition.Sender)
+	if err != nil || strings.ContainsAny(e.Addition.Sender, "\r\n") {
+		return fmt.Errorf("invalid sender address")
 	}
+	senderAddr := sender.Address
+	senderHeader := sender.String()
 
 	// Parse recipients (support comma-separated list)
 	var rcptList []string
 	var rcptHeaderParts []string
-	if addrs, err := mail.ParseAddressList(e.Addition.Receiver); err == nil {
-		for _, a := range addrs {
-			rcptList = append(rcptList, a.Address)
-			rcptHeaderParts = append(rcptHeaderParts, a.String())
-		}
-	} else {
-		// Fallback simple split
-		parts := strings.Split(e.Addition.Receiver, ",")
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p == "" {
-				continue
-			}
-			if a, err := mail.ParseAddress(p); err == nil {
-				rcptList = append(rcptList, a.Address)
-				rcptHeaderParts = append(rcptHeaderParts, a.String())
-			} else {
-				rcptList = append(rcptList, p)
-				rcptHeaderParts = append(rcptHeaderParts, p)
-			}
-		}
+	if strings.ContainsAny(e.Addition.Receiver, "\r\n") {
+		return fmt.Errorf("recipient address contains a line break")
+	}
+	recipients, err := mail.ParseAddressList(e.Addition.Receiver)
+	if err != nil {
+		return fmt.Errorf("invalid recipient address: %w", err)
+	}
+	for _, recipient := range recipients {
+		rcptList = append(rcptList, recipient.Address)
+		rcptHeaderParts = append(rcptHeaderParts, recipient.String())
 	}
 	if len(rcptList) == 0 {
 		return fmt.Errorf("no valid recipient address parsed")

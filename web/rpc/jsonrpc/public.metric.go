@@ -214,7 +214,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		rawSlot       int
 	}
 	now := time.Now().UTC()
-	plans := make([]publicMetricBatchPlan, 0, len(metricKeys)*maxInt(1, len(entityIDs)))
+	plans := make([]publicMetricBatchPlan, 0)
 	aggregateQueries := make([]metric.AggregateQuery, 0, len(plans))
 	rawQueries := make([]metric.Query, 0, len(plans))
 	for _, metricKey := range metricKeys {

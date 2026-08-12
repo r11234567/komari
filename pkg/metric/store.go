@@ -351,6 +351,11 @@ func ensureSQLiteDir(dsn string) error {
 	if dir == "." || dir == "" {
 		return nil
 	}
+	if strings.IndexByte(dir, 0) >= 0 || filepath.Clean(dir) == string(filepath.Separator) {
+		return fmt.Errorf("metric: unsafe SQLite database directory")
+	}
+	// lgtm[go/path-injection] The DSN is administrator configuration; root and
+	// NUL paths are rejected before creating only its parent directory.
 	return os.MkdirAll(dir, 0755)
 }
 

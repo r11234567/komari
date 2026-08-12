@@ -228,7 +228,7 @@ func loadDashboardLatencyJitter(ctx context.Context, clientList []models.Client,
 }
 
 func dashboardLatencyTaskID(point metric.AggregatePoint) (uint, bool) {
-	value, err := strconv.ParseUint(strings.TrimSpace(point.Tags["task_id"]), 10, 64)
+	value, err := strconv.ParseUint(strings.TrimSpace(point.Tags["task_id"]), 10, strconv.IntSize)
 	return uint(value), err == nil && value > 0
 }
 

@@ -19,6 +19,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/utils/safepath"
+	websecurity "github.com/komari-monitor/komari/web/security"
 )
 
 var legacyDefaultFaviconSHA256 = [32]byte{
@@ -176,37 +178,6 @@ func replaceHTMLLanguage(htmlStr, language string) string {
 	return htmlStr
 }
 
-// isSafePath 验证路径是否在指定的基础目录内，防止路径穿透攻击
-func isSafePath(basePath, targetPath string) bool {
-	// 获取基础目录的绝对路径
-	absBase, err := filepath.Abs(basePath)
-	if err != nil {
-		return false
-	}
-
-	// 清理目标路径，移除 ../ 等
-	cleanTarget := filepath.Clean(targetPath)
-
-	// 拼接完整路径
-	fullPath := filepath.Join(absBase, cleanTarget)
-
-	// 获取绝对路径
-	absTarget, err := filepath.Abs(fullPath)
-	if err != nil {
-		return false
-	}
-
-	// 检查目标路径是否以基础路径开头
-	// 使用 filepath.Rel 更可靠地检查路径关系
-	rel, err := filepath.Rel(absBase, absTarget)
-	if err != nil {
-		return false
-	}
-
-	// 如果相对路径以 .. 开头，说明目标在基础目录之外
-	return !strings.HasPrefix(rel, "..") && rel != ".."
-}
-
 func embeddedFileContent(root, relativePath string) ([]byte, string, bool) {
 	cleanPath := path.Clean(strings.TrimPrefix(filepath.ToSlash(relativePath), "/"))
 	if cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, "../") {
@@ -235,15 +206,17 @@ func localThemeFileContent(themeID, relativePath string) ([]byte, string, bool) 
 	if !validThemeID(themeID) {
 		return nil, "", false
 	}
-	cleanPath := filepath.Clean(strings.TrimPrefix(relativePath, "/"))
 	themeBasePath := filepath.Join(DataDir, ThemesDir, themeID)
-	if !isSafePath(themeBasePath, cleanPath) {
+	localPath, err := safepath.JoinUnder(themeBasePath, strings.TrimPrefix(relativePath, "/"))
+	if err != nil {
 		return nil, "", false
 	}
-	localPath := filepath.Join(themeBasePath, cleanPath)
-	if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
-		content, err := os.ReadFile(localPath)
-		if err == nil {
+	// lgtm[go/path-injection] localPath is confined to the selected theme by
+	// safepath.JoinUnder after strict theme ID validation.
+	if info, statErr := os.Stat(localPath); statErr == nil && !info.IsDir() {
+		// lgtm[go/path-injection]
+		content, readErr := os.ReadFile(localPath)
+		if readErr == nil {
 			return content, contentTypeForPath(localPath), true
 		}
 	}
@@ -550,15 +523,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			}
 			expireSeconds := int(tempKeyExpireTime - now)
 			if expireSeconds > 0 {
-				c.SetCookie(
-					"temp_key",    // key
-					tempKey,       // value
-					expireSeconds, // maxAge（秒）
-					"/",           // path
-					"",            // domain
-					false,         // secure
-					false,         // httpOnly
-				)
+				websecurity.SetSensitiveCookie(c, "temp_key", tempKey, expireSeconds)
 			}
 		}()
 		reqPath := c.Request.URL.Path

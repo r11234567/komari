@@ -102,7 +102,7 @@ func summarizeDashboardPacketLoss(clientList []models.Client, taskList []models.
 		if _, ok := clientsByID[point.EntityID]; !ok {
 			continue
 		}
-		taskID64, parseErr := strconv.ParseUint(strings.TrimSpace(point.Tags["task_id"]), 10, 64)
+		taskID64, parseErr := strconv.ParseUint(strings.TrimSpace(point.Tags["task_id"]), 10, strconv.IntSize)
 		if parseErr != nil {
 			continue
 		}
