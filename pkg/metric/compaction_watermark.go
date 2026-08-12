@@ -9,12 +9,17 @@ import (
 )
 
 // compactionWatermark returns the last boundary for which a metric's raw data
-// was successfully materialized into rollups and retained/deleted in the same
-// transaction. A missing row is expected for stores created before watermark
-// tracking was introduced or for metrics that have never been compacted.
+// was successfully materialized into rollups in the same transaction. Raw may
+// be retained or deleted according to policy. A missing row is expected for
+// stores created before watermark tracking was introduced or for metrics that
+// have never been compacted.
 func (s *Store) compactionWatermark(ctx context.Context, metricName string) (time.Time, bool, error) {
+	return s.compactionWatermarkFrom(ctx, s.reader(), metricName)
+}
+
+func (s *Store) compactionWatermarkFrom(ctx context.Context, q querier, metricName string) (time.Time, bool, error) {
 	var nano int64
-	err := s.reader().QueryRowContext(ctx, fmt.Sprintf(
+	err := q.QueryRowContext(ctx, fmt.Sprintf(
 		`SELECT watermark_nano FROM %s WHERE metric_name = %s`,
 		s.tables.watermarks, s.dialect.placeholder(1),
 	), metricName).Scan(&nano)
@@ -31,8 +36,8 @@ func (s *Store) compactionWatermark(ctx context.Context, metricName string) (tim
 }
 
 // persistCompactionWatermarkTx records a successful compaction boundary in the
-// same transaction as rollup writes and raw retention deletion. It is
-// monotonic so a delayed caller cannot move the read boundary backwards.
+// same transaction as rollup writes and optional raw retention deletion. It
+// is monotonic so a delayed caller cannot move the read boundary backwards.
 func (s *Store) persistCompactionWatermarkTx(ctx context.Context, metricName string, watermark time.Time, tx *sql.Tx) error {
 	watermark = watermark.UTC()
 	if watermark.IsZero() {

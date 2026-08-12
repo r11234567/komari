@@ -41,13 +41,17 @@ type RollupTier struct {
 // RollupPolicy 描述完整保留阶梯：原始点保留多久，以及后续逐级变粗的
 // rollup 层；Compact 会物化这些层并执行保留窗口。
 type RollupPolicy struct {
-	// RawRetention is how long raw points are kept before Compact deletes them
-	// (after they have been rolled into the finest tier). Zero means "never
-	// delete raw" — rollups are still built, but raw is retained.
+	// RawRetention is the hot-data window before points are materialized into
+	// the finest tier. Compact deletes those points unless PreserveRaw is set.
+	// Zero keeps the historical full-rebuild behavior.
 	//
 	// RawRetention 是 Compact 删除原始点之前保留它们的时间（在它们已进入最细
 	// rollup 层之后）。零值表示“永不删除原始点”；rollup 仍会构建，但原始点保留。
 	RawRetention time.Duration `json:"raw_retention"`
+	// PreserveRaw keeps raw points after they have been materialized into
+	// rollups. The watermark still advances, so background compaction remains
+	// incremental instead of rebuilding retained history on every cycle.
+	PreserveRaw bool `json:"preserve_raw,omitempty"`
 	// Tiers are ordered finest-first. Each Interval must be a positive integer
 	// multiple of the previous tier's Interval (so a coarse bucket is composed
 	// of whole finer buckets), and each Retention must be >= the previous

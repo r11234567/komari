@@ -207,3 +207,72 @@ func TestRuntimeSealingDrainsMoreThanOneSeriesBatch(t *testing.T) {
 		t.Fatalf("eligible hot rollups remained after batched sealing: %d", oldHotRows)
 	}
 }
+
+func TestIncrementalCompactionPreservesRawWithoutDuplicatingRollups(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		RawRetention: 2 * time.Hour,
+		PreserveRaw:  true,
+		Tiers: []RollupTier{
+			{Interval: time.Minute, Retention: 24 * time.Hour},
+		},
+	}
+	store := newRollupStore(t, policy)
+	if err := store.CreateMetric(ctx, Definition{Name: "preserved", Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatal(err)
+	}
+
+	base := time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC)
+	wantRaw := []Point{
+		{MetricName: "preserved", EntityID: "node-a", Timestamp: base.Add(10 * time.Second), Value: 10},
+		{MetricName: "preserved", EntityID: "node-a", Timestamp: base.Add(time.Minute + 10*time.Second), Value: 20},
+		{MetricName: "preserved", EntityID: "node-a", Timestamp: base.Add(2*time.Minute + 10*time.Second), Value: 30},
+	}
+	if err := store.WriteBatch(ctx, wantRaw); err != nil {
+		t.Fatal(err)
+	}
+
+	now := base.Add(3 * time.Hour)
+	if _, err := store.CompactMetric(ctx, "preserved", now); err != nil {
+		t.Fatalf("first preserved compaction: %v", err)
+	}
+	assertPreservedRawAndRollups(t, ctx, store, base, wantRaw)
+
+	if _, err := store.CompactMetric(ctx, "preserved", now.Add(10*time.Minute)); err != nil {
+		t.Fatalf("second preserved compaction: %v", err)
+	}
+	assertPreservedRawAndRollups(t, ctx, store, base, wantRaw)
+}
+
+func assertPreservedRawAndRollups(t *testing.T, ctx context.Context, store *Store, base time.Time, wantRaw []Point) {
+	t.Helper()
+	raw, err := store.Query(ctx, Query{
+		MetricName: "preserved",
+		EntityID:   "node-a",
+		Start:      base,
+		End:        base.Add(3 * time.Minute),
+		Order:      OrderAsc,
+	})
+	if err != nil || len(raw) != len(wantRaw) {
+		t.Fatalf("preserved raw count=%d err=%v, want %d", len(raw), err, len(wantRaw))
+	}
+	rollups, err := store.AggregateRollup(ctx, AggregateQuery{
+		Query: Query{
+			MetricName: "preserved",
+			EntityID:   "node-a",
+			Start:      base,
+			End:        base.Add(3*time.Minute - time.Nanosecond),
+			Order:      OrderAsc,
+		},
+		Aggregation: AggSum,
+		Interval:    time.Minute,
+	}, time.Minute)
+	if err != nil || len(rollups) != len(wantRaw) {
+		t.Fatalf("rollup count=%d err=%v, want %d", len(rollups), err, len(wantRaw))
+	}
+	for index, point := range rollups {
+		if point.Count != 1 || point.Value != wantRaw[index].Value {
+			t.Fatalf("rollup %d=%#v, want one value %v", index, point, wantRaw[index].Value)
+		}
+	}
+}

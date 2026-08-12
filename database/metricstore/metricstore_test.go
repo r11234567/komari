@@ -72,11 +72,14 @@ func TestBuildMetricConfigPreservesRawPointsByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build metric config: %v", err)
 	}
-	if cfg.RollupPolicy.Enabled() {
-		t.Fatal("default config unexpectedly enabled downsampling")
+	if !cfg.RollupPolicy.Enabled() {
+		t.Fatal("default config did not enable non-destructive rollups")
 	}
-	if cfg.RollupPolicy.RawRetention != 0 {
-		t.Fatalf("raw retention = %s, want unlimited", cfg.RollupPolicy.RawRetention)
+	if !cfg.RollupPolicy.PreserveRaw {
+		t.Fatal("default config did not preserve raw points")
+	}
+	if cfg.RollupPolicy.RawRetention != DefaultRollupMaterializationDelay {
+		t.Fatalf("materialization delay = %s, want %s", cfg.RollupPolicy.RawRetention, DefaultRollupMaterializationDelay)
 	}
 }
 
@@ -96,7 +99,7 @@ func TestBuildMetricConfigLeavesFinalRetentionToMetricDefinition(t *testing.T) {
 	}
 }
 
-func TestBuildMetricConfigDisablesRollupTiersWhenDownsamplingIsDisabled(t *testing.T) {
+func TestBuildMetricConfigKeepsRollupTiersWhenDownsamplingIsDisabled(t *testing.T) {
 	cfg, err := buildMetricConfig(&MetricStoreConfig{
 		Driver: "sqlite",
 		DSN:    ":memory:",
@@ -104,28 +107,28 @@ func TestBuildMetricConfigDisablesRollupTiersWhenDownsamplingIsDisabled(t *testi
 	if err != nil {
 		t.Fatalf("build metric config: %v", err)
 	}
-	if cfg.RollupPolicy.Enabled() {
-		t.Fatal("downsampling-disabled config unexpectedly retained rollup tiers")
+	if !cfg.RollupPolicy.Enabled() || len(cfg.RollupPolicy.Tiers) != 4 {
+		t.Fatal("downsampling-disabled config must retain query rollup tiers")
 	}
-	if cfg.RollupPolicy.RawRetention != 0 {
-		t.Fatalf("raw retention = %s, want unlimited", cfg.RollupPolicy.RawRetention)
+	if !cfg.RollupPolicy.PreserveRaw {
+		t.Fatal("downsampling-disabled config must preserve raw points")
 	}
 }
 
 func TestRollupPolicyEnablesRawExpiryOnlyWhenRequested(t *testing.T) {
 	disabled := rollupPolicy(false)
 	enabled := rollupPolicy(true)
-	if disabled.Enabled() || len(disabled.Tiers) != 0 {
-		t.Fatalf("disabled policy unexpectedly has rollup tiers: %#v", disabled)
+	if !disabled.Enabled() || len(disabled.Tiers) != 4 {
+		t.Fatalf("disabled policy must keep query rollup tiers: %#v", disabled)
 	}
-	if disabled.RawRetention != 0 {
-		t.Fatalf("disabled raw retention = %s, want unlimited", disabled.RawRetention)
+	if !disabled.PreserveRaw || disabled.RawRetention != DefaultRollupMaterializationDelay {
+		t.Fatalf("disabled policy does not preserve raw with delayed rollups: %#v", disabled)
 	}
-	if enabled.RawRetention != DefaultRollupRawRetention {
+	if enabled.PreserveRaw || enabled.RawRetention != DefaultRollupRawRetention {
 		t.Fatalf("enabled raw retention = %s, want %s", enabled.RawRetention, DefaultRollupRawRetention)
 	}
-	if reflect.DeepEqual(disabled.Tiers, enabled.Tiers) || len(enabled.Tiers) != 4 {
-		t.Fatal("enabled policy must define the three rollup tiers")
+	if !reflect.DeepEqual(disabled.Tiers, enabled.Tiers) || len(enabled.Tiers) != 4 {
+		t.Fatal("raw preservation must not change the configured rollup tiers")
 	}
 }
 

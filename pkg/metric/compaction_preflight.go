@@ -18,13 +18,23 @@ func (s *Store) incrementalCompactionPending(ctx context.Context, metricName str
 	}
 
 	rawCutoff := policy.rawCutoff(now).UnixNano()
-	pending, err := s.sqliteV4MetricPointRowsBefore(ctx, metricName, rawCutoff, true)
-	if err != nil || pending {
-		return pending, err
+	if policy.PreserveRaw {
+		watermark, found, err := s.compactionWatermark(ctx, metricName)
+		if err != nil {
+			return false, err
+		}
+		if !found || watermark.UnixNano() < rawCutoff {
+			return true, nil
+		}
+	} else {
+		pending, err := s.sqliteV4MetricPointRowsBefore(ctx, metricName, rawCutoff, true)
+		if err != nil || pending {
+			return pending, err
+		}
 	}
 
 	for _, interval := range obsoleteIntervals {
-		pending, err = s.sqliteV4MetricRollupRows(ctx, metricName, interval.Nanoseconds(), nil)
+		pending, err := s.sqliteV4MetricRollupRows(ctx, metricName, interval.Nanoseconds(), nil)
 		if err != nil || pending {
 			return pending, err
 		}
@@ -36,14 +46,14 @@ func (s *Store) incrementalCompactionPending(ctx context.Context, metricName str
 			alignment = policy.Tiers[index+1].Interval
 		}
 		cutoff := alignRollupRetentionCutoff(now.Add(-tier.Retention), alignment).UnixNano()
-		pending, err = s.sqliteV4MetricRollupRows(ctx, metricName, tier.Interval.Nanoseconds(), &cutoff)
+		pending, err := s.sqliteV4MetricRollupRows(ctx, metricName, tier.Interval.Nanoseconds(), &cutoff)
 		if err != nil || pending {
 			return pending, err
 		}
 	}
 
 	sealBefore := now.Add(-sqliteV4HotWindow).UnixNano()
-	pending, err = s.sqliteV4MetricPointRowsBefore(ctx, metricName, sealBefore, false)
+	pending, err := s.sqliteV4MetricPointRowsBefore(ctx, metricName, sealBefore, false)
 	if err != nil || pending {
 		return pending, err
 	}

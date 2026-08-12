@@ -227,9 +227,28 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 	defer func() { _ = tx.Rollback() }()
 
 	rawCutoff := policy.rawCutoff(now)
-	chunkStart, found, err := s.oldestRawTimestampBeforeTx(ctx, tx, metricName, rawCutoff)
-	if err != nil {
-		return 0, false, err
+	var chunkStart time.Time
+	var found bool
+	if policy.PreserveRaw {
+		watermark, hasWatermark, err := s.compactionWatermarkFrom(ctx, tx, metricName)
+		if err != nil {
+			return 0, false, err
+		}
+		if hasWatermark {
+			chunkStart = watermark
+			found = watermark.Before(rawCutoff)
+		} else {
+			chunkStart, found, err = s.oldestRawTimestampBeforeTx(ctx, tx, metricName, rawCutoff)
+			if err != nil {
+				return 0, false, err
+			}
+		}
+	} else {
+		var err error
+		chunkStart, found, err = s.oldestRawTimestampBeforeTx(ctx, tx, metricName, rawCutoff)
+		if err != nil {
+			return 0, false, err
+		}
 	}
 	chunkEnd := rawCutoff
 	completed := true
@@ -248,13 +267,15 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 		if err != nil {
 			return 0, false, err
 		}
-		if s.sqliteStorageV4 {
-			err = s.deleteSQLiteV4PointsBeforeCompactionTx(ctx, tx, metricName, chunkEnd.UnixNano())
-		} else {
-			_, err = s.DeleteBeforeTx(ctx, metricName, chunkEnd, tx)
-		}
-		if err != nil {
-			return 0, false, err
+		if !policy.PreserveRaw {
+			if s.sqliteStorageV4 {
+				err = s.deleteSQLiteV4PointsBeforeCompactionTx(ctx, tx, metricName, chunkEnd.UnixNano())
+			} else {
+				_, err = s.DeleteBeforeTx(ctx, metricName, chunkEnd, tx)
+			}
+			if err != nil {
+				return 0, false, err
+			}
 		}
 	}
 

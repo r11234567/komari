@@ -42,6 +42,7 @@ func init() {
 
 type downsamplingPolicyResponse struct {
 	Enabled                    bool                       `json:"enabled"`
+	PreserveRaw                bool                       `json:"preserve_raw"`
 	RawRetention               string                     `json:"raw_retention"`
 	MinuteRetentionMinutes     int                        `json:"minute_retention_minutes"`
 	FiveMinuteRetentionMinutes int                        `json:"five_minute_retention_minutes"`
@@ -59,9 +60,14 @@ func currentDownsamplingPolicy() (downsamplingPolicyResponse, error) {
 	if err != nil {
 		return downsamplingPolicyResponse{}, err
 	}
+	rawRetention := metricstore.DefaultRollupRawRetention
+	if !cfg.DownsamplingEnabled {
+		rawRetention = metricstore.DefaultRollupMaterializationDelay
+	}
 	policy := downsamplingPolicyResponse{
 		Enabled:                    cfg.DownsamplingEnabled,
-		RawRetention:               metricstore.DefaultRollupRawRetention.String(),
+		PreserveRaw:                !cfg.DownsamplingEnabled,
+		RawRetention:               rawRetention.String(),
 		MinuteRetentionMinutes:     cfg.RollupMinuteRetentionMinutes,
 		FiveMinuteRetentionMinutes: cfg.RollupFiveMinuteRetentionMinutes,
 		HourRetentionHours:         cfg.RollupHourRetentionHours,

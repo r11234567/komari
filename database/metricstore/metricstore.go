@@ -31,6 +31,7 @@ const (
 	// DefaultRollupRawRetention keeps a short hot raw window; older samples are
 	// served from rollups after compaction.
 	DefaultRollupRawRetention               = 15 * time.Minute
+	DefaultRollupMaterializationDelay       = 2 * time.Hour
 	DefaultRollupFinestTier                 = time.Minute
 	DefaultRollupMinuteRetentionMinutes     = 600
 	DefaultRollupFiveMinuteRetentionMinutes = 3000
@@ -65,9 +66,8 @@ const (
 	MetricStoreEnabledKey = "metric_store_enabled" // Deprecated: metric store 始终启用
 	MetricDBDriverKey     = "metric_db_driver"
 	MetricDBDSNKey        = "metric_db_dsn"
-	// MetricDownsamplingEnabledKey controls the three query rollup tiers and
-	// expiry of raw points. It defaults to false so no rollups are generated and
-	// migrations preserve every source sample.
+	// MetricDownsamplingEnabledKey controls expiry of raw points. Rollups are
+	// always materialized for bounded historical queries; false preserves raw.
 	MetricDownsamplingEnabledKey              = "metric_downsampling_enabled"
 	MetricRollupMinuteRetentionMinutesKey     = "metric_rollup_minute_retention_minutes"
 	MetricRollupFiveMinuteRetentionMinutesKey = "metric_rollup_five_minute_retention_minutes"
@@ -163,10 +163,6 @@ func rollupPolicyFromConfig(cfg *MetricStoreConfig) (metric.RollupPolicy, error)
 	if cfg == nil {
 		return metric.RollupPolicy{}, fmt.Errorf("metric store config is nil")
 	}
-	if !cfg.DownsamplingEnabled {
-		return metric.RollupPolicy{}, nil
-	}
-
 	minuteRetention := cfg.RollupMinuteRetentionMinutes
 	fiveMinuteRetention := cfg.RollupFiveMinuteRetentionMinutes
 	hourRetention := cfg.RollupHourRetentionHours
@@ -196,8 +192,14 @@ func rollupPolicyFromConfig(cfg *MetricStoreConfig) (metric.RollupPolicy, error)
 		return metric.RollupPolicy{}, err
 	}
 
+	rawRetention := DefaultRollupRawRetention
+	preserveRaw := !cfg.DownsamplingEnabled
+	if preserveRaw {
+		rawRetention = DefaultRollupMaterializationDelay
+	}
 	policy := metric.RollupPolicy{
-		RawRetention: DefaultRollupRawRetention,
+		RawRetention: rawRetention,
+		PreserveRaw:  preserveRaw,
 		Tiers: []metric.RollupTier{
 			{Interval: DefaultRollupFinestTier, Retention: minuteDuration},
 			{Interval: 5 * time.Minute, Retention: fiveMinuteDuration},
