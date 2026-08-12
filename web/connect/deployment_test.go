@@ -41,6 +41,23 @@ func TestDeploymentCommandRejectsRescueOnMacOS(t *testing.T) {
 	}
 }
 
+func TestDeploymentCommandDisablesRemoteControlForNonPrivilegedRuntime(t *testing.T) {
+	command, err := deploymentCommand(clients.DeploymentProfile{
+		Platform:             "linux",
+		RuntimeIdentity:      clients.AgentRuntimeIdentityCurrentUser,
+		RemoteControlEnabled: true,
+	}, "https://monitor.example.com", "agent-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(command, "--disable-remote-control") {
+		t.Fatalf("non-privileged install command enables remote control: %s", command)
+	}
+	if strings.Contains(command, "--disable-web-ssh") {
+		t.Fatalf("install command retains deprecated WebSSH switch: %s", command)
+	}
+}
+
 func TestNormalizeDeploymentEndpointUsesRequestOriginWhenSettingIsEmpty(t *testing.T) {
 	endpoint, err := normalizeDeploymentEndpoint("", "https://monitor.example.com/")
 	if err != nil {

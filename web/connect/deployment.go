@@ -77,6 +77,12 @@ func normalizeDeploymentEndpoint(configured, requestOrigin string) (string, erro
 }
 
 func deploymentCommand(profile clients.DeploymentProfile, endpoint, token string) (string, error) {
+	// The ordinary Agent executes remote commands as its own process. A
+	// non-privileged runtime must therefore never receive a command that enables
+	// remote control, even when an API caller bypasses the deployment UI.
+	if profile.RuntimeIdentity == clients.AgentRuntimeIdentityCurrentUser {
+		profile.RemoteControlEnabled = false
+	}
 	arguments := []string{"--install-runtime-identity", profile.RuntimeIdentity, "--endpoint", endpoint, "--token", token}
 	if profile.EnableCustomDir && profile.Dir != "" {
 		arguments = append(arguments, "--install-dir", profile.Dir)
@@ -104,9 +110,6 @@ func deploymentCommand(profile clients.DeploymentProfile, endpoint, token string
 	}
 	if !profile.RemoteControlEnabled {
 		arguments = append(arguments, "--disable-remote-control")
-	}
-	if profile.DisableWebSSH {
-		arguments = append(arguments, "--disable-web-ssh")
 	}
 	if profile.RescueEnabled {
 		arguments = append(arguments, "--install-rescue")
@@ -195,7 +198,12 @@ func (s *deploymentService) SaveDeploymentProfile(_ context.Context, req *connec
 		profile.IgnoreUnsafeCert = install.IgnoreUnsafeCertificate
 		profile.EnableGPU = install.EnableGpu
 		profile.RemoteControlEnabled = install.RemoteControlEnabled
-		profile.DisableWebSSH = install.DisableWebSsh
+		// disable_web_ssh is a deprecated wire-compatibility field. The Agent
+		// treats it exactly like disabling all remote control, so never expose
+		// it as an independent installation choice.
+		if install.DisableWebSsh {
+			profile.RemoteControlEnabled = false
+		}
 		profile.GetIPAddrFromNIC = install.GetIpAddressFromNic
 		profile.EnableGHProxy = install.EnableGithubProxy
 		profile.GHProxy = install.GithubProxy

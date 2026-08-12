@@ -49,7 +49,9 @@ const (
 
 const themeBundleMigrationKey = "theme_bundle_migration_v1"
 
-const currentThemeBundleMigration = 4
+// Increment whenever the embedded official default theme must replace an
+// already-installed bundle. Version 5 removes the legacy RPC2 public entry.
+const currentThemeBundleMigration = 5
 
 const themeChangeReloadScript = `<script>(()=>{window.addEventListener("storage",(event)=>{if(event.key==="komari-active-theme-changed"){window.location.reload();}});})();</script>`
 

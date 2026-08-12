@@ -49,11 +49,14 @@ type DeploymentDeliveryState struct {
 // DeploymentProfile contains both runtime-manageable settings and values that
 // are retained solely to regenerate an installation command.
 type DeploymentProfile struct {
-	Platform                 string  `json:"platform"`
-	RuntimeIdentity          string  `json:"runtime_identity"`
-	RescueEnabled            bool    `json:"rescue_enabled"`
-	RescueConfigureFirewall  bool    `json:"rescue_configure_firewall"`
-	DisableWebSSH            bool    `json:"disable_web_ssh"`
+	Platform                string `json:"platform"`
+	RuntimeIdentity         string `json:"runtime_identity"`
+	RescueEnabled           bool   `json:"rescue_enabled"`
+	RescueConfigureFirewall bool   `json:"rescue_configure_firewall"`
+	// DisableWebSSH is retained only to decode historical profiles. WebSSH and
+	// command execution are one remote-control capability, so new profiles use
+	// RemoteControlEnabled exclusively.
+	DisableWebSSH            bool    `json:"disable_web_ssh,omitempty"`
 	DisableAutoUpdate        bool    `json:"disable_auto_update"`
 	IgnoreUnsafeCert         bool    `json:"ignore_unsafe_cert"`
 	GetIPAddrFromNIC         bool    `json:"get_ip_addr_from_nic"`
@@ -458,6 +461,16 @@ func normalizeDeploymentProfile(profile *DeploymentProfile) error {
 	case AgentRuntimeIdentityPrivileged, AgentRuntimeIdentityCurrentUser:
 	default:
 		return fmt.Errorf("runtime_identity must be root-or-administrator or current-user")
+	}
+	// Older profiles could disable only WebSSH. That flag was always implemented
+	// by the Agent as disabling all remote control, so preserve that behavior
+	// while collapsing the persisted model to its single canonical switch.
+	if profile.DisableWebSSH {
+		profile.RemoteControlEnabled = false
+		profile.DisableWebSSH = false
+	}
+	if profile.RuntimeIdentity == AgentRuntimeIdentityCurrentUser {
+		profile.RemoteControlEnabled = false
 	}
 	if profile.RescueEnabled && profile.RemoteControlEnabled {
 		return fmt.Errorf("rescue helper requires remote control to be disabled")
