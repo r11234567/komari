@@ -14,7 +14,7 @@ on:
       target_ref:
         description: Git ref to release
         required: true
-        default: main
+        default: 1.4.5
         type: string
       web_ref:
         description: Branch or tag in r11234567/komari-web
