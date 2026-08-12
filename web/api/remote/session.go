@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/web/connection"
 )
 
 const (
@@ -29,8 +29,8 @@ type remoteSession struct {
 	RequesterIP   string
 	BrowserTicket string
 	AgentTicket   string
-	Browser       *websocket.Conn
-	Agent         *websocket.Conn
+	Browser       *connection.SafeConn
+	Agent         *connection.SafeConn
 	CreatedAt     time.Time
 	ExpiresAt     time.Time
 	StartedAt     time.Time
@@ -40,7 +40,7 @@ type remoteSession struct {
 
 var errRemoteSessionLimit = errors.New("too many active remote sessions")
 
-func (session *remoteSession) attachBrowser(ticket string, connection *websocket.Conn, now time.Time) bool {
+func (session *remoteSession) attachBrowser(ticket string, connection *connection.SafeConn, now time.Time) bool {
 	session.mu.Lock()
 	defer session.mu.Unlock()
 	valid := !session.closed && session.Browser == nil && now.Before(session.ExpiresAt) &&
@@ -60,7 +60,7 @@ func (session *remoteSession) canAttachAgent(clientUUID, ticket string, now time
 		session.Agent == nil && now.Before(session.ExpiresAt) && ticketsEqual(session.AgentTicket, ticket)
 }
 
-func (session *remoteSession) attachAgent(clientUUID, ticket string, connection *websocket.Conn, now time.Time) bool {
+func (session *remoteSession) attachAgent(clientUUID, ticket string, connection *connection.SafeConn, now time.Time) bool {
 	session.mu.Lock()
 	defer session.mu.Unlock()
 	valid := !session.closed && session.UUID == clientUUID && session.Browser != nil &&

@@ -22,7 +22,7 @@ func EstablishAgent(c *gin.Context) {
 		api.RespondError(c, http.StatusUnauthorized, "Remote session authorization failed")
 		return
 	}
-	conn, err := api.UpgradeWebSocket(c, api.AllowAgentWebSocket)
+	conn, err := api.UpgradeSafeConn(c, api.AllowAgentWebSocket)
 	if err != nil {
 		deleteSession(session.ID)
 		return

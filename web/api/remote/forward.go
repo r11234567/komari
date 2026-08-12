@@ -7,6 +7,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/web/connection"
 )
 
 func forwardSession(session *remoteSession) {
@@ -21,16 +22,16 @@ func forwardSession(session *remoteSession) {
 	}
 	auditlog.Log(session.RequesterIP, session.UserUUID, "established remote session, client:"+session.UUID, "terminal")
 	errCh := make(chan error, 2)
-	setAlive := func(connection *websocket.Conn) {
-		_ = connection.SetReadDeadline(time.Now().Add(remoteIdleTimeout))
-		connection.SetPongHandler(func(string) error {
+	setAlive := func(conn *connection.SafeConn) {
+		_ = conn.SetReadDeadline(time.Now().Add(remoteIdleTimeout))
+		conn.SetPongHandler(func(string) error {
 			session.touch(time.Now())
-			return connection.SetReadDeadline(time.Now().Add(remoteIdleTimeout))
+			return conn.SetReadDeadline(time.Now().Add(remoteIdleTimeout))
 		})
 	}
 	setAlive(browser)
 	setAlive(agent)
-	forward := func(source, target *websocket.Conn, auditFileWrites bool, browserSource bool) {
+	forward := func(source, target *connection.SafeConn, auditFileWrites bool, browserSource bool) {
 		for {
 			messageType, data, err := source.ReadMessage()
 			if err == nil {

@@ -1,14 +1,17 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/web/connection"
 	"github.com/komari-monitor/komari/web/security"
 )
 
@@ -58,6 +61,42 @@ func UpgradeWebSocket(c *gin.Context, options ...WebSocketUpgradeOption) (*webso
 		option(&upgrader)
 	}
 	return upgrader.Upgrade(c.Writer, c.Request, nil)
+}
+
+// UpgradeSafeConn attaches the process-wide plugin WebSocket hook chain to a
+// newly upgraded connection. Legacy callers that need the raw websocket stay
+// supported; protocol handlers use this typed wrapper so hooks see every
+// JSON-RPC and agent frame.
+func UpgradeSafeConn(c *gin.Context, options ...WebSocketUpgradeOption) (*connection.SafeConn, error) {
+	unsafeConn, err := UpgradeWebSocket(c, options...)
+	if err != nil {
+		return nil, err
+	}
+	interceptor := connection.Interceptor()
+	if interceptor == nil {
+		return connection.NewSafeConn(unsafeConn), nil
+	}
+	sc := connection.NewSafeConn(unsafeConn)
+	info := &connection.ConnInfo{
+		ID:        sc.ID,
+		Path:      c.Request.URL.Path,
+		RemoteIP:  c.ClientIP(),
+		UserAgent: c.Request.UserAgent(),
+	}
+	if clientUUID, ok := c.Get("client_uuid"); ok {
+		if value, ok := clientUUID.(string); ok {
+			info.ClientUUID = value
+		}
+	}
+	if deny, reason := interceptor.OnConnect(info); deny {
+		_ = unsafeConn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, reason),
+			time.Now().Add(time.Second))
+		_ = unsafeConn.Close()
+		return nil, errors.New("websocket connection denied by plugin")
+	}
+	sc.SetInterceptor(info, interceptor)
+	return sc, nil
 }
 
 func CheckWebSocketOrigin(r *http.Request) bool {

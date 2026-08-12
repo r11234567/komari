@@ -10,7 +10,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/komari-monitor/komari/web/connection"
 )
+
+func testSafeConn() *connection.SafeConn {
+	return connection.NewSafeConn(&websocket.Conn{})
+}
 
 func replaceRemoteSessions(t *testing.T, replacement map[string]*remoteSession) {
 	t.Helper()
@@ -60,18 +65,18 @@ func TestBrowserAndAgentTicketsAreSingleUse(t *testing.T) {
 		AgentTicket:   "agent-ticket",
 		ExpiresAt:     now.Add(time.Minute),
 	}
-	browser := &websocket.Conn{}
-	agent := &websocket.Conn{}
+	browser := testSafeConn()
+	agent := testSafeConn()
 	if !session.attachBrowser("browser-ticket", browser, now) {
 		t.Fatal("valid browser ticket was rejected")
 	}
-	if session.attachBrowser("browser-ticket", &websocket.Conn{}, now) {
+	if session.attachBrowser("browser-ticket", testSafeConn(), now) {
 		t.Fatal("browser ticket replay was accepted")
 	}
 	if !session.attachAgent("node-a", "agent-ticket", agent, now) {
 		t.Fatal("valid agent ticket was rejected")
 	}
-	if session.attachAgent("node-a", "agent-ticket", &websocket.Conn{}, now) {
+	if session.attachAgent("node-a", "agent-ticket", testSafeConn(), now) {
 		t.Fatal("agent ticket replay was accepted")
 	}
 }
@@ -81,19 +86,19 @@ func TestAgentTicketIsBoundToNodeAndExpiry(t *testing.T) {
 	session := &remoteSession{
 		UUID:        "node-a",
 		AgentTicket: "agent-ticket",
-		Browser:     &websocket.Conn{},
+		Browser:     testSafeConn(),
 		ExpiresAt:   now.Add(time.Minute),
 	}
 	if session.canAttachAgent("node-b", "agent-ticket", now) {
 		t.Fatal("cross-node agent ticket was accepted")
 	}
-	if session.attachAgent("node-b", "agent-ticket", &websocket.Conn{}, now) {
+	if session.attachAgent("node-b", "agent-ticket", testSafeConn(), now) {
 		t.Fatal("cross-node agent attached")
 	}
 	if session.canAttachAgent("node-a", "agent-ticket", now.Add(2*time.Minute)) {
 		t.Fatal("expired agent ticket was accepted")
 	}
-	if session.attachAgent("node-a", "agent-ticket", &websocket.Conn{}, now.Add(2*time.Minute)) {
+	if session.attachAgent("node-a", "agent-ticket", testSafeConn(), now.Add(2*time.Minute)) {
 		t.Fatal("expired agent attached")
 	}
 }

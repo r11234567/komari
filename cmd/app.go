@@ -24,6 +24,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/plugin"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/corn"
 	"github.com/komari-monitor/komari/pkg/metric"
@@ -97,6 +98,12 @@ func (a *App) addCleanup(name string, fn func(ctx context.Context) error) {
 func (a *App) Bootstrap() error {
 	if err := os.MkdirAll("./data/theme", os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create theme directory: %w", err)
+	}
+	if err := os.MkdirAll(plugin.DataDir, os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create plugin directory: %w", err)
+	}
+	if err := os.MkdirAll(plugin.StorageDir, os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create plugin storage directory: %w", err)
 	}
 
 	// 注入版本标识，供 dbcore 在检测到版本升级时自动备份 ./data。
@@ -614,6 +621,11 @@ func (a *App) BuildRouter() error {
 	})
 
 	router.Register(r)
+	plugin.Init(r)
+	if err := plugin.LoadAll(); err != nil {
+		logger.ErrorArgs("server", "Failed to load some plugins:", err)
+	}
+	a.addCleanup("plugins", func(context.Context) error { return plugin.CloseAll() })
 
 	// 集中登记并启动热重载订阅。
 	a.registerReloadHandlers(cors)
@@ -628,7 +640,7 @@ func (a *App) Run() error {
 	httpsSettings, err := httpsserver.LoadSettings()
 	if err != nil {
 		logger.Errorf("https", "Failed to load built-in HTTPS settings: %v", err)
-	} else if err := httpsserver.Default.Start(a.engine, httpsSettings, flags.Listen); err != nil {
+	} else if err := httpsserver.Default.Start(plugin.HTMLInjectHandler(plugin.WrapHandler(a.engine)), httpsSettings, flags.Listen); err != nil {
 		// Keep HTTP available so an invalid certificate or occupied HTTPS port
 		// can still be corrected from the admin page.
 		logger.Errorf("https", "Built-in HTTPS did not start: %v", err)
@@ -639,7 +651,7 @@ func (a *App) Run() error {
 
 	a.server = &http.Server{
 		Addr:    flags.Listen,
-		Handler: httpsserver.Default.HTTPRedirectHandler(a.engine),
+		Handler: httpsserver.Default.HTTPRedirectHandler(plugin.HTMLInjectHandler(plugin.WrapHandler(a.engine))),
 	}
 
 	serverErr := make(chan error, 1)

@@ -28,6 +28,8 @@ require (
 
 require google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
 
+require github.com/dop251/base64dec v0.0.0-20231022112746-c6c9f9a96217 // indirect
+
 require golang.org/x/crypto v0.52.0
 
 require golang.org/x/net v0.55.0 // indirect

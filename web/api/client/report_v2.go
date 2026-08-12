@@ -18,7 +18,6 @@ import (
 	"github.com/komari-monitor/komari/utils/notifier"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/api"
-	"github.com/komari-monitor/komari/web/connection"
 )
 
 func readMaybeCompressedBody(r *http.Request) ([]byte, error) {
@@ -157,12 +156,11 @@ func WebSocketV2RPC(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Require WebSocket upgrade"})
 		return
 	}
-	unsafeConn, err := api.UpgradeWebSocket(c, api.EnableWebSocketCompression, api.AllowAgentWebSocket)
+	conn, err := api.UpgradeSafeConn(c, api.EnableWebSocketCompression, api.AllowAgentWebSocket)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 		return
 	}
-	conn := connection.NewSafeConn(unsafeConn)
 	defer conn.Close()
 
 	uuid, ok := clientUUIDFromContext(c)

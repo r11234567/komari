@@ -3,14 +3,14 @@ package terminal
 import (
 	"sync"
 
-	"github.com/gorilla/websocket"
+	"github.com/komari-monitor/komari/web/connection"
 )
 
 type TerminalSession struct {
 	UUID        string
 	UserUUID    string
-	Browser     *websocket.Conn
-	Agent       *websocket.Conn
+	Browser     *connection.SafeConn
+	Agent       *connection.SafeConn
 	RequesterIp string
 }
 
@@ -19,7 +19,7 @@ var TerminalSessions = make(map[string]*TerminalSession)
 
 func CloseClientSessions(uuid string) {
 	TerminalSessionsMutex.Lock()
-	connections := make([]*websocket.Conn, 0)
+	connections := make([]*connection.SafeConn, 0)
 	for id, session := range TerminalSessions {
 		if session.UUID != uuid {
 			continue

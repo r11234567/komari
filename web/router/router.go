@@ -43,6 +43,7 @@ func registerPublicRoutes(r *gin.Engine) {
 	r.GET("/api/oauth", public_api.OAuth)
 	r.GET("/api/oauth_callback", public_api.OAuthCallback)
 	r.GET("/api/mjpeg_live", public_api.MjpegLiveHandler)
+	r.GET("/api/plugin/:short/*filepath", public_api.ServePluginFile)
 	// /api/clients 是 WebSocket 端点（客户端发 "get"/"get <uuid>" 拉取在线列表与最新上报），
 	// 非 JSON-RPC，保留为 WS handler。
 	r.GET("/api/clients", api.GetClients)
@@ -227,6 +228,24 @@ func registerAdminRoutes(r *gin.Engine) {
 		clipboardGroup.POST("/:id", jsonRpc.Bind("admin:updateClipboard", jsonRpc.WithPath("id")))
 		clipboardGroup.POST("/remove", jsonRpc.Bind("admin:batchDeleteClipboard"))
 		clipboardGroup.POST("/:id/remove", jsonRpc.Bind("admin:deleteClipboard", jsonRpc.WithPath("id")))
+	}
+
+	pluginGroup := g.Group("/plugin")
+	{
+		pluginGroup.GET("/list", jsonRpc.Bind("admin:listPlugins"))
+		pluginGroup.POST("/enabled", jsonRpc.Bind("admin:setPluginEnabled"))
+		pluginGroup.GET("/logs", jsonRpc.Bind("admin:getPluginLogs", jsonRpc.WithQuery("short")))
+		pluginGroup.POST("/install", admin.UploadPlugin)
+		pluginGroup.GET("/market/sources", admin.ListPluginMarketSources)
+		pluginGroup.POST("/market/sources", admin.CreatePluginMarketSource)
+		pluginGroup.PUT("/market/sources/:id", admin.UpdatePluginMarketSource)
+		pluginGroup.DELETE("/market/sources/:id", admin.DeletePluginMarketSource)
+		pluginGroup.GET("/market/catalog", admin.ListPluginMarketCatalog)
+		pluginGroup.POST("/market/install", admin.InstallPluginFromMarket)
+		pluginGroup.POST("/delete", jsonRpc.Bind("admin:deletePlugin"))
+		pluginGroup.GET("/configuration", jsonRpc.Bind("admin:getPluginConfiguration", jsonRpc.WithQuery("short")))
+		pluginGroup.POST("/configuration", jsonRpc.Bind("admin:setPluginConfiguration"))
+		pluginGroup.GET("/:short/*filepath", admin.ServePluginFile)
 	}
 
 	// notifications

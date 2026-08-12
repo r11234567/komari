@@ -157,7 +157,7 @@ func ConnectBrowser(c *gin.Context) {
 		api.RespondError(c, http.StatusNotFound, "Remote session not found")
 		return
 	}
-	conn, err := api.UpgradeWebSocket(c, api.RequireRemoteBrowserOrigin)
+	conn, err := api.UpgradeSafeConn(c, api.RequireRemoteBrowserOrigin)
 	if err != nil {
 		return
 	}

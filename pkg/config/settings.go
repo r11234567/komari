@@ -108,4 +108,5 @@ const (
 	XtermjsSettingsKey            = "xtermjs_settings"
 	DashboardSettingsKey          = "dashboard_settings"
 	ThemeMarketSourcesKey         = "theme_market_sources"
+	PluginMarketSourcesKey        = "plugin_market_sources"
 )

@@ -17,7 +17,6 @@ import (
 	"github.com/komari-monitor/komari/utils/notifier"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/api"
-	"github.com/komari-monitor/komari/web/connection"
 )
 
 const (
@@ -140,12 +139,11 @@ func WebSocketReport(c *gin.Context) {
 		return
 	}
 	// Upgrade the HTTP connection to a WebSocket connection
-	unsafeConn, err := api.UpgradeWebSocket(c, api.AllowAgentWebSocket)
+	conn, err := api.UpgradeSafeConn(c, api.AllowAgentWebSocket)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 		return
 	}
-	conn := connection.NewSafeConn(unsafeConn)
 	defer conn.Close()
 
 	_, message, err := conn.ReadMessage()
