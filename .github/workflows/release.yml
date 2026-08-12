@@ -117,6 +117,20 @@ jobs:
       - name: Install Zig cross-compiler toolchain
         uses: ./.github/actions/setup-zig
 
+      - name: Download Go modules with retry
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if go mod download; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$((attempt * 5))"
+          done
+
       - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}
