@@ -107,6 +107,21 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 		}
 
 		path := c.Request.URL.Path
+		if strings.HasPrefix(path, "/komari.") {
+			privateSite, err := config.GetAs[bool](config.PrivateSiteKey, false)
+			if err != nil {
+				RespondError(c, http.StatusInternalServerError, "Failed to get configuration.")
+				c.Abort()
+				return
+			}
+			if privateSite && !hasTempAccess(c) {
+				RespondError(c, http.StatusUnauthorized, "Private site is enabled, please login first.")
+				c.Abort()
+				return
+			}
+			c.Next()
+			return
+		}
 
 		// 公开路径直接放行
 		for _, p := range publicPaths {

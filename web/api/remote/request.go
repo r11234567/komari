@@ -52,6 +52,11 @@ func CreateSession(c *gin.Context) {
 		api.RespondError(c, http.StatusNotFound, "Client not found")
 		return
 	}
+	allowed, err := clients.RemoteControlAllowed(uuid)
+	if err != nil || !allowed {
+		api.RespondError(c, http.StatusForbidden, "Remote control is disabled for this client")
+		return
+	}
 	if !agent_runtime.IsAgentOnline(uuid) {
 		api.RespondError(c, http.StatusConflict, "Client is offline")
 		return
@@ -142,14 +147,7 @@ func CancelSession(c *gin.Context) {
 }
 
 func verifyRemoteAccess(c *gin.Context, loginSession string) error {
-	if hasFreshStepUp(loginSession) {
-		return nil
-	}
-	if err := api.VerifySensitive2FA(c); err != nil {
-		return err
-	}
-	rememberStepUp(loginSession)
-	return nil
+	return api.VerifySensitive2FA(c)
 }
 
 func ConnectBrowser(c *gin.Context) {

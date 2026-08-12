@@ -20,12 +20,16 @@ import (
 // protocolVersion 标记上报所用协议（1 或 2），用于运行时区分客户端能力。
 // markPresence 为 true 时按 POST 上报会话刷新在线状态（WS 连接自行管理在线状态，应传 false）。
 func ingestReport(uuid string, report v1.Report, protocolVersion int, markPresence bool) error {
+	return ingestReportContext(context.Background(), uuid, report, protocolVersion, markPresence)
+}
+
+func ingestReportContext(ctx context.Context, uuid string, report v1.Report, protocolVersion int, markPresence bool) error {
 	report.UUID = uuid
 	report.UpdatedAt = time.Now().UTC()
 	if err := clients.ReportVerify(report); err != nil {
 		return err
 	}
-	savedReport, err := metricstore.WriteReport(context.Background(), report)
+	savedReport, err := metricstore.WriteReport(ctx, report)
 	if err != nil {
 		return err
 	}
@@ -35,6 +39,17 @@ func ingestReport(uuid string, report v1.Report, protocolVersion int, markPresen
 		refreshPostPresence(uuid)
 	}
 	return nil
+}
+
+// IngestReport is the transport-neutral entry point used by Connect handlers.
+// Legacy v1/v2 routes continue to call the private helper above.
+func IngestReport(uuid string, report v1.Report, protocolVersion int, markPresence bool) error {
+	return ingestReport(uuid, report, protocolVersion, markPresence)
+}
+
+// IngestReportContext propagates Connect cancellation and deadlines to storage.
+func IngestReportContext(ctx context.Context, uuid string, report v1.Report, protocolVersion int, markPresence bool) error {
+	return ingestReportContext(ctx, uuid, report, protocolVersion, markPresence)
 }
 
 // ingestBasicInfo 保存客户端基础信息。fallbackIP 在上报未携带 IP 时用作兜底。

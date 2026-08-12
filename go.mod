@@ -3,6 +3,7 @@ module github.com/komari-monitor/komari
 go 1.25.0
 
 require (
+	connectrpc.com/connect v1.19.1
 	github.com/dop251/goja v0.0.0-20251008123653-cf18d89f3cf6
 	github.com/dop251/goja_nodejs v0.0.0-20251015164255-5e94316bedaf
 	github.com/gin-gonic/gin v1.10.0
@@ -14,6 +15,7 @@ require (
 	github.com/oschwald/maxminddb-golang v1.13.1
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/pquerna/otp v1.5.0
+	github.com/r11234567/komari-proto v0.1.1
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/image v0.41.0
@@ -26,7 +28,7 @@ require (
 
 require google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
 
-require golang.org/x/crypto v0.52.0 // indirect
+require golang.org/x/crypto v0.52.0
 
 require golang.org/x/net v0.55.0 // indirect
 
@@ -67,7 +69,6 @@ require (
 	github.com/ugorji/go/codec v1.2.12 // indirect
 	golang.org/x/arch v0.15.0 // indirect
 	golang.org/x/sync v0.20.0
-	golang.org/x/term v0.43.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

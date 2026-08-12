@@ -24,6 +24,11 @@ func RequestTerminal(c *gin.Context) {
 		})
 		return
 	}
+	allowed, err := clients.RemoteControlAllowed(uuid)
+	if err != nil || !allowed {
+		api.RespondError(c, http.StatusForbidden, "Remote control is disabled for this client")
+		return
+	}
 	// 建立ws
 	if !api.IsWebSocketUpgrade(c) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Require WebSocket upgrade"})

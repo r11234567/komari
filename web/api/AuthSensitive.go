@@ -5,10 +5,17 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
 )
+
+var sensitive2FAReplayCache = struct {
+	sync.Mutex
+	used map[string]time.Time
+}{used: make(map[string]time.Time)}
 
 func RequireSensitive2FA() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -25,10 +32,10 @@ func RequireSensitive2FA() gin.HandlerFunc {
 
 // VerifySensitive2FACore 传输无关的 2FA 校验核心。
 // 输入原始值:userUUID、2FA code、是否为 API Key。
-// API Key 豁免;未启用 2FA 的用户放行;其余需要有效 code。
+// API keys never satisfy fresh 2FA. Users without configured 2FA are rejected.
 func VerifySensitive2FACore(userUUID, code string, isAPIKey bool) error {
 	if isAPIKey {
-		return nil
+		return err2FARequired()
 	}
 	if userUUID == "" {
 		return err2FARequired()
@@ -38,7 +45,7 @@ func VerifySensitive2FACore(userUUID, code string, isAPIKey bool) error {
 		return err
 	}
 	if user.TwoFactor == "" {
-		return nil
+		return err2FARequired()
 	}
 	if code == "" {
 		return err2FARequired()
@@ -50,7 +57,26 @@ func VerifySensitive2FACore(userUUID, code string, isAPIKey bool) error {
 	if !valid {
 		return err2FAInvalid()
 	}
+	if !claimSensitive2FACode(userUUID, code, time.Now()) {
+		return err2FAInvalid()
+	}
 	return nil
+}
+
+func claimSensitive2FACode(userUUID, code string, now time.Time) bool {
+	key := userUUID + "\x00" + code
+	sensitive2FAReplayCache.Lock()
+	defer sensitive2FAReplayCache.Unlock()
+	for cached, expiresAt := range sensitive2FAReplayCache.used {
+		if !expiresAt.After(now) {
+			delete(sensitive2FAReplayCache.used, cached)
+		}
+	}
+	if sensitive2FAReplayCache.used[key].After(now) {
+		return false
+	}
+	sensitive2FAReplayCache.used[key] = now.Add(90 * time.Second)
+	return true
 }
 
 // VerifySensitive2FA gin 适配层:从 gin.Context 提取参数后委托核心校验。

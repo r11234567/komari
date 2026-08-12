@@ -14,7 +14,6 @@ const (
 	pendingSessionTTL  = 45 * time.Second
 	remoteIdleTimeout  = 45 * time.Second
 	remotePingInterval = 15 * time.Second
-	remoteStepUpTTL    = 10 * time.Minute
 	remoteMaxDuration  = 2 * time.Hour
 	remoteReadLimit    = 2 << 20
 	maxRemoteSessions  = 64
@@ -108,8 +107,6 @@ func (session *remoteSession) pendingAgentTicket() string {
 var (
 	sessionsMu sync.RWMutex
 	sessions   = make(map[string]*remoteSession)
-	stepUpMu   sync.Mutex
-	stepUps    = make(map[string]time.Time)
 )
 
 func putSession(session *remoteSession) error {
@@ -205,28 +202,4 @@ func ticketsEqual(left, right string) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
-}
-
-func hasFreshStepUp(loginSession string) bool {
-	if loginSession == "" {
-		return false
-	}
-	now := time.Now()
-	stepUpMu.Lock()
-	defer stepUpMu.Unlock()
-	for token, expiresAt := range stepUps {
-		if !expiresAt.After(now) {
-			delete(stepUps, token)
-		}
-	}
-	return stepUps[loginSession].After(now)
-}
-
-func rememberStepUp(loginSession string) {
-	if loginSession == "" {
-		return
-	}
-	stepUpMu.Lock()
-	stepUps[loginSession] = time.Now().Add(remoteStepUpTTL)
-	stepUpMu.Unlock()
 }

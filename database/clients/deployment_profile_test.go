@@ -27,6 +27,8 @@ func TestDeploymentProfileRuntimeConfigExcludesInstallationOnlyFields(t *testing
 		ServiceName:             "custom-agent",
 		EnableInterval:          true,
 		Interval:                15,
+		DetailedGPU:             true,
+		RemoteControlEnabled:    true,
 	}
 	if err := normalizeDeploymentProfile(&profile); err != nil {
 		t.Fatalf("normalizeDeploymentProfile() error = %v", err)
@@ -52,6 +54,9 @@ func TestDeploymentProfileRuntimeConfigExcludesInstallationOnlyFields(t *testing
 	if !strings.Contains(payload, `"interval":15`) {
 		t.Fatalf("runtime config is missing interval: %s", payload)
 	}
+	if !strings.Contains(payload, `"detailed_gpu":true`) || !strings.Contains(payload, `"remote_control_enabled":true`) {
+		t.Fatalf("runtime config is missing Connect-only fields: %s", payload)
+	}
 }
 
 func TestNormalizeDeploymentProfileRejectsInvalidRuntimeValues(t *testing.T) {
@@ -71,6 +76,22 @@ func TestNormalizeDeploymentProfileRejectsInvalidRuntimeValues(t *testing.T) {
 	}
 	if err := normalizeDeploymentProfile(&profile); err == nil {
 		t.Fatal("expected invalid month rotation day to be rejected")
+	}
+}
+
+func TestLegacyDeploymentProfileDefaultsRemoteControlFromHistoricalBehavior(t *testing.T) {
+	var profile DeploymentProfile
+	if err := json.Unmarshal([]byte(`{"platform":"linux","disable_web_ssh":false}`), &profile); err != nil {
+		t.Fatalf("unmarshal legacy profile: %v", err)
+	}
+	if !profile.RemoteControlEnabled {
+		t.Fatal("legacy profile unexpectedly disabled remote control")
+	}
+	if err := json.Unmarshal([]byte(`{"platform":"linux","remote_control_enabled":false}`), &profile); err != nil {
+		t.Fatalf("unmarshal managed profile: %v", err)
+	}
+	if profile.RemoteControlEnabled {
+		t.Fatal("explicit remote-control disable was ignored")
 	}
 }
 

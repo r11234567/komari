@@ -110,5 +110,5 @@ func (ctrl *CorsController) Middleware() gin.HandlerFunc {
 }
 
 func isAPIRequestPath(path string) bool {
-	return path == "/api" || strings.HasPrefix(path, "/api/")
+	return path == "/api" || strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/komari.")
 }

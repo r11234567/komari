@@ -135,14 +135,16 @@ type RemoteRequestParams struct {
 }
 
 type ConfigParams struct {
-	Revision           uint64   `json:"revision,omitempty"`
-	MonthRotate        *int     `json:"month_rotate,omitempty"`
-	Interval           *float64 `json:"interval,omitempty"`
-	IncludeNics        *string  `json:"include_nics,omitempty"`
-	ExcludeNics        *string  `json:"exclude_nics,omitempty"`
-	IncludeMountpoints *string  `json:"include_mountpoints,omitempty"`
-	MemoryIncludeCache *bool    `json:"memory_include_cache,omitempty"`
-	EnableGPU          *bool    `json:"enable_gpu,omitempty"`
+	Revision             uint64   `json:"revision,omitempty"`
+	MonthRotate          *int     `json:"month_rotate,omitempty"`
+	Interval             *float64 `json:"interval,omitempty"`
+	IncludeNics          *string  `json:"include_nics,omitempty"`
+	ExcludeNics          *string  `json:"exclude_nics,omitempty"`
+	IncludeMountpoints   *string  `json:"include_mountpoints,omitempty"`
+	MemoryIncludeCache   *bool    `json:"memory_include_cache,omitempty"`
+	EnableGPU            *bool    `json:"enable_gpu,omitempty"`
+	DetailedGPU          *bool    `json:"detailed_gpu,omitempty"`
+	RemoteControlEnabled *bool    `json:"remote_control_enabled,omitempty"`
 }
 
 type ConfigResultParams struct {

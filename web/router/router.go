@@ -8,6 +8,7 @@ import (
 	public_api "github.com/komari-monitor/komari/web/api/public"
 	"github.com/komari-monitor/komari/web/api/remote"
 	"github.com/komari-monitor/komari/web/api/terminal"
+	connectapi "github.com/komari-monitor/komari/web/connect"
 	installweb "github.com/komari-monitor/komari/web/install"
 	"github.com/komari-monitor/komari/web/public"
 	jsonRpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
@@ -25,6 +26,7 @@ func Register(r *gin.Engine) {
 	registerPublicRoutes(r)
 	registerAgentRoutes(r)
 	registerAdminRoutes(r)
+	connectapi.Register(r)
 
 	public.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
 		r.NoRoute(handlers...)

@@ -20,11 +20,14 @@ import (
 const defaultReportInterval = 3.0
 
 const (
-	DeploymentDeliverySaved      = "saved"
-	DeploymentDeliverySent       = "sent"
-	DeploymentDeliveryApplied    = "applied"
-	DeploymentDeliveryFailed     = "failed"
-	deploymentDeliveryErrorLimit = 512
+	DeploymentDeliverySaved           = "saved"
+	DeploymentDeliverySent            = "sent"
+	DeploymentDeliveryApplied         = "applied"
+	DeploymentDeliveryFailed          = "failed"
+	DeploymentDeliveryRejected        = "rejected"
+	DeploymentDeliveryOffline         = "offline"
+	DeploymentDeliveryUpgradeRequired = "upgrade-required"
+	deploymentDeliveryErrorLimit      = 512
 )
 
 type DeploymentDeliveryState struct {
@@ -47,6 +50,8 @@ type DeploymentProfile struct {
 	GetIPAddrFromNIC         bool    `json:"get_ip_addr_from_nic"`
 	MemoryIncludeCache       bool    `json:"memory_include_cache"`
 	EnableGPU                bool    `json:"enable_gpu"`
+	DetailedGPU              bool    `json:"detailed_gpu"`
+	RemoteControlEnabled     bool    `json:"remote_control_enabled"`
 	EnableGHProxy            bool    `json:"enable_ghproxy"`
 	GHProxy                  string  `json:"ghproxy"`
 	EnableCustomDir          bool    `json:"enable_custom_dir"`
@@ -65,8 +70,21 @@ type DeploymentProfile struct {
 	MonthRotate              int     `json:"month_rotate"`
 }
 
+// UnmarshalJSON preserves the historical remote-control default for profiles
+// saved before remote_control_enabled existed. New profiles always serialize
+// the explicit field, including false.
+func (profile *DeploymentProfile) UnmarshalJSON(data []byte) error {
+	type profileAlias DeploymentProfile
+	decoded := profileAlias{RemoteControlEnabled: true}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*profile = DeploymentProfile(decoded)
+	return nil
+}
+
 func defaultDeploymentProfile(client models.Client) DeploymentProfile {
-	profile := DeploymentProfile{Platform: "linux"}
+	profile := DeploymentProfile{Platform: "linux", RemoteControlEnabled: true}
 	if client.TrafficResetDay != nil && *client.TrafficResetDay > 0 {
 		profile.EnableMonthRotate = true
 		profile.MonthRotate = *client.TrafficResetDay
@@ -89,6 +107,20 @@ func GetDeploymentProfileWithDelivery(clientUUID string) (DeploymentProfile, boo
 		return DeploymentProfile{}, false, DeploymentDeliveryState{}, err
 	}
 	return profile, true, deploymentDeliveryState(stored), nil
+}
+
+// RemoteControlAllowed preserves legacy behavior for unmanaged agents. Once a
+// deployment profile is managed online, its explicit runtime switch is
+// authoritative for exec, terminal, and remote desktop paths.
+func RemoteControlAllowed(clientUUID string) (bool, error) {
+	profile, saved, err := GetDeploymentProfile(clientUUID)
+	if err != nil {
+		return false, err
+	}
+	if !saved {
+		return true, nil
+	}
+	return profile.RemoteControlEnabled, nil
 }
 
 func getDeploymentProfile(db *gorm.DB, clientUUID string) (DeploymentProfile, bool, error) {
@@ -253,6 +285,34 @@ func CompleteDeploymentConfig(clientUUID string, result v2.ConfigResultParams) (
 	return completeDeploymentConfig(dbcore.GetDBInstance(), clientUUID, result)
 }
 
+// CompleteDeploymentConfigDelivery records a Connect configuration terminal
+// state without translating it through a legacy JSON-RPC status string.
+func CompleteDeploymentConfigDelivery(clientUUID string, revision uint64, status, deliveryError string) (bool, error) {
+	if revision == 0 {
+		return false, fmt.Errorf("revision is required")
+	}
+	switch status {
+	case DeploymentDeliveryApplied, DeploymentDeliveryRejected, DeploymentDeliveryUpgradeRequired:
+	default:
+		return false, fmt.Errorf("invalid deployment config status")
+	}
+	deliveryError = strings.TrimSpace(deliveryError)
+	if len(deliveryError) > deploymentDeliveryErrorLimit {
+		deliveryError = truncateDeploymentError(deliveryError, deploymentDeliveryErrorLimit)
+	}
+	if status == DeploymentDeliveryApplied {
+		deliveryError = ""
+	}
+	now := time.Now().UTC()
+	result := dbcore.GetDBInstance().Model(&models.ClientDeploymentProfile{}).
+		Where("client = ? AND revision = ?", clientUUID, revision).
+		Updates(map[string]any{
+			"delivery_status": status, "delivery_error": deliveryError,
+			"delivery_updated_at": now, "finished_at": now,
+		})
+	return result.RowsAffected > 0, result.Error
+}
+
 func completeDeploymentConfig(db *gorm.DB, clientUUID string, result v2.ConfigResultParams) (bool, error) {
 	if result.Revision == 0 || (result.Status != DeploymentDeliveryApplied && result.Status != DeploymentDeliveryFailed) {
 		return false, fmt.Errorf("invalid deployment config result")
@@ -413,14 +473,18 @@ func (profile DeploymentProfile) RuntimeConfig() v2.ConfigParams {
 	}
 	memoryIncludeCache := profile.MemoryIncludeCache
 	enableGPU := profile.EnableGPU
+	detailedGPU := profile.DetailedGPU
+	remoteControlEnabled := profile.RemoteControlEnabled
 	return v2.ConfigParams{
-		MonthRotate:        &monthRotate,
-		Interval:           &interval,
-		IncludeNics:        &includeNics,
-		ExcludeNics:        &excludeNics,
-		IncludeMountpoints: &includeMountpoints,
-		MemoryIncludeCache: &memoryIncludeCache,
-		EnableGPU:          &enableGPU,
+		MonthRotate:          &monthRotate,
+		Interval:             &interval,
+		IncludeNics:          &includeNics,
+		ExcludeNics:          &excludeNics,
+		IncludeMountpoints:   &includeMountpoints,
+		MemoryIncludeCache:   &memoryIncludeCache,
+		EnableGPU:            &enableGPU,
+		DetailedGPU:          &detailedGPU,
+		RemoteControlEnabled: &remoteControlEnabled,
 	}
 }
 
@@ -457,6 +521,12 @@ func deploymentProfileFromRuntime(platform string, config v2.ConfigParams) (Depl
 	}
 	if config.EnableGPU != nil {
 		profile.EnableGPU = *config.EnableGPU
+	}
+	if config.DetailedGPU != nil {
+		profile.DetailedGPU = *config.DetailedGPU
+	}
+	if config.RemoteControlEnabled != nil {
+		profile.RemoteControlEnabled = *config.RemoteControlEnabled
 	}
 	if err := normalizeDeploymentProfile(&profile); err != nil {
 		return DeploymentProfile{}, err

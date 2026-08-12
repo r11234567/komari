@@ -96,6 +96,19 @@ func TestCorsMiddlewareHandlesAPIPreflight(t *testing.T) {
 	}
 }
 
+func TestCorsMiddlewareProtectsConnectProcedures(t *testing.T) {
+	setupCORSConfigDB(t, "")
+	router := setupCORSRouter(true, "https://allowed.example")
+	router.POST("/komari.browser.v1.BrowserService/GetPublicInfo", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	rejected := performCORSRequest(router, http.MethodPost, "/komari.browser.v1.BrowserService/GetPublicInfo", "api.example", "https://evil.example")
+	if rejected.Code != http.StatusForbidden {
+		t.Fatalf("Connect origin status = %d, want %d", rejected.Code, http.StatusForbidden)
+	}
+}
+
 func TestCorsMiddlewareAllowsAuthorizationPreflightFromAnyOrigin(t *testing.T) {
 	setupCORSConfigDB(t, "")
 	router := setupCORSRouter(true, "")

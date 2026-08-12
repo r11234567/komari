@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
@@ -184,6 +185,15 @@ func adminExec(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcE
 	}
 	if len(params.Clients) == 0 {
 		return nil, rpc.MakeError(rpc.InvalidParams, "clients is required", nil)
+	}
+	for _, uuid := range params.Clients {
+		allowed, err := clients.RemoteControlAllowed(uuid)
+		if err != nil {
+			return nil, rpc.MakeError(rpc.InternalError, "Failed to read remote-control policy", nil)
+		}
+		if !allowed {
+			return nil, rpc.MakeError(rpc.PermissionDenied, "Remote control is disabled for client: "+uuid, nil)
+		}
 	}
 	var onlineClients, queuedClients, offlineClients []string
 	for _, uuid := range params.Clients {
