@@ -103,14 +103,13 @@ func TestLogin(t *testing.T) {
 	accounts.DeleteAllSessions()
 }
 
-func TestSessionCookieSecureFollowsRequestScheme(t *testing.T) {
+func TestSessionCookieIsAlwaysSecure(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tests := []struct {
 		name       string
 		requestURL string
 		remoteAddr string
 		forwarded  string
-		wantSecure bool
 	}{
 		{
 			name:       "http",
@@ -119,14 +118,12 @@ func TestSessionCookieSecureFollowsRequestScheme(t *testing.T) {
 		{
 			name:       "https",
 			requestURL: "https://example.test/login",
-			wantSecure: true,
 		},
 		{
 			name:       "trusted reverse proxy",
 			requestURL: "http://example.test/login",
 			remoteAddr: "127.0.0.1:43000",
 			forwarded:  "https",
-			wantSecure: true,
 		},
 		{
 			name:       "untrusted spoofed reverse proxy",
@@ -151,11 +148,7 @@ func TestSessionCookieSecureFollowsRequestScheme(t *testing.T) {
 			setSessionCookie(c, "test-session", sessionCookieMaxAge)
 
 			setCookie := strings.Join(w.Header().Values("Set-Cookie"), "\n")
-			if tt.wantSecure {
-				assert.Contains(t, setCookie, "Secure")
-			} else {
-				assert.NotContains(t, setCookie, "Secure")
-			}
+			assert.Contains(t, setCookie, "Secure")
 		})
 	}
 }
