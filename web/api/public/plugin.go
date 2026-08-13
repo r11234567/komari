@@ -2,6 +2,7 @@ package public
 
 import (
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -13,10 +14,16 @@ import (
 // must be enabled and the requested file must be listed as a public page.
 func ServePluginFile(c *gin.Context) {
 	name := strings.TrimPrefix(c.Param("filepath"), "/")
-	full, err := plugin.ResolvePublicFile(c.Param("short"), name)
+	file, err := plugin.OpenPublicFile(c.Param("short"), name)
 	if err != nil {
 		c.Status(http.StatusNotFound)
 		return
 	}
-	c.File(full)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	http.ServeContent(c.Writer, c.Request, filepath.Base(name), info.ModTime(), file)
 }

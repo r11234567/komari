@@ -36,7 +36,6 @@ import (
 	"github.com/komari-monitor/komari/pkg/corn"
 	"github.com/komari-monitor/komari/pkg/jsruntime"
 	"github.com/komari-monitor/komari/pkg/rpc"
-	"github.com/komari-monitor/komari/utils/safepath"
 	"github.com/komari-monitor/komari/web/connection"
 )
 
@@ -600,50 +599,85 @@ func Manifest(short string) (models.Plugin, error) {
 // HTML and its relative assets are reachable without exposing the whole
 // plugin directory.
 func ResolvePublicFile(short, name string) (string, error) {
+	if err := validatePublicFile(short, name); err != nil {
+		return "", err
+	}
+	return ResolveFile(short, name)
+}
+
+// OpenPublicFile securely opens a public plugin file beneath DataDir.
+func OpenPublicFile(short, name string) (*os.File, error) {
+	if err := validatePublicFile(short, name); err != nil {
+		return nil, err
+	}
+	return OpenFile(short, name)
+}
+
+func validatePublicFile(short, name string) error {
 	if !validShort(short) {
-		return "", fmt.Errorf("invalid plugin short %q", short)
+		return fmt.Errorf("invalid plugin short %q", short)
 	}
 	if !global.stateStore().get(short).Enabled {
-		return "", fmt.Errorf("plugin %q is not enabled", short)
+		return fmt.Errorf("plugin %q is not enabled", short)
 	}
 	info, err := readManifest(filepath.Join(DataDir, short))
 	if err != nil {
-		return "", err
+		return err
 	}
 	name = filepath.Clean(strings.TrimPrefix(name, "/"))
+	if !filepath.IsLocal(name) {
+		return fmt.Errorf("invalid plugin file path %q", name)
+	}
 	for _, page := range info.Pages {
 		if page.Visibility != models.PageVisibilityPublic || page.Type != models.PageTypeIframe {
 			continue
 		}
 		dir := filepath.Dir(page.File)
 		if dir == "." || name == dir || strings.HasPrefix(name, dir+string(os.PathSeparator)) {
-			return ResolveFile(short, name)
+			return nil
 		}
 	}
-	return "", fmt.Errorf("plugin page %q is not public", name)
+	return fmt.Errorf("plugin page %q is not public", name)
 }
 
 // ResolveFile returns the absolute path of a file inside an installed plugin
 // directory, rejecting traversal. Used to serve injected plugin pages.
 func ResolveFile(short, name string) (string, error) {
-	if !validShort(short) {
-		return "", fmt.Errorf("invalid plugin short %q", short)
-	}
-	if !filepath.IsLocal(name) {
-		return "", fmt.Errorf("invalid plugin file path %q", name)
-	}
-	dir, err := safepath.JoinUnder(DataDir, short)
+	file, err := OpenFile(short, name)
 	if err != nil {
-		return "", fmt.Errorf("invalid plugin directory %q: %w", short, err)
-	}
-	full, err := safepath.JoinUnder(dir, name)
-	if err != nil {
-		return "", fmt.Errorf("invalid plugin file path %q: %w", name, err)
-	}
-	if _, err := os.Stat(full); err != nil {
 		return "", err
 	}
-	return full, nil
+	_ = file.Close()
+	return filepath.Join(DataDir, short, name), nil
+}
+
+// OpenFile securely opens a regular file below an installed plugin directory.
+// os.Root prevents traversal and symlink escapes from the plugin root.
+func OpenFile(short, name string) (*os.File, error) {
+	if !validShort(short) {
+		return nil, fmt.Errorf("invalid plugin short %q", short)
+	}
+	if !filepath.IsLocal(name) {
+		return nil, fmt.Errorf("invalid plugin file path %q", name)
+	}
+	root, err := os.OpenRoot(DataDir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	file, err := root.Open(filepath.Join(short, name))
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("plugin file path %q is not a regular file", name)
+	}
+	return file, nil
 }
 
 // hooksOf returns a snapshot of the hooks with the given kind.

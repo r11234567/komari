@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/komari-monitor/komari/database/models"
-	"github.com/komari-monitor/komari/utils/safepath"
 )
 
 // urlSchemeRE matches a leading URL scheme such as "http:" or "javascript:",
@@ -20,11 +19,12 @@ var urlSchemeRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+\-.]*:`)
 // directory.
 func readManifest(dir string) (models.Plugin, error) {
 	var info models.Plugin
-	manifestPath, err := safepath.JoinUnder(dir, manifestFile)
+	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return info, fmt.Errorf("invalid plugin manifest path: %w", err)
+		return info, fmt.Errorf("open plugin directory: %w", err)
 	}
-	data, err := os.ReadFile(manifestPath)
+	defer root.Close()
+	data, err := root.ReadFile(manifestFile)
 	if err != nil {
 		return info, fmt.Errorf("read plugin manifest: %w", err)
 	}
