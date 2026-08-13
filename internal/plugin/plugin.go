@@ -418,7 +418,6 @@ func (m *Manager) closeAll() error {
 }
 
 func (m *Manager) setEnabled(short string, enabled, approved bool) error {
-	dir := filepath.Join(DataDir, short)
 	info, err := readManifest(short)
 	if err != nil {
 		return err
