@@ -36,6 +36,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/corn"
 	"github.com/komari-monitor/komari/pkg/jsruntime"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/utils/safepath"
 	"github.com/komari-monitor/komari/web/connection"
 )
 
@@ -631,10 +632,13 @@ func ResolveFile(short, name string) (string, error) {
 	if !filepath.IsLocal(name) {
 		return "", fmt.Errorf("invalid plugin file path %q", name)
 	}
-	dir := filepath.Join(DataDir, short)
-	full := filepath.Join(dir, name)
-	if !withinDir(full, dir) {
-		return "", fmt.Errorf("invalid plugin file path %q", name)
+	dir, err := safepath.JoinUnder(DataDir, short)
+	if err != nil {
+		return "", fmt.Errorf("invalid plugin directory %q: %w", short, err)
+	}
+	full, err := safepath.JoinUnder(dir, name)
+	if err != nil {
+		return "", fmt.Errorf("invalid plugin file path %q: %w", name, err)
 	}
 	if _, err := os.Stat(full); err != nil {
 		return "", err

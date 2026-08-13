@@ -70,24 +70,25 @@ func TestChildProcessStdioAreStreams(t *testing.T) {
 			checks.push(child.stdin instanceof stream.Writable);
 			checks.push(child.stdout instanceof stream.Readable);
 			checks.push(child.stderr instanceof stream.Readable);
+			checks.push(child.stdin.writable === true);
+			checks.push(child.stdout.readable === true);
+			const closed = new Promise((resolve) => {
+				child.on("close", (exitCode) => resolve(exitCode));
+				child.on("error", () => resolve(-1));
+			});
 			child.stdin.write("hello ");
 			child.stdin.end("stream");
 			let output = "";
 			child.stdout.setEncoding("utf8");
 			child.stdout.on("data", (chunk) => output += chunk);
 			child.stdout.on("error", () => {});
-			await new Promise((resolve, reject) => {
+			const ended = new Promise((resolve, reject) => {
 				child.stdout.on("end", resolve);
 				child.on("error", () => reject(new Error("spawn failed")));
 			});
-			const code = await new Promise((resolve) => {
-				child.on("close", (exitCode) => resolve(exitCode));
-				child.on("error", () => resolve(-1));
-			});
+			const [, code] = await Promise.all([ended, closed]);
 			return code === 0 && output === "hello stream" &&
-				checks.join(",") === "true,true,true" &&
-				child.stdin.writable === true &&
-				child.stdout.readable === true &&
+				checks.join(",") === "true,true,true,true,true" &&
 				child.stdout.readableEnded === true;
 		}
 	`, Options{NodeJS: true, AllowExec: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 8 * time.Second})
