@@ -52,7 +52,10 @@ type dashboardLatencyBucket struct {
 	Count int
 }
 
-const dashboardLatencyJitterLookback = 10 * time.Minute
+const (
+	dashboardLatencyInterval       = 15 * time.Minute
+	dashboardLatencyJitterLookback = 10 * time.Minute
+)
 
 func loadDashboardLatency(ctx context.Context, clientList []models.Client, now time.Time, rankingLimit int) (dashboardLatencySummary, error) {
 	result := dashboardLatencySummary{}
@@ -65,7 +68,6 @@ func loadDashboardLatency(ctx context.Context, clientList []models.Client, now t
 		return result, fmt.Errorf("metric store is not initialized")
 	}
 	start := now.Add(-6 * time.Hour)
-	interval := store.CompatibleSeriesInterval(start, now, time.Hour)
 	series, err := store.DashboardSeries(ctx, metric.AggregateQuery{
 		Query: metric.Query{
 			MetricName: metricstore.MetricPingLatency,
@@ -74,7 +76,7 @@ func loadDashboardLatency(ctx context.Context, clientList []models.Client, now t
 			Order:      metric.OrderAsc,
 		},
 		Aggregation:    metric.AggAvg,
-		Interval:       interval,
+		Interval:       dashboardLatencyInterval,
 		PreserveSeries: true,
 	}, now)
 	if err != nil {
