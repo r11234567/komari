@@ -16,6 +16,7 @@ var (
 	connectedClients        = make(map[string]*connection.SafeConn)
 	connectedClientProtocol = make(map[string]int)
 	v2Capabilities          = make(map[string]map[string]bool)
+	connectCapabilities     = make(map[string]map[string]bool)
 	latestReport            = make(map[string]*v1.Report)
 	recentReports           = make(map[string][]v1.Report)
 	// presenceOnly stores online state for non-WebSocket agents.
@@ -59,6 +60,9 @@ func SetClientProtocolVersion(uuid string, version int) {
 	if version != 2 {
 		delete(v2Capabilities, uuid)
 	}
+	if version < 3 {
+		delete(connectCapabilities, uuid)
+	}
 }
 
 func IsV2Client(uuid string) bool {
@@ -71,6 +75,30 @@ func IsConnectClient(uuid string) bool {
 	mu.RLock()
 	defer mu.RUnlock()
 	return connectedClientProtocol[uuid] >= 3
+}
+
+// SetConnectCapabilities records typed capabilities from the latest report.
+func SetConnectCapabilities(uuid string, returnRouteProbe bool) {
+	if metricstore.EntityWritesBlocked(uuid) {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	connectCapabilities[uuid] = map[string]bool{"return-route": returnRouteProbe}
+}
+
+// SupportsReturnRoute requires an explicit capability on both transports.
+func SupportsReturnRoute(uuid string) bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	version := connectedClientProtocol[uuid]
+	if version == 2 {
+		return v2Capabilities[uuid][v2.MethodAgentRoute]
+	}
+	if version >= 3 {
+		return connectCapabilities[uuid]["return-route"]
+	}
+	return false
 }
 
 // SetV2Capabilities records capabilities declared by a legacy v2 Agent.
@@ -111,6 +139,7 @@ func DeleteClientConditionally(uuid string, connToRemove *connection.SafeConn) {
 		delete(connectedClients, uuid)
 		delete(connectedClientProtocol, uuid)
 		delete(v2Capabilities, uuid)
+		delete(connectCapabilities, uuid)
 	}
 }
 func DeleteConnectedClients(uuid string) {
@@ -119,6 +148,7 @@ func DeleteConnectedClients(uuid string) {
 	delete(connectedClients, uuid)
 	delete(connectedClientProtocol, uuid)
 	delete(v2Capabilities, uuid)
+	delete(connectCapabilities, uuid)
 	delete(presenceOnly, uuid)
 	delete(latestReport, uuid)
 	delete(recentReports, uuid)

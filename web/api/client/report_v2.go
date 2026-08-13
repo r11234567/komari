@@ -55,6 +55,7 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 		if err := ingestReport(uuid, params.Report, 2, true); err != nil {
 			return v2.Error(req.ID, -32000, "failed to save report", err.Error())
 		}
+		agent_runtime.SetV2Capabilities(uuid, params.Capabilities)
 		return v2.Success(req.ID, gin.H{
 			"status": "success",
 			"events": agent_runtime.TakeV2Events(uuid, params.AckEventIDs, 8),

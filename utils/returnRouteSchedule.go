@@ -56,6 +56,16 @@ func (m *returnRouteTaskManager) Reload(tasks []models.ReturnRouteTask) error {
 }
 
 func DispatchReturnRouteTask(task models.ReturnRouteTask) bool {
+	if !agentRuntime.SupportsReturnRoute(task.Client) {
+		return false
+	}
+	if agentRuntime.IsConnectClient(task.Client) {
+		dispatched := agentRuntime.EnqueueReturnRouteProbe(task.Client, task.Id, task.Protocol, task.Target, task.IPVersion, 30)
+		if dispatched {
+			StartReturnRouteProbe(task.Id)
+		}
+		return dispatched
+	}
 	if !agentRuntime.IsV2Client(task.Client) {
 		return false
 	}

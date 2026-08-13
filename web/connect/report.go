@@ -9,6 +9,7 @@ import (
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	legacyv1 "github.com/komari-monitor/komari/protocol/v1"
+	agentRuntime "github.com/komari-monitor/komari/web/agent"
 	clientapi "github.com/komari-monitor/komari/web/api/client"
 	"github.com/komari-monitor/komari/web/rescueapp"
 	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
@@ -37,6 +38,8 @@ func (s *reportService) SubmitReport(ctx context.Context, req *connect.Request[r
 		return nil, connectError(connect.CodeInvalidArgument, err)
 	}
 	if metadata := req.Msg.Report.Metadata; metadata != nil {
+		capabilities := metadata.Capabilities
+		agentRuntime.SetConnectCapabilities(agentID, capabilities != nil && capabilities.ReturnRouteProbe != nil && capabilities.ReturnRouteProbe.Available)
 		if metadata.AppliedConfigRevision > 0 {
 			if _, err := clients.RecordAppliedDeploymentRevision(agentID, metadata.AppliedConfigRevision); err != nil {
 				return nil, connectError(connect.CodeInternal, err)
@@ -47,6 +50,8 @@ func (s *reportService) SubmitReport(ctx context.Context, req *connect.Request[r
 				return nil, connectError(connect.CodeInvalidArgument, err)
 			}
 		}
+	} else {
+		agentRuntime.SetConnectCapabilities(agentID, false)
 	}
 	return connect.NewResponse(&reportv1.SubmitReportResponse{
 		Accepted:           true,

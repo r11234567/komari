@@ -1,0 +1,80 @@
+package connectapi
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"connectrpc.com/connect"
+	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/pkg/rpc"
+	legacyv2 "github.com/komari-monitor/komari/protocol/v2"
+	agentRuntime "github.com/komari-monitor/komari/web/agent"
+	networkv1 "github.com/r11234567/komari-proto/gen/go/komari/network/v1"
+	networkv1connect "github.com/r11234567/komari-proto/gen/go/komari/network/v1/networkv1connect"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+const returnRouteLongPoll = 25 * time.Second
+
+type networkProbeService struct {
+	networkv1connect.UnimplementedNetworkProbeServiceHandler
+}
+
+func (s *networkProbeService) LeaseReturnRouteProbe(ctx context.Context, req *connect.Request[networkv1.LeaseReturnRouteProbeRequest]) (*connect.Response[networkv1.LeaseReturnRouteProbeResponse], error) {
+	agentID, err := requireAgent(rpc.MetaFromContext(ctx), req.Msg.AgentId)
+	if err != nil {
+		return nil, err
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, returnRouteLongPoll)
+	defer cancel()
+	assignment, err := agentRuntime.WaitReturnRouteProbe(waitCtx, agentID)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return connect.NewResponse(&networkv1.LeaseReturnRouteProbeResponse{}), nil
+		}
+		return nil, err
+	}
+	return connect.NewResponse(&networkv1.LeaseReturnRouteProbeResponse{Assignment: &networkv1.ReturnRouteProbeAssignment{
+		AssignmentId: assignment.AssignmentID, TaskId: uint64(assignment.TaskID), Protocol: assignment.Protocol,
+		Target: assignment.Target, IpVersion: uint32(assignment.IPVersion), MaxHops: uint32(assignment.MaxHops),
+		HopTimeout: durationpb.New(900 * time.Millisecond), LeaseExpiresAt: timestamppb.New(assignment.LeaseExpires),
+	}}), nil
+}
+
+func (s *networkProbeService) SubmitReturnRouteProbeResult(ctx context.Context, req *connect.Request[networkv1.SubmitReturnRouteProbeResultRequest]) (*connect.Response[networkv1.SubmitReturnRouteProbeResultResponse], error) {
+	agentID, err := requireAgent(rpc.MetaFromContext(ctx), req.Msg.AgentId)
+	if err != nil {
+		return nil, err
+	}
+	if req.Msg.TaskId == 0 || req.Msg.AssignmentId == "" {
+		return nil, connectError(connect.CodeInvalidArgument, errors.New("assignment_id and task_id are required"))
+	}
+	taskID := uint(req.Msg.TaskId)
+	if uint64(taskID) != req.Msg.TaskId {
+		return nil, connectError(connect.CodeInvalidArgument, errors.New("task_id exceeds the platform integer range"))
+	}
+	alreadyCompleted, err := agentRuntime.ValidateReturnRouteResult(agentID, req.Msg.AssignmentId, taskID)
+	if err != nil {
+		return nil, connectError(connect.CodeFailedPrecondition, err)
+	}
+	if alreadyCompleted {
+		return connect.NewResponse(&networkv1.SubmitReturnRouteProbeResultResponse{Accepted: true}), nil
+	}
+	result := legacyv2.RouteResultParams{TaskID: taskID, Error: req.Msg.Error}
+	if req.Msg.FinishedAt != nil && req.Msg.FinishedAt.IsValid() {
+		result.FinishedAt = req.Msg.FinishedAt.AsTime()
+	}
+	result.Hops = make([]legacyv2.RouteHop, 0, len(req.Msg.Hops))
+	for _, hop := range req.Msg.Hops {
+		if hop != nil {
+			result.Hops = append(result.Hops, legacyv2.RouteHop{TTL: int(hop.Ttl), IP: hop.Ip, LatencyMS: hop.LatencyMs, Timeout: hop.Timeout})
+		}
+	}
+	if err := tasks.SaveReturnRouteResult(agentID, result); err != nil {
+		return nil, connectError(connect.CodeInvalidArgument, err)
+	}
+	agentRuntime.CompleteReturnRouteProbe(agentID, req.Msg.AssignmentId, taskID)
+	return connect.NewResponse(&networkv1.SubmitReturnRouteProbeResultResponse{Accepted: true}), nil
+}

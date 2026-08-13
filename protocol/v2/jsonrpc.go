@@ -54,8 +54,9 @@ type RPCError struct {
 }
 
 type ReportParams struct {
-	Report      v1.Report `json:"report"`
-	AckEventIDs []string  `json:"ack_event_ids,omitempty"`
+	Report       v1.Report `json:"report"`
+	AckEventIDs  []string  `json:"ack_event_ids,omitempty"`
+	Capabilities []string  `json:"capabilities,omitempty"`
 }
 
 type BasicInfoParams struct {

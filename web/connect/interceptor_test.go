@@ -9,6 +9,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	metricsv1connect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
+	networkv1connect "github.com/r11234567/komari-proto/gen/go/komari/network/v1/networkv1connect"
 )
 
 func TestPolicyDeclaresEveryGeneratedProcedure(t *testing.T) {
@@ -35,6 +36,8 @@ func TestPolicyDeclaresEveryGeneratedProcedure(t *testing.T) {
 		metricsv1connect.MetricsServiceListPingTasksProcedure,
 		metricsv1connect.MetricsServiceGetPingStatsProcedure,
 		"/komari.metrics.v1.MetricsService/WatchMetrics",
+		networkv1connect.NetworkProbeServiceLeaseReturnRouteProbeProcedure,
+		networkv1connect.NetworkProbeServiceSubmitReturnRouteProbeResultProcedure,
 		"/komari.exec.v1.ExecutionService/CreateExecution",
 		"/komari.exec.v1.ExecutionService/WatchExecution",
 		"/komari.exec.v1.ExecutionService/CancelExecution",

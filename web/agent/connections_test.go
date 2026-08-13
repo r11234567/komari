@@ -135,3 +135,40 @@ func TestV2ConfigRequiresExplicitCapability(t *testing.T) {
 		t.Fatal("Connect Agent leaked into the legacy v2 capability adapter")
 	}
 }
+
+func TestReturnRouteRequiresExplicitTransportCapability(t *testing.T) {
+	mu.Lock()
+	previousProtocols := connectedClientProtocol
+	previousV2Capabilities := v2Capabilities
+	previousConnectCapabilities := connectCapabilities
+	connectedClientProtocol = make(map[string]int)
+	v2Capabilities = make(map[string]map[string]bool)
+	connectCapabilities = make(map[string]map[string]bool)
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		connectedClientProtocol = previousProtocols
+		v2Capabilities = previousV2Capabilities
+		connectCapabilities = previousConnectCapabilities
+		mu.Unlock()
+	})
+
+	SetClientProtocolVersion("legacy", 2)
+	SetV2Capabilities("legacy", []string{"ping"})
+	if SupportsReturnRoute("legacy") {
+		t.Fatal("legacy Agent without route capability was accepted")
+	}
+	SetV2Capabilities("legacy", []string{v2.MethodAgentRoute})
+	if !SupportsReturnRoute("legacy") {
+		t.Fatal("legacy Agent route capability was ignored")
+	}
+
+	SetClientProtocolVersion("connect", 3)
+	if SupportsReturnRoute("connect") {
+		t.Fatal("Connect Agent without typed capability was accepted")
+	}
+	SetConnectCapabilities("connect", true)
+	if !SupportsReturnRoute("connect") {
+		t.Fatal("Connect Agent typed capability was ignored")
+	}
+}

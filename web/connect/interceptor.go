@@ -25,6 +25,7 @@ func newPolicyInterceptor() *policyInterceptor {
 		deploy  = "/komari.deployment.v1.DeploymentService/"
 		report  = "/komari.report.v1.AgentReportService/"
 		metrics = "/komari.metrics.v1.MetricsService/"
+		network = "/komari.network.v1.NetworkProbeService/"
 		exec    = "/komari.exec.v1.ExecutionService/"
 		webssh  = "/komari.webssh.v1.WebSSHService/"
 		events  = "/komari.agent.v1.AgentEventService/"
@@ -48,6 +49,7 @@ func newPolicyInterceptor() *policyInterceptor {
 	add(metrics, rpc.RoleClient, 5*time.Minute, "UploadMetrics")
 	add(metrics, rpc.RoleGuest, 30*time.Second, "QueryMetrics", "ListMetricDefinitions", "ListPingTasks", "GetPingStats")
 	add(metrics, rpc.RoleAdmin, 30*time.Minute, "WatchMetrics")
+	add(network, rpc.RoleClient, 30*time.Second, "LeaseReturnRouteProbe", "SubmitReturnRouteProbeResult")
 	add(exec, rpc.RoleAdmin, 30*time.Second, "CreateExecution", "CancelExecution", "GetExecution")
 	add(exec, rpc.RoleAdmin, 30*time.Minute, "WatchExecution")
 	add(exec, rpc.RoleClient, 30*time.Minute, "LeaseExecution")
