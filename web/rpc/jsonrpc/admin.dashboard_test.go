@@ -88,6 +88,10 @@ func TestDashboardModuleCacheHonorsFifteenSecondRefresh(t *testing.T) {
 	assert.Equal(t, int32(2), calls.Load())
 }
 
+func TestDashboardLatencyUsesFifteenMinuteBuckets(t *testing.T) {
+	assert.Equal(t, 15*time.Minute, dashboardLatencyInterval)
+}
+
 func TestDashboardNavigationFollowsThirdPartyThemeManifest(t *testing.T) {
 	t.Chdir(t.TempDir())
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})

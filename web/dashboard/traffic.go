@@ -10,7 +10,7 @@ import (
 
 const (
 	DefaultTrafficTrendWindow   = 24 * time.Hour
-	DefaultTrafficTrendInterval = 15 * time.Minute
+	DefaultTrafficTrendInterval = 20 * time.Minute
 	MinTrafficTrendInterval     = 10 * time.Minute
 	MaxTrafficTrendInterval     = 30 * time.Minute
 	maxTrafficTrendBuckets      = 2048
