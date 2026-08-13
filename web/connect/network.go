@@ -27,6 +27,7 @@ func (s *networkProbeService) LeaseReturnRouteProbe(ctx context.Context, req *co
 	if err != nil {
 		return nil, err
 	}
+	agentRuntime.MarkConnectReturnRouteLease(agentID)
 	waitCtx, cancel := context.WithTimeout(ctx, returnRouteLongPoll)
 	defer cancel()
 	assignment, err := agentRuntime.WaitReturnRouteProbe(waitCtx, agentID)

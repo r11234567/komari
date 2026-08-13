@@ -87,6 +87,19 @@ func SetConnectCapabilities(uuid string, returnRouteProbe bool) {
 	connectCapabilities[uuid] = map[string]bool{"return-route": returnRouteProbe}
 }
 
+// MarkConnectReturnRouteLease restores transport state after a backend restart.
+// An authenticated lease request is direct proof that the connected Agent uses
+// the typed transport and implements return-route probes.
+func MarkConnectReturnRouteLease(uuid string) {
+	if metricstore.EntityWritesBlocked(uuid) {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	connectedClientProtocol[uuid] = 3
+	connectCapabilities[uuid] = map[string]bool{"return-route": true}
+}
+
 // SupportsReturnRoute requires an explicit capability on both transports.
 func SupportsReturnRoute(uuid string) bool {
 	mu.RLock()

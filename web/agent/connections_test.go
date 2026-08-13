@@ -172,3 +172,23 @@ func TestReturnRouteRequiresExplicitTransportCapability(t *testing.T) {
 		t.Fatal("Connect Agent typed capability was ignored")
 	}
 }
+
+func TestReturnRouteLeaseRestoresConnectCapability(t *testing.T) {
+	mu.Lock()
+	previousProtocols := connectedClientProtocol
+	previousCapabilities := connectCapabilities
+	connectedClientProtocol = make(map[string]int)
+	connectCapabilities = make(map[string]map[string]bool)
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		connectedClientProtocol = previousProtocols
+		connectCapabilities = previousCapabilities
+		mu.Unlock()
+	})
+
+	MarkConnectReturnRouteLease("connect")
+	if !IsConnectClient("connect") || !SupportsReturnRoute("connect") {
+		t.Fatal("authenticated Connect route lease did not restore probe capability")
+	}
+}
