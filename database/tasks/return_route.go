@@ -22,6 +22,9 @@ const (
 	returnRouteLineCUGVIP       = "CUG VIP"
 	returnRouteLineCUGOptimized = "CUG 优化"
 	returnRouteLineCN2Pending   = "CN2 待确认"
+	returnRouteLineSoftBank     = "SoftBank"
+	returnRouteLineIIJ          = "IIJ"
+	returnRouteLineLumen        = "Lumen"
 )
 
 type ReturnRouteOverview struct {
@@ -71,6 +74,7 @@ type ReturnRouteTaskBatchEdit struct {
 	Cooldown        int    `json:"cooldown"`
 	Notify          bool   `json:"notify"`
 	NotifyRecovery  bool   `json:"notify_recovery"`
+	NotifyRepeated  bool   `json:"notify_repeated"`
 	Enabled         bool   `json:"enabled"`
 }
 
@@ -156,13 +160,20 @@ func normalizeReturnRouteTaskWithDB(db *gorm.DB, task *models.ReturnRouteTask) e
 }
 
 func returnRouteLines() []string {
-	return []string{"CMIN2", "CMI", "CMNET", "CN2 GIA", "CN2 GT", "163", returnRouteLineCUGVIP, returnRouteLineCUGOptimized, "9929", "4837"}
+	return []string{"CMIN2", "CMI", "CMNET", "CN2 GIA", "CN2 GT", "163", returnRouteLineCUGVIP, returnRouteLineCUGOptimized, "9929", "4837", returnRouteLineSoftBank, returnRouteLineIIJ, returnRouteLineLumen}
 }
 
 func normalizeReturnRouteLine(value string) string {
 	line := strings.ToUpper(strings.TrimSpace(value))
-	if line == "10099" {
+	switch line {
+	case "10099":
 		return returnRouteLineCUGVIP
+	case "SOFTBANK":
+		return returnRouteLineSoftBank
+	case "IIJ":
+		return returnRouteLineIIJ
+	case "LUMEN":
+		return returnRouteLineLumen
 	}
 	return line
 }
@@ -194,7 +205,8 @@ func EditReturnRouteTask(task *models.ReturnRouteTask) error {
 		"expected_line": task.ExpectedLine, "protocol": task.Protocol,
 		"interval": task.Interval, "switch_confirm": task.SwitchConfirm,
 		"recovery_confirm": task.RecoveryConfirm, "cooldown": task.Cooldown,
-		"notify": task.Notify, "notify_recovery": task.NotifyRecovery, "enabled": task.Enabled,
+		"notify": task.Notify, "notify_recovery": task.NotifyRecovery,
+		"notify_repeated": task.NotifyRepeated, "enabled": task.Enabled,
 	}
 	result := dbcore.GetDBInstance().Model(&models.ReturnRouteTask{}).Where("id = ?", task.Id).Updates(updates)
 	if result.Error != nil {
@@ -237,7 +249,7 @@ func editReturnRouteTasksBatch(db *gorm.DB, params ReturnRouteTaskBatchEdit) err
 			Protocol: params.Protocol, Interval: params.Interval,
 			SwitchConfirm: params.SwitchConfirm, RecoveryConfirm: params.RecoveryConfirm,
 			Cooldown: params.Cooldown, Notify: params.Notify,
-			NotifyRecovery: params.NotifyRecovery, Enabled: params.Enabled,
+			NotifyRecovery: params.NotifyRecovery, NotifyRepeated: params.NotifyRepeated, Enabled: params.Enabled,
 		}
 		if err := normalizeReturnRouteTaskWithDB(db, &candidate); err != nil {
 			return err
@@ -255,7 +267,7 @@ func editReturnRouteTasksBatch(db *gorm.DB, params ReturnRouteTaskBatchEdit) err
 		"protocol": params.Protocol, "interval": params.Interval,
 		"switch_confirm": params.SwitchConfirm, "recovery_confirm": params.RecoveryConfirm,
 		"cooldown": params.Cooldown, "notify": params.Notify,
-		"notify_recovery": params.NotifyRecovery, "enabled": params.Enabled,
+		"notify_recovery": params.NotifyRecovery, "notify_repeated": params.NotifyRepeated, "enabled": params.Enabled,
 	}
 	return db.Model(&models.ReturnRouteTask{}).Where("id IN ?", ids).Updates(updates).Error
 }
@@ -674,7 +686,7 @@ func SaveReturnRouteResult(client string, result v2.RouteResultParams) error {
 		if shouldSendReturnRouteEventNotification(task, *event) {
 			go sendReturnRouteNotification(task, *event, false)
 		}
-	} else if shouldSendReturnRouteRepeatNotificationAfterObservation(task, statusSnapshot, line, now) {
+	} else if shouldSendReturnRouteRepeatNotificationAfterObservation(task, statusSnapshot, line) {
 		if reminder := buildReturnRouteRepeatNotification(task, statusSnapshot, now); reminder != nil {
 			go sendReturnRouteNotification(task, *reminder, true)
 		}
@@ -693,19 +705,12 @@ func shouldSendReturnRouteEventNotification(task models.ReturnRouteTask, event m
 	}
 }
 
-func shouldSendReturnRouteRepeatNotification(task models.ReturnRouteTask, status models.ReturnRouteStatus, now time.Time) bool {
-	if !task.Notify || status.State != "switched" || strings.TrimSpace(status.CurrentLine) == "" {
-		return false
-	}
-	return returnRouteRepeatNotificationDue(status.LastNotifiedAt, task.Cooldown, now)
+func shouldSendReturnRouteRepeatNotification(task models.ReturnRouteTask, status models.ReturnRouteStatus) bool {
+	return task.Notify && task.NotifyRepeated && status.State == "switched" && strings.TrimSpace(status.CurrentLine) != ""
 }
 
-func shouldSendReturnRouteRepeatNotificationAfterObservation(task models.ReturnRouteTask, status models.ReturnRouteStatus, line string, now time.Time) bool {
-	return line != returnRouteLineCN2Pending && shouldSendReturnRouteRepeatNotification(task, status, now)
-}
-
-func returnRouteRepeatNotificationDue(lastNotifiedAt *time.Time, cooldown int, now time.Time) bool {
-	return lastNotifiedAt == nil || cooldown <= 0 || !now.Before(lastNotifiedAt.Add(time.Duration(cooldown)*time.Second))
+func shouldSendReturnRouteRepeatNotificationAfterObservation(task models.ReturnRouteTask, status models.ReturnRouteStatus, line string) bool {
+	return line != returnRouteLineCN2Pending && shouldSendReturnRouteRepeatNotification(task, status)
 }
 
 func advanceReturnRouteState(status *models.ReturnRouteStatus, task models.ReturnRouteTask, line string, now time.Time) *models.ReturnRouteEvent {
@@ -787,23 +792,21 @@ func buildReturnRouteRepeatNotification(task models.ReturnRouteTask, status mode
 func sendReturnRouteNotification(task models.ReturnRouteTask, event models.ReturnRouteEvent, repeated bool) {
 	db := dbcore.GetDBInstance()
 	var currentTask models.ReturnRouteTask
-	if err := db.Select("notify", "notify_recovery", "cooldown").First(&currentTask, task.Id).Error; err != nil {
+	if err := db.Select("notify", "notify_recovery", "notify_repeated").First(&currentTask, task.Id).Error; err != nil {
 		return
 	}
 	if repeated {
-		if !currentTask.Notify {
+		if !currentTask.Notify || !currentTask.NotifyRepeated {
+			return
+		}
+		var status models.ReturnRouteStatus
+		if err := db.Select("state", "current_line").First(&status, "task_id = ?", task.Id).Error; err != nil || status.State != "switched" || status.CurrentLine != event.ToLine {
 			return
 		}
 	} else if !shouldSendReturnRouteEventNotification(currentTask, event) {
 		return
 	}
 	now := time.Now().UTC()
-	if repeated {
-		var status models.ReturnRouteStatus
-		if err := db.First(&status, "task_id = ?", task.Id).Error; err != nil || !returnRouteRepeatNotificationDue(status.LastNotifiedAt, currentTask.Cooldown, now) {
-			return
-		}
-	}
 	title := "回程线路已切换"
 	if repeated {
 		title = "回程线路仍处于切线状态"
@@ -918,6 +921,16 @@ func classifyReturnRouteSignaturesWithRules(hops []returnRouteSignature, rules *
 		return line, confidence
 	}
 
+	for _, hop := range hops {
+		switch {
+		case rules.hasSignature("softbank", hop):
+			return returnRouteLineSoftBank, rules.document.Confidence["softbank"]
+		case rules.hasSignature("iij", hop):
+			return returnRouteLineIIJ, rules.document.Confidence["iij"]
+		case rules.hasSignature("lumen", hop):
+			return returnRouteLineLumen, rules.document.Confidence["lumen"]
+		}
+	}
 	for _, hop := range hops {
 		switch {
 		case rules.hasSignature("telecom_163", hop):
@@ -1042,7 +1055,7 @@ func isTelecom163BackboneCandidate(hop returnRouteSignature, rules *compiledRetu
 	if ip == nil || ip[0] != 202 || ip[1] != 97 {
 		return false
 	}
-	for _, group := range requiredReturnRouteASNGroups {
+	for _, group := range returnRouteASNGroups {
 		if rules.hasPrefix(group, hop.ip) {
 			return group == "telecom_163"
 		}

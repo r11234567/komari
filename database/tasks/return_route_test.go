@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -38,6 +39,11 @@ func TestClassifyReturnRoute(t *testing.T) {
 		{models.StringArray{"AS4134"}, "163"},
 		{models.StringArray{"AS4837"}, "4837"},
 		{models.StringArray{"AS9808", "AS56041"}, "CMNET"},
+		{models.StringArray{"AS17676"}, returnRouteLineSoftBank},
+		{models.StringArray{"AS2497"}, returnRouteLineIIJ},
+		{models.StringArray{"AS3356"}, returnRouteLineLumen},
+		{models.StringArray{"AS3356", "AS4134"}, returnRouteLineLumen},
+		{models.StringArray{"AS2497", "AS4837"}, returnRouteLineIIJ},
 	}
 	for _, test := range tests {
 		got, confidence := classifyReturnRoute(test.path)
@@ -52,6 +58,7 @@ func TestReturnRouteLinesAllowCrossCarrierExpectations(t *testing.T) {
 		"CMIN2": true, "CMI": true, "CMNET": true,
 		"CN2 GIA": true, "CN2 GT": true, "163": true,
 		returnRouteLineCUGVIP: true, returnRouteLineCUGOptimized: true, "9929": true, "4837": true,
+		returnRouteLineSoftBank: true, returnRouteLineIIJ: true, returnRouteLineLumen: true,
 	}
 	for _, line := range returnRouteLines() {
 		delete(want, line)
@@ -388,6 +395,31 @@ func TestCN2ManualAndBGPPrefixRulesStaySeparated(t *testing.T) {
 	}
 }
 
+func TestLegacyReturnRouteRulesInheritInternationalDefaults(t *testing.T) {
+	var document ReturnRouteRuleDocument
+	if err := json.Unmarshal(builtinReturnRouteRuleJSON, &document); err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range optionalReturnRouteASNGroups {
+		delete(document.ASNGroups, group)
+		delete(document.PrefixGroups, group)
+		delete(document.Confidence, group)
+	}
+	data, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, err := compileReturnRouteRules(data)
+	if err != nil {
+		t.Fatalf("legacy rules were rejected: %v", err)
+	}
+	for group, asn := range map[string]int{"softbank": 17676, "iij": 2497, "lumen": 3356} {
+		if !rules.hasASN(group, asn) {
+			t.Fatalf("legacy rules did not inherit %s AS%d", group, asn)
+		}
+	}
+}
+
 func TestPrepareReturnRouteSignaturesExcludesSharedAddressSpace(t *testing.T) {
 	prepared, hidden := prepareReturnRouteSignatures([]returnRouteSignature{
 		{hidden: true},
@@ -558,7 +590,7 @@ func TestPendingCN2ObservationPreservesConfirmedState(t *testing.T) {
 	if status.LastChangedAt == nil || !status.LastChangedAt.Equal(changedAt) {
 		t.Fatalf("pending observation changed last transition time: %#v", status.LastChangedAt)
 	}
-	if shouldSendReturnRouteRepeatNotificationAfterObservation(task, status, returnRouteLineCN2Pending, now) {
+	if shouldSendReturnRouteRepeatNotificationAfterObservation(task, status, returnRouteLineCN2Pending) {
 		t.Fatal("pending observation triggered a repeated switch notification")
 	}
 
@@ -620,27 +652,24 @@ func TestReturnRouteNotificationSwitchesAreIndependent(t *testing.T) {
 	}
 }
 
-func TestReturnRouteRepeatNotificationRequiresCooldownAndSwitchToggle(t *testing.T) {
-	now := time.Now().UTC()
-	last := now.Add(-239 * time.Second)
-	task := models.ReturnRouteTask{Notify: true, Cooldown: 240}
-	status := models.ReturnRouteStatus{State: "switched", CurrentLine: "CMIN2", LastNotifiedAt: &last}
+func TestReturnRouteRepeatNotificationRequiresExplicitToggle(t *testing.T) {
+	task := models.ReturnRouteTask{Notify: true}
+	status := models.ReturnRouteStatus{State: "switched", CurrentLine: "CMIN2"}
 
-	if shouldSendReturnRouteRepeatNotification(task, status, now) {
-		t.Fatal("repeat notification fired during the cooldown")
+	if shouldSendReturnRouteRepeatNotification(task, status) {
+		t.Fatal("repeat notification fired without the explicit repeat toggle")
 	}
-	last = now.Add(-240 * time.Second)
-	status.LastNotifiedAt = &last
-	if !shouldSendReturnRouteRepeatNotification(task, status, now) {
-		t.Fatal("repeat notification did not fire after the cooldown")
+	task.NotifyRepeated = true
+	if !shouldSendReturnRouteRepeatNotification(task, status) {
+		t.Fatal("repeat notification did not fire with the explicit repeat toggle")
 	}
 	task.Notify = false
-	if shouldSendReturnRouteRepeatNotification(task, status, now) {
+	if shouldSendReturnRouteRepeatNotification(task, status) {
 		t.Fatal("repeat notification fired while switch notifications were disabled")
 	}
 	task.Notify = true
 	status.State = "healthy"
-	if shouldSendReturnRouteRepeatNotification(task, status, now) {
+	if shouldSendReturnRouteRepeatNotification(task, status) {
 		t.Fatal("repeat notification fired after the route recovered")
 	}
 }
@@ -707,7 +736,7 @@ func TestEditReturnRouteTasksBatchPreservesTaskIdentity(t *testing.T) {
 		Carrier: "telecom", Region: "华北", Target: "202.97.0.1",
 		IPVersion: 4, ExpectedLine: "CN2 GT", Protocol: "icmp",
 		Interval: 300, SwitchConfirm: 4, RecoveryConfirm: 5, Cooldown: 900,
-		Notify: false, NotifyRecovery: true, Enabled: true,
+		Notify: false, NotifyRecovery: true, NotifyRepeated: true, Enabled: true,
 	}
 
 	missing := params
@@ -737,7 +766,7 @@ func TestEditReturnRouteTasksBatchPreservesTaskIdentity(t *testing.T) {
 	for _, task := range updated[:2] {
 		if task.Carrier != "telecom" || task.Region != "华北" || task.Target != "202.97.0.1" ||
 			task.ExpectedLine != "CN2 GT" || task.Interval != 300 || task.SwitchConfirm != 4 ||
-			task.RecoveryConfirm != 5 || task.Cooldown != 900 || task.Notify || !task.NotifyRecovery || !task.Enabled {
+			task.RecoveryConfirm != 5 || task.Cooldown != 900 || task.Notify || !task.NotifyRecovery || !task.NotifyRepeated || !task.Enabled {
 			t.Fatalf("batch edit values = %#v", task)
 		}
 	}

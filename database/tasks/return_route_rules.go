@@ -37,16 +37,20 @@ var (
 	//go:embed return_route_signatures.json
 	builtinReturnRouteRuleJSON []byte
 
-	requiredReturnRouteASNGroups = []string{
+	coreReturnRouteASNGroups = []string{
 		"cmin2", "cmi", "cn2_global", "cn2_backbone", "telecom_163",
 		"unicom_10099", "unicom_9929", "unicom_4837", "cmnet",
 	}
-	requiredReturnRouteConfidence = []string{
+	optionalReturnRouteASNGroups = []string{"softbank", "iij", "lumen"}
+	returnRouteASNGroups         = append(append([]string{}, coreReturnRouteASNGroups...), optionalReturnRouteASNGroups...)
+	coreReturnRouteConfidence    = []string{
 		"cmin2", "cmi", "cn2_gia", "cn2_gt_strong", "cn2_gt",
 		"cn2_gt_prefix_only", "unicom_10099", "unicom_9929", "unicom_4837",
 		"telecom_163", "telecom_163_prefix", "cmnet",
 	}
-	returnRouteBGPHTTPClient = &http.Client{Timeout: returnRouteBGPDownloadTimeout}
+	optionalReturnRouteConfidence = []string{"softbank", "iij", "lumen"}
+	returnRouteConfidence         = append(append([]string{}, coreReturnRouteConfidence...), optionalReturnRouteConfidence...)
+	returnRouteBGPHTTPClient      = &http.Client{Timeout: returnRouteBGPDownloadTimeout}
 )
 
 type ReturnRouteRuleDocument struct {
@@ -394,13 +398,14 @@ func compileReturnRouteRules(data []byte) (*compiledReturnRouteRules, error) {
 	if document.RuleVersion == "" {
 		return nil, fmt.Errorf("rule_version 不能为空")
 	}
-	if err := validateReturnRouteRuleKeys("asn_groups", document.ASNGroups, requiredReturnRouteASNGroups); err != nil {
+	fillOptionalReturnRouteRules(&document)
+	if err := validateReturnRouteRuleKeys("asn_groups", document.ASNGroups, coreReturnRouteASNGroups, optionalReturnRouteASNGroups); err != nil {
 		return nil, err
 	}
-	if err := validateReturnRouteRuleKeys("prefix_groups", document.PrefixGroups, requiredReturnRouteASNGroups); err != nil {
+	if err := validateReturnRouteRuleKeys("prefix_groups", document.PrefixGroups, coreReturnRouteASNGroups, optionalReturnRouteASNGroups); err != nil {
 		return nil, err
 	}
-	if err := validateReturnRouteRuleKeys("confidence", document.Confidence, requiredReturnRouteConfidence); err != nil {
+	if err := validateReturnRouteRuleKeys("confidence", document.Confidence, coreReturnRouteConfidence, optionalReturnRouteConfidence); err != nil {
 		return nil, err
 	}
 
@@ -410,7 +415,7 @@ func compileReturnRouteRules(data []byte) (*compiledReturnRouteRules, error) {
 		prefixGroups: make(map[string][]*net.IPNet, len(document.PrefixGroups)),
 	}
 	seenASNs := make(map[int]string)
-	for _, group := range requiredReturnRouteASNGroups {
+	for _, group := range returnRouteASNGroups {
 		compiled.asnGroups[group] = make(map[int]struct{}, len(document.ASNGroups[group]))
 		for _, asn := range document.ASNGroups[group] {
 			if asn <= 0 {
@@ -425,7 +430,7 @@ func compileReturnRouteRules(data []byte) (*compiledReturnRouteRules, error) {
 		}
 	}
 	seenPrefixes := make(map[string]string)
-	for _, group := range requiredReturnRouteASNGroups {
+	for _, group := range returnRouteASNGroups {
 		for _, value := range document.PrefixGroups[group] {
 			network, normalized, err := parseReturnRouteCIDR(value)
 			if err != nil {
@@ -440,7 +445,7 @@ func compileReturnRouteRules(data []byte) (*compiledReturnRouteRules, error) {
 			compiled.cidrRuleCount++
 		}
 	}
-	for _, key := range requiredReturnRouteConfidence {
+	for _, key := range returnRouteConfidence {
 		value := document.Confidence[key]
 		if value <= 0 || value > 1 {
 			return nil, fmt.Errorf("confidence.%s 必须大于 0 且不超过 1", key)
@@ -469,7 +474,7 @@ func compileReturnRouteBGPRules(data []byte) (*compiledReturnRouteBGPRules, erro
 	if document.Source == "" {
 		return nil, fmt.Errorf("BGP 规则 source 不能为空")
 	}
-	if err := validateReturnRouteRuleKeys("prefix_groups", document.PrefixGroups, requiredReturnRouteASNGroups); err != nil {
+	if err := validateReturnRouteRuleKeys("prefix_groups", document.PrefixGroups, coreReturnRouteASNGroups, optionalReturnRouteASNGroups); err != nil {
 		return nil, err
 	}
 	compiled := &compiledReturnRouteBGPRules{
@@ -482,7 +487,7 @@ func compileReturnRouteBGPRules(data []byte) (*compiledReturnRouteBGPRules, erro
 		prefixGroups: make(map[string][]*net.IPNet, len(document.PrefixGroups)),
 	}
 	seen := make(map[string]string)
-	for _, group := range requiredReturnRouteASNGroups {
+	for _, group := range returnRouteASNGroups {
 		for _, value := range document.PrefixGroups[group] {
 			network, normalized, err := parseReturnRouteCIDR(value)
 			if err != nil {
@@ -511,16 +516,19 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 	return fmt.Errorf("规则文件只能包含一个 JSON 对象")
 }
 
-func validateReturnRouteRuleKeys[T any](name string, values map[string]T, required []string) error {
+func validateReturnRouteRuleKeys[T any](name string, values map[string]T, required, optional []string) error {
 	if values == nil {
 		return fmt.Errorf("%s 不能为空", name)
 	}
-	known := make(map[string]struct{}, len(required))
+	known := make(map[string]struct{}, len(required)+len(optional))
 	for _, key := range required {
 		known[key] = struct{}{}
 		if _, ok := values[key]; !ok {
 			return fmt.Errorf("%s 缺少必需分组 %q", name, key)
 		}
+	}
+	for _, key := range optional {
+		known[key] = struct{}{}
 	}
 	for key := range values {
 		if _, ok := known[key]; !ok {
@@ -528,6 +536,30 @@ func validateReturnRouteRuleKeys[T any](name string, values map[string]T, requir
 		}
 	}
 	return nil
+}
+
+func fillOptionalReturnRouteRules(document *ReturnRouteRuleDocument) {
+	defaults := map[string]int{"softbank": 17676, "iij": 2497, "lumen": 3356}
+	if document.ASNGroups == nil {
+		document.ASNGroups = make(map[string][]int)
+	}
+	if document.PrefixGroups == nil {
+		document.PrefixGroups = make(map[string][]string)
+	}
+	if document.Confidence == nil {
+		document.Confidence = make(map[string]float64)
+	}
+	for _, group := range optionalReturnRouteASNGroups {
+		if _, ok := document.ASNGroups[group]; !ok {
+			document.ASNGroups[group] = []int{defaults[group]}
+		}
+		if _, ok := document.PrefixGroups[group]; !ok {
+			document.PrefixGroups[group] = []string{}
+		}
+		if _, ok := document.Confidence[group]; !ok {
+			document.Confidence[group] = 0.96
+		}
+	}
 }
 
 func parseReturnRouteCIDR(value string) (*net.IPNet, string, error) {
@@ -576,7 +608,7 @@ func (rules *compiledReturnRouteRules) representativeASN(group string) int {
 }
 
 func localReturnRouteASN(value string, rules *compiledReturnRouteRules) int {
-	for _, group := range requiredReturnRouteASNGroups {
+	for _, group := range returnRouteASNGroups {
 		if rules.hasPrefix(group, value) {
 			return rules.representativeASN(group)
 		}
@@ -639,7 +671,7 @@ func mergeReturnRouteRules(base *compiledReturnRouteRules, bgp *compiledReturnRo
 	for group, networks := range base.prefixGroups {
 		merged.prefixGroups[group] = append([]*net.IPNet(nil), networks...)
 	}
-	for _, group := range requiredReturnRouteASNGroups {
+	for _, group := range returnRouteASNGroups {
 		for index, network := range bgp.prefixGroups[group] {
 			if _, ok := seen[network.String()]; ok {
 				continue

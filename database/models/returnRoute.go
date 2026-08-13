@@ -20,6 +20,7 @@ type ReturnRouteTask struct {
 	Cooldown        int       `json:"cooldown" gorm:"type:int;not null;default:1800"`
 	Notify          bool      `json:"notify" gorm:"type:boolean;not null;default:true"`
 	NotifyRecovery  bool      `json:"notify_recovery" gorm:"type:boolean;not null;default:true"`
+	NotifyRepeated  bool      `json:"notify_repeated" gorm:"type:boolean;not null;default:false"`
 	Enabled         bool      `json:"enabled" gorm:"type:boolean;not null;default:true"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
