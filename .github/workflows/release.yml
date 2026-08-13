@@ -19,7 +19,7 @@ on:
       web_ref:
         description: Branch or tag in r11234567/komari-web
         required: true
-        default: 1.4.11
+        default: 1.4.12
         type: string
 
 permissions:
@@ -58,7 +58,7 @@ jobs:
           WEB_REF="$INPUT_WEB_REF"
           if [ "$EVENT_NAME" = "release" ]; then
             VERSION_HASH="${VERSION_HASH:-$(printf '%s\n' "$RELEASE_BODY" | sed -n 's/.*komari-version-hash:[[:space:]]*\([A-Za-z0-9]\{7\}\).*/\1/p' | head -n 1)}"
-            WEB_REF="${WEB_REF:-1.4.11}"
+            WEB_REF="${WEB_REF:-1.4.12}"
           else
             VERSION="${INPUT_TAG:-$VERSION}"
           fi

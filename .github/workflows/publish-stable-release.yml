@@ -19,7 +19,7 @@ on:
       web_ref:
         description: Branch or tag in r11234567/komari-web
         required: true
-        default: 1.4.11
+        default: 1.4.12
         type: string
 
 permissions:
