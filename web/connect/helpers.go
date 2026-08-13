@@ -132,8 +132,7 @@ func deploymentToProto(agentID string, profile clients.DeploymentProfile) *deplo
 			DisableWebSsh:           profile.DisableWebSSH,
 			GetIpAddressFromNic:     profile.GetIPAddrFromNIC,
 			Rescue: &deploymentv1.RescueInstallConfig{
-				Enabled:           profile.RescueEnabled,
-				ConfigureFirewall: profile.RescueConfigureFirewall,
+				Enabled: profile.RescueEnabled,
 			},
 		},
 		Runtime: runtimeToProto(profile.RuntimeConfig()),

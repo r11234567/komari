@@ -59,6 +59,7 @@ type Client struct {
 type ClientDeploymentProfile struct {
 	Client            string     `json:"-" gorm:"type:varchar(36);primaryKey"`
 	Config            string     `json:"-" gorm:"type:text;not null"`
+	PreviousRuntime   string     `json:"-" gorm:"type:text;not null;default:''"`
 	Revision          uint64     `json:"-" gorm:"not null;default:0"`
 	AppliedRevision   uint64     `json:"-" gorm:"not null;default:0"`
 	DeliveryStatus    string     `json:"-" gorm:"type:varchar(16);not null;default:''"`

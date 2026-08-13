@@ -113,9 +113,6 @@ func deploymentCommand(profile clients.DeploymentProfile, endpoint, token string
 	}
 	if profile.RescueEnabled {
 		arguments = append(arguments, "--install-rescue")
-		if profile.RescueConfigureFirewall {
-			arguments = append(arguments, "--install-rescue-firewall")
-		}
 	}
 	script := "https://raw.githubusercontent.com/r11234567/komari-agent/main/install.sh"
 	switch profile.Platform {
@@ -210,7 +207,6 @@ func (s *deploymentService) SaveDeploymentProfile(_ context.Context, req *connec
 		profile.RuntimeIdentity = runtimeIdentityFromProto(install.RuntimeIdentity)
 		if install.Rescue != nil {
 			profile.RescueEnabled = install.Rescue.Enabled
-			profile.RescueConfigureFirewall = install.Rescue.ConfigureFirewall
 		}
 	}
 	if err := applyRuntime(&profile, req.Msg.Profile.Runtime); err != nil {

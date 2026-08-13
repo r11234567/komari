@@ -328,3 +328,61 @@ func TestDeploymentConfigDeliveryTracksOnlyRuntimeChangesAndRejectsStaleResults(
 		t.Fatalf("retry delivery state = %+v, runtimeChanged=%v", state, runtimeChanged)
 	}
 }
+
+func TestPreviousRuntimeSurvivesRedispatchAndPreservesInstallSettings(t *testing.T) {
+	db, err := gorm.Open(
+		sqlite.Open("file:deployment-profile-rollback?mode=memory&cache=shared"),
+		&gorm.Config{Logger: logger.Default.LogMode(logger.Silent)},
+	)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	if err := db.AutoMigrate(&models.Client{}, &models.ClientDeploymentProfile{}); err != nil {
+		t.Fatalf("migrate database: %v", err)
+	}
+	if err := db.Create(&models.Client{UUID: "node-rollback", Token: "token-rollback"}).Error; err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+
+	profile := DeploymentProfile{
+		Platform:             "linux",
+		RuntimeIdentity:      AgentRuntimeIdentityServiceAccount,
+		RemoteControlEnabled: false,
+		RescueEnabled:        true,
+		EnableCustomDir:      true,
+		Dir:                  "/opt/current-agent",
+		EnableInterval:       true,
+		Interval:             10,
+		EnableMonthRotate:    true,
+		MonthRotate:          7,
+		MemoryIncludeCache:   true,
+	}
+	if _, state, _, err := saveDeploymentProfileForDispatch(db, "node-rollback", profile, false); err != nil || state.Revision != 1 {
+		t.Fatalf("save initial profile: state=%+v error=%v", state, err)
+	}
+
+	profile.Interval = 20
+	profile.MonthRotate = 15
+	profile.MemoryIncludeCache = false
+	if _, state, _, err := saveDeploymentProfileForDispatch(db, "node-rollback", profile, false); err != nil || state.Revision != 2 {
+		t.Fatalf("save changed runtime: state=%+v error=%v", state, err)
+	}
+	if _, state, _, err := saveDeploymentProfileForDispatch(db, "node-rollback", profile, true); err != nil || state.Revision != 3 {
+		t.Fatalf("redispatch unchanged runtime: state=%+v error=%v", state, err)
+	}
+
+	rollback, available, err := previousDeploymentRuntimeProfile(db, "node-rollback")
+	if err != nil || !available {
+		t.Fatalf("load previous runtime: available=%v error=%v", available, err)
+	}
+	if rollback.Interval != 10 || rollback.MonthRotate != 7 || !rollback.MemoryIncludeCache {
+		t.Fatalf("rollback runtime = %+v, want interval=10 reset-day=7 memory-cache=true", rollback.RuntimeConfig())
+	}
+	if rollback.Dir != profile.Dir || rollback.RuntimeIdentity != profile.RuntimeIdentity ||
+		rollback.RemoteControlEnabled != profile.RemoteControlEnabled || rollback.RescueEnabled != profile.RescueEnabled {
+		t.Fatalf("rollback changed install-only settings: %+v", rollback)
+	}
+	if _, state, changed, err := saveDeploymentProfileForDispatch(db, "node-rollback", rollback, true); err != nil || !changed || state.Revision != 4 {
+		t.Fatalf("save rollback: state=%+v changed=%v error=%v", state, changed, err)
+	}
+}

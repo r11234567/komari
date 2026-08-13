@@ -9,11 +9,10 @@ import (
 
 func TestDeploymentCommandIncludesManagedAgentInstallOptions(t *testing.T) {
 	command, err := deploymentCommand(clients.DeploymentProfile{
-		Platform:                "linux",
-		RuntimeIdentity:         clients.AgentRuntimeIdentityServiceAccount,
-		RemoteControlEnabled:    false,
-		RescueEnabled:           true,
-		RescueConfigureFirewall: true,
+		Platform:             "linux",
+		RuntimeIdentity:      clients.AgentRuntimeIdentityServiceAccount,
+		RemoteControlEnabled: false,
+		RescueEnabled:        true,
 	}, "https://monitor.example.com", "agent-token")
 	if err != nil {
 		t.Fatal(err)
@@ -21,7 +20,7 @@ func TestDeploymentCommandIncludesManagedAgentInstallOptions(t *testing.T) {
 	for _, expected := range []string{
 		"r11234567/komari-agent/main/install.sh",
 		"--install-runtime-identity", "service-account",
-		"--disable-remote-control", "--install-rescue", "--install-rescue-firewall",
+		"--disable-remote-control", "--install-rescue",
 	} {
 		if !strings.Contains(command, expected) {
 			t.Fatalf("deployment command does not contain %q: %s", expected, command)

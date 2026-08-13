@@ -13,6 +13,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils"
+	deploymentapp "github.com/komari-monitor/komari/web/deployment"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	rescuev1 "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -34,6 +35,8 @@ var signals = struct {
 	sync.Mutex
 	byKey map[string]chan struct{}
 }{byKey: make(map[string]chan struct{})}
+
+var createMu sync.Mutex
 
 func signalKey(key string) {
 	signals.Lock()
@@ -71,7 +74,10 @@ func GetStatus(agentID string) (*rescuev1.RescueHelperStatus, error) {
 	status.Installed = stored.Installed
 	status.GuardianRunning = stored.GuardianRunning
 	status.HelperRunning = stored.HelperRunning
-	status.FirewallConfigured = stored.FirewallConfigured
+	status.NetworkIsolation = rescuev1.NetworkIsolationMode(stored.NetworkIsolation)
+	if stored.BlockedInterfaces != "" {
+		_ = json.Unmarshal([]byte(stored.BlockedInterfaces), &status.BlockedInterfaces)
+	}
 	status.Version = stored.Version
 	status.HelperInstanceId = stored.HelperInstanceID
 	status.ObservedAt = timestamppb.New(stored.ObservedAt)
@@ -101,9 +107,10 @@ func ReportStatus(agentID string, status *rescuev1.RescueHelperStatus) error {
 		errorCode = sanitize(status.Error.Code, 64)
 		errorMessage = sanitize(status.Error.Message, 512)
 	}
+	blockedInterfaces, _ := json.Marshal(sanitizeList(status.BlockedInterfaces, 128, 256))
 	row := models.ClientRescueHelper{
 		Client: agentID, Installed: status.Installed, GuardianRunning: status.GuardianRunning,
-		HelperRunning: status.HelperRunning, FirewallConfigured: status.FirewallConfigured,
+		HelperRunning: status.HelperRunning, NetworkIsolation: int32(status.NetworkIsolation), BlockedInterfaces: string(blockedInterfaces),
 		Version: sanitize(status.Version, 100), HelperInstanceID: status.HelperInstanceId,
 		ErrorCode: errorCode, ErrorMessage: errorMessage, ObservedAt: observedAt,
 	}
@@ -149,6 +156,8 @@ func ClearConnectionError(agentID, helperInstanceID string) error {
 }
 
 func Create(agentID string, action rescuev1.RescueAction, arguments []string, timeout *durationpb.Duration, maxOutput uint64, idempotencyKey string) (*rescuev1.RescueSession, error) {
+	createMu.Lock()
+	defer createMu.Unlock()
 	profile, saved, err := clients.GetDeploymentProfile(agentID)
 	if err != nil {
 		return nil, err
@@ -156,7 +165,7 @@ func Create(agentID string, action rescuev1.RescueAction, arguments []string, ti
 	if !saved || profile.RemoteControlEnabled || !profile.RescueEnabled {
 		return nil, errors.New("rescue helper is unavailable unless normal remote control is disabled and rescue is enabled")
 	}
-	if action < rescuev1.RescueAction_RESCUE_ACTION_DIAGNOSTICS || action > rescuev1.RescueAction_RESCUE_ACTION_RESTART_AGENT {
+	if !allowedAction(action) {
 		return nil, errors.New("unsupported rescue action")
 	}
 	if len(arguments) > maxArgumentCount {
@@ -211,8 +220,43 @@ func Create(agentID string, action rescuev1.RescueAction, arguments []string, ti
 	if err := dbcore.GetDBInstance().Create(&row).Error; err != nil {
 		return nil, err
 	}
+	if action == rescuev1.RescueAction_RESCUE_ACTION_ROLLBACK_ONLINE_CONFIG {
+		if _, err := deploymentapp.RollbackOnlineConfig(agentID); err != nil {
+			_ = dbcore.GetDBInstance().Delete(&row).Error
+			return nil, fmt.Errorf("rollback online configuration: %w", err)
+		}
+	}
 	signalKey("lease:" + agentID)
 	return sessionToProto(row), nil
+}
+
+func allowedAction(action rescuev1.RescueAction) bool {
+	switch action {
+	case rescuev1.RescueAction_RESCUE_ACTION_DIAGNOSTICS,
+		rescuev1.RescueAction_RESCUE_ACTION_SHUTDOWN,
+		rescuev1.RescueAction_RESCUE_ACTION_REBOOT,
+		rescuev1.RescueAction_RESCUE_ACTION_BLOCK_PUBLIC_INTERFACES,
+		rescuev1.RescueAction_RESCUE_ACTION_BLOCK_TAILSCALE_INTERFACES,
+		rescuev1.RescueAction_RESCUE_ACTION_ISOLATE_CONTROL_PLANE,
+		rescuev1.RescueAction_RESCUE_ACTION_RESTORE_NETWORK,
+		rescuev1.RescueAction_RESCUE_ACTION_ROLLBACK_ONLINE_CONFIG:
+		return true
+	default:
+		return false
+	}
+}
+
+func sanitizeList(values []string, maxCount, maxBytes int) []string {
+	if len(values) > maxCount {
+		values = values[:maxCount]
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = sanitize(value, maxBytes); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func GetSession(sessionID string) (*rescuev1.RescueSession, error) {

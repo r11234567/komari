@@ -135,6 +135,8 @@ github.com/r11234567/komari-proto v0.1.11 h1:Z+ijrElzV4i5eyeL5H6SlrR/zbpSvlw+Mbf
 github.com/r11234567/komari-proto v0.1.11/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
 github.com/r11234567/komari-proto v0.1.12 h1:vi340N3IxiFaSFaHiJ1hEFhHTZn/UEe5TeT89+VWKMc=
 github.com/r11234567/komari-proto v0.1.12/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
+github.com/r11234567/komari-proto v0.1.13 h1:P2iOV3gnEjCEL7XN5775LoAA7/MTfL7s5AipgMh6z9A=
+github.com/r11234567/komari-proto v0.1.13/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
 github.com/rogpeppe/go-internal v1.8.0 h1:FCbCCtXNOY3UtUuHUYaghJg4y7Fd14rXifAYUAtL9R8=
 github.com/rogpeppe/go-internal v1.8.0/go.mod h1:WmiCO8CzOY8rg0OYDC4/i/2WRWAB6poM+XZ2dLUbcbE=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=

@@ -5,6 +5,7 @@ package deployment
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/komari-monitor/komari/database/clients"
@@ -111,6 +112,17 @@ func Save(agentID string, profile clients.DeploymentProfile, forceDispatch bool)
 		}
 	}
 	return result, err
+}
+
+func RollbackOnlineConfig(agentID string) (SaveResult, error) {
+	profile, available, err := clients.PreviousDeploymentRuntimeProfile(agentID)
+	if err != nil {
+		return SaveResult{}, err
+	}
+	if !available {
+		return SaveResult{}, errors.New("no previous online configuration is available")
+	}
+	return Save(agentID, profile, true)
 }
 
 // GetDesired returns a newer desired snapshot, if one exists.
