@@ -238,7 +238,7 @@ func (m *Manager) instanceFor(short string) *Instance {
 // instance is dropped and its hooks and RPC methods are cleaned up.
 func (m *Manager) load(short string) error {
 	dir := filepath.Join(DataDir, short)
-	info, err := readManifest(dir)
+	info, err := readManifest(short)
 	if err != nil {
 		return err
 	}
@@ -419,7 +419,7 @@ func (m *Manager) closeAll() error {
 
 func (m *Manager) setEnabled(short string, enabled, approved bool) error {
 	dir := filepath.Join(DataDir, short)
-	info, err := readManifest(dir)
+	info, err := readManifest(short)
 	if err != nil {
 		return err
 	}
@@ -481,7 +481,7 @@ func (m *Manager) loadAll() error {
 		if !st.Enabled || m.instanceFor(short) != nil {
 			continue
 		}
-		info, err := readManifest(filepath.Join(DataDir, short))
+		info, err := readManifest(short)
 		if err != nil {
 			errs = append(errs, m.disableWithError(short, st, err))
 			continue
@@ -504,7 +504,7 @@ func (m *Manager) loadAll() error {
 // plugin and keeps the error visible, mirroring the startup load path.
 func (m *Manager) restartPlugin(short string) error {
 	st := m.stateStore().get(short)
-	info, err := readManifest(filepath.Join(DataDir, short))
+	info, err := readManifest(short)
 	if err != nil {
 		return m.disableWithError(short, st, err)
 	}
@@ -541,7 +541,7 @@ func (m *Manager) list() []Info {
 			continue
 		}
 		short := entry.Name()
-		info, err := readManifest(filepath.Join(DataDir, short))
+		info, err := readManifest(short)
 		if err != nil {
 			continue // mirror the theme list: skip unreadable entries
 		}
@@ -589,7 +589,7 @@ func Manifest(short string) (models.Plugin, error) {
 	if !validShort(short) {
 		return models.Plugin{}, fmt.Errorf("invalid plugin short %q", short)
 	}
-	return readManifest(filepath.Join(DataDir, short))
+	return readManifest(short)
 }
 
 // ResolvePublicFile returns the absolute path of a file that belongs to a
@@ -620,7 +620,7 @@ func validatePublicFile(short, name string) error {
 	if !global.stateStore().get(short).Enabled {
 		return fmt.Errorf("plugin %q is not enabled", short)
 	}
-	info, err := readManifest(filepath.Join(DataDir, short))
+	info, err := readManifest(short)
 	if err != nil {
 		return err
 	}

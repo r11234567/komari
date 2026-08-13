@@ -15,16 +15,18 @@ import (
 // mirroring the theme redirect validation.
 var urlSchemeRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+\-.]*:`)
 
-// readManifest loads and validates the manifest of an installed plugin
-// directory.
-func readManifest(dir string) (models.Plugin, error) {
+// readManifest loads and validates the manifest of an installed plugin.
+func readManifest(short string) (models.Plugin, error) {
 	var info models.Plugin
-	root, err := os.OpenRoot(dir)
+	if !validShort(short) {
+		return info, fmt.Errorf("invalid plugin short %q", short)
+	}
+	root, err := os.OpenRoot(DataDir)
 	if err != nil {
 		return info, fmt.Errorf("open plugin directory: %w", err)
 	}
 	defer root.Close()
-	data, err := root.ReadFile(manifestFile)
+	data, err := root.ReadFile(filepath.Join(short, manifestFile))
 	if err != nil {
 		return info, fmt.Errorf("read plugin manifest: %w", err)
 	}
