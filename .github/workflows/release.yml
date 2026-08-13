@@ -1,6 +1,8 @@
 name: Attach Release Binaries
 
 on:
+  release:
+    types: [created, published, prereleased]
   workflow_dispatch:
     inputs:
       tag:
@@ -28,24 +30,40 @@ env:
 
 jobs:
   prepare:
+    if: ${{ github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'Snapshot-') }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.validate.outputs.version }}
       version_hash: ${{ steps.validate.outputs.version_hash }}
       web_ref: ${{ steps.validate.outputs.web_ref }}
+      source_ref: ${{ steps.validate.outputs.source_ref }}
     steps:
       - name: Validate release metadata
         id: validate
         env:
-          VERSION: ${{ inputs.tag }}
-          VERSION_HASH: ${{ inputs.version_hash }}
-          WEB_REF: ${{ inputs.web_ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_BODY: ${{ github.event.release.body }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_VERSION_HASH: ${{ inputs.version_hash }}
+          INPUT_WEB_REF: ${{ inputs.web_ref }}
         shell: bash
         run: |
           set -euo pipefail
+          VERSION="$RELEASE_TAG"
+          VERSION_HASH="$INPUT_VERSION_HASH"
+          WEB_REF="$INPUT_WEB_REF"
+          if [ "$EVENT_NAME" = "release" ]; then
+            VERSION_HASH="${VERSION_HASH:-$(printf '%s\n' "$RELEASE_BODY" | sed -n 's/.*komari-version-hash:[[:space:]]*\([A-Za-z0-9]\{7\}\).*/\1/p' | head -n 1)}"
+            WEB_REF="${WEB_REF:-1.4.11}"
+          else
+            VERSION="${INPUT_TAG:-$VERSION}"
+          fi
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid version: $VERSION" >&2; exit 1; }
+          VERSION_HASH="${VERSION_HASH:-${GITHUB_SHA::7}}"
           [[ "$VERSION_HASH" =~ ^[A-Za-z0-9]{7}$ ]] || { echo "Invalid version identifier: $VERSION_HASH" >&2; exit 1; }
           [ -n "$WEB_REF" ] || { echo "Komari Web ref cannot be empty." >&2; exit 1; }
+          echo "source_ref=$VERSION" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "version_hash=$VERSION_HASH" >> "$GITHUB_OUTPUT"
           echo "web_ref=$WEB_REF" >> "$GITHUB_OUTPUT"
@@ -56,6 +74,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_ref }}
 
       - name: Build frontend artifact
         uses: ./.github/actions/build-frontend
@@ -105,6 +125,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_ref }}
 
       - name: Restore frontend artifact
         uses: ./.github/actions/restore-frontend
@@ -172,6 +194,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_ref }}
 
       - name: Download Docker binaries
         uses: actions/download-artifact@v4
