@@ -2,7 +2,10 @@ name: Attach Release Binaries
 
 on:
   release:
-    types: [created, published, prereleased]
+    # GitHub emits both created and published when a drafted release is
+    # published. Listening only to published covers stable and prerelease
+    # releases without building the same tag twice.
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
