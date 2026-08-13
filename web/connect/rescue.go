@@ -57,9 +57,6 @@ func (s *rescueService) WatchRescueSession(ctx context.Context, req *connect.Req
 	if err := stream.Send(&rescuev1.WatchRescueSessionResponse{Session: session}); err != nil {
 		return err
 	}
-	if rescueTerminal(session.State) {
-		return nil
-	}
 	lastState := session.State
 	sequence := req.Msg.AfterSequence
 	for {
@@ -77,6 +74,11 @@ func (s *rescueService) WatchRescueSession(ctx context.Context, req *connect.Req
 				return nil
 			}
 		}
+		// A fast action may finish before the browser starts watching. Always
+		// replay persisted events before closing an already-terminal session.
+		if rescueTerminal(session.State) {
+			return nil
+		}
 		session, _, err = rescueapp.ExpireIfOverdue(req.Msg.SessionId)
 		if err != nil {
 			return connectError(connect.CodeInternal, err)
@@ -87,7 +89,10 @@ func (s *rescueService) WatchRescueSession(ctx context.Context, req *connect.Req
 			}
 			lastState = session.State
 			if rescueTerminal(session.State) {
-				return nil
+				// The terminal event and session transition are committed together,
+				// but the event query above may have raced just before that commit.
+				// Loop once more so the terminal output is delivered first.
+				continue
 			}
 		}
 		deadlineWait := time.NewTimer(time.Second)
