@@ -17,9 +17,9 @@ on:
         default: 1.4.5
         type: string
       frontend_ref:
-        description: komari-web branch or tag to build.
+        description: Komari Web release tag, branch, or latest published release.
         required: true
-        default: 1.4.12
+        default: latest
         type: string
 
 permissions:

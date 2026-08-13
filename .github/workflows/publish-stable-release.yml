@@ -17,9 +17,9 @@ on:
         default: 1.4.5
         type: string
       web_ref:
-        description: Branch or tag in r11234567/komari-web
+        description: Komari Web release tag, branch, or latest published release
         required: true
-        default: 1.4.12
+        default: latest
         type: string
 
 permissions:

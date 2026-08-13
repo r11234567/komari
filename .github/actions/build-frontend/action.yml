@@ -9,8 +9,8 @@ inputs:
     description: komari-web repository URL.
     default: https://github.com/r11234567/komari-web
   ref:
-    description: Optional komari-web ref to build. Uses the repository default branch when empty.
-    default: 1.4.12
+    description: Komari Web ref to build. Use latest to resolve the latest published stable release.
+    default: latest
   artifact-name:
     description: Optional artifact name for the packed system UI.
     default: ""
@@ -25,14 +25,26 @@ runs:
 
     - name: Clone and build Komari web bundles
       shell: bash
+      env:
+        KOMARI_WEB_REPOSITORY: ${{ inputs.repository }}
+        KOMARI_WEB_REF: ${{ inputs.ref }}
       run: |
         set -euxo pipefail
         rm -rf komari-web
-        if [ -n "${{ inputs.ref }}" ]; then
-          git clone --depth=1 --branch "${{ inputs.ref }}" "${{ inputs.repository }}" komari-web
-        else
-          git clone --depth=1 "${{ inputs.repository }}" komari-web
+        repository="$KOMARI_WEB_REPOSITORY"
+        requested_ref="$KOMARI_WEB_REF"
+        resolved_ref="$requested_ref"
+        if [ -z "$requested_ref" ] || [ "$requested_ref" = "latest" ]; then
+          release_url="${repository%.git}/releases/latest"
+          latest_url="$(curl -fsSL --retry 3 -o /dev/null -w '%{url_effective}' "$release_url")"
+          resolved_ref="${latest_url##*/}"
+          if [ -z "$resolved_ref" ] || [ "$resolved_ref" = "latest" ]; then
+            echo "Unable to resolve the latest published Komari Web release from $release_url" >&2
+            exit 1
+          fi
+          echo "Resolved Komari Web latest release to $resolved_ref"
         fi
+        git clone --depth=1 --branch "$resolved_ref" "$repository" komari-web
         cd komari-web
         npm ci
         npm run lint
