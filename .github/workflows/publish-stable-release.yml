@@ -84,6 +84,7 @@ jobs:
           echo "Release display version: $VERSION ($VERSION_HASH)"
 
       - name: Create version-only tag and release
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.metadata.outputs.version }}
@@ -109,6 +110,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --title "$VERSION" \
               --latest
+            echo "created=false" >> "$GITHUB_OUTPUT"
           else
             gh release create "$VERSION" \
               --repo "$GITHUB_REPOSITORY" \
@@ -117,9 +119,11 @@ jobs:
               --notes "<!-- komari-version-hash: $VERSION_HASH -->" \
               --latest \
               --verify-tag
+            echo "created=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build release assets and Docker image
+        if: steps.release.outputs.created != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.metadata.outputs.version }}
