@@ -158,6 +158,10 @@ func TestReturnRouteRequiresExplicitTransportCapability(t *testing.T) {
 	if SupportsReturnRoute("legacy") {
 		t.Fatal("legacy Agent without route capability was accepted")
 	}
+	SetV2Capabilities("legacy", []string{"route"})
+	if !SupportsReturnRoute("legacy") {
+		t.Fatal("released Agent short route capability was ignored")
+	}
 	SetV2Capabilities("legacy", []string{v2.MethodAgentRoute})
 	if !SupportsReturnRoute("legacy") {
 		t.Fatal("legacy Agent route capability was ignored")

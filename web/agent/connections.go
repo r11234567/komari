@@ -106,7 +106,7 @@ func SupportsReturnRoute(uuid string) bool {
 	defer mu.RUnlock()
 	version := connectedClientProtocol[uuid]
 	if version == 2 {
-		return v2Capabilities[uuid][v2.MethodAgentRoute]
+		return v2Capabilities[uuid]["route"] || v2Capabilities[uuid][v2.MethodAgentRoute]
 	}
 	if version >= 3 {
 		return connectCapabilities[uuid]["return-route"]
