@@ -141,7 +141,7 @@ func deploymentToProto(agentID string, profile clients.DeploymentProfile) *deplo
 }
 
 func runtimeIdentityToProto(identity string) deploymentv1.AgentRuntimeIdentity {
-	if identity == clients.AgentRuntimeIdentityCurrentUser {
+	if identity == clients.AgentRuntimeIdentityServiceAccount {
 		return deploymentv1.AgentRuntimeIdentity_AGENT_RUNTIME_IDENTITY_CURRENT_USER
 	}
 	return deploymentv1.AgentRuntimeIdentity_AGENT_RUNTIME_IDENTITY_ROOT_OR_ADMINISTRATOR
@@ -149,7 +149,7 @@ func runtimeIdentityToProto(identity string) deploymentv1.AgentRuntimeIdentity {
 
 func runtimeIdentityFromProto(identity deploymentv1.AgentRuntimeIdentity) string {
 	if identity == deploymentv1.AgentRuntimeIdentity_AGENT_RUNTIME_IDENTITY_CURRENT_USER {
-		return clients.AgentRuntimeIdentityCurrentUser
+		return clients.AgentRuntimeIdentityServiceAccount
 	}
 	return clients.AgentRuntimeIdentityPrivileged
 }

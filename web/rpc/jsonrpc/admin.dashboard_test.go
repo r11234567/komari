@@ -14,6 +14,7 @@ import (
 	"github.com/komari-monitor/komari/database/trafficledger"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/metric"
+	dashboardapp "github.com/komari-monitor/komari/web/dashboard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
@@ -324,10 +325,7 @@ func TestSummarizeDashboardTrafficExcludesFreeClientsFromBilling(t *testing.T) {
 	summary := summarizeDashboardTraffic(clients, rows, map[string]trafficledger.Usage{
 		"a": {Up: 100, Down: 40},
 		"b": {Up: 20, Down: 80},
-	}, map[string][]trafficledger.HourlyUsage{
-		"a": {{Hour: trafficledger.BeijingDay(now).Add(2 * time.Hour), Usage: trafficledger.Usage{Up: 100, Down: 40}}},
-		"b": {{Hour: trafficledger.BeijingDay(now).Add(3 * time.Hour), Usage: trafficledger.Usage{Up: 20, Down: 80}}},
-	}, nil, now, 5)
+	}, dashboardTrafficTrendFixture(now, trafficledger.Usage{Up: 120, Down: 120}), nil, now, 5)
 
 	if !summary.HistoryReady {
 		t.Fatal("complete dashboard history reported as incomplete")
@@ -344,11 +342,16 @@ func TestSummarizeDashboardTrafficExcludesFreeClientsFromBilling(t *testing.T) {
 	if len(summary.Daily) != trafficledger.DashboardHistoryDays {
 		t.Fatalf("daily points = %d, want %d", len(summary.Daily), trafficledger.DashboardHistoryDays)
 	}
-	if len(summary.Hourly) != now.In(trafficledger.BeijingLocation).Hour()+1 {
-		t.Fatalf("hourly points = %d", len(summary.Hourly))
+	if len(summary.Hourly) != 96 {
+		t.Fatalf("15-minute points = %d", len(summary.Hourly))
 	}
-	if summary.Hourly[2].Up != 100 || summary.Hourly[2].Down != 40 || summary.Hourly[3].Up != 120 || summary.Hourly[3].Down != 120 {
-		t.Fatalf("unexpected cumulative hourly traffic: %#v", summary.Hourly[:4])
+	var trendUp, trendDown int64
+	for _, point := range summary.Hourly {
+		trendUp += point.Up
+		trendDown += point.Down
+	}
+	if trendUp != 120 || trendDown != 120 {
+		t.Fatalf("unexpected 24-hour interval traffic: up=%d down=%d", trendUp, trendDown)
 	}
 }
 
@@ -367,7 +370,7 @@ func TestSummarizeDashboardTrafficMarksMissingHistory(t *testing.T) {
 	}
 }
 
-func TestSummarizeDashboardTrafficUsesCalibratedDailyAndHourlyValues(t *testing.T) {
+func TestSummarizeDashboardTrafficUsesCalibratedDailyAndIntervalValues(t *testing.T) {
 	now := time.Date(2026, 8, 2, 8, 30, 0, 0, time.UTC)
 	today := trafficledger.BeijingDay(now)
 	yesterday := today.AddDate(0, 0, -1).Format(time.DateOnly)
@@ -376,9 +379,7 @@ func TestSummarizeDashboardTrafficUsesCalibratedDailyAndHourlyValues(t *testing.
 		[]models.Client{{UUID: "a", Price: 1, TrafficLimitType: "sum"}},
 		[]models.TrafficDailyLedger{{Client: "a", Day: yesterday, UpBytes: 100, DownBytes: 200}},
 		map[string]trafficledger.Usage{"a": {Up: 10, Down: 20}},
-		map[string][]trafficledger.HourlyUsage{
-			"a": {{Hour: today.Add(15 * time.Hour), Usage: trafficledger.Usage{Up: 10, Down: 20}}},
-		},
+		dashboardTrafficTrendFixture(now, trafficledger.Usage{Up: 10, Down: 20}),
 		map[string]trafficledger.SignedUsage{
 			"a\x00" + yesterday: {Up: 50, Down: -25},
 			"a\x00" + todayKey:  {Up: 5, Down: -10},
@@ -392,6 +393,23 @@ func TestSummarizeDashboardTrafficUsesCalibratedDailyAndHourlyValues(t *testing.
 	assert.Equal(t, int64(15), summary.TodayUp)
 	assert.Equal(t, int64(10), summary.TodayDown)
 	assert.Equal(t, int64(25), summary.TodayBillable)
-	assert.Equal(t, int64(15), summary.Hourly[len(summary.Hourly)-1].Up)
-	assert.Equal(t, int64(10), summary.Hourly[len(summary.Hourly)-1].Down)
+	var trendUp, trendDown int64
+	for _, point := range summary.Hourly {
+		trendUp += point.Up
+		trendDown += point.Down
+	}
+	assert.Equal(t, int64(10), trendUp)
+	assert.Equal(t, int64(20), trendDown)
+}
+
+func dashboardTrafficTrendFixture(now time.Time, usage trafficledger.Usage) []dashboardapp.TrafficTrendBucket {
+	end := now.In(trafficledger.BeijingLocation).Truncate(dashboardapp.DefaultTrafficTrendInterval).Add(dashboardapp.DefaultTrafficTrendInterval)
+	start := end.Add(-dashboardapp.DefaultTrafficTrendWindow)
+	buckets := make([]dashboardapp.TrafficTrendBucket, dashboardapp.DefaultTrafficTrendWindow/dashboardapp.DefaultTrafficTrendInterval)
+	for index := range buckets {
+		buckets[index].Start = start.Add(time.Duration(index) * dashboardapp.DefaultTrafficTrendInterval)
+	}
+	buckets[len(buckets)-1].Up = usage.Up
+	buckets[len(buckets)-1].Down = usage.Down
+	return buckets
 }

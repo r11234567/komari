@@ -37,6 +37,7 @@ func newPolicyInterceptor() *policyInterceptor {
 		}
 	}
 	add(browser, rpc.RoleGuest, 30*time.Second, "GetPublicInfo", "ListAgents", "GetAgent", "GetThemeContract")
+	add(browser, rpc.RoleAdmin, 30*time.Second, "GetTrafficTrend")
 	add(browser, rpc.RoleGuest, 30*time.Minute, "WatchAgentStatus")
 	add(config, rpc.RoleClient, 30*time.Second, "GetDesiredConfig", "AcknowledgeConfig")
 	add(config, rpc.RoleClient, 30*time.Minute, "WatchDesiredConfig")

@@ -20,8 +20,8 @@ import (
 const defaultReportInterval = 3.0
 
 const (
-	AgentRuntimeIdentityPrivileged  = "root-or-administrator"
-	AgentRuntimeIdentityCurrentUser = "current-user"
+	AgentRuntimeIdentityPrivileged     = "root-or-administrator"
+	AgentRuntimeIdentityServiceAccount = "service-account"
 )
 
 const (
@@ -102,8 +102,8 @@ func (profile *DeploymentProfile) UnmarshalJSON(data []byte) error {
 func defaultDeploymentProfile(client models.Client) DeploymentProfile {
 	profile := DeploymentProfile{
 		Platform:                "linux",
-		RuntimeIdentity:         AgentRuntimeIdentityPrivileged,
-		RemoteControlEnabled:    true,
+		RuntimeIdentity:         AgentRuntimeIdentityServiceAccount,
+		RemoteControlEnabled:    false,
 		RescueConfigureFirewall: true,
 	}
 	if client.TrafficResetDay != nil && *client.TrafficResetDay > 0 {
@@ -454,13 +454,16 @@ func normalizeDeploymentProfile(profile *DeploymentProfile) error {
 		return fmt.Errorf("platform must be linux, windows, macos, or docker")
 	}
 	profile.RuntimeIdentity = strings.ToLower(strings.TrimSpace(profile.RuntimeIdentity))
+	if profile.RuntimeIdentity == "current-user" {
+		profile.RuntimeIdentity = AgentRuntimeIdentityServiceAccount
+	}
 	if profile.RuntimeIdentity == "" {
 		profile.RuntimeIdentity = AgentRuntimeIdentityPrivileged
 	}
 	switch profile.RuntimeIdentity {
-	case AgentRuntimeIdentityPrivileged, AgentRuntimeIdentityCurrentUser:
+	case AgentRuntimeIdentityPrivileged, AgentRuntimeIdentityServiceAccount:
 	default:
-		return fmt.Errorf("runtime_identity must be root-or-administrator or current-user")
+		return fmt.Errorf("runtime_identity must be root-or-administrator or service-account")
 	}
 	// Older profiles could disable only WebSSH. That flag was always implemented
 	// by the Agent as disabling all remote control, so preserve that behavior
@@ -469,7 +472,7 @@ func normalizeDeploymentProfile(profile *DeploymentProfile) error {
 		profile.RemoteControlEnabled = false
 		profile.DisableWebSSH = false
 	}
-	if profile.RuntimeIdentity == AgentRuntimeIdentityCurrentUser {
+	if profile.RuntimeIdentity == AgentRuntimeIdentityServiceAccount {
 		profile.RemoteControlEnabled = false
 	}
 	if profile.RescueEnabled && profile.RemoteControlEnabled {

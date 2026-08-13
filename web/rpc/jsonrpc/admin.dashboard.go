@@ -17,6 +17,7 @@ import (
 	"github.com/komari-monitor/komari/database/trafficledger"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
+	dashboardapp "github.com/komari-monitor/komari/web/dashboard"
 )
 
 type dashboardOfflineNode struct {
@@ -40,7 +41,7 @@ type dashboardTrafficDay struct {
 	Billable int64  `json:"billable"`
 }
 
-type dashboardTrafficHour struct {
+type dashboardTrafficBucket struct {
 	Hour string `json:"hour"`
 	Up   int64  `json:"up"`
 	Down int64  `json:"down"`
@@ -59,7 +60,7 @@ type dashboardTrafficSummary struct {
 	TodayUp       int64                      `json:"today_up"`
 	TodayDown     int64                      `json:"today_down"`
 	TodayBillable int64                      `json:"today_billable"`
-	Hourly        []dashboardTrafficHour     `json:"hourly"`
+	Hourly        []dashboardTrafficBucket   `json:"hourly"`
 	Daily         []dashboardTrafficDay      `json:"daily"`
 	Ranking       []dashboardTrafficRankItem `json:"ranking"`
 	HistoryReady  bool                       `json:"history_ready"`
@@ -480,19 +481,22 @@ func loadDashboardTraffic(ctx context.Context, clientList []models.Client, now t
 	}
 
 	todayUsage := make(map[string]trafficledger.Usage, len(clientList))
-	todayHourly := make(map[string][]trafficledger.HourlyUsage, len(clientList))
 	clientIDs := make([]string, 0, len(clientList))
 	for _, client := range clientList {
 		clientIDs = append(clientIDs, client.UUID)
 	}
-	todayUsage, todayHourly, err = trafficledger.MetricUsageByHourBatch(ctx, clientIDs, today.UTC(), now.UTC())
+	todayUsage, _, err = trafficledger.MetricUsageByHourBatch(ctx, clientIDs, today.UTC(), now.UTC())
 	if err != nil {
 		return dashboardTrafficSummary{}, fmt.Errorf("read today's dashboard traffic: %w", err)
 	}
-	return summarizeDashboardTraffic(clientList, rows, todayUsage, todayHourly, adjustments, now, rankingLimit), nil
+	trendBuckets, err := dashboardapp.LoadTrafficTrend(ctx, clientIDs, now, dashboardapp.DefaultTrafficTrendWindow, dashboardapp.DefaultTrafficTrendInterval)
+	if err != nil {
+		return dashboardTrafficSummary{}, fmt.Errorf("read 24-hour dashboard traffic trend: %w", err)
+	}
+	return summarizeDashboardTraffic(clientList, rows, todayUsage, trendBuckets, adjustments, now, rankingLimit), nil
 }
 
-func summarizeDashboardTraffic(clientList []models.Client, rows []models.TrafficDailyLedger, todayUsage map[string]trafficledger.Usage, todayHourly map[string][]trafficledger.HourlyUsage, adjustments map[string]trafficledger.SignedUsage, now time.Time, rankingLimit int) dashboardTrafficSummary {
+func summarizeDashboardTraffic(clientList []models.Client, rows []models.TrafficDailyLedger, todayUsage map[string]trafficledger.Usage, trendBuckets []dashboardapp.TrafficTrendBucket, adjustments map[string]trafficledger.SignedUsage, now time.Time, rankingLimit int) dashboardTrafficSummary {
 	today := trafficledger.BeijingDay(now)
 	start := today.AddDate(0, 0, -(trafficledger.DashboardHistoryDays - 1))
 	clientsByID := make(map[string]models.Client, len(clientList))
@@ -503,10 +507,14 @@ func summarizeDashboardTraffic(clientList []models.Client, rows []models.Traffic
 	daysByKey := make(map[string]*dashboardTrafficDay, trafficledger.DashboardHistoryDays)
 	summary := dashboardTrafficSummary{
 		Daily:  make([]dashboardTrafficDay, 0, trafficledger.DashboardHistoryDays),
-		Hourly: make([]dashboardTrafficHour, now.In(trafficledger.BeijingLocation).Hour()+1),
+		Hourly: make([]dashboardTrafficBucket, len(trendBuckets)),
 	}
-	for hour := range summary.Hourly {
-		summary.Hourly[hour].Hour = fmt.Sprintf("%02d:00", hour)
+	for index, bucket := range trendBuckets {
+		summary.Hourly[index] = dashboardTrafficBucket{
+			Hour: bucket.Start.In(trafficledger.BeijingLocation).Format("01-02 15:04"),
+			Up:   bucket.Up,
+			Down: bucket.Down,
+		}
 	}
 	for day := start; !day.After(today); day = day.AddDate(0, 0, 1) {
 		key := day.Format(time.DateOnly)
@@ -558,17 +566,6 @@ func summarizeDashboardTraffic(clientList []models.Client, rows []models.Traffic
 				UUID: client.UUID, Name: name, Up: usage.Up, Down: usage.Down, Billable: rankingBillable,
 			}, rankingLimit)
 		}
-		for _, hourly := range trafficledger.ApplyHourlyAdjustment(todayHourly[client.UUID], adjustment, now) {
-			hour := hourly.Hour.In(trafficledger.BeijingLocation).Hour()
-			if hour >= 0 && hour < len(summary.Hourly) {
-				summary.Hourly[hour].Up += hourly.Up
-				summary.Hourly[hour].Down += hourly.Down
-			}
-		}
-	}
-	for hour := 1; hour < len(summary.Hourly); hour++ {
-		summary.Hourly[hour].Up += summary.Hourly[hour-1].Up
-		summary.Hourly[hour].Down += summary.Hourly[hour-1].Down
 	}
 
 	expectedRows := len(clientList) * (trafficledger.DashboardHistoryDays - 1)

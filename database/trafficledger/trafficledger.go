@@ -474,8 +474,18 @@ func MetricUsageByHour(ctx context.Context, clientID string, start, end time.Tim
 // MetricUsageByHourBatch calculates the same per-client totals as
 // MetricUsageByHour while sharing the underlying metric scans across clients.
 func MetricUsageByHourBatch(ctx context.Context, clientIDs []string, start, end time.Time) (map[string]Usage, map[string][]HourlyUsage, error) {
+	return MetricUsageByIntervalBatch(ctx, clientIDs, start, end, time.Hour)
+}
+
+// MetricUsageByIntervalBatch calculates per-client totals and interval
+// increments in one shared metric-store scan. Buckets are aligned in Beijing
+// time so dashboard labels stay consistent with traffic billing days.
+func MetricUsageByIntervalBatch(ctx context.Context, clientIDs []string, start, end time.Time, interval time.Duration) (map[string]Usage, map[string][]HourlyUsage, error) {
 	if end.Before(start) {
 		return nil, nil, fmt.Errorf("traffic metric range end precedes start")
+	}
+	if interval <= 0 {
+		return nil, nil, fmt.Errorf("traffic metric interval must be positive")
 	}
 	records, baselines, err := metricstore.GetTrafficRecordsByClientsAndTime(ctx, clientIDs, start, end)
 	if err != nil {
@@ -508,7 +518,7 @@ func MetricUsageByHourBatch(ctx context.Context, clientIDs []string, start, end 
 				Time: baseline.Time, NetTotalUp: baseline.NetTotalUp, NetTotalDown: baseline.NetTotalDown,
 			}
 		}
-		usage, hourly, err := usageByHourFromRecords(recordsByClient[clientID], previous)
+		usage, hourly, err := usageByIntervalFromRecords(recordsByClient[clientID], previous, interval)
 		if err != nil {
 			return nil, nil, fmt.Errorf("calculate traffic for client %s: %w", clientID, err)
 		}
@@ -519,6 +529,10 @@ func MetricUsageByHourBatch(ctx context.Context, clientIDs []string, start, end 
 }
 
 func usageByHourFromRecords(records []DeltaRecord, previous *DeltaRecord) (Usage, []HourlyUsage, error) {
+	return usageByIntervalFromRecords(records, previous, time.Hour)
+}
+
+func usageByIntervalFromRecords(records []DeltaRecord, previous *DeltaRecord, interval time.Duration) (Usage, []HourlyUsage, error) {
 	hasPrevious := previous != nil
 	var previousUp, previousDown int64
 	if previous != nil {
@@ -540,7 +554,7 @@ func usageByHourFromRecords(records []DeltaRecord, previous *DeltaRecord) (Usage
 	byHour := make(map[time.Time]Usage)
 	total := Usage{}
 	for index, record := range records {
-		hour := record.Time.In(BeijingLocation).Truncate(time.Hour)
+		hour := record.Time.In(BeijingLocation).Truncate(interval)
 		usage := byHour[hour]
 		usage.Up += upDeltas[index]
 		usage.Down += downDeltas[index]

@@ -80,7 +80,7 @@ func deploymentCommand(profile clients.DeploymentProfile, endpoint, token string
 	// The ordinary Agent executes remote commands as its own process. A
 	// non-privileged runtime must therefore never receive a command that enables
 	// remote control, even when an API caller bypasses the deployment UI.
-	if profile.RuntimeIdentity == clients.AgentRuntimeIdentityCurrentUser {
+	if profile.RuntimeIdentity == clients.AgentRuntimeIdentityServiceAccount {
 		profile.RemoteControlEnabled = false
 	}
 	arguments := []string{"--install-runtime-identity", profile.RuntimeIdentity, "--endpoint", endpoint, "--token", token}
@@ -128,7 +128,7 @@ func deploymentCommand(profile clients.DeploymentProfile, endpoint, token string
 		if profile.RescueEnabled {
 			return "", errors.New("the privileged rescue helper is currently supported only on Linux and Windows")
 		}
-		return "curl -fsSL " + shellQuote(script) + " | bash -s -- " + shellArguments(arguments), nil
+		return "curl -fsSL " + shellQuote(script) + " | sudo bash -s -- " + shellArguments(arguments), nil
 	default:
 		return "", errors.New("install command is supported only for Linux, Windows, and macOS")
 	}

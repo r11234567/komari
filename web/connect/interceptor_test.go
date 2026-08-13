@@ -19,6 +19,7 @@ func TestPolicyDeclaresEveryGeneratedProcedure(t *testing.T) {
 		"/komari.browser.v1.BrowserService/GetAgent",
 		"/komari.browser.v1.BrowserService/WatchAgentStatus",
 		"/komari.browser.v1.BrowserService/GetThemeContract",
+		"/komari.browser.v1.BrowserService/GetTrafficTrend",
 		"/komari.config.v1.ConfigService/GetDesiredConfig",
 		"/komari.config.v1.ConfigService/WatchDesiredConfig",
 		"/komari.config.v1.ConfigService/AcknowledgeConfig",

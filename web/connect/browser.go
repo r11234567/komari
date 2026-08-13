@@ -17,6 +17,7 @@ import (
 	legacyv1 "github.com/komari-monitor/komari/protocol/v1"
 	"github.com/komari-monitor/komari/utils"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
+	dashboardapp "github.com/komari-monitor/komari/web/dashboard"
 	browserv1 "github.com/r11234567/komari-proto/gen/go/komari/browser/v1"
 	browserv1connect "github.com/r11234567/komari-proto/gen/go/komari/browser/v1/browserv1connect"
 	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
@@ -130,6 +131,57 @@ func (s *browserService) GetThemeContract(context.Context, *connect.Request[brow
 		ConnectBasePath:        "/komari.browser.v1.BrowserService/",
 		LegacyJsonRpcAvailable: true,
 	}), nil
+}
+
+func (s *browserService) GetTrafficTrend(ctx context.Context, req *connect.Request[browserv1.GetTrafficTrendRequest]) (*connect.Response[browserv1.GetTrafficTrendResponse], error) {
+	window, err := browserDuration(req.Msg.Window, dashboardapp.DefaultTrafficTrendWindow)
+	if err != nil {
+		return nil, connectError(connect.CodeInvalidArgument, fmt.Errorf("invalid traffic trend window: %w", err))
+	}
+	interval, err := browserDuration(req.Msg.Interval, dashboardapp.DefaultTrafficTrendInterval)
+	if err != nil {
+		return nil, connectError(connect.CodeInvalidArgument, fmt.Errorf("invalid traffic trend interval: %w", err))
+	}
+	items, err := clients.GetAllClientBasicInfo()
+	if err != nil {
+		return nil, connectError(connect.CodeInternal, err)
+	}
+	clientIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		clientIDs = append(clientIDs, item.UUID)
+	}
+	now := time.Now().UTC()
+	buckets, err := dashboardapp.LoadTrafficTrend(ctx, clientIDs, now, window, interval)
+	if err != nil {
+		return nil, connectError(connect.CodeInvalidArgument, err)
+	}
+	response := &browserv1.GetTrafficTrendResponse{
+		Buckets:     make([]*browserv1.TrafficTrendBucket, 0, len(buckets)),
+		Interval:    durationpb.New(interval),
+		GeneratedAt: timestamppb.New(now),
+	}
+	for _, bucket := range buckets {
+		response.Buckets = append(response.Buckets, &browserv1.TrafficTrendBucket{
+			StartTime:     timestamppb.New(bucket.Start),
+			UploadBytes:   uint64(max(bucket.Up, 0)),
+			DownloadBytes: uint64(max(bucket.Down, 0)),
+		})
+	}
+	return connect.NewResponse(response), nil
+}
+
+func browserDuration(value *durationpb.Duration, fallback time.Duration) (time.Duration, error) {
+	if value == nil {
+		return fallback, nil
+	}
+	if err := value.CheckValid(); err != nil {
+		return 0, err
+	}
+	result := value.AsDuration()
+	if result <= 0 {
+		return 0, errors.New("duration must be positive")
+	}
+	return result, nil
 }
 
 func (s *browserService) WatchAgentStatus(ctx context.Context, req *connect.Request[browserv1.WatchAgentStatusRequest], stream *connect.ServerStream[browserv1.WatchAgentStatusResponse]) error {

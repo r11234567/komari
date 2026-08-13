@@ -10,7 +10,7 @@ import (
 func TestDeploymentCommandIncludesManagedAgentInstallOptions(t *testing.T) {
 	command, err := deploymentCommand(clients.DeploymentProfile{
 		Platform:                "linux",
-		RuntimeIdentity:         clients.AgentRuntimeIdentityCurrentUser,
+		RuntimeIdentity:         clients.AgentRuntimeIdentityServiceAccount,
 		RemoteControlEnabled:    false,
 		RescueEnabled:           true,
 		RescueConfigureFirewall: true,
@@ -20,7 +20,7 @@ func TestDeploymentCommandIncludesManagedAgentInstallOptions(t *testing.T) {
 	}
 	for _, expected := range []string{
 		"r11234567/komari-agent/main/install.sh",
-		"--install-runtime-identity", "current-user",
+		"--install-runtime-identity", "service-account",
 		"--disable-remote-control", "--install-rescue", "--install-rescue-firewall",
 	} {
 		if !strings.Contains(command, expected) {
@@ -32,7 +32,7 @@ func TestDeploymentCommandIncludesManagedAgentInstallOptions(t *testing.T) {
 func TestDeploymentCommandRejectsRescueOnMacOS(t *testing.T) {
 	_, err := deploymentCommand(clients.DeploymentProfile{
 		Platform:             "macos",
-		RuntimeIdentity:      clients.AgentRuntimeIdentityCurrentUser,
+		RuntimeIdentity:      clients.AgentRuntimeIdentityServiceAccount,
 		RemoteControlEnabled: false,
 		RescueEnabled:        true,
 	}, "https://monitor.example.com", "agent-token")
@@ -44,7 +44,7 @@ func TestDeploymentCommandRejectsRescueOnMacOS(t *testing.T) {
 func TestDeploymentCommandDisablesRemoteControlForNonPrivilegedRuntime(t *testing.T) {
 	command, err := deploymentCommand(clients.DeploymentProfile{
 		Platform:             "linux",
-		RuntimeIdentity:      clients.AgentRuntimeIdentityCurrentUser,
+		RuntimeIdentity:      clients.AgentRuntimeIdentityServiceAccount,
 		RemoteControlEnabled: true,
 	}, "https://monitor.example.com", "agent-token")
 	if err != nil {
