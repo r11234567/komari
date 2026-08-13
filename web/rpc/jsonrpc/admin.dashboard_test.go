@@ -346,8 +346,8 @@ func TestSummarizeDashboardTrafficExcludesFreeClientsFromBilling(t *testing.T) {
 	if len(summary.Daily) != trafficledger.DashboardHistoryDays {
 		t.Fatalf("daily points = %d, want %d", len(summary.Daily), trafficledger.DashboardHistoryDays)
 	}
-	if len(summary.Hourly) != 96 {
-		t.Fatalf("15-minute points = %d", len(summary.Hourly))
+	if len(summary.Hourly) != int(dashboardapp.DefaultTrafficTrendWindow/dashboardapp.DefaultTrafficTrendInterval) {
+		t.Fatalf("unexpected 24-hour traffic points = %d", len(summary.Hourly))
 	}
 	var trendUp, trendDown int64
 	for _, point := range summary.Hourly {
