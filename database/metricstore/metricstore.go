@@ -703,7 +703,7 @@ func CompactStep(ctx context.Context, now time.Time) (written int, cycleComplete
 	cycleCompleted = compactAt == 0
 	beginCompactStep(activeStore.Driver(), defs[idx].Name, idx, len(defs), time.Now().UTC())
 	metricName := defs[idx].Name
-	written, compactErr := activeStore.CompactMetric(ctx, metricName, now)
+	written, compactErr := activeStore.CompactMetricStep(ctx, metricName, now)
 	if metric.IsDigestHandoffDeferred(compactErr) {
 		handleDigestHandoffDeferred(metricName, compactErr, time.Now().UTC())
 		compactErr = nil

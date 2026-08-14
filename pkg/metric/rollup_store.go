@@ -80,6 +80,18 @@ func (s *Store) Compact(ctx context.Context, now time.Time) (int, error) {
 // 在新快照上重试。SQLite 在单连接上串行化写入，其默认隔离已提供该保证，
 // 无需提升隔离级别。
 func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.Time) (int, error) {
+	return s.compactMetric(ctx, metricName, now, metricCompactionChunksPerRun)
+}
+
+// CompactMetricStep performs a deliberately small amount of incremental work.
+// It is intended for the periodic background scheduler; explicit compaction
+// keeps the broader CompactMetric budget so maintenance callers can make
+// meaningful progress without monopolizing a constrained server at runtime.
+func (s *Store) CompactMetricStep(ctx context.Context, metricName string, now time.Time) (int, error) {
+	return s.compactMetric(ctx, metricName, now, metricCompactionChunksPerStep)
+}
+
+func (s *Store) compactMetric(ctx context.Context, metricName string, now time.Time, chunkLimit int) (int, error) {
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
 	}
@@ -108,7 +120,7 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 	policy = effectivePolicy
 	now = now.UTC()
 	if policy.RawRetention > 0 {
-		return s.compactMetricIncrementalInChunks(ctx, metricName, now, policy, obsoleteIntervals)
+		return s.compactMetricIncrementalInChunks(ctx, metricName, now, policy, obsoleteIntervals, chunkLimit)
 	}
 
 	// Retry the whole compaction on a transient serialization/deadlock failure.
@@ -143,8 +155,9 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 // consumes every raw sample exactly once, including when a one-hour bucket is
 // assembled from several committed chunks.
 const (
-	metricCompactionChunkWindow = 5 * time.Minute
-	metricCompactionSeriesBatch = 8
+	metricCompactionChunkWindow  = 5 * time.Minute
+	metricCompactionSeriesBatch  = 8
+	metricCompactionChunksPerRun = 16
 	// Low-end VPS instances frequently expose a full vCPU but heavily throttle
 	// it. Two bounded windows make historical materialization cooperative rather
 	// than allowing one scheduled tick to monopolize that vCPU.
@@ -156,7 +169,7 @@ const (
 // compactMetricIncrementalInChunks commits old upgrade data in bounded ranges.
 // A timeout only rolls back the active range; earlier ranges and their persisted
 // watermarks remain available for the next scheduled compaction attempt.
-func (s *Store) compactMetricIncrementalInChunks(ctx context.Context, metricName string, now time.Time, policy RollupPolicy, obsoleteIntervals []time.Duration) (int, error) {
+func (s *Store) compactMetricIncrementalInChunks(ctx context.Context, metricName string, now time.Time, policy RollupPolicy, obsoleteIntervals []time.Duration, chunkLimit int) (int, error) {
 	pending, err := s.incrementalCompactionPending(ctx, metricName, now, policy, obsoleteIntervals)
 	if err != nil {
 		return 0, err
@@ -175,7 +188,7 @@ func (s *Store) compactMetricIncrementalInChunks(ctx context.Context, metricName
 		}
 		total += written
 		chunksSinceVacuum++
-		stepLimitReached := s.sqliteStorageV4 && chunksSinceVacuum >= metricCompactionChunksPerStep
+		stepLimitReached := s.sqliteStorageV4 && chunkLimit > 0 && chunksSinceVacuum >= chunkLimit
 		if (completed || stepLimitReached) && s.sqliteStorageV4 {
 			sealBefore := now.Add(-sqliteV4HotWindow).UnixNano()
 			var sealErr error
