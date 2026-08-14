@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,9 +29,11 @@ import (
 
 const (
 	historyExportTTL        = 48 * time.Hour
-	historyExportWindow     = 5 * time.Minute
 	historyExportQueueDepth = 8
 	historyExportDirectory  = "data/exports"
+	historyExportBatchWork  = 600 * time.Minute
+	historyExportMinWindow  = 2 * time.Minute
+	historyExportMaxWindow  = 2 * time.Hour
 )
 
 type historyExportRequest struct {
@@ -97,6 +100,12 @@ type exportRow struct {
 	timestamp time.Time
 	values    map[string][]string
 	ping      map[string]*exportPingValue
+}
+
+type historyExportScheduler struct {
+	window     time.Duration
+	total      time.Duration
+	lastSample historyExportSystemSample
 }
 
 var resourceExportColumns = []exportMetricColumn{
@@ -462,11 +471,17 @@ func writeHistoryExportHeaders(writer *csv.Writer, columns []exportMetricColumn,
 
 func streamHistoryExportRows(ctx context.Context, writer *csv.Writer, store *metric.Store, job *historyExportJob, columns []exportMetricColumn, pingTasks []exportPingTask) error {
 	total := job.End.Sub(job.Start)
+	queryCount := len(columns)
+	if len(pingTasks) > 0 {
+		queryCount += 2
+	}
+	scheduler := newHistoryExportScheduler(total, queryCount)
 	for cursor := job.Start; cursor.Before(job.End); {
+		chunkStarted := time.Now()
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		next := cursor.Add(historyExportWindow)
+		next := cursor.Add(scheduler.window)
 		if next.After(job.End) {
 			next = job.End
 		}
@@ -490,6 +505,10 @@ func streamHistoryExportRows(ctx context.Context, writer *csv.Writer, store *met
 			return err
 		}
 		rows := make(map[int64]*exportRow)
+		pointCount := 0
+		for _, points := range series {
+			pointCount += len(points)
+		}
 		rowFor := func(timestamp time.Time) *exportRow {
 			key := timestamp.UnixNano()
 			row := rows[key]
@@ -549,15 +568,147 @@ func streamHistoryExportRows(ctx context.Context, writer *csv.Writer, store *met
 		}
 		setHistoryExportProgress(job.ID, 1+int(next.Sub(job.Start)*98/total))
 		cursor = next
-		timer := time.NewTimer(20 * time.Millisecond)
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
+		delay := scheduler.completeChunk(pointCount, time.Since(chunkStarted))
+		if cursor.Before(job.End) {
+			if delay <= 0 {
+				runtime.Gosched()
+			} else {
+				timer := time.NewTimer(delay)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return ctx.Err()
+				}
+			}
 		}
 	}
 	return nil
+}
+
+func newHistoryExportScheduler(total time.Duration, queryCount int) *historyExportScheduler {
+	if queryCount < 1 {
+		queryCount = 1
+	}
+	window := historyExportBatchWork / time.Duration(queryCount)
+	if window > time.Hour {
+		window = time.Hour
+	}
+	sample := sampleHistoryExportSystem()
+	memoryRatio := sample.memoryAvailableRatio()
+	switch {
+	case sample.memoryAvailable > 0 && (sample.memoryAvailable < 512*1024*1024 || memoryRatio > 0 && memoryRatio < 0.15):
+		window /= 4
+	case sample.loadRatio >= 0.90:
+		window /= 4
+	case sample.memoryAvailable > 0 && sample.memoryAvailable < 1024*1024*1024:
+		window /= 2
+	case sample.loadRatio >= 0.75:
+		window /= 2
+	case sample.loadRatio >= 0 && sample.loadRatio < 0.35 && (memoryRatio == 0 || memoryRatio >= 0.30):
+		window = window * 3 / 2
+	}
+	window = clampHistoryExportWindow(window, total)
+	return &historyExportScheduler{window: window, total: total, lastSample: sample}
+}
+
+func clampHistoryExportWindow(window, total time.Duration) time.Duration {
+	if window < historyExportMinWindow {
+		window = historyExportMinWindow
+	} else if window > historyExportMaxWindow {
+		window = historyExportMaxWindow
+	}
+	if total > 0 && total < window {
+		return total
+	}
+	return window
+}
+
+func (scheduler *historyExportScheduler) completeChunk(pointCount int, chunkDuration time.Duration) time.Duration {
+	current := sampleHistoryExportSystem()
+	cpuUsage := historyExportCPUUsage(scheduler.lastSample, current)
+	scheduler.lastSample = current
+
+	targetPoints := 40_000
+	memoryRatio := current.memoryAvailableRatio()
+	switch {
+	case current.memoryAvailable > 0 && (current.memoryAvailable < 512*1024*1024 || memoryRatio > 0 && memoryRatio < 0.15):
+		targetPoints = 12_000
+	case current.memoryAvailable > 0 && (current.memoryAvailable < 1024*1024*1024 || memoryRatio > 0 && memoryRatio < 0.25):
+		targetPoints = 25_000
+	case current.memoryAvailable >= 4*1024*1024*1024 && memoryRatio >= 0.40:
+		targetPoints = 120_000
+	case current.memoryAvailable >= 2*1024*1024*1024 && memoryRatio >= 0.30:
+		targetPoints = 75_000
+	}
+	switch {
+	case cpuUsage >= 0.90:
+		targetPoints /= 4
+	case cpuUsage >= 0.75:
+		targetPoints /= 2
+	case cpuUsage >= 0 && cpuUsage < 0.35 && (memoryRatio == 0 || memoryRatio >= 0.30):
+		targetPoints = targetPoints * 3 / 2
+	}
+	if targetPoints < 4_000 {
+		targetPoints = 4_000
+	} else if targetPoints > 150_000 {
+		targetPoints = 150_000
+	}
+
+	if pointCount > 0 {
+		desired := time.Duration(float64(scheduler.window) * float64(targetPoints) / float64(pointCount))
+		if desired < scheduler.window/2 {
+			desired = scheduler.window / 2
+		} else if desired > scheduler.window*2 {
+			desired = scheduler.window * 2
+		}
+		if current.memoryAvailable > 0 && (current.memoryAvailable < 512*1024*1024 || memoryRatio > 0 && memoryRatio < 0.15) {
+			desired = scheduler.window / 2
+		} else if cpuUsage >= 0.90 {
+			desired = scheduler.window / 2
+		} else if cpuUsage >= 0.75 && desired > scheduler.window*3/4 {
+			desired = scheduler.window * 3 / 4
+		}
+		scheduler.window = clampHistoryExportWindow((scheduler.window*2+desired)/3, scheduler.total)
+	} else {
+		scheduler.window = clampHistoryExportWindow(scheduler.window*2, scheduler.total)
+	}
+
+	memoryTight := current.memoryAvailable > 0 && (current.memoryAvailable < 512*1024*1024 || memoryRatio > 0 && memoryRatio < 0.15)
+	switch {
+	case memoryTight || cpuUsage >= 0.90:
+		return clampHistoryExportDelay(chunkDuration/2, 10*time.Millisecond, 250*time.Millisecond)
+	case cpuUsage >= 0.75:
+		return clampHistoryExportDelay(chunkDuration/5, 5*time.Millisecond, 100*time.Millisecond)
+	case cpuUsage >= 0.50:
+		return clampHistoryExportDelay(chunkDuration/20, time.Millisecond, 25*time.Millisecond)
+	default:
+		return 0
+	}
+}
+
+func historyExportCPUUsage(previous, current historyExportSystemSample) float64 {
+	if current.cpuTotal > previous.cpuTotal {
+		total := current.cpuTotal - previous.cpuTotal
+		idle := uint64(0)
+		if current.cpuIdle >= previous.cpuIdle {
+			idle = current.cpuIdle - previous.cpuIdle
+		}
+		if idle <= total {
+			return 1 - float64(idle)/float64(total)
+		}
+	}
+	return current.loadRatio
+}
+
+func clampHistoryExportDelay(value, minimum, maximum time.Duration) time.Duration {
+	if value < minimum {
+		return minimum
+	}
+	if value > maximum {
+		return maximum
+	}
+	return value
 }
 
 func writeHistoryExportRow(writer *csv.Writer, nodeName string, row *exportRow, columns []exportMetricColumn, pingTasks []exportPingTask) error {
