@@ -9,7 +9,7 @@ import (
 
 // CompactStepInterval is the cadence used by the scheduled incremental
 // compactor. It is also used to estimate the next end-of-cycle checkpoint.
-const CompactStepInterval = 10 * time.Second
+const CompactStepInterval = 30 * time.Second
 
 const (
 	checkpointQuickRetryInterval = 30 * time.Second

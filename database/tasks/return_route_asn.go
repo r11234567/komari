@@ -16,6 +16,7 @@ import (
 const (
 	returnRouteASNLookupTimeout   = 6 * time.Second
 	returnRouteASNProviderTimeout = 1500 * time.Millisecond
+	returnRouteASNLookupWorkers   = 4
 )
 
 type asnCacheEntry struct {
@@ -45,19 +46,29 @@ func lookupASNsWithRules(ips []string, rules *compiledReturnRouteRules) map[stri
 	result := make(map[string]int, len(unique))
 	ctx, cancel := context.WithTimeout(context.Background(), returnRouteASNLookupTimeout)
 	defer cancel()
+	jobs := make(chan string)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	for ip := range unique {
-		ip := ip
+	workers := returnRouteASNLookupWorkers
+	if workers > len(unique) {
+		workers = len(unique)
+	}
+	for range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			asn := lookupASNWithRules(ctx, ip, rules)
-			mu.Lock()
-			result[ip] = asn
-			mu.Unlock()
+			for ip := range jobs {
+				asn := lookupASNWithRules(ctx, ip, rules)
+				mu.Lock()
+				result[ip] = asn
+				mu.Unlock()
+			}
 		}()
 	}
+	for ip := range unique {
+		jobs <- ip
+	}
+	close(jobs)
 	wg.Wait()
 	return result
 }

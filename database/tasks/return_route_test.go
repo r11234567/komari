@@ -426,7 +426,7 @@ func TestPrepareReturnRouteSignaturesExcludesSharedAddressSpace(t *testing.T) {
 		{ip: "100.72.56.6"},
 		{ip: "10.110.193.1"},
 		{ip: "59.43.181.145", asn: 4809},
-	})
+	}, currentReturnRouteRules())
 	if hidden != 1 || len(prepared) != 1 || prepared[0].ip != "59.43.181.145" {
 		t.Fatalf("prepared route = %#v, hidden=%d", prepared, hidden)
 	}

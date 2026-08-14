@@ -143,11 +143,14 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 // consumes every raw sample exactly once, including when a one-hour bucket is
 // assembled from several committed chunks.
 const (
-	metricCompactionChunkWindow   = 5 * time.Minute
-	metricCompactionSeriesBatch   = 8
-	metricCompactionChunksPerStep = 16
+	metricCompactionChunkWindow = 5 * time.Minute
+	metricCompactionSeriesBatch = 8
+	// Low-end VPS instances frequently expose a full vCPU but heavily throttle
+	// it. Two bounded windows make historical materialization cooperative rather
+	// than allowing one scheduled tick to monopolize that vCPU.
+	metricCompactionChunksPerStep = 2
 	metricCompactionVacuumEvery   = 16
-	metricCompactionMinYield      = 5 * time.Millisecond
+	metricCompactionMinYield      = 100 * time.Millisecond
 )
 
 // compactMetricIncrementalInChunks commits old upgrade data in bounded ranges.

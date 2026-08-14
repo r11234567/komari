@@ -5,6 +5,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -16,7 +17,12 @@ import (
 	"gorm.io/gorm"
 )
 
-const returnRouteEventRetention = 90 * 24 * time.Hour
+const (
+	returnRouteEventRetention       = 90 * 24 * time.Hour
+	returnRouteEventCleanupInterval = time.Hour
+)
+
+var returnRouteEventCleanupAt atomic.Int64
 
 const (
 	returnRouteLineCUGVIP       = "CUG VIP"
@@ -677,7 +683,7 @@ func SaveReturnRouteResult(client string, result v2.RouteResultParams) error {
 			}
 		}
 		statusSnapshot = status
-		return tx.Where("occurred_at < ?", now.Add(-returnRouteEventRetention)).Delete(&models.ReturnRouteEvent{}).Error
+		return cleanupExpiredReturnRouteEvents(tx, now)
 	})
 	if err != nil {
 		return err
@@ -853,9 +859,11 @@ func classifyReturnRoute(path models.StringArray) (string, float64) {
 }
 
 type returnRouteSignature struct {
-	ip     string
-	asn    int
-	hidden bool
+	ip             string
+	asn            int
+	hidden         bool
+	prefixGroup    string
+	prefixResolved bool
 }
 
 func classifyReturnRouteHops(ips []string, asns map[string]int) (string, float64) {
@@ -874,7 +882,7 @@ func classifyReturnRouteSignatures(hops []returnRouteSignature) (string, float64
 }
 
 func classifyReturnRouteSignaturesWithRules(hops []returnRouteSignature, rules *compiledReturnRouteRules) (string, float64) {
-	hops, hiddenHops := prepareReturnRouteSignatures(hops)
+	hops, hiddenHops := prepareReturnRouteSignatures(hops, rules)
 	hasCUGAccess := hasUnicomReturnRouteGroup(hops, rules, "unicom_10099")
 	has9929 := hasUnicomReturnRouteGroup(hops, rules, "unicom_9929")
 	has4837 := hasUnicomReturnRouteGroup(hops, rules, "unicom_4837")
@@ -947,7 +955,7 @@ func classifyReturnRouteSignaturesWithRules(hops []returnRouteSignature, rules *
 	return "UNKNOWN", 0
 }
 
-func prepareReturnRouteSignatures(hops []returnRouteSignature) ([]returnRouteSignature, int) {
+func prepareReturnRouteSignatures(hops []returnRouteSignature, rules *compiledReturnRouteRules) ([]returnRouteSignature, int) {
 	prepared := make([]returnRouteSignature, 0, len(hops))
 	hidden := 0
 	for _, hop := range hops {
@@ -961,6 +969,10 @@ func prepareReturnRouteSignatures(hops []returnRouteSignature) ([]returnRouteSig
 		}
 		if hop.ip == "" && hop.asn <= 0 {
 			continue
+		}
+		if hop.ip != "" && !hop.prefixResolved {
+			hop.prefixGroup = rules.matchPrefixGroup(hop.ip)
+			hop.prefixResolved = true
 		}
 		prepared = append(prepared, hop)
 	}
@@ -1055,8 +1067,11 @@ func isTelecom163BackboneCandidate(hop returnRouteSignature, rules *compiledRetu
 	if ip == nil || ip[0] != 202 || ip[1] != 97 {
 		return false
 	}
-	for _, group := range returnRouteASNGroups {
-		if rules.hasPrefix(group, hop.ip) {
+	if hop.prefixResolved && hop.prefixGroup != "" {
+		return hop.prefixGroup == "telecom_163"
+	}
+	if !hop.prefixResolved {
+		if group := rules.matchPrefixGroup(hop.ip); group != "" {
 			return group == "telecom_163"
 		}
 	}
@@ -1101,9 +1116,17 @@ func hasUnicomReturnRouteGroup(hops []returnRouteSignature, rules *compiledRetur
 func unicomReturnRouteGroup(hop returnRouteSignature, rules *compiledReturnRouteRules) string {
 	groups := [...]string{"unicom_10099", "unicom_9929", "unicom_4837"}
 	// A maintained CIDR is more reliable than a conflicting external ASN answer.
-	for _, group := range groups {
-		if rules.hasPrefix(group, hop.ip) {
-			return group
+	if hop.prefixResolved {
+		for _, group := range groups {
+			if hop.prefixGroup == group {
+				return group
+			}
+		}
+	} else if group := rules.matchPrefixGroup(hop.ip); group != "" {
+		for _, candidate := range groups {
+			if group == candidate {
+				return group
+			}
 		}
 	}
 	for _, group := range groups {
@@ -1112,6 +1135,24 @@ func unicomReturnRouteGroup(hop returnRouteSignature, rules *compiledReturnRoute
 		}
 	}
 	return ""
+}
+
+func cleanupExpiredReturnRouteEvents(tx *gorm.DB, now time.Time) error {
+	nowUnix := now.UnixNano()
+	for {
+		previous := returnRouteEventCleanupAt.Load()
+		if previous > 0 && nowUnix-previous < returnRouteEventCleanupInterval.Nanoseconds() {
+			return nil
+		}
+		if !returnRouteEventCleanupAt.CompareAndSwap(previous, nowUnix) {
+			continue
+		}
+		err := tx.Where("occurred_at < ?", now.Add(-returnRouteEventRetention)).Delete(&models.ReturnRouteEvent{}).Error
+		if err != nil {
+			returnRouteEventCleanupAt.CompareAndSwap(nowUnix, previous)
+		}
+		return err
+	}
 }
 
 func lowerReturnRouteConfidence(left, right float64) float64 {

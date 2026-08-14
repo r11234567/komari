@@ -735,7 +735,7 @@ func registerScheduledWork() {
 	if err := corn.AddFunc("records:cleanup", "@every 30m", cleanupScheduledData); err != nil {
 		logger.ErrorArgs("server", "Failed to add cleanup scheduled task:", err)
 	}
-	if err := corn.AddContextFunc("metrics:compact", "@every 10s", true, compactMetricStore); err != nil {
+	if err := corn.AddContextFunc("metrics:compact", "@every 30s", false, compactMetricStore); err != nil {
 		logger.ErrorArgs("server", "Failed to add metric compact scheduled task:", err)
 	}
 	if err := corn.AddFunc("notifier:traffic", "@every 1m", notifier.CheckTraffic); err != nil {
@@ -762,7 +762,7 @@ func cleanupScheduledData() {
 }
 
 func compactMetricStore(ctx context.Context) {
-	compactCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	compactCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	written, cycleCompleted, err := metricstore.CompactStep(compactCtx, time.Now().UTC())

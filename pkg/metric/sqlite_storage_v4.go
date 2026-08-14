@@ -55,9 +55,10 @@ func (s *Store) migrateSQLiteStorageV4(ctx context.Context) error {
 		if err := s.markSQLiteStorageCurrent(ctx); err != nil {
 			return err
 		}
-		if err := optimizeSQLite(ctx, s.db); err != nil {
-			log.Printf("metric: SQLite post-migration query planner optimization skipped: %v", err)
-		}
+		// Do not run PRAGMA optimize on every server start. On a large raw-history
+		// database SQLite may choose to analyze the complete hot table here, which
+		// turns an otherwise idle restart into sustained CPU and disk I/O.
+		// Fresh schema migrations still optimize below, after their one-off work.
 		s.reportMigrationProgress(MigrationPhaseCompleted, 1, 1, 0)
 		return nil
 	}

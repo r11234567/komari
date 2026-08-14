@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,11 +99,22 @@ type returnRoutePrefixRule struct {
 	network *net.IPNet
 }
 
+type returnRoutePrefixNode struct {
+	group string
+	child [2]*returnRoutePrefixNode
+}
+
+type returnRoutePrefixMatcher struct {
+	v4 *returnRoutePrefixNode
+	v6 *returnRoutePrefixNode
+}
+
 type compiledReturnRouteRules struct {
 	document      ReturnRouteRuleDocument
 	asnGroups     map[string]map[int]struct{}
 	prefixGroups  map[string][]*net.IPNet
 	prefixRules   []returnRoutePrefixRule
+	prefixMatcher *returnRoutePrefixMatcher
 	asnRuleCount  int
 	cidrRuleCount int
 }
@@ -451,6 +463,7 @@ func compileReturnRouteRules(data []byte) (*compiledReturnRouteRules, error) {
 			return nil, fmt.Errorf("confidence.%s 必须大于 0 且不超过 1", key)
 		}
 	}
+	compiled.prefixMatcher = newReturnRoutePrefixMatcher(compiled.prefixRules)
 	return compiled, nil
 }
 
@@ -576,27 +589,17 @@ func (rules *compiledReturnRouteRules) hasASN(group string, asn int) bool {
 }
 
 func (rules *compiledReturnRouteRules) hasPrefix(group, value string) bool {
-	ip := net.ParseIP(strings.TrimSpace(value))
-	if ip == nil {
-		return false
-	}
-	bestGroup := ""
-	bestMask := -1
-	for _, rule := range rules.prefixRules {
-		if !rule.network.Contains(ip) {
-			continue
-		}
-		mask, _ := rule.network.Mask.Size()
-		if mask > bestMask {
-			bestGroup = rule.group
-			bestMask = mask
-		}
-	}
-	return bestGroup == group
+	return rules.matchPrefixGroup(value) == group
 }
 
 func (rules *compiledReturnRouteRules) hasSignature(group string, hop returnRouteSignature) bool {
-	return rules.hasASN(group, hop.asn) || rules.hasPrefix(group, hop.ip)
+	if rules.hasASN(group, hop.asn) {
+		return true
+	}
+	if hop.prefixResolved {
+		return hop.prefixGroup == group
+	}
+	return rules.hasPrefix(group, hop.ip)
 }
 
 func (rules *compiledReturnRouteRules) representativeASN(group string) int {
@@ -608,10 +611,8 @@ func (rules *compiledReturnRouteRules) representativeASN(group string) int {
 }
 
 func localReturnRouteASN(value string, rules *compiledReturnRouteRules) int {
-	for _, group := range returnRouteASNGroups {
-		if rules.hasPrefix(group, value) {
-			return rules.representativeASN(group)
-		}
+	if group := rules.matchPrefixGroup(value); group != "" {
+		return rules.representativeASN(group)
 	}
 	return 0
 }
@@ -683,7 +684,69 @@ func mergeReturnRouteRules(base *compiledReturnRouteRules, bgp *compiledReturnRo
 			merged.cidrRuleCount++
 		}
 	}
+	merged.prefixMatcher = newReturnRoutePrefixMatcher(merged.prefixRules)
 	return merged
+}
+
+func newReturnRoutePrefixMatcher(rules []returnRoutePrefixRule) *returnRoutePrefixMatcher {
+	matcher := &returnRoutePrefixMatcher{}
+	for _, rule := range rules {
+		prefix, err := netip.ParsePrefix(rule.network.String())
+		if err != nil {
+			continue
+		}
+		prefix = prefix.Masked()
+		address := prefix.Addr().Unmap()
+		root := &matcher.v6
+		if address.Is4() {
+			root = &matcher.v4
+		}
+		if *root == nil {
+			*root = &returnRoutePrefixNode{}
+		}
+		node := *root
+		bytes := address.AsSlice()
+		for bit := 0; bit < prefix.Bits(); bit++ {
+			branch := (bytes[bit/8] >> (7 - uint(bit%8))) & 1
+			if node.child[branch] == nil {
+				node.child[branch] = &returnRoutePrefixNode{}
+			}
+			node = node.child[branch]
+		}
+		node.group = rule.group
+	}
+	return matcher
+}
+
+func (rules *compiledReturnRouteRules) matchPrefixGroup(value string) string {
+	if rules == nil || rules.prefixMatcher == nil {
+		return ""
+	}
+	address, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil {
+		return ""
+	}
+	address = address.Unmap()
+	node := rules.prefixMatcher.v6
+	if address.Is4() {
+		node = rules.prefixMatcher.v4
+	}
+	if node == nil {
+		return ""
+	}
+	matched := node.group
+	bytes := address.AsSlice()
+	for bit := 0; bit < len(bytes)*8; bit++ {
+		branch := (bytes[bit/8] >> (7 - uint(bit%8))) & 1
+		node = node.child[branch]
+		if node == nil {
+			break
+		}
+		if node.group != "" {
+			matched = node.group
+		}
+	}
+	return matched
 }
 
 func newReturnRouteRuleStatus(compiled *compiledReturnRouteRules, source string, watching bool) ReturnRouteRuleStatus {
