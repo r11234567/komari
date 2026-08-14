@@ -48,6 +48,7 @@ start_worker() {
     script_path=$(absolute_path "$0")
     pid_file="$deploy_dir/import-legacy-history.pid"
     log_file="$deploy_dir/import-legacy-history.log"
+    state_file="$deploy_dir/import-legacy-history.state"
     if [ -f "$pid_file" ]; then
         old_pid=$(cat "$pid_file" 2>/dev/null || true)
         if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
@@ -59,6 +60,7 @@ start_worker() {
     if [ -f "$log_file" ]; then
         mv "$log_file" "$log_file.$(date -u '+%Y%m%d-%H%M%S')"
     fi
+    rm -f "$state_file"
     nohup "$script_path" __worker "$source_db" "$deploy_dir" "$include_long_term" >>"$log_file" 2>&1 </dev/null &
     worker_pid=$!
     printf '%s\n' "$worker_pid" >"$pid_file"
@@ -72,14 +74,26 @@ show_status() {
     deploy_dir=$(absolute_path "$1")
     pid_file="$deploy_dir/import-legacy-history.pid"
     log_file="$deploy_dir/import-legacy-history.log"
+    state_file="$deploy_dir/import-legacy-history.state"
     if [ -f "$pid_file" ]; then
         worker_pid=$(cat "$pid_file" 2>/dev/null || true)
         if [ -n "$worker_pid" ] && kill -0 "$worker_pid" 2>/dev/null; then
             echo "running (PID $worker_pid)"
             exit 0
         fi
+        rm -f "$pid_file"
+        printf 'interrupted\n' >"$state_file"
+        echo "interrupted (stale worker PID ${worker_pid:-unknown}); inspect $log_file"
+        exit 1
     fi
-    if [ -f "$log_file" ] && grep -q 'Import worker completed successfully' "$log_file"; then
+    state=$(cat "$state_file" 2>/dev/null || true)
+    if [ "$state" = "completed" ]; then
+        echo "completed"
+    elif [ "$state" = "failed" ]; then
+        echo "failed; inspect $log_file"
+    elif [ "$state" = "interrupted" ]; then
+        echo "interrupted; inspect $log_file"
+    elif [ -f "$log_file" ] && grep -q 'Import worker completed successfully' "$log_file"; then
         echo "completed"
     elif [ -f "$log_file" ]; then
         echo "not running; inspect $log_file"
@@ -118,7 +132,21 @@ run_worker() {
     include_long_term=$3
     data_dir="$deploy_dir/data"
     pid_file="$deploy_dir/import-legacy-history.pid"
-    trap 'rm -f "$pid_file"' EXIT INT TERM
+    state_file="$deploy_dir/import-legacy-history.state"
+    worker_completed=0
+    cleanup_worker() {
+        worker_status=$?
+        rm -f "$pid_file"
+        if [ "$worker_completed" -eq 0 ]; then
+            printf 'failed\n' >"$state_file"
+            log "Import worker exited before completion (status $worker_status)"
+        fi
+    }
+    trap cleanup_worker EXIT
+    trap 'exit 130' HUP INT TERM
+
+    printf '%s\n' "$$" >"$pid_file"
+    printf 'running\n' >"$state_file"
 
     log "Import worker started"
     log "Source: $source_db"
@@ -192,6 +220,8 @@ run_worker() {
     docker compose up -d komari
     docker compose ps komari
     log "Import worker completed successfully"
+    printf 'completed\n' >"$state_file"
+    worker_completed=1
 }
 
 command=${1:-}
