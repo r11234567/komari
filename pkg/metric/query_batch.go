@@ -30,10 +30,17 @@ type rawBatchSeries struct {
 	queryIndices []int
 }
 
-// QueryBatch evaluates compatible raw queries with one physical scan (or a
-// bounded number of parameter chunks). Results preserve input order and each
-// query's independent paging semantics.
+// QueryBatch evaluates compatible raw queries. It is retained for callers that
+// predate the explicit raw-only API; exports should use QueryRawBatch so a
+// future historical-query optimization cannot silently substitute rollups.
 func (s *Store) QueryBatch(ctx context.Context, queries []Query) ([][]Point, error) {
+	return s.QueryRawBatch(ctx, queries)
+}
+
+// QueryRawBatch evaluates compatible queries exclusively from retained raw
+// points, with one physical scan (or a bounded number of parameter chunks).
+// Results preserve input order and each query's independent paging semantics.
+func (s *Store) QueryRawBatch(ctx context.Context, queries []Query) ([][]Point, error) {
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
