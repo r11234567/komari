@@ -172,8 +172,10 @@ run_worker() {
 
     log "Pulling the current Komari image while the service remains online"
     docker compose pull komari
-    image=$(docker compose config --images | sed -n '1p')
-    [ -n "$image" ] || { log "ERROR: failed to resolve Komari image"; exit 1; }
+    image=$(docker compose images -q komari | sed -n '1p')
+    [ -n "$image" ] || { log "ERROR: failed to resolve the pulled Komari image ID"; exit 1; }
+    log "Preflighting the importer from immutable image $image"
+    docker run --rm "$image" /app/komari import-legacy-history --help >/dev/null
 
     log "Stopping Komari for offline import"
     docker compose stop komari
@@ -200,6 +202,7 @@ run_worker() {
         -v "$source_db:/import/komari.db:ro" \
         -w /app \
         "$image" \
+        /app/komari \
         import-legacy-history \
         --source /import/komari.db \
         --database /app/data/komari.db \
