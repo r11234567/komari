@@ -64,6 +64,13 @@ type LegacyMonitoringDeleted struct {
 	LatencyRows int64 `json:"latency_rows"`
 }
 
+// LegacyMonitoringImportOptions controls which legacy history sources are
+// imported. Raw-only recovery deliberately excludes records_long_term because
+// those rows may already be 15-minute aggregates.
+type LegacyMonitoringImportOptions struct {
+	IncludeLongTerm bool
+}
+
 type legacyMonitoringBounds struct {
 	Oldest string `gorm:"column:oldest"`
 	Newest string `gorm:"column:newest"`
@@ -107,6 +114,10 @@ func LegacyMonitoringMigrationRequired(db *gorm.DB) (bool, LegacyMonitoringSumma
 }
 
 func InspectLegacyMonitoring(db *gorm.DB) (LegacyMonitoringSummary, error) {
+	return inspectLegacyMonitoring(db, true)
+}
+
+func inspectLegacyMonitoring(db *gorm.DB, includeLongTerm bool) (LegacyMonitoringSummary, error) {
 	var summary LegacyMonitoringSummary
 	if db == nil {
 		return summary, fmt.Errorf("migration database is nil")
@@ -125,6 +136,9 @@ func InspectLegacyMonitoring(db *gorm.DB) (LegacyMonitoringSummary, error) {
 	}
 	var oldest, newest time.Time
 	for _, table := range legacyMonitoringTables {
+		if table == "records_long_term" && !includeLongTerm {
+			continue
+		}
 		if !db.Migrator().HasTable(table) {
 			continue
 		}
@@ -214,10 +228,17 @@ func DeleteLegacyMonitoringBefore(db *gorm.DB, cutoff time.Time) (LegacyMonitori
 }
 
 func MigrateLegacyMonitoring(ctx context.Context, db *gorm.DB, s *metric.Store, progress func(LegacyMonitoringProgress)) (LegacyMonitoringStats, error) {
+	return MigrateLegacyMonitoringWithOptions(ctx, db, s, LegacyMonitoringImportOptions{IncludeLongTerm: true}, progress)
+}
+
+// MigrateLegacyMonitoringWithOptions imports legacy monitoring rows without
+// modifying or dropping the source database. Writes are idempotent at the
+// metric store's series/timestamp key, so an interrupted recovery can resume.
+func MigrateLegacyMonitoringWithOptions(ctx context.Context, db *gorm.DB, s *metric.Store, options LegacyMonitoringImportOptions, progress func(LegacyMonitoringProgress)) (LegacyMonitoringStats, error) {
 	if err := metricstore.EnsureBuiltinMetricDefinitions(ctx, s); err != nil {
 		return LegacyMonitoringStats{}, fmt.Errorf("ensure built-in metric definitions: %w", err)
 	}
-	return migrateLegacyMonitoringTables(ctx, db, s, progress)
+	return migrateLegacyMonitoringTablesWithOptions(ctx, db, s, options, progress)
 }
 
 // CompleteLegacyMonitoringMigration removes the legacy tables, runs any
@@ -275,10 +296,18 @@ func runLegacyMonitoringMigration(ctx context.Context, db *gorm.DB, s *metric.St
 }
 
 func migrateLegacyMonitoringTables(ctx context.Context, db *gorm.DB, s *metric.Store, progress func(LegacyMonitoringProgress)) (LegacyMonitoringStats, error) {
+	return migrateLegacyMonitoringTablesWithOptions(ctx, db, s, LegacyMonitoringImportOptions{IncludeLongTerm: true}, progress)
+}
+
+func migrateLegacyMonitoringTablesWithOptions(ctx context.Context, db *gorm.DB, s *metric.Store, options LegacyMonitoringImportOptions, progress func(LegacyMonitoringProgress)) (LegacyMonitoringStats, error) {
 	var stats LegacyMonitoringStats
-	summary, err := InspectLegacyMonitoring(db)
+	summary, err := inspectLegacyMonitoring(db, options.IncludeLongTerm)
 	if err != nil {
 		return stats, err
+	}
+	recordTables := []string{"records"}
+	if options.IncludeLongTerm {
+		recordTables = append(recordTables, "records_long_term")
 	}
 	var rowsDone, writtenPoints int64
 	emit := func(table string, rows, points int64) {
@@ -297,19 +326,19 @@ func migrateLegacyMonitoringTables(ctx context.Context, db *gorm.DB, s *metric.S
 	if progress != nil {
 		emit("", 0, 0)
 	}
-	n, err := migrateLegacyRecordTables(ctx, s, db, []string{"records", "records_long_term"}, emit)
+	n, err := migrateLegacyRecordTables(ctx, s, db, recordTables, summary.LoadRows, emit)
 	if err != nil {
 		return stats, err
 	}
 	stats.Records += n
 
-	n, err = migrateLegacyGPURecordTable(ctx, s, db, "gpu_records", emit)
+	n, err = migrateLegacyGPURecordTable(ctx, s, db, "gpu_records", summary.GPURows, emit)
 	if err != nil {
 		return stats, err
 	}
 	stats.GPU += n
 
-	n, err = migrateLegacyPingRecordTable(ctx, s, db, "ping_records", emit)
+	n, err = migrateLegacyPingRecordTable(ctx, s, db, "ping_records", summary.LatencyRows, emit)
 	if err != nil {
 		return stats, err
 	}
@@ -318,23 +347,15 @@ func migrateLegacyMonitoringTables(ctx context.Context, db *gorm.DB, s *metric.S
 	return stats, nil
 }
 
-func migrateLegacyRecordTables(ctx context.Context, s *metric.Store, db *gorm.DB, tables []string, progress legacyBatchProgress) (int64, error) {
+func migrateLegacyRecordTables(ctx context.Context, s *metric.Store, db *gorm.DB, tables []string, total int64, progress legacyBatchProgress) (int64, error) {
 	var existing []string
-	var total int64
 	for _, table := range tables {
 		if !db.Migrator().HasTable(table) {
 			continue
 		}
-		var count int64
-		if err := db.Table(table).Count(&count).Error; err != nil {
-			return 0, fmt.Errorf("count legacy %s: %w", table, err)
-		}
-		if count > 0 {
-			existing = append(existing, table)
-			total += count
-		}
+		existing = append(existing, table)
 	}
-	if len(existing) == 0 {
+	if len(existing) == 0 || total == 0 {
 		return 0, nil
 	}
 
@@ -364,14 +385,9 @@ func migrateLegacyRecordTables(ctx context.Context, s *metric.Store, db *gorm.DB
 	return migrated, nil
 }
 
-func migrateLegacyGPURecordTable(ctx context.Context, s *metric.Store, db *gorm.DB, table string, progress legacyBatchProgress) (int64, error) {
+func migrateLegacyGPURecordTable(ctx context.Context, s *metric.Store, db *gorm.DB, table string, total int64, progress legacyBatchProgress) (int64, error) {
 	if !db.Migrator().HasTable(table) {
 		return 0, nil
-	}
-
-	var total int64
-	if err := db.Table(table).Count(&total).Error; err != nil {
-		return 0, fmt.Errorf("count legacy %s: %w", table, err)
 	}
 	if total == 0 {
 		return 0, nil
@@ -393,14 +409,9 @@ func migrateLegacyGPURecordTable(ctx context.Context, s *metric.Store, db *gorm.
 	return migrated, nil
 }
 
-func migrateLegacyPingRecordTable(ctx context.Context, s *metric.Store, db *gorm.DB, table string, progress legacyBatchProgress) (int64, error) {
+func migrateLegacyPingRecordTable(ctx context.Context, s *metric.Store, db *gorm.DB, table string, total int64, progress legacyBatchProgress) (int64, error) {
 	if !db.Migrator().HasTable(table) {
 		return 0, nil
-	}
-
-	var total int64
-	if err := db.Table(table).Count(&total).Error; err != nil {
-		return 0, fmt.Errorf("count legacy %s: %w", table, err)
 	}
 	if total == 0 {
 		return 0, nil
