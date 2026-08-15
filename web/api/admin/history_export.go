@@ -90,10 +90,8 @@ type exportPingTask struct {
 }
 
 type exportPingValue struct {
-	latency    float64
-	loss       float64
-	hasLatency bool
-	hasLoss    bool
+	latency []float64
+	loss    []float64
 }
 
 type exportRow struct {
@@ -354,7 +352,10 @@ func writeHistoryExport(ctx context.Context, id string) error {
 	if store == nil {
 		return fmt.Errorf("metric store is not initialized")
 	}
-	columns := historyExportColumns(job.Category)
+	columns, err := historyExportColumnsForJob(ctx, store, job)
+	if err != nil {
+		return err
+	}
 	pingTasks, err := historyExportPingTasks(ctx, store, job.Category)
 	if err != nil {
 		return err
@@ -407,6 +408,55 @@ func historyExportColumns(category string) []exportMetricColumn {
 		columns = append(columns, networkExportColumns...)
 	}
 	return columns
+}
+
+// historyExportColumnsForJob omits the complete GPU family for nodes that did
+// not report GPU values during the exported range. This keeps ordinary-node
+// CSVs readable without hiding GPU data from nodes that actually reported it.
+func historyExportColumnsForJob(ctx context.Context, store *metric.Store, job *historyExportJob) ([]exportMetricColumn, error) {
+	columns := historyExportColumns(job.Category)
+	queries := make([]metric.Query, 0, 5)
+	for _, column := range columns {
+		if !isGPUExportColumn(column) {
+			continue
+		}
+		queries = append(queries, metric.Query{
+			MetricName: column.name,
+			EntityID:   job.UUID,
+			Start:      job.Start,
+			End:        job.End,
+			Order:      metric.OrderAsc,
+			Limit:      1,
+		})
+	}
+	if len(queries) == 0 {
+		return columns, nil
+	}
+	series, err := store.QueryRawBatch(ctx, queries)
+	if err != nil {
+		return nil, fmt.Errorf("check GPU export data: %w", err)
+	}
+	for _, points := range series {
+		if len(points) > 0 {
+			return columns, nil
+		}
+	}
+	filtered := make([]exportMetricColumn, 0, len(columns)-len(queries))
+	for _, column := range columns {
+		if !isGPUExportColumn(column) {
+			filtered = append(filtered, column)
+		}
+	}
+	return filtered, nil
+}
+
+func isGPUExportColumn(column exportMetricColumn) bool {
+	switch column.name {
+	case metricstore.MetricGPUDeviceUsage, metricstore.MetricGPUMemTotal, metricstore.MetricGPUMem, metricstore.MetricGPUTemp, metricstore.MetricGPU:
+		return true
+	default:
+		return false
+	}
 }
 
 func historyExportPingTasks(ctx context.Context, store *metric.Store, category string) ([]exportPingTask, error) {
@@ -484,6 +534,10 @@ func streamHistoryExportRows(ctx context.Context, writer *csv.Writer, store *met
 		next := cursor.Add(scheduler.window)
 		if next.After(job.End) {
 			next = job.End
+		} else if aligned := next.UTC().Truncate(time.Second); aligned.After(cursor) {
+			// Rows are keyed by second. Align every chunk boundary to the same
+			// boundary so one second cannot be emitted by two adjacent chunks.
+			next = aligned
 		}
 		queryEnd := next
 		if next.Before(job.End) {
@@ -510,10 +564,11 @@ func streamHistoryExportRows(ctx context.Context, writer *csv.Writer, store *met
 			pointCount += len(points)
 		}
 		rowFor := func(timestamp time.Time) *exportRow {
+			timestamp = timestamp.UTC().Truncate(time.Second)
 			key := timestamp.UnixNano()
 			row := rows[key]
 			if row == nil {
-				row = &exportRow{timestamp: timestamp.UTC(), values: make(map[string][]string), ping: make(map[string]*exportPingValue)}
+				row = &exportRow{timestamp: timestamp, values: make(map[string][]string), ping: make(map[string]*exportPingValue)}
 				rows[key] = row
 			}
 			return row
@@ -546,9 +601,9 @@ func streamHistoryExportRows(ctx context.Context, writer *csv.Writer, store *met
 						row.ping[taskID] = value
 					}
 					if seriesIndex == 0 {
-						value.latency, value.hasLatency = point.Value, true
+						value.latency = append(value.latency, point.Value)
 					} else {
-						value.loss, value.hasLoss = point.Value, true
+						value.loss = append(value.loss, point.Value)
 					}
 				}
 			}
@@ -721,18 +776,28 @@ func writeHistoryExportRow(writer *csv.Writer, nodeName string, row *exportRow, 
 	for _, task := range pingTasks {
 		latency, loss := "", ""
 		if value := row.ping[task.id]; value != nil {
-			if value.hasLatency && value.latency >= 0 {
-				latency = strconv.FormatFloat(value.latency, 'f', 2, 64)
-			}
-			if value.hasLoss {
-				loss = strconv.FormatFloat(value.loss*100, 'f', 2, 64)
-			} else if value.hasLatency {
-				if value.latency < 0 {
-					loss = "100.00"
-				} else {
-					loss = "0.00"
+			latencies := make([]string, 0, len(value.latency))
+			for _, point := range value.latency {
+				if point >= 0 {
+					latencies = append(latencies, strconv.FormatFloat(point, 'f', 2, 64))
 				}
 			}
+			latency = strings.Join(latencies, "; ")
+			losses := make([]string, 0, len(value.loss))
+			if len(value.loss) > 0 {
+				for _, point := range value.loss {
+					losses = append(losses, strconv.FormatFloat(point*100, 'f', 2, 64))
+				}
+			} else {
+				for _, point := range value.latency {
+					if point < 0 {
+						losses = append(losses, "100.00")
+					} else {
+						losses = append(losses, "0.00")
+					}
+				}
+			}
+			loss = strings.Join(losses, "; ")
 		}
 		record = append(record, latency, loss)
 	}
