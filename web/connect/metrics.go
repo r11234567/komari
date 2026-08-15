@@ -74,6 +74,10 @@ func ingestMetricBatch(ctx context.Context, meta *rpc.ContextMeta, batch *metric
 	if err != nil {
 		return nil, err
 	}
+	// Every authenticated metrics submission is a heartbeat. Refresh presence
+	// before sequence de-duplication so a retried batch also keeps the Agent
+	// online while its previous acknowledgement is in doubt.
+	clientapi.TouchConnectPresence(agentID)
 	if batch.Sequence == 0 {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("metrics sequence is required"))
 	}
