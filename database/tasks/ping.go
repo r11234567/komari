@@ -195,10 +195,15 @@ func updatePingTaskOrder(db *gorm.DB, order map[uint]int) error {
 // metric store，旧 ping_records 表不再参与。
 
 func SavePingRecord(record models.PingRecord) error {
+	return SavePingRecordContext(context.Background(), record)
+}
+
+// SavePingRecordContext preserves request cancellation for typed transports.
+func SavePingRecordContext(ctx context.Context, record models.PingRecord) error {
 	if !utils.IsPingTaskAssigned(record.TaskId, record.Client) {
 		return fmt.Errorf("ping task %d is not assigned to client %s", record.TaskId, record.Client)
 	}
-	return metricstore.WritePingRecord(context.Background(), record)
+	return metricstore.WritePingRecord(ctx, record)
 }
 
 func DeletePingRecords(id []uint) error {

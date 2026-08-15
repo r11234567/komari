@@ -3,9 +3,11 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	legacyv2 "github.com/komari-monitor/komari/protocol/v2"
@@ -16,10 +18,65 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const returnRouteLongPoll = 25 * time.Second
+const networkProbeLongPoll = 25 * time.Second
 
 type networkProbeService struct {
 	networkv1connect.UnimplementedNetworkProbeServiceHandler
+}
+
+func (s *networkProbeService) LeasePingProbe(ctx context.Context, req *connect.Request[networkv1.LeasePingProbeRequest]) (*connect.Response[networkv1.LeasePingProbeResponse], error) {
+	agentID, err := requireAgent(rpc.MetaFromContext(ctx), req.Msg.AgentId)
+	if err != nil {
+		return nil, err
+	}
+	agentRuntime.MarkConnectPingLease(agentID)
+	waitCtx, cancel := context.WithTimeout(ctx, networkProbeLongPoll)
+	defer cancel()
+	assignment, err := agentRuntime.WaitPingProbe(waitCtx, agentID)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return connect.NewResponse(&networkv1.LeasePingProbeResponse{}), nil
+		}
+		return nil, err
+	}
+	return connect.NewResponse(&networkv1.LeasePingProbeResponse{Assignment: &networkv1.PingProbeAssignment{
+		AssignmentId: assignment.AssignmentID, TaskId: uint64(assignment.TaskID), Protocol: assignment.Protocol,
+		Target: assignment.Target, Timeout: durationpb.New(3 * time.Second), LeaseExpiresAt: timestamppb.New(assignment.LeaseExpires),
+	}}), nil
+}
+
+func (s *networkProbeService) SubmitPingProbeResult(ctx context.Context, req *connect.Request[networkv1.SubmitPingProbeResultRequest]) (*connect.Response[networkv1.SubmitPingProbeResultResponse], error) {
+	agentID, err := requireAgent(rpc.MetaFromContext(ctx), req.Msg.AgentId)
+	if err != nil {
+		return nil, err
+	}
+	if req.Msg.TaskId == 0 || strings.TrimSpace(req.Msg.AssignmentId) == "" {
+		return nil, connectError(connect.CodeInvalidArgument, errors.New("assignment_id and task_id are required"))
+	}
+	taskID := uint(req.Msg.TaskId)
+	maxInt := int64(^uint(0) >> 1)
+	if uint64(taskID) != req.Msg.TaskId || req.Msg.LatencyMs < -1 || req.Msg.LatencyMs > maxInt {
+		return nil, connectError(connect.CodeInvalidArgument, errors.New("ping result is outside the supported range"))
+	}
+	alreadyCompleted, err := agentRuntime.ValidatePingProbeResult(agentID, req.Msg.AssignmentId, taskID)
+	if err != nil {
+		return nil, connectError(connect.CodeFailedPrecondition, err)
+	}
+	if alreadyCompleted {
+		return connect.NewResponse(&networkv1.SubmitPingProbeResultResponse{Accepted: true}), nil
+	}
+	finishedAt := time.Now().UTC()
+	if req.Msg.FinishedAt != nil {
+		if !req.Msg.FinishedAt.IsValid() {
+			return nil, connectError(connect.CodeInvalidArgument, errors.New("finished_at is invalid"))
+		}
+		finishedAt = req.Msg.FinishedAt.AsTime().UTC()
+	}
+	if err := tasks.SavePingRecordContext(ctx, models.PingRecord{Client: agentID, TaskId: taskID, Time: finishedAt, Value: int(req.Msg.LatencyMs)}); err != nil {
+		return nil, connectError(connect.CodeInvalidArgument, err)
+	}
+	agentRuntime.CompletePingProbe(agentID, req.Msg.AssignmentId, taskID)
+	return connect.NewResponse(&networkv1.SubmitPingProbeResultResponse{Accepted: true}), nil
 }
 
 func (s *networkProbeService) LeaseReturnRouteProbe(ctx context.Context, req *connect.Request[networkv1.LeaseReturnRouteProbeRequest]) (*connect.Response[networkv1.LeaseReturnRouteProbeResponse], error) {
@@ -28,7 +85,7 @@ func (s *networkProbeService) LeaseReturnRouteProbe(ctx context.Context, req *co
 		return nil, err
 	}
 	agentRuntime.MarkConnectReturnRouteLease(agentID)
-	waitCtx, cancel := context.WithTimeout(ctx, returnRouteLongPoll)
+	waitCtx, cancel := context.WithTimeout(ctx, networkProbeLongPoll)
 	defer cancel()
 	assignment, err := agentRuntime.WaitReturnRouteProbe(waitCtx, agentID)
 	if err != nil {

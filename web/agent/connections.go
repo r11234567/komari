@@ -97,7 +97,28 @@ func MarkConnectReturnRouteLease(uuid string) {
 	mu.Lock()
 	defer mu.Unlock()
 	connectedClientProtocol[uuid] = 3
-	connectCapabilities[uuid] = map[string]bool{"return-route": true}
+	capabilities := connectCapabilities[uuid]
+	if capabilities == nil {
+		capabilities = make(map[string]bool)
+		connectCapabilities[uuid] = capabilities
+	}
+	capabilities["return-route"] = true
+}
+
+// MarkConnectPingLease restores typed transport state after a backend restart.
+func MarkConnectPingLease(uuid string) {
+	if metricstore.EntityWritesBlocked(uuid) {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	connectedClientProtocol[uuid] = 3
+	capabilities := connectCapabilities[uuid]
+	if capabilities == nil {
+		capabilities = make(map[string]bool)
+		connectCapabilities[uuid] = capabilities
+	}
+	capabilities["ping"] = true
 }
 
 // SupportsReturnRoute requires an explicit capability on both transports.

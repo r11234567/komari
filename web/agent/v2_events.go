@@ -78,6 +78,9 @@ func DispatchPing(uuid string, legacy any, params v2.PingParams) bool {
 			return true
 		}
 	}
+	if IsConnectClient(uuid) {
+		return EnqueuePingProbe(uuid, params.TaskID, params.Type, params.Target)
+	}
 	if !IsV2Client(uuid) {
 		return false
 	}

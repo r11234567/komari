@@ -36,6 +36,8 @@ func TestPolicyDeclaresEveryGeneratedProcedure(t *testing.T) {
 		metricsv1connect.MetricsServiceListPingTasksProcedure,
 		metricsv1connect.MetricsServiceGetPingStatsProcedure,
 		"/komari.metrics.v1.MetricsService/WatchMetrics",
+		networkv1connect.NetworkProbeServiceLeasePingProbeProcedure,
+		networkv1connect.NetworkProbeServiceSubmitPingProbeResultProcedure,
 		networkv1connect.NetworkProbeServiceLeaseReturnRouteProbeProcedure,
 		networkv1connect.NetworkProbeServiceSubmitReturnRouteProbeResultProcedure,
 		"/komari.exec.v1.ExecutionService/CreateExecution",
