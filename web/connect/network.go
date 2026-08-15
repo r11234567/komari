@@ -12,6 +12,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 	legacyv2 "github.com/komari-monitor/komari/protocol/v2"
 	agentRuntime "github.com/komari-monitor/komari/web/agent"
+	clientapi "github.com/komari-monitor/komari/web/api/client"
 	networkv1 "github.com/r11234567/komari-proto/gen/go/komari/network/v1"
 	networkv1connect "github.com/r11234567/komari-proto/gen/go/komari/network/v1/networkv1connect"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -29,6 +30,10 @@ func (s *networkProbeService) LeasePingProbe(ctx context.Context, req *connect.R
 	if err != nil {
 		return nil, err
 	}
+	// Ping leases are continuously renewed by the primary Agent even when no
+	// task is queued. They provide a transport-independent presence heartbeat
+	// for older Connect Agents whose metric stream may be stalled by a proxy.
+	clientapi.TouchConnectPresence(agentID)
 	agentRuntime.MarkConnectPingLease(agentID)
 	waitCtx, cancel := context.WithTimeout(ctx, networkProbeLongPoll)
 	defer cancel()

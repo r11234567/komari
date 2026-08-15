@@ -59,8 +59,8 @@ func IngestBasicInfo(uuid string, info map[string]interface{}, fallbackIP string
 }
 
 // TouchConnectPresence refreshes online state for a typed non-WebSocket Agent
-// without writing another metric sample. Connect report and metrics services
-// call it because both requests prove that the authenticated Agent is alive.
+// without writing another metric sample. Connect report, metrics and primary
+// Agent probe services call it because those requests prove the Agent is alive.
 func TouchConnectPresence(uuid string) {
 	refreshPostPresence(uuid)
 	agent_runtime.SetClientProtocolVersion(uuid, 3)
