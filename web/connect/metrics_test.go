@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/komari-monitor/komari/database/metricstore"
+	legacyv1 "github.com/komari-monitor/komari/protocol/v1"
 	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -17,6 +19,20 @@ func completeMetricPoints() []*metricsv1.MetricsPoint {
 		points = append(points, &metricsv1.MetricsPoint{Metric: name, Value: float64(index + 1), ObservedAt: now})
 	}
 	return points
+}
+
+func TestLegacyReportMetricPointsUsePublicMetricNames(t *testing.T) {
+	report := &legacyv1.Report{UpdatedAt: time.Now().UTC()}
+	report.CPU.Usage = 42
+	report.Network.Down = 1024
+	points := legacyReportMetricPoints(report)
+	values := make(map[string]float64, len(points))
+	for _, point := range points {
+		values[point.Metric] = point.Value
+	}
+	if values[metricstore.MetricCPU] != 42 || values[metricstore.MetricNetIn] != 1024 {
+		t.Fatalf("unexpected live metric mapping: %#v", values)
+	}
 }
 
 func TestMetricPointsToReportPreservesLegacySurface(t *testing.T) {

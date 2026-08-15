@@ -7,6 +7,7 @@ import (
 	v1 "github.com/komari-monitor/komari/protocol/v1"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/web/connection"
+	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
 )
 
 func TestRecordReportKeepsLatestAndShortRecentWindow(t *testing.T) {
@@ -143,7 +144,7 @@ func TestReturnRouteRequiresExplicitTransportCapability(t *testing.T) {
 	previousConnectCapabilities := connectCapabilities
 	connectedClientProtocol = make(map[string]int)
 	v2Capabilities = make(map[string]map[string]bool)
-	connectCapabilities = make(map[string]map[string]bool)
+	connectCapabilities = make(map[string]*connectCapabilityState)
 	mu.Unlock()
 	t.Cleanup(func() {
 		mu.Lock()
@@ -171,9 +172,37 @@ func TestReturnRouteRequiresExplicitTransportCapability(t *testing.T) {
 	if SupportsReturnRoute("connect") {
 		t.Fatal("Connect Agent without typed capability was accepted")
 	}
-	SetConnectCapabilities("connect", true)
+	SetConnectCapabilities("connect", &reportv1.AgentCapabilities{ReturnRouteProbe: &reportv1.CapabilityState{Available: true}})
 	if !SupportsReturnRoute("connect") {
 		t.Fatal("Connect Agent typed capability was ignored")
+	}
+}
+
+func TestConnectRemoteCapabilitiesAreExplicit(t *testing.T) {
+	mu.Lock()
+	previousProtocols := connectedClientProtocol
+	previousCapabilities := connectCapabilities
+	connectedClientProtocol = make(map[string]int)
+	connectCapabilities = make(map[string]*connectCapabilityState)
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		connectedClientProtocol = previousProtocols
+		connectCapabilities = previousCapabilities
+		mu.Unlock()
+	})
+
+	SetClientProtocolVersion("connect", 3)
+	if SupportsExecution("connect") || SupportsWebSSH("connect") {
+		t.Fatal("Connect protocol version was treated as a remote capability")
+	}
+	SetConnectCapabilities("connect", &reportv1.AgentCapabilities{Execution: &reportv1.CapabilityState{Available: true}})
+	if !SupportsExecution("connect") || SupportsWebSSH("connect") {
+		t.Fatal("typed execution capability was not preserved independently")
+	}
+	MarkConnectWebSSHLease("connect")
+	if !SupportsExecution("connect") || !SupportsWebSSH("connect") {
+		t.Fatal("authenticated WebSSH lease did not restore its capability")
 	}
 }
 
@@ -182,7 +211,7 @@ func TestReturnRouteLeaseRestoresConnectCapability(t *testing.T) {
 	previousProtocols := connectedClientProtocol
 	previousCapabilities := connectCapabilities
 	connectedClientProtocol = make(map[string]int)
-	connectCapabilities = make(map[string]map[string]bool)
+	connectCapabilities = make(map[string]*connectCapabilityState)
 	mu.Unlock()
 	t.Cleanup(func() {
 		mu.Lock()

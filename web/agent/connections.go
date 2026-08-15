@@ -10,13 +10,20 @@ import (
 	v1 "github.com/komari-monitor/komari/protocol/v1"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/web/connection"
+	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
+	"google.golang.org/protobuf/proto"
 )
+
+type connectCapabilityState struct {
+	values map[string]bool
+	report *reportv1.AgentCapabilities
+}
 
 var (
 	connectedClients        = make(map[string]*connection.SafeConn)
 	connectedClientProtocol = make(map[string]int)
 	v2Capabilities          = make(map[string]map[string]bool)
-	connectCapabilities     = make(map[string]map[string]bool)
+	connectCapabilities     = make(map[string]*connectCapabilityState)
 	latestReport            = make(map[string]*v1.Report)
 	recentReports           = make(map[string][]v1.Report)
 	// presenceOnly stores online state for non-WebSocket agents.
@@ -78,47 +85,94 @@ func IsConnectClient(uuid string) bool {
 }
 
 // SetConnectCapabilities records typed capabilities from the latest report.
-func SetConnectCapabilities(uuid string, returnRouteProbe bool) {
+func SetConnectCapabilities(uuid string, capabilities *reportv1.AgentCapabilities) {
+	if metricstore.EntityWritesBlocked(uuid) {
+		return
+	}
+	state := &connectCapabilityState{values: make(map[string]bool)}
+	if capabilities != nil {
+		state.values["execution"] = capabilityAvailable(capabilities.Execution)
+		state.values["webssh"] = capabilityAvailable(capabilities.Webssh)
+		state.values["return-route"] = capabilityAvailable(capabilities.ReturnRouteProbe)
+		state.report = proto.Clone(capabilities).(*reportv1.AgentCapabilities)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	connectCapabilities[uuid] = state
+}
+
+func capabilityAvailable(capability *reportv1.CapabilityState) bool {
+	return capability != nil && capability.Available
+}
+
+func markConnectCapability(uuid, capability string) {
 	if metricstore.EntityWritesBlocked(uuid) {
 		return
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	connectCapabilities[uuid] = map[string]bool{"return-route": returnRouteProbe}
+	connectedClientProtocol[uuid] = 3
+	state := connectCapabilities[uuid]
+	if state == nil {
+		state = &connectCapabilityState{values: make(map[string]bool), report: &reportv1.AgentCapabilities{}}
+		connectCapabilities[uuid] = state
+	}
+	if state.values == nil {
+		state.values = make(map[string]bool)
+	}
+	if state.report == nil {
+		state.report = &reportv1.AgentCapabilities{}
+	}
+	state.values[capability] = true
+	available := &reportv1.CapabilityState{Available: true}
+	switch capability {
+	case "execution":
+		state.report.Execution = available
+	case "webssh":
+		state.report.Webssh = available
+	case "return-route":
+		state.report.ReturnRouteProbe = available
+	}
 }
 
 // MarkConnectReturnRouteLease restores transport state after a backend restart.
 // An authenticated lease request is direct proof that the connected Agent uses
 // the typed transport and implements return-route probes.
 func MarkConnectReturnRouteLease(uuid string) {
-	if metricstore.EntityWritesBlocked(uuid) {
-		return
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	connectedClientProtocol[uuid] = 3
-	capabilities := connectCapabilities[uuid]
-	if capabilities == nil {
-		capabilities = make(map[string]bool)
-		connectCapabilities[uuid] = capabilities
-	}
-	capabilities["return-route"] = true
+	markConnectCapability(uuid, "return-route")
 }
 
 // MarkConnectPingLease restores typed transport state after a backend restart.
 func MarkConnectPingLease(uuid string) {
-	if metricstore.EntityWritesBlocked(uuid) {
-		return
+	markConnectCapability(uuid, "ping")
+}
+
+func MarkConnectExecutionLease(uuid string) { markConnectCapability(uuid, "execution") }
+
+func MarkConnectWebSSHLease(uuid string) { markConnectCapability(uuid, "webssh") }
+
+func SupportsExecution(uuid string) bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	state := connectCapabilities[uuid]
+	return connectedClientProtocol[uuid] >= 3 && state != nil && state.values["execution"]
+}
+
+func SupportsWebSSH(uuid string) bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	state := connectCapabilities[uuid]
+	return connectedClientProtocol[uuid] >= 3 && state != nil && state.values["webssh"]
+}
+
+func GetConnectCapabilities(uuid string) *reportv1.AgentCapabilities {
+	mu.RLock()
+	defer mu.RUnlock()
+	state := connectCapabilities[uuid]
+	if connectedClientProtocol[uuid] < 3 || state == nil || state.report == nil {
+		return nil
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	connectedClientProtocol[uuid] = 3
-	capabilities := connectCapabilities[uuid]
-	if capabilities == nil {
-		capabilities = make(map[string]bool)
-		connectCapabilities[uuid] = capabilities
-	}
-	capabilities["ping"] = true
+	return proto.Clone(state.report).(*reportv1.AgentCapabilities)
 }
 
 // SupportsReturnRoute requires an explicit capability on both transports.
@@ -130,7 +184,8 @@ func SupportsReturnRoute(uuid string) bool {
 		return v2Capabilities[uuid]["route"] || v2Capabilities[uuid][v2.MethodAgentRoute]
 	}
 	if version >= 3 {
-		return connectCapabilities[uuid]["return-route"]
+		state := connectCapabilities[uuid]
+		return state != nil && state.values["return-route"]
 	}
 	return false
 }

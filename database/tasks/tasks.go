@@ -5,9 +5,23 @@ import (
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"gorm.io/gorm"
 )
 
+type CommandTask struct {
+	ID      string
+	Client  string
+	Command string
+}
+
 func CreateTask(taskId string, clients []string, command string) error {
+	items := make([]CommandTask, 0, len(clients))
+	for _, client := range clients {
+		items = append(items, CommandTask{ID: taskId, Client: client, Command: command})
+	}
+	if len(items) == 1 {
+		return CreateTaskBatch(items)
+	}
 	db := dbcore.GetDBInstance()
 	// Create a new task in the database with clients as JSON array
 	task := models.Task{
@@ -33,6 +47,29 @@ func CreateTask(taskId string, clients []string, command string) error {
 		return db.Create(&taskResults).Error
 	}
 	return nil
+}
+
+// CreateTaskBatch atomically creates independent single-client command tasks.
+// Typed execution uses one task ID per client so streams and cancellation have
+// unambiguous ownership, while legacy multi-client tasks keep CreateTask.
+func CreateTaskBatch(items []CommandTask) error {
+	if len(items) == 0 {
+		return nil
+	}
+	now := time.Now().UTC()
+	return dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
+		for _, item := range items {
+			task := models.Task{TaskId: item.ID, Clients: models.StringArray{item.Client}, Command: item.Command}
+			if err := tx.Create(&task).Error; err != nil {
+				return err
+			}
+			result := models.TaskResult{TaskId: item.ID, Client: item.Client, CreatedAt: now}
+			if err := tx.Create(&result).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 func GetTaskByTaskId(taskId string) (*models.Task, error) {
 	var task models.Task

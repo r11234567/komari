@@ -15,7 +15,7 @@ require (
 	github.com/oschwald/maxminddb-golang v1.13.1
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/pquerna/otp v1.5.0
-	github.com/r11234567/komari-proto v0.1.14
+	github.com/r11234567/komari-proto v0.1.23
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/image v0.41.0

@@ -57,6 +57,7 @@ func (s *browserService) GetPublicInfo(ctx context.Context, _ *connect.Request[b
 		PrivateSite:            boolValue(info, "private_site") && !isTemporaryShare(ctx),
 		ThemeSettings:          themeSettings,
 		VisitorAuditEnabled:    boolValue(info, "visitor_audit_enabled"),
+		BuildHash:              utils.VersionHash,
 	}), nil
 }
 
@@ -232,21 +233,43 @@ func browserStatusVersion(summary *browserv1.AgentSummary, report *legacyv1.Repo
 	if report != nil {
 		updated = report.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
+	capabilities := ""
+	if value := summary.Capabilities; value != nil {
+		capabilities = fmt.Sprintf("%d:%t:%s:%t:%s:%t:%s",
+			value.PrivilegeMode,
+			capabilityEnabled(value.Execution), capabilityLimitation(value.Execution),
+			capabilityEnabled(value.Webssh), capabilityLimitation(value.Webssh),
+			capabilityEnabled(value.ReturnRouteProbe), capabilityLimitation(value.ReturnRouteProbe),
+		)
+	}
 	return strings.Join([]string{
 		summary.AgentId,
 		summary.Status.String(),
 		updated,
 		fmt.Sprintf("%.6f", summary.CpuPercent),
 		fmt.Sprintf("%.6f", summary.MemoryPercent),
+		capabilities,
 	}, "|")
+}
+
+func capabilityEnabled(value *reportv1.CapabilityState) bool {
+	return value != nil && value.Available
+}
+
+func capabilityLimitation(value *reportv1.CapabilityState) string {
+	if value == nil {
+		return ""
+	}
+	return value.Limitation
 }
 
 func browserSummary(client models.Client, report *legacyv1.Report, online, includePrivate, showGuestIP bool) *browserv1.AgentSummary {
 	result := &browserv1.AgentSummary{
-		AgentId:   client.UUID,
-		Name:      client.Name,
-		Status:    browserStatus(online),
-		BasicInfo: browserBasicInfo(client, includePrivate, showGuestIP),
+		AgentId:      client.UUID,
+		Name:         client.Name,
+		Status:       browserStatus(online),
+		Capabilities: agent_runtime.GetConnectCapabilities(client.UUID),
+		BasicInfo:    browserBasicInfo(client, includePrivate, showGuestIP),
 	}
 	if report != nil {
 		result.LastSeen = timestamppb.New(report.UpdatedAt)

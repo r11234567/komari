@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/komari-monitor/komari/database/clients"
+	deploymentv1 "github.com/r11234567/komari-proto/gen/go/komari/deployment/v1"
 )
 
 func TestDeploymentCommandIncludesManagedAgentInstallOptions(t *testing.T) {
@@ -74,5 +75,19 @@ func TestNormalizeDeploymentEndpointPrefersConfiguredDomain(t *testing.T) {
 	}
 	if endpoint != "https://agents.example.com" {
 		t.Fatalf("endpoint = %q", endpoint)
+	}
+}
+
+func TestRuntimeIdentityUsesDedicatedServiceAccount(t *testing.T) {
+	if got := runtimeIdentityToProto(clients.AgentRuntimeIdentityServiceAccount); got != deploymentv1.AgentRuntimeIdentity_AGENT_RUNTIME_IDENTITY_SERVICE_ACCOUNT {
+		t.Fatalf("service account encoded as %s", got)
+	}
+	for _, wireValue := range []deploymentv1.AgentRuntimeIdentity{
+		deploymentv1.AgentRuntimeIdentity_AGENT_RUNTIME_IDENTITY_SERVICE_ACCOUNT,
+		deploymentv1.AgentRuntimeIdentity_AGENT_RUNTIME_IDENTITY_CURRENT_USER,
+	} {
+		if got := runtimeIdentityFromProto(wireValue); got != clients.AgentRuntimeIdentityServiceAccount {
+			t.Fatalf("wire identity %s decoded as %q", wireValue, got)
+		}
 	}
 }

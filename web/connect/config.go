@@ -3,12 +3,15 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/web/agentevents"
 	deploymentapp "github.com/komari-monitor/komari/web/deployment"
+	agentv1 "github.com/r11234567/komari-proto/gen/go/komari/agent/v1"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	configv1connect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -85,6 +88,7 @@ func (s *configService) UpdateDesiredConfig(ctx context.Context, req *connect.Re
 	if err != nil {
 		return nil, connectError(connect.CodeInvalidArgument, err)
 	}
+	agentevents.Notify(req.Msg.AgentId, agentv1.ServerEventType_SERVER_EVENT_TYPE_CONFIG_AVAILABLE, map[string]string{"revision": fmt.Sprintf("%d", result.Delivery.Revision)})
 	return connect.NewResponse(&configv1.UpdateDesiredConfigResponse{
 		Desired: &configv1.DesiredConfig{
 			AgentId: req.Msg.AgentId, Revision: result.Delivery.Revision,

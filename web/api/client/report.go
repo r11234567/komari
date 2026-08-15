@@ -61,7 +61,6 @@ func refreshPostPresence(uuid string) {
 	// 新 POST 会话：生成 connID，标记在线，启动超时定时器
 	connID := time.Now().UnixNano()
 	agent_runtime.KeepAlivePresence(uuid, connID, postPresenceTTL)
-	agent_runtime.SetClientProtocolVersion(uuid, 1)
 	go notifier.OnlineNotification(uuid, connID)
 
 	defaultGeneration := uint64(0)

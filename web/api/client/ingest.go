@@ -52,6 +52,21 @@ func IngestReportContext(ctx context.Context, uuid string, report v1.Report, pro
 	return ingestReportContext(ctx, uuid, report, protocolVersion, markPresence)
 }
 
+// IngestBasicInfo is the transport-neutral entry point for typed system
+// identity reports. The caller owns protocol decoding and authentication.
+func IngestBasicInfo(uuid string, info map[string]interface{}, fallbackIP string) error {
+	return ingestBasicInfo(uuid, info, fallbackIP)
+}
+
+// TouchConnectPresence refreshes online state for a typed non-WebSocket Agent
+// without writing another metric sample. AgentReportService uses this for
+// periodic identity/capability reports while MetricsService exclusively owns
+// resource history ingestion.
+func TouchConnectPresence(uuid string) {
+	refreshPostPresence(uuid)
+	agent_runtime.SetClientProtocolVersion(uuid, 3)
+}
+
 // ingestBasicInfo 保存客户端基础信息。fallbackIP 在上报未携带 IP 时用作兜底。
 func ingestBasicInfo(uuid string, info map[string]interface{}, fallbackIP string) error {
 	if info == nil {
