@@ -28,12 +28,14 @@ import (
 )
 
 const (
-	historyExportTTL        = 48 * time.Hour
-	historyExportQueueDepth = 8
-	historyExportDirectory  = "data/exports"
-	historyExportBatchWork  = 600 * time.Minute
-	historyExportMinWindow  = 2 * time.Minute
-	historyExportMaxWindow  = 2 * time.Hour
+	historyExportTTL          = 48 * time.Hour
+	historyExportQueueDepth   = 8
+	historyExportDirectory    = "data/exports"
+	historyExportBatchWork    = 600 * time.Minute
+	historyExportMinWindow    = 2 * time.Minute
+	historyExportMaxWindow    = 2 * time.Hour
+	historyExportPingBatchGap = 10 * time.Second
+	historyExportPingJoinGap  = time.Minute
 )
 
 type historyExportRequest struct {
@@ -92,6 +94,19 @@ type exportPingTask struct {
 type exportPingValue struct {
 	latency []float64
 	loss    []float64
+}
+
+type exportPingObservation struct {
+	timestamp time.Time
+	taskID    string
+	value     float64
+	loss      bool
+}
+
+type exportPingBatch struct {
+	first time.Time
+	last  time.Time
+	ping  map[string]*exportPingValue
 }
 
 type exportRow struct {
@@ -352,7 +367,7 @@ func writeHistoryExport(ctx context.Context, id string) error {
 	if store == nil {
 		return fmt.Errorf("metric store is not initialized")
 	}
-	columns, err := historyExportColumnsForJob(ctx, store, job)
+	columns, err := historyExportColumnsForJob(job)
 	if err != nil {
 		return err
 	}
@@ -410,44 +425,37 @@ func historyExportColumns(category string) []exportMetricColumn {
 	return columns
 }
 
-// historyExportColumnsForJob omits the complete GPU family for nodes that did
-// not report GPU values during the exported range. This keeps ordinary-node
-// CSVs readable without hiding GPU data from nodes that actually reported it.
-func historyExportColumnsForJob(ctx context.Context, store *metric.Store, job *historyExportJob) ([]exportMetricColumn, error) {
+// historyExportColumnsForJob omits the complete GPU family when the node says
+// it has no GPU device. Agents still report a zero-valued node GPU metric on
+// such machines, so raw point existence is not a reliable capability signal.
+func historyExportColumnsForJob(job *historyExportJob) ([]exportMetricColumn, error) {
 	columns := historyExportColumns(job.Category)
-	queries := make([]metric.Query, 0, 5)
-	for _, column := range columns {
-		if !isGPUExportColumn(column) {
-			continue
-		}
-		queries = append(queries, metric.Query{
-			MetricName: column.name,
-			EntityID:   job.UUID,
-			Start:      job.Start,
-			End:        job.End,
-			Order:      metric.OrderAsc,
-			Limit:      1,
-		})
-	}
-	if len(queries) == 0 {
+	if job.Category != "resource" && job.Category != "all" {
 		return columns, nil
 	}
-	series, err := store.QueryRawBatch(ctx, queries)
+	client, err := clients.GetClientByUUID(job.UUID)
 	if err != nil {
-		return nil, fmt.Errorf("check GPU export data: %w", err)
+		return nil, fmt.Errorf("check GPU export capability: %w", err)
 	}
-	for _, points := range series {
-		if len(points) > 0 {
-			return columns, nil
-		}
+	if hasGPUDevice(client.GpuName) {
+		return columns, nil
 	}
-	filtered := make([]exportMetricColumn, 0, len(columns)-len(queries))
+	filtered := make([]exportMetricColumn, 0, len(columns)-5)
 	for _, column := range columns {
 		if !isGPUExportColumn(column) {
 			filtered = append(filtered, column)
 		}
 	}
 	return filtered, nil
+}
+
+func hasGPUDevice(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "none", "n/a", "unknown", "not available":
+		return false
+	default:
+		return true
+	}
 }
 
 func isGPUExportColumn(column exportMetricColumn) bool {
@@ -591,22 +599,15 @@ func streamHistoryExportRows(ctx context.Context, writer *csv.Writer, store *met
 			}
 		}
 		if len(pingTasks) > 0 {
+			observations := make([]exportPingObservation, 0, len(series[pingOffset])+len(series[pingOffset+1]))
 			for seriesIndex := 0; seriesIndex < 2; seriesIndex++ {
 				for _, point := range series[pingOffset+seriesIndex] {
-					taskID := point.Tags["task_id"]
-					row := rowFor(point.Timestamp)
-					value := row.ping[taskID]
-					if value == nil {
-						value = &exportPingValue{}
-						row.ping[taskID] = value
-					}
-					if seriesIndex == 0 {
-						value.latency = append(value.latency, point.Value)
-					} else {
-						value.loss = append(value.loss, point.Value)
-					}
+					observations = append(observations, exportPingObservation{
+						timestamp: point.Timestamp.UTC(), taskID: point.Tags["task_id"], value: point.Value, loss: seriesIndex == 1,
+					})
 				}
 			}
+			attachHistoryExportPingBatches(rows, historyExportPingBatches(observations), rowFor)
 		}
 		keys := make([]int64, 0, len(rows))
 		for key := range rows {
@@ -639,6 +640,71 @@ func streamHistoryExportRows(ctx context.Context, writer *csv.Writer, store *met
 		}
 	}
 	return nil
+}
+
+func historyExportPingBatches(observations []exportPingObservation) []*exportPingBatch {
+	sort.SliceStable(observations, func(i, j int) bool {
+		return observations[i].timestamp.Before(observations[j].timestamp)
+	})
+	batches := make([]*exportPingBatch, 0)
+	var current *exportPingBatch
+	for _, observation := range observations {
+		value := (*exportPingValue)(nil)
+		if current != nil {
+			value = current.ping[observation.taskID]
+		}
+		repeated := value != nil && ((!observation.loss && len(value.latency) > 0) || (observation.loss && len(value.loss) > 0))
+		if current == nil || repeated || observation.timestamp.Sub(current.last) > historyExportPingBatchGap {
+			current = &exportPingBatch{
+				first: observation.timestamp, last: observation.timestamp, ping: make(map[string]*exportPingValue),
+			}
+			batches = append(batches, current)
+			value = nil
+		}
+		if value == nil {
+			value = &exportPingValue{}
+			current.ping[observation.taskID] = value
+		}
+		if observation.loss {
+			value.loss = append(value.loss, observation.value)
+		} else {
+			value.latency = append(value.latency, observation.value)
+		}
+		current.last = observation.timestamp
+	}
+	return batches
+}
+
+func attachHistoryExportPingBatches(rows map[int64]*exportRow, batches []*exportPingBatch, rowFor func(time.Time) *exportRow) {
+	for _, batch := range batches {
+		var target *exportRow
+		bestDistance := historyExportPingJoinGap + time.Nanosecond
+		midpoint := batch.first.Add(batch.last.Sub(batch.first) / 2)
+		for _, row := range rows {
+			if len(row.values) == 0 {
+				continue
+			}
+			distance := row.timestamp.Sub(midpoint)
+			if distance < 0 {
+				distance = -distance
+			}
+			if distance <= historyExportPingJoinGap && distance < bestDistance {
+				target, bestDistance = row, distance
+			}
+		}
+		if target == nil {
+			target = rowFor(batch.first)
+		}
+		for taskID, value := range batch.ping {
+			existing := target.ping[taskID]
+			if existing == nil {
+				target.ping[taskID] = value
+				continue
+			}
+			existing.latency = append(existing.latency, value.latency...)
+			existing.loss = append(existing.loss, value.loss...)
+		}
+	}
 }
 
 func newHistoryExportScheduler(total time.Duration, queryCount int) *historyExportScheduler {
