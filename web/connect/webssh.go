@@ -269,7 +269,7 @@ func (s *webSSHService) OpenSession(ctx context.Context, stream *connect.BidiStr
 	if err != nil {
 		return remoteSessionError(err)
 	}
-	defer session.Close(websshv1.CloseReason_CLOSE_REASON_DISCONNECTED)
+	defer session.Close(websshv1.CloseReason_CLOSE_REASON_CANCELLED)
 	if err := stream.Send(&websshv1.OpenSessionResponse{Event: &websshv1.OpenSessionResponse_Started{Started: &websshv1.SessionStarted{
 		SessionId: session.ID, StartedAt: timestamppb.New(session.CreatedAt),
 	}}}); err != nil {
