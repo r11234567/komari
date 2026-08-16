@@ -542,9 +542,9 @@ func streamHistoryExportRows(ctx context.Context, writer *csv.Writer, store *met
 		next := cursor.Add(scheduler.window)
 		if next.After(job.End) {
 			next = job.End
-		} else if aligned := next.UTC().Truncate(time.Second); aligned.After(cursor) {
-			// Rows are keyed by second. Align every chunk boundary to the same
-			// boundary so one second cannot be emitted by two adjacent chunks.
+		} else if aligned := next.UTC().Truncate(time.Minute); aligned.After(cursor) {
+			// Rows are keyed by minute. Align every chunk boundary to the same
+			// boundary so one minute cannot be emitted by two adjacent chunks.
 			next = aligned
 		}
 		queryEnd := next
@@ -572,7 +572,7 @@ func streamHistoryExportRows(ctx context.Context, writer *csv.Writer, store *met
 			pointCount += len(points)
 		}
 		rowFor := func(timestamp time.Time) *exportRow {
-			timestamp = timestamp.UTC().Truncate(time.Second)
+			timestamp = timestamp.UTC().Truncate(time.Minute)
 			key := timestamp.UnixNano()
 			row := rows[key]
 			if row == nil {
