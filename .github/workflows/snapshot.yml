@@ -348,7 +348,8 @@ jobs:
             commit_range="-30"
             commit_heading="最近提交"
           fi
-          commits="$(git log --no-merges --format='- %s (\`%h\`)' "${commit_range}" \
+          # 反引号在单引号里就是字面量，不能再加反斜杠转义，否则输出成 \`abc1234\`
+          commits="$(git log --no-merges --format='- %s (`%h`)' "${commit_range}" \
             | awk '!/\[skip ci\]/ && shown < 40 { print; shown++ }')"
           if [ -z "${commits}" ]; then
             commits="- 自上一个正式版以来没有用户可见的改动。"
