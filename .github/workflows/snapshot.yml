@@ -272,6 +272,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          # 发布说明由提交记录生成，需要历史与标签。
+          fetch-depth: 0
 
       - name: Download Linux binaries
         uses: actions/download-artifact@v4
@@ -330,11 +333,35 @@ jobs:
           set -euo pipefail
           release_time="$(date -u -d '+8 hours' '+%Y-%m-%d %H:%M')"
           version_hash="${GITHUB_SHA::7}"
-          release_notes="$(<.github/release-notes/snapshot.md)"
-          release_notes="${release_notes//__RELEASE_TIME__/${release_time}}"
-          release_notes="${release_notes//__UPDATE_TIME__/${release_time}}"
-          release_notes="${release_notes//__VERSION_HASH__/${version_hash}}"
-          release_notes="${release_notes//__APP_VERSION__/${APP_VERSION}}"
+
+          # 快照说明只列提交记录。基线取最近一个正式版标签；排除自动化提交
+          # （回程 BGP 规则更新每天多次，会淹没真实改动）。
+          # 保留 komari-version-hash 标记：release.yml、rebuild-release.yml、
+          # publish-stable-release.yml 和 generate-release-notes.yml 都从
+          # release body 里解析它。
+          base_tag="$(git tag --list --merged HEAD --sort=-creatordate \
+            | grep -vE '^Snapshot-' | head -n 1 || true)"
+          if [ -n "${base_tag}" ]; then
+            commit_range="${base_tag}..HEAD"
+            commit_heading="自 \`${base_tag}\` 以来的提交"
+          else
+            commit_range="-30"
+            commit_heading="最近提交"
+          fi
+          commits="$(git log --no-merges --format='- %s (\`%h\`)' "${commit_range}" \
+            | awk '!/\[skip ci\]/ && shown < 40 { print; shown++ }')"
+          if [ -z "${commits}" ]; then
+            commits="- 自上一个正式版以来没有用户可见的改动。"
+          fi
+
+          release_notes="$(printf '%s\n' \
+            "<!-- komari-version-hash: ${version_hash} -->" \
+            "" \
+            "快照 \`${APP_VERSION}\`，构建自 \`main\` 的 \`${version_hash}\`，${release_time}（北京时间）。" \
+            "" \
+            "### ${commit_heading}" \
+            "" \
+            "${commits}")"
 
           if gh release view "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh api --method PATCH \
