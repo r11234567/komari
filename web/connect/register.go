@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
+	adminv1connect "github.com/r11234567/komari-proto/gen/go/komari/admin/v1/adminv1connect"
 	agentv1connect "github.com/r11234567/komari-proto/gen/go/komari/agent/v1/agentv1connect"
 	browserv1connect "github.com/r11234567/komari-proto/gen/go/komari/browser/v1/browserv1connect"
 	configv1connect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
@@ -35,6 +36,9 @@ func Register(r *gin.Engine) {
 		handler http.Handler
 	}{
 		newHandler(browserv1connect.NewBrowserServiceHandler(&browserService{}, opts...)),
+		newHandler(adminv1connect.NewDashboardServiceHandler(&dashboardService{}, opts...)),
+		newHandler(adminv1connect.NewMaintenanceServiceHandler(&maintenanceService{}, opts...)),
+		newHandler(adminv1connect.NewPingTaskServiceHandler(&pingTaskService{}, opts...)),
 		newHandler(configv1connect.NewConfigServiceHandler(&configService{}, opts...)),
 		newHandler(deploymentv1connect.NewDeploymentServiceHandler(&deploymentService{}, opts...)),
 		newHandler(reportv1connect.NewAgentReportServiceHandler(&reportService{}, opts...)),
@@ -76,6 +80,13 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 			RemoteIP:       c.ClientIP(),
 			UserAgent:      c.Request.UserAgent(),
 			TempShareValid: api.HasTempAccess(c),
+		}
+		// The session list marks the caller's own credential, so the token has to
+		// reach Connect handlers the same way it reaches the legacy transport.
+		if principal.Type == rpc.PrincipalUser {
+			if session, err := c.Cookie("session_token"); err == nil {
+				meta.SessionToken = session
+			}
 		}
 		c.Request = c.Request.WithContext(rpc.NewContextWithMeta(c.Request.Context(), meta))
 		handler.ServeHTTP(c.Writer, c.Request)

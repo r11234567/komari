@@ -20,17 +20,20 @@ type policyInterceptor struct {
 
 func newPolicyInterceptor() *policyInterceptor {
 	const (
-		browser = "/komari.browser.v1.BrowserService/"
-		config  = "/komari.config.v1.ConfigService/"
-		deploy  = "/komari.deployment.v1.DeploymentService/"
-		report  = "/komari.report.v1.AgentReportService/"
-		metrics = "/komari.metrics.v1.MetricsService/"
-		plugin  = "/komari.plugin.v1.PluginService/"
-		network = "/komari.network.v1.NetworkProbeService/"
-		exec    = "/komari.exec.v1.ExecutionService/"
-		webssh  = "/komari.webssh.v1.WebSSHService/"
-		events  = "/komari.agent.v1.AgentEventService/"
-		rescue  = "/komari.rescue.v1.RescueService/"
+		dashboard   = "/komari.admin.v1.DashboardService/"
+		maintenance = "/komari.admin.v1.MaintenanceService/"
+		pingTask    = "/komari.admin.v1.PingTaskService/"
+		browser     = "/komari.browser.v1.BrowserService/"
+		config      = "/komari.config.v1.ConfigService/"
+		deploy      = "/komari.deployment.v1.DeploymentService/"
+		report      = "/komari.report.v1.AgentReportService/"
+		metrics     = "/komari.metrics.v1.MetricsService/"
+		plugin      = "/komari.plugin.v1.PluginService/"
+		network     = "/komari.network.v1.NetworkProbeService/"
+		exec        = "/komari.exec.v1.ExecutionService/"
+		webssh      = "/komari.webssh.v1.WebSSHService/"
+		events      = "/komari.agent.v1.AgentEventService/"
+		rescue      = "/komari.rescue.v1.RescueService/"
 	)
 	policies := map[string]procedurePolicy{}
 	add := func(prefix, role string, timeout time.Duration, methods ...string) {
@@ -38,6 +41,14 @@ func newPolicyInterceptor() *policyInterceptor {
 			policies[prefix+method] = procedurePolicy{role: role, maxDuration: timeout}
 		}
 	}
+	add(dashboard, rpc.RoleAdmin, 30*time.Second, "GetDashboardSummary", "GetDashboardCharts", "ListDashboardAlertItems")
+	add(maintenance, rpc.RoleAdmin, 30*time.Second, "ListSessions", "DeleteSession", "DeleteAllSessions", "ListAuditLogs",
+		"ListClipboardEntries", "GetClipboardEntry", "CreateClipboardEntry", "UpdateClipboardEntry", "DeleteClipboardEntries",
+		"ClearRecords", "GetDatabaseStatus")
+	// Reclaiming storage rewrites whole tables and routinely outlives a normal
+	// admin request on large SQLite deployments.
+	add(maintenance, rpc.RoleAdmin, 30*time.Minute, "VacuumDatabase")
+	add(pingTask, rpc.RoleAdmin, 30*time.Second, "ListPingTasks", "CreatePingTask", "UpdatePingTasks", "DeletePingTasks", "ReorderPingTasks")
 	add(browser, rpc.RoleGuest, 30*time.Second, "GetPublicInfo", "ListAgents", "GetAgent", "GetThemeContract")
 	add(browser, rpc.RoleAdmin, 30*time.Second, "GetTrafficTrend")
 	add(browser, rpc.RoleGuest, 30*time.Minute, "WatchAgentStatus")

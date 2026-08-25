@@ -2,6 +2,7 @@ package jsonrpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -68,44 +69,19 @@ var dashboardAlertKinds = map[string]struct{}{
 	"offline": {}, "resource": {}, "latency_loss": {}, "traffic": {}, "return_route": {}, "billing": {},
 }
 
+// adminGetDashboardAlertItems is the legacy JSON view over DashboardAlertItems.
+// It exists for unconverted themes; komari.admin.v1.DashboardService is the
+// production reader.
 func adminGetDashboardAlertItems(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	rawKind, _ := rpc.GetParamAs[string](req, "kind")
-	kind := strings.ToLower(strings.TrimSpace(rawKind))
-	if _, ok := dashboardAlertKinds[kind]; !ok {
+	result, err := DashboardAlertItems(rawKind)
+	switch {
+	case errors.Is(err, ErrDashboardAlertKind):
 		return nil, rpc.MakeError(rpc.InvalidParams, "unsupported dashboard alert kind", nil)
-	}
-	clientList, err := clients.GetAllClientBasicInfo()
-	if err != nil {
+	case err != nil:
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
-	now := time.Now().UTC()
-	clientByID := make(map[string]models.Client, len(clientList))
-	for _, client := range clientList {
-		clientByID[client.UUID] = client
-	}
-	reports := agent_runtime.GetLatestReport()
-	var summary dashboardAlertSummary
-	switch kind {
-	case "offline":
-		summary = buildDashboardOfflineAlerts(clientByID, now)
-	case "resource":
-		summary = buildDashboardResourceAlerts(clientByID, reports)
-	case "latency_loss":
-		summary = buildDashboardLatencyAlerts(now)
-	case "traffic":
-		summary = buildDashboardTrafficAlerts(clientList, reports, now)
-	case "return_route":
-		summary = buildDashboardReturnRouteAlerts(now)
-	case "billing":
-		summary = buildDashboardBillingAlerts(clientList, now)
-	}
-	if summary.Error != "" {
-		return nil, rpc.MakeError(rpc.InternalError, summary.Error, nil)
-	}
-	if summary.Items == nil {
-		summary.Items = []dashboardAlertAffectedItem{}
-	}
-	return dashboardAlertItemsResponse{Kind: kind, Items: summary.Items, GeneratedAt: now}, nil
+	return result, nil
 }
 
 func buildDashboardAlerts(clientList []models.Client, now time.Time) dashboardAlertSummaries {

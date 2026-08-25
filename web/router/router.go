@@ -1,6 +1,9 @@
 package router
 
 import (
+	"os"
+	"strings"
+
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/api/admin"
@@ -13,6 +16,18 @@ import (
 	"github.com/komari-monitor/komari/web/public"
 	jsonRpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
 )
+
+// legacyRemoteCompatEnabled reports whether the pre-Connect terminal and remote
+// control endpoints are mounted.
+//
+// Connect WebSSH (komari.webssh.v1) is the production transport for both the
+// browser and the Agent. The WebSocket pair below only ever reaches an Agent
+// that never established a Connect lease, so leaving it mounted would keep a
+// second, weaker authorization path open for no production benefit. Operators
+// who still run pre-Connect Agents and need a terminal there can opt back in.
+func legacyRemoteCompatEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("KOMARI_LEGACY_REMOTE_COMPAT")), "true")
+}
 
 // Register binds all HTTP, WebSocket, JSON-RPC and static frontend routes.
 //
@@ -76,8 +91,13 @@ func registerAgentRoutes(r *gin.Engine) {
 		tokenAuthorized.POST("/report", client.UploadReport)
 		tokenAuthorized.GET("/v2/rpc", client.WebSocketV2RPC)
 		tokenAuthorized.POST("/v2/rpc", client.UploadV2RPC)
-		tokenAuthorized.GET("/terminal", terminal.EstablishConnection)
-		tokenAuthorized.GET("/remote", remote.EstablishAgent)
+
+		// Agent 侧遗留终端/远程通道。Connect 的 WebSSHService.AttachSession 已覆盖，
+		// 仅在显式开启兼容开关时挂载。
+		if legacyRemoteCompatEnabled() {
+			tokenAuthorized.GET("/terminal", terminal.EstablishConnection)
+			tokenAuthorized.GET("/remote", remote.EstablishAgent)
+		}
 
 		// JSON 接口 -> RPC2 (client: 命名空间)。
 		tokenAuthorized.POST("/task/result", jsonRpc.Bind("client:taskResult", jsonRpc.WithRaw()))
@@ -89,9 +109,8 @@ func registerAgentRoutes(r *gin.Engine) {
 // registerAdminRoutes 管理员路由。除二进制/流类外全部经 Bind 绑定到 admin: 命名空间方法。
 func registerAdminRoutes(r *gin.Engine) {
 	g := r.Group("/api/admin", api.RequireRole(api.RoleAdmin))
-	g.GET("/dashboard", jsonRpc.Bind("admin:getDashboard", jsonRpc.WithQuery("sections", "limit"), jsonRpc.WithRaw()))
-	g.GET("/dashboard/charts", jsonRpc.Bind("admin:getDashboardCharts", jsonRpc.WithQuery("sections", "limit"), jsonRpc.WithRaw()))
-	g.GET("/dashboard/alerts", jsonRpc.Bind("admin:getDashboardAlertItems", jsonRpc.WithQuery("kind"), jsonRpc.WithRaw()))
+	// dashboard 读取已迁移到 komari.admin.v1.DashboardService。admin:getDashboard*
+	// 方法仍在 /api/rpc2 上注册，供未改造的第三方主题使用，但不再有 REST 桥接路由。
 	admin.RegisterPprofRoutes(g)
 	admin.RegisterHistoryExportRoutes(g)
 
@@ -143,16 +162,8 @@ func registerAdminRoutes(r *gin.Engine) {
 
 	// --- 以下全部 JSON -> RPC2 ---
 
-	// tasks（远程执行）
-	task := g.Group("/task")
-	{
-		task.GET("/all", jsonRpc.Bind("admin:getTasks"))
-		task.POST("/exec", api.RequireSensitive2FA(), jsonRpc.Bind("admin:exec"))
-		task.GET("/:task_id", jsonRpc.Bind("admin:getTaskById", jsonRpc.WithPath("task_id")))
-		task.GET("/:task_id/result", jsonRpc.Bind("admin:getTaskResultsByTaskId", jsonRpc.WithPath("task_id")))
-		task.GET("/:task_id/result/:uuid", jsonRpc.Bind("admin:getSpecificTaskResult", jsonRpc.WithPath("task_id", "uuid")))
-		task.GET("/client/:uuid", jsonRpc.Bind("admin:getTasksByClientId", jsonRpc.WithPath("uuid")))
-	}
+	// 远程执行已由 komari.exec.v1.ExecutionService 承担（下发、观察、取消），
+	// admin:getTasks / admin:exec 等方法仍在 /api/rpc2 上保留。
 
 	// settings
 	settings := g.Group("/settings")
@@ -173,20 +184,18 @@ func registerAdminRoutes(r *gin.Engine) {
 		settings.POST("/cloudflared/remove-token", jsonRpc.Bind("admin:removeCloudflaredToken"))
 	}
 
-	// database storage inspection and maintenance
-	databaseGroup := g.Group("/database")
-	{
-		databaseGroup.GET("/size", jsonRpc.Bind("admin:getDatabaseSize"))
-		databaseGroup.POST("/vacuum", jsonRpc.Bind("admin:vacuumDatabase"))
-	}
-
 	// clients
 	clientGroup := g.Group("/client")
 	{
-		clientGroup.POST("/remote/authorize", remote.Authorize)
-		clientGroup.POST("/remote/session", remote.CreateSession)
-		clientGroup.POST("/remote/session/cancel", remote.CancelSession)
-		clientGroup.GET("/remote", remote.ConnectBrowser)
+		// 浏览器侧遗留远程控制入口。Connect 的 WebSSHService.CreateSession /
+		// WatchSession / SendSessionCommand 已覆盖且为前端唯一使用路径，
+		// 仅在显式开启兼容开关时挂载。
+		if legacyRemoteCompatEnabled() {
+			clientGroup.POST("/remote/authorize", remote.Authorize)
+			clientGroup.POST("/remote/session", remote.CreateSession)
+			clientGroup.POST("/remote/session/cancel", remote.CancelSession)
+			clientGroup.GET("/remote", remote.ConnectBrowser)
+		}
 		clientGroup.POST("/add", jsonRpc.Bind("admin:addClient", jsonRpc.WithFlat()))
 		clientGroup.GET("/list", jsonRpc.Bind("admin:listClients", jsonRpc.WithRaw()))
 		clientGroup.GET("/:uuid", jsonRpc.Bind("admin:getClient", jsonRpc.WithPath("uuid"), jsonRpc.WithRaw()))
@@ -199,36 +208,13 @@ func registerAdminRoutes(r *gin.Engine) {
 		clientGroup.POST("/:uuid/traffic-calibration", admin.UpdateTrafficCalibration)
 		clientGroup.POST("/token/rotate", api.RequireSensitive2FA(), jsonRpc.Bind("admin:rotateClientToken"))
 		clientGroup.POST("/order", jsonRpc.Bind("admin:orderClients"))
-		clientGroup.GET("/:uuid/terminal", api.RequireSensitive2FA(), terminal.RequestTerminal)
+		if legacyRemoteCompatEnabled() {
+			clientGroup.GET("/:uuid/terminal", api.RequireSensitive2FA(), terminal.RequestTerminal)
+		}
 	}
 
-	// records
-	record := g.Group("/record")
-	{
-		record.POST("/clear", jsonRpc.Bind("admin:clearRecords"))
-		record.POST("/clear/all", jsonRpc.Bind("admin:clearAllRecords"))
-	}
-
-	// sessions
-	session := g.Group("/session")
-	{
-		session.GET("/get", jsonRpc.Bind("admin:getSessions", jsonRpc.WithFlat()))
-		session.POST("/remove", jsonRpc.Bind("admin:deleteSession"))
-		session.POST("/remove/all", jsonRpc.Bind("admin:deleteAllSessions"))
-	}
-
-	g.GET("/logs", jsonRpc.Bind("admin:getLogs", jsonRpc.WithQuery("limit", "page")))
-
-	// clipboard
-	clipboardGroup := g.Group("/clipboard")
-	{
-		clipboardGroup.GET("/:id", jsonRpc.Bind("admin:getClipboard", jsonRpc.WithPath("id")))
-		clipboardGroup.GET("", jsonRpc.Bind("admin:listClipboard"))
-		clipboardGroup.POST("", jsonRpc.Bind("admin:createClipboard"))
-		clipboardGroup.POST("/:id", jsonRpc.Bind("admin:updateClipboard", jsonRpc.WithPath("id")))
-		clipboardGroup.POST("/remove", jsonRpc.Bind("admin:batchDeleteClipboard"))
-		clipboardGroup.POST("/:id/remove", jsonRpc.Bind("admin:deleteClipboard", jsonRpc.WithPath("id")))
-	}
+	// records、sessions、logs、clipboard、database 读写已迁移到
+	// komari.admin.v1.MaintenanceService；对应 admin:* 方法仍在 /api/rpc2 上保留。
 
 	pluginGroup := g.Group("/plugin")
 	{
@@ -280,15 +266,8 @@ func registerAdminRoutes(r *gin.Engine) {
 		}
 	}
 
-	// ping tasks
-	pingTask := g.Group("/ping")
-	{
-		pingTask.GET("/", jsonRpc.Bind("admin:getAllPingTasks"))
-		pingTask.POST("/add", jsonRpc.Bind("admin:addPingTask"))
-		pingTask.POST("/delete", jsonRpc.Bind("admin:deletePingTask"))
-		pingTask.POST("/edit", jsonRpc.Bind("admin:editPingTask"))
-		pingTask.POST("/order", jsonRpc.Bind("admin:orderPingTask"))
-	}
+	// ping tasks 已迁移到 komari.admin.v1.PingTaskService；
+	// admin:*PingTask* 方法仍在 /api/rpc2 上保留。
 
 	returnRoute := g.Group("/return-route")
 	{
