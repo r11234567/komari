@@ -166,7 +166,23 @@ func normalizeReturnRouteTaskWithDB(db *gorm.DB, task *models.ReturnRouteTask) e
 }
 
 func returnRouteLines() []string {
-	return []string{"CMIN2", "CMI", "CMNET", "CN2 GIA", "CN2 GT", "163", returnRouteLineCUGVIP, returnRouteLineCUGOptimized, "9929", "4837", returnRouteLineSoftBank, returnRouteLineIIJ, returnRouteLineLumen}
+	lines := []string{"CMIN2", "CMI", "CMNET", "CN2 GIA", "CN2 GT", "163", returnRouteLineCUGVIP, returnRouteLineCUGOptimized, "9929", "4837", returnRouteLineSoftBank, returnRouteLineIIJ, returnRouteLineLumen}
+	rules := currentReturnRouteRules()
+	for name := range rules.document.CustomLines {
+		if !containsLine(lines, name) {
+			lines = append(lines, name)
+		}
+	}
+	return lines
+}
+
+func containsLine(lines []string, wanted string) bool {
+	for _, line := range lines {
+		if line == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeReturnRouteLine(value string) string {
@@ -883,6 +899,17 @@ func classifyReturnRouteSignatures(hops []returnRouteSignature) (string, float64
 
 func classifyReturnRouteSignaturesWithRules(hops []returnRouteSignature, rules *compiledReturnRouteRules) (string, float64) {
 	hops, hiddenHops := prepareReturnRouteSignatures(hops, rules)
+	for name, line := range rules.document.CustomLines {
+		matched := 0
+		for _, hop := range hops {
+			if matched < len(line.Groups) && returnRouteGroupMatches(hop, line.Groups[matched], rules) {
+				matched++
+			}
+		}
+		if matched == len(line.Groups) {
+			return name, line.Confidence
+		}
+	}
 	hasCUGAccess := hasUnicomReturnRouteGroup(hops, rules, "unicom_10099")
 	has9929 := hasUnicomReturnRouteGroup(hops, rules, "unicom_9929")
 	has4837 := hasUnicomReturnRouteGroup(hops, rules, "unicom_4837")
@@ -953,6 +980,13 @@ func classifyReturnRouteSignaturesWithRules(hops []returnRouteSignature, rules *
 		}
 	}
 	return "UNKNOWN", 0
+}
+
+func returnRouteGroupMatches(hop returnRouteSignature, group string, rules *compiledReturnRouteRules) bool {
+	if hop.prefixResolved && hop.prefixGroup == group {
+		return true
+	}
+	return rules.hasSignature(group, hop)
 }
 
 func prepareReturnRouteSignatures(hops []returnRouteSignature, rules *compiledReturnRouteRules) ([]returnRouteSignature, int) {

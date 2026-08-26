@@ -45,5 +45,11 @@
     "softbank": 0.96,
     "iij": 0.96,
     "lumen": 0.96
+  },
+  "custom_lines": {
+    "Lumen-CMI": {
+      "groups": ["lumen", "cmi"],
+      "confidence": 0.96
+    }
   }
 }

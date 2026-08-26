@@ -53,6 +53,16 @@ func TestClassifyReturnRoute(t *testing.T) {
 	}
 }
 
+func TestClassifyConfiguredCompositeLine(t *testing.T) {
+	rules := currentReturnRouteRules()
+	line, confidence := classifyReturnRouteSignaturesWithRules([]returnRouteSignature{
+		{asn: 3356}, {asn: 58453}, {asn: 9808},
+	}, rules)
+	if line != "Lumen-CMI" || confidence != 0.96 {
+		t.Fatalf("configured composite route = %q, %.2f; want Lumen-CMI, 0.96", line, confidence)
+	}
+}
+
 func TestReturnRouteLinesAllowCrossCarrierExpectations(t *testing.T) {
 	want := map[string]bool{
 		"CMIN2": true, "CMI": true, "CMNET": true,

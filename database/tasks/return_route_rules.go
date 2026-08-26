@@ -55,11 +55,17 @@ var (
 )
 
 type ReturnRouteRuleDocument struct {
-	SchemaVersion int                 `json:"schema_version"`
-	RuleVersion   string              `json:"rule_version"`
-	ASNGroups     map[string][]int    `json:"asn_groups"`
-	PrefixGroups  map[string][]string `json:"prefix_groups"`
-	Confidence    map[string]float64  `json:"confidence"`
+	SchemaVersion int                              `json:"schema_version"`
+	RuleVersion   string                           `json:"rule_version"`
+	ASNGroups     map[string][]int                 `json:"asn_groups"`
+	PrefixGroups  map[string][]string              `json:"prefix_groups"`
+	Confidence    map[string]float64               `json:"confidence"`
+	CustomLines   map[string]ReturnRouteCustomLine `json:"custom_lines,omitempty"`
+}
+
+type ReturnRouteCustomLine struct {
+	Groups     []string `json:"groups"`
+	Confidence float64  `json:"confidence"`
 }
 
 type ReturnRouteBGPRuleDocument struct {
@@ -420,6 +426,20 @@ func compileReturnRouteRules(data []byte) (*compiledReturnRouteRules, error) {
 	if err := validateReturnRouteRuleKeys("confidence", document.Confidence, coreReturnRouteConfidence, optionalReturnRouteConfidence); err != nil {
 		return nil, err
 	}
+	for name, line := range document.CustomLines {
+		name = strings.TrimSpace(name)
+		if name == "" || len(line.Groups) < 2 {
+			return nil, fmt.Errorf("custom_lines.%s 必须包含至少两个有序分组", name)
+		}
+		if line.Confidence <= 0 || line.Confidence > 1 {
+			return nil, fmt.Errorf("custom_lines.%s.confidence 必须大于 0 且不超过 1", name)
+		}
+		for _, group := range line.Groups {
+			if !containsReturnRouteGroup(group) {
+				return nil, fmt.Errorf("custom_lines.%s 引用了未知分组 %q", name, group)
+			}
+		}
+	}
 
 	compiled := &compiledReturnRouteRules{
 		document:     cloneReturnRouteRuleDocument(document),
@@ -465,6 +485,16 @@ func compileReturnRouteRules(data []byte) (*compiledReturnRouteRules, error) {
 	}
 	compiled.prefixMatcher = newReturnRoutePrefixMatcher(compiled.prefixRules)
 	return compiled, nil
+}
+
+func containsReturnRouteGroup(value string) bool {
+	value = strings.TrimSpace(value)
+	for _, group := range returnRouteASNGroups {
+		if group == value {
+			return true
+		}
+	}
+	return false
 }
 
 func compileReturnRouteBGPRules(data []byte) (*compiledReturnRouteBGPRules, error) {
