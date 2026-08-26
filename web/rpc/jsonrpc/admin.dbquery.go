@@ -85,7 +85,7 @@ func adminDBQuery(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonR
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to execute database query: "+err.Error(), nil)
 	}
-	return response, nil
+	return response.asMap(), nil
 }
 
 func adminDBExec(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -116,7 +116,7 @@ func adminDBExec(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRp
 	if id, err := result.LastInsertId(); err == nil {
 		lastInsertID = &id
 	}
-	return databaseExecResponse{Database: target, Driver: string(driver), RowsAffected: rowsAffected, LastInsertID: lastInsertID}, nil
+	return (databaseExecResponse{Database: target, Driver: string(driver), RowsAffected: rowsAffected, LastInsertID: lastInsertID}).asMap(), nil
 }
 
 func adminDBTables(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -132,7 +132,37 @@ func adminDBTables(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Json
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to list database tables: "+err.Error(), nil)
 	}
-	return response, nil
+	return response.asMap(), nil
+}
+
+// Explicit maps preserve JSON field names when an installed plugin calls the
+// compatibility RPC directly through server.call instead of HTTP JSON-RPC.
+func (response databaseQueryResponse) asMap() map[string]any {
+	return map[string]any{
+		"database":  response.Database,
+		"driver":    response.Driver,
+		"columns":   response.Columns,
+		"rows":      response.Rows,
+		"row_count": response.RowCount,
+		"truncated": response.Truncated,
+	}
+}
+
+func (response databaseExecResponse) asMap() map[string]any {
+	return map[string]any{
+		"database":       response.Database,
+		"driver":         response.Driver,
+		"rows_affected":  response.RowsAffected,
+		"last_insert_id": response.LastInsertID,
+	}
+}
+
+func (response databaseTablesResponse) asMap() map[string]any {
+	return map[string]any{
+		"database": response.Database,
+		"driver":   response.Driver,
+		"tables":   response.Tables,
+	}
 }
 
 func parseDatabaseQueryParams(req *rpc.JsonRpcRequest) (databaseQueryParams, string, string, int, *rpc.JsonRpcError) {

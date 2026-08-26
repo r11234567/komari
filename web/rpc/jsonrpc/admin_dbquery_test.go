@@ -7,6 +7,27 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
+func TestDatabaseQueryResponseAsMapUsesJSONFieldNames(t *testing.T) {
+	response := databaseQueryResponse{
+		Database: "main",
+		Driver:   "sqlite",
+		Columns:  []string{"uuid"},
+		Rows:     [][]any{{"user-1"}},
+		RowCount: 1,
+	}
+	result := response.asMap()
+	if result["row_count"] != 1 {
+		t.Fatalf("row_count = %v, want 1", result["row_count"])
+	}
+	if _, exists := result["RowCount"]; exists {
+		t.Fatal("response must not expose Go field names to plugins")
+	}
+	rows, ok := result["rows"].([][]any)
+	if !ok || len(rows) != 1 || rows[0][0] != "user-1" {
+		t.Fatalf("rows = %#v, want one database row", result["rows"])
+	}
+}
+
 func TestParseDatabaseTarget(t *testing.T) {
 	tests := []struct {
 		name  string
