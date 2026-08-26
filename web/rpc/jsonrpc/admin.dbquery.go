@@ -209,7 +209,11 @@ func listDatabaseTables(ctx context.Context, target string) (databaseTablesRespo
 		if dbErr != nil {
 			return databaseTablesResponse{}, dbErr
 		}
-		rows, err = db.QueryContext(ctx, tableListSQL(metric.DriverSQLite))
+		statement, sqlErr := tableListSQL(metric.DriverSQLite)
+		if sqlErr != nil {
+			return databaseTablesResponse{}, sqlErr
+		}
+		rows, err = db.QueryContext(ctx, statement)
 		driver, release = metric.DriverSQLite, func() {}
 	case databaseTargetMetrics:
 		rows, driver, release, err = metricstore.QueryForDriver(ctx, tableListSQL)
