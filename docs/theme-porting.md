@@ -1,57 +1,149 @@
 # 第三方主题移植指南
 
-本文对应本仓库当前代码，每条都标注了判定点位置，便于核对。适用对象是把上游
-Komari 主题移到本分支、或为本分支新写主题的人。
+把上游 Komari 主题移到本分支，或为本分支新写主题。本文对应仓库当前代码，标注了
+判定点位置便于核对；示例来自实际移植过的三个主题
+（adhesive-note、animal-island、junimo）。
 
-## 一句话结论
+## 目标形态
 
-**大部分上游主题不需要改代码。** 面向公开大屏的接口（`public:*`、`common:*`、
-`/api/clients`、`/api/records/*`）全部原样保留；只有直接调用**管理端 REST 桥接**
-的主题需要改，因为其中一部分已随管理台迁移到 Connect 而移除。
+**公开大屏的数据读取全部走 Connect。** 主题不应再使用 `/api/rpc2`、
+`/api/clients` WebSocket，或 `/api/nodes`、`/api/records/*` 这类 JSON 端点——
+它们仍然存在（`legacy_json_rpc_available` 为 true，未改造的主题不会被打死），
+但新主题不必再迁就它们。
+
+只有两类接口按其性质留在 REST：
+
+- **登录与 OAuth**（`/api/login`、`/api/oauth`）：前者要由服务端写下会话 Cookie，
+  后者是浏览器跳转，都不是 RPC 能表达的形态。
+- **主题与插件管理**（`/api/admin/theme/*`、`/api/admin/plugin/*`）：按兼容策略
+  保持不动。
 
 ## 契约来源
 
 契约由服务端自己声明，不必猜：
 
 ```
-GET/POST /komari.browser.v1.BrowserService/GetThemeContract
+POST /komari.browser.v1.BrowserService/GetThemeContract
 ```
 
-返回（`web/connect/browser.go:128`）：
+返回（`web/connect/browser.go`）`schema_version`、`manifest_name`、
+`connect_base_path`、`legacy_json_rpc_available`。
 
-| 字段 | 值 | 含义 |
-| --- | --- | --- |
-| `schemaVersion` | `1` | 清单结构版本 |
-| `manifestName` | `komari-theme.json` | 清单文件名 |
-| `connectBasePath` | `/komari.browser.v1.BrowserService/` | 类型化接口基路径 |
-| `legacyJsonRpcAvailable` | `true` | **RPC2 仍然可用**，主题不必迁移 |
+## 依赖与客户端
 
-`legacyJsonRpcAvailable` 是本分支对主题的长期承诺：`/api/rpc2` 不会为了"架构统一"
-被摘掉。
+```bash
+npm i @connectrpc/connect @connectrpc/connect-web @bufbuild/protobuf \
+      github:r11234567/komari-proto#v0.1.28
+```
+
+```ts
+import { createClient } from "@connectrpc/connect";
+import { createConnectTransport } from "@connectrpc/connect-web";
+import { BrowserService } from "@komari/proto/komari/browser/v1/browser_pb";
+import { MetricsService } from "@komari/proto/komari/metrics/v1/metrics_pb";
+
+const transport = createConnectTransport({
+  baseUrl: window.location.origin,
+  useBinaryFormat: true,
+  // 站点可能开启私有访问，凭据必须随请求发出，否则会被判为访客。
+  fetch: (input, init) => fetch(input, { ...init, credentials: "same-origin" }),
+});
+
+export const browser = createClient(BrowserService, transport);
+export const metrics = createClient(MetricsService, transport);
+```
+
+三处容易踩的构建配置：
+
+- **`moduleResolution` 必须是 `bundler`（或 `node16`/`nodenext`）**，proto 包用
+  子路径 exports 分发。
+- **不能开 `erasableSyntaxOnly`**：proto 包以未编译的 `.ts` 分发，生成代码用
+  `enum` 表达 protobuf 枚举，而 `enum` 不是可擦除语法；这些是被直接导入的源码而非
+  `.d.ts`，`skipLibCheck` 也管不到。
+- **`uint64` 到了 TS 是 `bigint`**，参与算术前先 `Number(...)`。
+
+## 接口对照
+
+| 旧调用 | Connect |
+| --- | --- |
+| `/api/public`、`public:getPublicSettings` | `BrowserService/GetPublicInfo` |
+| `/api/nodes`、`public:getNodesInformation`、`common:getNodes` | `BrowserService/ListAgents` |
+| `/api/me`、`public:getMe` | `BrowserService/GetSession` |
+| `/api/clients` WebSocket、`common:getNodesLatestStatus` 轮询 | `BrowserService/WatchAgentStatus`（服务端流） |
+| `/api/records/load`、`public:getRecordsByUUID`、`common:getRecords` | `MetricsService/QueryMetrics` |
+| `/api/records/ping`、`public:getPingRecords` | `MetricsService/QueryMetrics`（`ping.latency_ms`，按 `task_id` 标签分组） |
+| `public:getPingMetricStats` | `MetricsService/GetPingStats` |
+| `/api/task/ping`、`public:getPublicPingTasks` | `MetricsService/ListPingTasks` |
+| `/api/admin/ping` | `admin.v1.PingTaskService/ListPingTasks`（需管理员会话） |
+
+访客可直接调用的过程见 `web/connect/interceptor.go` 的角色表：BrowserService 的
+`GetPublicInfo`/`ListAgents`/`GetAgent`/`GetSession`/`GetThemeContract`/
+`WatchAgentStatus`，以及 MetricsService 的 `QueryMetrics`/`ListMetricDefinitions`/
+`ListPingTasks`/`GetPingStats`。`GetTrafficTrend` 是管理员权限，不能用在公开大屏。
+
+## 从轮询改成推送
+
+`WatchAgentStatus` 是服务端流，按事件推送**单个**节点的变化，不是整表快照。两点
+经验：
+
+- **自己累积快照。** 事件只带一个 agent，界面要的是全量表。
+- **推送粒度 ≠ 渲染粒度。** 节点多时逐条事件都提交一次会让整面卡片墙持续重排。
+  三个主题都把原来的「轮询间隔」改为约束渲染节奏：事件先累积，按间隔 flush 一次。
+
+```ts
+let afterEventId = "";
+for await (const event of browser.watchAgentStatus(
+  { agentIds: [], afterEventId },
+  { signal, timeoutMs: 0 },   // 流不能套用一元请求的超时
+)) {
+  const agent = event.agent;
+  if (!agent) continue;
+  afterEventId = agent.eventId || afterEventId;   // 位点，重连时不必从头重放
+  snapshot.set(agent.agentId, toRealtime(agent, event.latestReport));
+  scheduleFlush();
+}
+```
+
+断线要自己重连（`catch` 后延迟重试），页面不可见时可以断开流、可见时再接上。
+
+## 从记录接口改成指标查询
+
+历史曲线由 `QueryMetrics` 重建：服务端按 metric 名 + 标签分组返回序列，主题按
+时间戳归并成自己的行结构。指标名见
+`database/metricstore/metrics.go`：
+
+```
+cpu.usage  memory.used  swap.used  load.average  disk.used
+net.in.rate  net.out.rate  net.total.up  net.total.down
+traffic.up  traffic.down  process.count  connections.tcp  connections.udp
+gpu.usage  ping.latency_ms  ping.loss
+```
+
+两个要点：
+
+- **空桶与 0 要区分。** `QueryPoint.value` 缺失表示该桶没有采样，不是数值 0。
+- **聚合方式与点数上限是整次请求级的。** 如果主题要按指标区分（例如流量用 `sum`、
+  速率用 `max`，点数上限也不同），把指标按 (聚合方式, 点数上限) 分组、每组发一次
+  请求即可，HTTP/2 多路复用下并发几次比放弃逐指标精度划算。junimo 的
+  `services/connect.ts` 就是这么做的。
+
+延迟统计不要在浏览器里重算：`GetPingStats` 直接给 min/max/avg/p50/p99/丢包，与
+后台口径一致。
 
 ## 安装包布局
 
-主题装的是**能直接安装的 ZIP**，不是源码压缩包。校验点在
-`web/public/public.go:239`，它要求这两个路径存在：
+装的是**能直接安装的 ZIP**，不是源码压缩包。校验点在
+`web/public/public.go:239`，要求这两个路径存在：
 
 ```
 komari-theme.json     ← 清单，必须在 ZIP 根
 dist/index.html       ← 静态资源根，服务端把 dist/ 挂到站点 /
 ```
 
-配套建议一起打进去：`preview.*`（清单里 `preview` 字段声明的那个文件名，主题市场
-列表要用）、`LICENSE`、`README.md`。
-
-两个容易踩的点：
-
-- **不要出现以 `_` 开头的文件。** 服务端用 Go 的 `embed`，它会忽略下划线开头的
-  文件，装进去就是 404。Vite 一般不产出这类文件名，但自定义 `assetFileNames` 时要注意。
-- **`dist/` 必须是站点根下可用的。** 服务端把 `dist/` 挂在 `/`。有客户端子路由
-  （如 `/server/xxx`）的主题必须用 `base: "/"`；只有单页、没有子路由时
-  `base: "./"` 也能用。
-
-清单没有 `schemaVersion` 字段是允许的，会被归一化为 v1（前端
-`normalizeThemeManifest`，`komari-web/tests/connectMigration.test.ts` 有覆盖）。
+- **不要出现以 `_` 开头的文件**：服务端用 Go 的 `embed`，它会忽略这类文件名，
+  装进去就是 404。
+- **有客户端子路由的主题必须用 `base: "/"`**；单页无子路由时 `base: "./"` 也可以。
+- 清单没有 `schemaVersion` 是允许的，会被归一化为 v1。
 
 ## index.html 的四个锚点
 
@@ -65,117 +157,19 @@ dist/index.html       ← 静态资源根，服务端把 dist/ 挂到站点 /
 | `</head>` | 自定义 head 注入 | 自定义 head 被前置到文档最前 | `public.go:82` |
 | `</body>` | 自定义 body、标题同步、主题热重载 | 脚本被追加到文档末尾 | `public.go:71`、`public.go:109` |
 
-两点说明：
+描述是**字面替换**（可以同时放在 `meta[name=description]`、`og:description`、
+`twitter:description`，`ReplaceAll` 会全部替换）；语言只认上表那三种写法，写死
+`lang="zh-CN"` 会让设置失效。标题不用管：正则会替换任何 `<title>`。
 
-- **描述是字面替换，语言是按序匹配。** 描述那句原文必须逐字保留（可以放在
-  `meta[name=description]`、`og:description`、`twitter:description` 里，`ReplaceAll`
-  会全部替换，社交预览也就跟着对了）。语言只认上表那三种写法，写死
-  `lang="zh-CN"` 或 `lang="en-US"` 都会让设置失效。
-- **标题不用管。** `documentTitlePattern` 是 `<title(?:\s[^>]*)?>.*?</title\s*>`
-  （`public.go:61`），任何 `<title>` 都会被替换成站点名，不需要写成
-  `Komari Monitor`。
+## 数据模型里的两个坑
 
-## 可直接用的 RPC2 方法
-
-以下方法在本分支上仍然注册，主题可以照旧调 `/api/rpc2`（`GET` 升级为 WebSocket，
-`POST` 走单次 HTTP）：
-
-**`public:` 组**（`web/rpc/jsonrpc/public.go`）
-
-```
-getVersion              getMe                   getPublicSettings
-getNodesInformation     getClientRecentRecords  getRecordsByUUID
-getPingRecords          getPublicPingTasks      getPingMetricStats
-queryMetrics            listMetricDefinitions
-```
-
-**`common:` 组**（`web/rpc/jsonrpc/common.go`）
-
-```
-getNodes        getNodesLatestStatus    getNodeRecentStatus
-getRecords      getPublicInfo           getMe                   getVersion
-```
-
-还有这些非 RPC2 的公开入口也未变动：`/api/clients`（WebSocket 在线列表）、
-`/api/nodes`、`/api/public`、`/api/me`、`/api/version`、`/api/records/load`、
-`/api/records/ping`、`/api/task/ping`。
-
-## 需要改的：已移除的管理端 REST 桥接
-
-本分支把管理台从 RPC2 迁到了 Connect，随之删掉了下列 **REST 桥接路由**。注意删的
-只是 REST 路由，**对应的 `admin:*` 方法仍然注册在 `/api/rpc2` 上**，就是为了不打死
-未改造的主题。
-
-| 已移除的 REST | 主题应改为 | 说明 |
-| --- | --- | --- |
-| `/api/admin/dashboard`、`/dashboard/charts`、`/dashboard/alerts` | `admin:getDashboard` 等，经 `/api/rpc2` | 或用 `komari.admin.v1.DashboardService` |
-| `/api/admin/ping`（及 `/add`、`/edit`、`/delete`、`/order`） | `admin:getAllPingTasks` 等 | 或用 `komari.admin.v1.PingTaskService` |
-| `/api/admin/session/*`、`/api/admin/logs`、`/api/admin/clipboard*`、`/api/admin/record/clear*`、`/api/admin/database/size`、`/api/admin/database/vacuum` | 同名 `admin:*` 方法 | 或用 `komari.admin.v1.MaintenanceService` |
-| `/api/admin/task/*` | `admin:getTasks`、`admin:exec` 等 | 或用 `komari.exec.v1.ExecutionService` |
-
-改法很短。以本次移植的 junimo 为例，原来是：
-
-```ts
-return await apiGet("/api/admin/ping", z.array(PingTaskSchema), options);
-```
-
-改成走 RPC2，并保留 REST 兜底，让同一份主题在本分支和上游都能用：
-
-```ts
-try {
-  return await rpcCall("admin:getAllPingTasks", {}, z.array(PingTaskSchema), options);
-} catch (error) {
-  if (options?.signal?.aborted) throw error;
-  // 上游仍提供该 REST 路由
-  return await apiGet("/api/admin/ping", z.array(PingTaskSchema), options);
-}
-```
-
-`admin:*` 方法要求管理员会话；主题在公开大屏上不应该依赖它们，只有主题自带的管理
-面板才需要。
-
-**仍然保留的管理端 REST**（主题管理与插件按兼容策略不动）：
-`/api/admin/theme/*`（含 `settings`、`market/*`）、`/api/admin/plugin/*`、
-`/api/admin/client/list`。
-
-## 可选：类型化的 Connect 接口
-
-不想再拼 JSON-RPC 的话，下列过程**访客即可调用**（角色表见
-`web/connect/interceptor.go:52`）：
-
-```
-/komari.browser.v1.BrowserService/GetPublicInfo
-/komari.browser.v1.BrowserService/ListAgents
-/komari.browser.v1.BrowserService/GetAgent
-/komari.browser.v1.BrowserService/GetThemeContract
-/komari.browser.v1.BrowserService/WatchAgentStatus     ← 服务端流，30 分钟预算
-/komari.metrics.v1.MetricsService/QueryMetrics
-/komari.metrics.v1.MetricsService/ListMetricDefinitions
-/komari.metrics.v1.MetricsService/ListPingTasks
-/komari.metrics.v1.MetricsService/GetPingStats
-```
-
-调用方式就是普通 POST，`Content-Type: application/json`，body 是请求消息的 JSON：
-
-```ts
-const response = await fetch("/komari.browser.v1.BrowserService/ListAgents", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  credentials: "same-origin",
-  body: "{}",
-});
-```
-
-需要完整类型时用 proto 生成客户端，仓库在
-`https://github.com/r11234567/komari-proto`（TS 产物已入库，可直接
-`npm i github:r11234567/komari-proto#<tag>`）。
-
-`GetTrafficTrend` 是管理员权限，不能在公开大屏上用。
+- **一次性付费是负周期。** 数据模型用 `-1` 表示，而 `billing_cycle_days` 是
+  无符号的，会被钳成 0。改用 `billing_one_time` 判断，需要时再还原成 `-1`。
+- **隐藏节点由服务端过滤。** 访客拿到的一律是可见节点，主题不必自己判 `hidden`。
 
 ## 打包与发布
 
-构建、打包、发版全部交给 GitHub Actions，本地只需要 `npm run dev`。本次移植的三个
-主题都是同一套流程，可以直接照抄：
+构建、打包、发版全部交给 GitHub Actions。三个主题用的是同一套流程，可以直接照抄：
 
 - `komari-theme-adhesive-note/.github/workflows/release.yml`
 - `komari-animal-island/.github/workflows/release.yml`
@@ -184,20 +178,22 @@ const response = await fetch("/komari.browser.v1.BrowserService/ListAgents", {
 流程是「打 `v*` 标签 → 构建 → 校验契约 → 打包 → 附 SHA-256 上传 Release」，其中
 两件事值得照做：
 
-- **校验清单版本与 tag 一致。** 不一致时主题市场的自动更新会拒绝，而这在发版当时
-  没有任何报错，只有装的人才发现更新不了。
+- **校验清单版本与 tag 一致**（`komari-theme.json`、`package.json`、
+  `package-lock.json` 三处都要同步）。不一致时主题市场的自动更新会拒绝，而发版
+  当时没有任何报错，只有装的人才发现更新不了。
 - **打包用固定时间戳。** 主题市场按 SHA-256 校验分发包，ZIP 条目时间戳一变整包
-  hash 就变，同一份源码打两次得到两个 hash，谁都无法自行验证 Release 里的包确实来自
-  这份源码。`scripts/package-zip.mjs` 里用 1980-01-01 固定，需要真实时间时用
+  hash 就变，同一份源码打两次得到两个 hash，谁都无法自证。需要真实时间时用
   `SOURCE_DATE_EPOCH` 覆盖。
 
 ## 移植自查清单
 
-1. 搜一遍 `/api/admin/`，命中上表「已移除」的改成 `/api/rpc2`（保留 REST 兜底）
-2. `dist/index.html` 里四个锚点齐全（描述原文、`lang="en"`、`</head>`、`</body>`）
-3. 有客户端子路由则 `base: "/"`
-4. 产物没有 `_` 开头的文件
-5. `komari-theme.json` 的 `version` 与要打的 tag 一致，`short` 只含 `[A-Za-z0-9_-]`
-6. `preview` 字段声明的文件真的在 ZIP 里
+1. 搜 `/api/`：除登录/OAuth、主题与插件管理外都应改为 Connect
+2. 搜 `new WebSocket`：实时状态改用 `WatchAgentStatus`
+3. 流的 `timeoutMs: 0`，并自己实现重连与事件位点
+4. `bigint` 转 `number` 后再参与计算
+5. `dist/index.html` 四个锚点齐全
+6. 有子路由则 `base: "/"`；产物没有 `_` 开头的文件
+7. 清单 `version` 与 tag 一致，`short` 只含 `[A-Za-z0-9_-]`
+8. `preview` 字段声明的文件真的在 ZIP 里
 
-前两条是实际会出问题的，后面几条是发版当时不报错、装的时候才暴露的。
+前四条决定能不能跑，后四条是发版当时不报错、装的时候才暴露的。
