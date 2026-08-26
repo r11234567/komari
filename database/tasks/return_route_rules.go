@@ -889,5 +889,14 @@ func cloneReturnRouteRuleDocument(document ReturnRouteRuleDocument) ReturnRouteR
 	for key, value := range document.Confidence {
 		cloned.Confidence[key] = value
 	}
+	if document.CustomLines != nil {
+		cloned.CustomLines = make(map[string]ReturnRouteCustomLine, len(document.CustomLines))
+		for key, value := range document.CustomLines {
+			cloned.CustomLines[key] = ReturnRouteCustomLine{
+				Groups:     append([]string(nil), value.Groups...),
+				Confidence: value.Confidence,
+			}
+		}
+	}
 	return cloned
 }
