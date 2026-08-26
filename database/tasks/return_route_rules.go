@@ -64,6 +64,7 @@ type ReturnRouteRuleDocument struct {
 }
 
 type ReturnRouteCustomLine struct {
+	Name       string   `json:"name,omitempty"`
 	Groups     []string `json:"groups"`
 	Confidence float64  `json:"confidence"`
 }
@@ -427,18 +428,24 @@ func compileReturnRouteRules(data []byte) (*compiledReturnRouteRules, error) {
 		return nil, err
 	}
 	for name, line := range document.CustomLines {
-		name = strings.TrimSpace(name)
-		if name == "" || len(line.Groups) < 2 {
-			return nil, fmt.Errorf("custom_lines.%s 必须包含至少两个有序分组", name)
+		key := strings.TrimSpace(name)
+		displayName := strings.TrimSpace(line.Name)
+		if displayName == "" {
+			displayName = key
+		}
+		if key == "" || displayName == "" || len(line.Groups) < 2 {
+			return nil, fmt.Errorf("custom_lines.%s 必须包含名称和至少两个有序分组", key)
 		}
 		if line.Confidence <= 0 || line.Confidence > 1 {
-			return nil, fmt.Errorf("custom_lines.%s.confidence 必须大于 0 且不超过 1", name)
+			return nil, fmt.Errorf("custom_lines.%s.confidence 必须大于 0 且不超过 1", key)
 		}
 		for _, group := range line.Groups {
 			if !containsReturnRouteGroup(group) {
-				return nil, fmt.Errorf("custom_lines.%s 引用了未知分组 %q", name, group)
+				return nil, fmt.Errorf("custom_lines.%s 引用了未知分组 %q", key, group)
 			}
 		}
+		line.Name = displayName
+		document.CustomLines[name] = line
 	}
 
 	compiled := &compiledReturnRouteRules{
@@ -893,6 +900,7 @@ func cloneReturnRouteRuleDocument(document ReturnRouteRuleDocument) ReturnRouteR
 		cloned.CustomLines = make(map[string]ReturnRouteCustomLine, len(document.CustomLines))
 		for key, value := range document.CustomLines {
 			cloned.CustomLines[key] = ReturnRouteCustomLine{
+				Name:       value.Name,
 				Groups:     append([]string(nil), value.Groups...),
 				Confidence: value.Confidence,
 			}

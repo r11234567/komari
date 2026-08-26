@@ -47,7 +47,8 @@
     "lumen": 0.96
   },
   "custom_lines": {
-    "Lumen-CMI": {
+    "lumen_cmi": {
+      "name": "Lumen-CMI",
       "groups": ["lumen", "cmi"],
       "confidence": 0.96
     }

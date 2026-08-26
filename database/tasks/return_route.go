@@ -168,7 +168,11 @@ func normalizeReturnRouteTaskWithDB(db *gorm.DB, task *models.ReturnRouteTask) e
 func returnRouteLines() []string {
 	lines := []string{"CMIN2", "CMI", "CMNET", "CN2 GIA", "CN2 GT", "163", returnRouteLineCUGVIP, returnRouteLineCUGOptimized, "9929", "4837", returnRouteLineSoftBank, returnRouteLineIIJ, returnRouteLineLumen}
 	rules := currentReturnRouteRules()
-	for name := range rules.document.CustomLines {
+	for key, line := range rules.document.CustomLines {
+		name := strings.TrimSpace(line.Name)
+		if name == "" {
+			name = key
+		}
 		if !containsLine(lines, name) {
 			lines = append(lines, name)
 		}
@@ -186,7 +190,8 @@ func containsLine(lines []string, wanted string) bool {
 }
 
 func normalizeReturnRouteLine(value string) string {
-	line := strings.ToUpper(strings.TrimSpace(value))
+	raw := strings.TrimSpace(value)
+	line := strings.ToUpper(raw)
 	switch line {
 	case "10099":
 		return returnRouteLineCUGVIP
@@ -196,6 +201,17 @@ func normalizeReturnRouteLine(value string) string {
 		return returnRouteLineIIJ
 	case "LUMEN":
 		return returnRouteLineLumen
+	}
+	// Configured composite lines keep their configured spelling for display,
+	// while task input remains case-insensitive.
+	for key, configured := range currentReturnRouteRules().document.CustomLines {
+		name := configured.Name
+		if name == "" {
+			name = key
+		}
+		if strings.EqualFold(raw, name) || strings.EqualFold(raw, key) {
+			return name
+		}
 	}
 	return line
 }
@@ -899,7 +915,7 @@ func classifyReturnRouteSignatures(hops []returnRouteSignature) (string, float64
 
 func classifyReturnRouteSignaturesWithRules(hops []returnRouteSignature, rules *compiledReturnRouteRules) (string, float64) {
 	hops, hiddenHops := prepareReturnRouteSignatures(hops, rules)
-	for name, line := range rules.document.CustomLines {
+	for key, line := range rules.document.CustomLines {
 		matched := 0
 		for _, hop := range hops {
 			if matched < len(line.Groups) && returnRouteGroupMatches(hop, line.Groups[matched], rules) {
@@ -907,6 +923,10 @@ func classifyReturnRouteSignaturesWithRules(hops []returnRouteSignature, rules *
 			}
 		}
 		if matched == len(line.Groups) {
+			name := line.Name
+			if name == "" {
+				name = key
+			}
 			return name, line.Confidence
 		}
 	}
