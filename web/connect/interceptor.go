@@ -49,7 +49,7 @@ func newPolicyInterceptor() *policyInterceptor {
 	// admin request on large SQLite deployments.
 	add(maintenance, rpc.RoleAdmin, 30*time.Minute, "VacuumDatabase")
 	add(pingTask, rpc.RoleAdmin, 30*time.Second, "ListPingTasks", "CreatePingTask", "UpdatePingTasks", "DeletePingTasks", "ReorderPingTasks")
-	add(browser, rpc.RoleGuest, 30*time.Second, "GetPublicInfo", "ListAgents", "GetAgent", "GetThemeContract")
+	add(browser, rpc.RoleGuest, 30*time.Second, "GetPublicInfo", "ListAgents", "GetAgent", "GetSession", "GetThemeContract")
 	add(browser, rpc.RoleAdmin, 30*time.Second, "GetTrafficTrend")
 	add(browser, rpc.RoleGuest, 30*time.Minute, "WatchAgentStatus")
 	add(config, rpc.RoleClient, 30*time.Second, "GetDesiredConfig", "AcknowledgeConfig")

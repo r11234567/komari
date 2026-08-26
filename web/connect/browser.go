@@ -125,6 +125,26 @@ func (s *browserService) GetAgent(ctx context.Context, req *connect.Request[brow
 	}), nil
 }
 
+// GetSession reports the caller's own login state. It is guest-answerable and
+// deliberately returns no credential material: a theme only needs to know
+// whether to show a login prompt or link to the admin console.
+func (s *browserService) GetSession(ctx context.Context, _ *connect.Request[browserv1.GetSessionRequest]) (*connect.Response[browserv1.GetSessionResponse], error) {
+	meta := rpc.MetaFromContext(ctx)
+	if meta == nil || meta.User == nil {
+		return connect.NewResponse(&browserv1.GetSessionResponse{Username: "Guest"}), nil
+	}
+	user := meta.User
+	return connect.NewResponse(&browserv1.GetSessionResponse{
+		LoggedIn:         true,
+		UserId:           user.UUID,
+		Username:         user.Username,
+		TwoFactorEnabled: user.TwoFactor != "",
+		SsoProvider:      user.SSOType,
+		Language:         user.Language,
+		Color:            user.Color,
+	}), nil
+}
+
 func (s *browserService) GetThemeContract(context.Context, *connect.Request[browserv1.GetThemeContractRequest]) (*connect.Response[browserv1.GetThemeContractResponse], error) {
 	return connect.NewResponse(&browserv1.GetThemeContractResponse{
 		SchemaVersion:          1,
@@ -306,6 +326,9 @@ func browserBasicInfo(client models.Client, includePrivate, showGuestIP bool) *b
 		Price:             client.Price,
 		Tags:              client.Tags,
 		BillingCycleDays:  uint32(max(client.BillingCycle, 0)),
+		BillingOneTime:    client.BillingCycle < 0,
+		AutoRenewal:       client.AutoRenewal,
+		PublicRemark:      client.PublicRemark,
 		Currency:          client.Currency,
 		Group:             client.Group,
 		TrafficLimitBytes: uint64(max(trafficLimit, 0)),
