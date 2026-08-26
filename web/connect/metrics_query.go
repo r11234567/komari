@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/metric"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
+	"golang.org/x/sync/semaphore"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -30,7 +32,37 @@ const (
 	connectMetricMemoryTotal   = "memory.total"
 	connectMetricSwapTotal     = "swap.total"
 	connectMetricDiskTotal     = "disk.total"
+	connectMetricReadQueueWait = 20 * time.Second
 )
+
+var connectMetricReadGate = semaphore.NewWeighted(connectMetricReadCapacity())
+
+func connectMetricReadCapacity() int64 {
+	// Historical metric scans are CPU- and SQLite-heavy. Reserve enough
+	// capacity for responsive dashboards on larger hosts while serializing them
+	// on a one-core instance, where parallel scans only increase contention.
+	capacity := (runtime.GOMAXPROCS(0) + 1) / 2
+	if capacity < 1 {
+		capacity = 1
+	}
+	if capacity > 4 {
+		capacity = 4
+	}
+	return int64(capacity)
+}
+
+// acquireMetricReadSlot schedules public history scans instead of letting a
+// browser burst run them all at once. It waits long enough for ordinary chart
+// loads, then sheds only a sustained overload. Report ingestion, probe leases,
+// and long-lived agent streams use separate paths and are never queued here.
+func acquireMetricReadSlot(ctx context.Context) (func(), error) {
+	queued, cancel := context.WithTimeout(ctx, connectMetricReadQueueWait)
+	defer cancel()
+	if err := connectMetricReadGate.Acquire(queued, 1); err != nil {
+		return nil, connect.NewError(connect.CodeResourceExhausted, errors.New("metric query capacity is busy; retry shortly"))
+	}
+	return func() { connectMetricReadGate.Release(1) }, nil
+}
 
 var connectDerivedMetricDefinitions = []metric.Definition{
 	{Name: connectMetricMemoryTotal, Description: "Installed memory", Type: metric.TypeGauge, Unit: "bytes"},
@@ -58,6 +90,11 @@ func (s *metricsService) QueryMetrics(ctx context.Context, req *connect.Request[
 	if maxPoints < 1 || maxPoints > connectMaxMetricPoints {
 		return nil, connectError(connect.CodeInvalidArgument, fmtRange("max_points must be between 1 and %d", connectMaxMetricPoints))
 	}
+	release, err := acquireMetricReadSlot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	entityIDs, err := connectVisibleAgentIDs(ctx, req.Msg.AgentIds)
 	if err != nil {
 		return nil, err
@@ -166,6 +203,11 @@ func (s *metricsService) GetPingStats(ctx context.Context, req *connect.Request[
 	if maxPoints < 1 || maxPoints > connectMaxMetricPoints {
 		return nil, connectError(connect.CodeInvalidArgument, fmtRange("max_points must be between 1 and %d", connectMaxMetricPoints))
 	}
+	release, err := acquireMetricReadSlot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	entityIDs, err := connectVisibleAgentIDs(ctx, req.Msg.AgentIds)
 	if err != nil {
 		return nil, err
