@@ -8,7 +8,7 @@ import (
 )
 
 func TestPrivateApplicationPaths(t *testing.T) {
-	for _, path := range []string{"/admin", "/admin/settings", "/terminal", "/terminal/node-a"} {
+	for _, path := range []string{"/admin", "/admin/settings", "/login", "/terminal", "/terminal/node-a"} {
 		if !isPrivateApplicationPath(path) {
 			t.Fatalf("private path %q was not recognized", path)
 		}

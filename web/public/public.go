@@ -575,7 +575,7 @@ func setNoStoreHeaders(c *gin.Context) {
 }
 
 func isPrivateApplicationPath(requestPath string) bool {
-	for _, prefix := range []string{"/admin", "/terminal", "/install", "/manage"} {
+	for _, prefix := range []string{"/admin", "/login", "/terminal", "/install", "/manage"} {
 		if requestPath == prefix || strings.HasPrefix(requestPath, prefix+"/") {
 			return true
 		}
