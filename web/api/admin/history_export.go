@@ -473,30 +473,31 @@ func compactHistoryExportCSV(path string, hasPing bool) error {
 	if err != nil {
 		return err
 	}
-	defer input.Close()
 
 	reader := csv.NewReader(input)
 	reader.FieldsPerRecord = -1
 	first, err := reader.Read()
 	if err != nil {
 		if errors.Is(err, io.EOF) {
+			_ = input.Close()
 			return nil
 		}
+		_ = input.Close()
 		return err
 	}
 	if len(first) > 0 {
 		first[0] = strings.TrimPrefix(first[0], "\ufeff")
 	}
-	headerRows := [][]string{first}
+	headerCount := 1
 	if hasPing {
-		second, readErr := reader.Read()
+		_, readErr := reader.Read()
 		if readErr != nil {
+			_ = input.Close()
 			return readErr
 		}
-		headerRows = append(headerRows, second)
+		headerCount++
 	}
 
-	dataRows := make([][]string, 0)
 	active := make([]bool, len(first))
 	for {
 		record, readErr := reader.Read()
@@ -504,9 +505,9 @@ func compactHistoryExportCSV(path string, hasPing bool) error {
 			break
 		}
 		if readErr != nil {
+			_ = input.Close()
 			return readErr
 		}
-		rowHasSample := false
 		for index := 2; index < len(record); index++ {
 			if strings.TrimSpace(record[index]) == "" {
 				continue
@@ -517,11 +518,10 @@ func compactHistoryExportCSV(path string, hasPing bool) error {
 				active = grown
 			}
 			active[index] = true
-			rowHasSample = true
 		}
-		if rowHasSample {
-			dataRows = append(dataRows, record)
-		}
+	}
+	if err := input.Close(); err != nil {
+		return err
 	}
 
 	keep := []int{0, 1}
@@ -545,13 +545,44 @@ func compactHistoryExportCSV(path string, hasPing bool) error {
 	if _, err := output.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
 		return err
 	}
+	input, err = os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	reader = csv.NewReader(input)
+	reader.FieldsPerRecord = -1
 	writer := csv.NewWriter(output)
-	for _, header := range headerRows {
+	for index := 0; index < headerCount; index++ {
+		header, readErr := reader.Read()
+		if readErr != nil {
+			return readErr
+		}
+		if index == 0 && len(header) > 0 {
+			header[0] = strings.TrimPrefix(header[0], "\ufeff")
+		}
 		if err := writer.Write(historyExportProjectCSVRecord(header, keep)); err != nil {
 			return err
 		}
 	}
-	for _, record := range dataRows {
+	for {
+		record, readErr := reader.Read()
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return readErr
+		}
+		rowHasSample := false
+		for index := 2; index < len(record); index++ {
+			if strings.TrimSpace(record[index]) != "" {
+				rowHasSample = true
+				break
+			}
+		}
+		if !rowHasSample {
+			continue
+		}
 		if err := writer.Write(historyExportProjectCSVRecord(record, keep)); err != nil {
 			return err
 		}
