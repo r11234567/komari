@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -775,4 +776,32 @@ func compactMetricStore(ctx context.Context) {
 	if result.Written > 0 {
 		logger.Infof("server", "Metric store compacted %d rollup buckets", result.Written)
 	}
+}
+
+// metricCompactCycleState is retained for compatibility with callers and
+// tests that aggregate the legacy one-step API. Production scheduling uses the
+// deduplicating queue in database/metricstore instead.
+type metricCompactCycleState struct {
+	sync.Mutex
+	written int
+	errors  []error
+}
+
+func (s *metricCompactCycleState) add(written int, err error) {
+	s.Lock()
+	defer s.Unlock()
+	s.written += written
+	if err != nil {
+		s.errors = append(s.errors, err)
+	}
+}
+
+func (s *metricCompactCycleState) finish() (int, error) {
+	s.Lock()
+	defer s.Unlock()
+	written := s.written
+	err := errors.Join(s.errors...)
+	s.written = 0
+	s.errors = nil
+	return written, err
 }
