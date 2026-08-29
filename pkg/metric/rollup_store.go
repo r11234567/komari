@@ -192,7 +192,7 @@ func (s *Store) compactMetricIncrementalInChunks(ctx context.Context, metricName
 		if (completed || stepLimitReached) && s.sqliteStorageV4 {
 			sealBefore := now.Add(-sqliteV4HotWindow).UnixNano()
 			var sealErr error
-			if policy.PreserveRaw {
+			if policy.PreservesRaw() {
 				sealErr = s.sealSQLiteV4RollupsInBatches(ctx, metricName, sealBefore)
 			} else {
 				sealErr = s.sealSQLiteV4MetricInBatches(ctx, metricName, sealBefore)
@@ -256,7 +256,7 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 	rawCutoff := policy.rawCutoff(now)
 	var chunkStart time.Time
 	var found bool
-	if policy.PreserveRaw {
+	if policy.PreservesRaw() {
 		watermark, hasWatermark, err := s.compactionWatermarkFrom(ctx, tx, metricName)
 		if err != nil {
 			return 0, false, err
@@ -290,11 +290,15 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 			chunkEnd = time.Unix(0, candidate).UTC()
 			completed = false
 		}
-		written, err = s.compactMetricIncrementalRangeWithinTx(ctx, metricName, chunkStart, chunkEnd, policy, tx)
+		if policy.PreservesRaw() {
+			written, err = s.compactMetricPreserveRawRangeWithinTx(ctx, metricName, chunkStart, chunkEnd, policy, tx)
+		} else {
+			written, err = s.compactMetricIncrementalRangeWithinTx(ctx, metricName, chunkStart, chunkEnd, policy, tx)
+		}
 		if err != nil {
 			return 0, false, err
 		}
-		if !policy.PreserveRaw {
+		if !policy.PreservesRaw() {
 			if s.sqliteStorageV4 {
 				err = s.deleteSQLiteV4PointsBeforeCompactionTx(ctx, tx, metricName, chunkEnd.UnixNano())
 			} else {
@@ -306,7 +310,7 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 		}
 	}
 
-	if completed {
+	if completed && !policy.PreservesRaw() {
 		if err := s.deleteRollupsForIntervalsTx(ctx, metricName, obsoleteIntervals, tx); err != nil {
 			return 0, false, err
 		}
@@ -328,6 +332,28 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 		return 0, false, err
 	}
 	return written, completed, nil
+}
+
+// compactMetricPreserveRawRange materializes every configured query tier
+// directly from the raw delta. Preserve-raw tiers are intentionally siblings,
+// rather than a handoff chain: 45-minute buckets cannot be composed exactly
+// from 30-minute buckets, while all requested tiers are exact multiples of the
+// one-minute raw timeline.
+func (s *Store) compactMetricPreserveRawRangeWithinTx(ctx context.Context, metricName string, start, before time.Time, policy RollupPolicy, tx *sql.Tx) (int, error) {
+	comp := policy.compression()
+	written := 0
+	for _, tier := range policy.Tiers {
+		buckets, err := s.buildFinestTierRange(ctx, tx, metricName, tier.Interval, comp, start, before)
+		if err != nil {
+			return written, err
+		}
+		n, err := s.mergeRollupBucketsTx(ctx, metricName, tier.Interval, buckets, tx)
+		if err != nil {
+			return written, err
+		}
+		written += n
+	}
+	return written, nil
 }
 
 // sealSQLiteV4MetricInBatches drains existing hot point and rollup backlogs in
@@ -571,6 +597,16 @@ func isRetryableSerializationError(err error) bool {
 func (s *Store) compactMetricWithinTx(ctx context.Context, metricName string, now time.Time, policy RollupPolicy, tx *sql.Tx) (int, error) {
 	if !policy.Enabled() {
 		return 0, nil
+	}
+	if policy.PreservesRaw() {
+		written, err := s.compactMetricPreserveRawRangeWithinTx(ctx, metricName, time.Time{}, time.Time{}, policy, tx)
+		if err != nil {
+			return written, err
+		}
+		if err := s.enforceRetentionWithinTx(ctx, metricName, now, policy, tx); err != nil {
+			return written, err
+		}
+		return written, nil
 	}
 	if policy.RawRetention > 0 {
 		return s.compactMetricIncrementalWithinTx(ctx, metricName, now, policy, tx)

@@ -104,23 +104,44 @@ func connectDownsamplingPolicy() (*metricsv1.DownsamplingPolicy, error) {
 	if err != nil {
 		return nil, err
 	}
-	rawRetention := metricstore.DefaultRollupRawRetention
-	if !cfg.DownsamplingEnabled {
-		rawRetention = metricstore.DefaultRollupMaterializationDelay
+	effective, err := metricstore.RollupPolicyForConfig(cfg)
+	if err != nil {
+		return nil, err
 	}
-	return &metricsv1.DownsamplingPolicy{
+	policy := &metricsv1.DownsamplingPolicy{
 		Enabled:                    cfg.DownsamplingEnabled,
-		PreserveRaw:                !cfg.DownsamplingEnabled,
-		RawRetention:               rawRetention.String(),
+		PreserveRaw:                effective.PreservesRaw(),
+		RawRetention:               effective.RawRetention.String(),
 		MinuteRetentionMinutes:     uint32(max(cfg.RollupMinuteRetentionMinutes, 0)),
 		FiveMinuteRetentionMinutes: uint32(max(cfg.RollupFiveMinuteRetentionMinutes, 0)),
 		HourRetentionHours:         uint32(max(cfg.RollupHourRetentionHours, 0)),
-		Tiers: []*metricsv1.DownsamplingTier{
-			{Interval: "1m", Retention: (time.Duration(cfg.RollupMinuteRetentionMinutes) * time.Minute).String()},
-			{Interval: "5m", Retention: (time.Duration(cfg.RollupFiveMinuteRetentionMinutes) * time.Minute).String()},
-			{Interval: "1h", Retention: (time.Duration(cfg.RollupHourRetentionHours) * time.Hour).String()},
-		},
-	}, nil
+		Tiers:                      make([]*metricsv1.DownsamplingTier, 0, len(effective.Tiers)),
+	}
+	for _, tier := range effective.Tiers {
+		policy.Tiers = append(policy.Tiers, &metricsv1.DownsamplingTier{
+			Interval: rollupIntervalLabel(tier.Interval), Retention: tier.Retention.String(),
+		})
+	}
+	return policy, nil
+}
+
+func rollupIntervalLabel(interval time.Duration) string {
+	switch interval {
+	case time.Minute:
+		return "1m"
+	case 5 * time.Minute:
+		return "5m"
+	case 15 * time.Minute:
+		return "15m"
+	case 30 * time.Minute:
+		return "30m"
+	case 45 * time.Minute:
+		return "45m"
+	case time.Hour:
+		return "1h"
+	default:
+		return interval.String()
+	}
 }
 
 func metricDefinitionToProto(definition metric.Definition) *metricsv1.MetricDefinition {

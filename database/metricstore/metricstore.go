@@ -37,10 +37,17 @@ const (
 	DefaultRollupFiveMinuteRetentionMinutes = 3000
 	DefaultRollupHourRetentionHours         = 600
 	defaultRollupTerminalRetention          = 100 * 365 * 24 * time.Hour
-	externalStoreInitTimeout                = 30 * time.Second
-	checkpointRetryTimeout                  = time.Second
-	backgroundCheckpointTimeout             = 10 * time.Second
-	metricWALCheckpointLimit                = 64 * 1024 * 1024
+	// Preserve-raw rollups mirror the dashboard windows. They are query
+	// accelerators only; raw samples remain authoritative until metric expiry.
+	PreserveRawMinuteRetention          = 6 * time.Hour
+	PreserveRawFiveMinuteRetention      = 24 * time.Hour
+	PreserveRawFifteenMinuteRetention   = 7 * 24 * time.Hour
+	PreserveRawThirtyMinuteRetention    = 15 * 24 * time.Hour
+	PreserveRawFortyFiveMinuteRetention = 30 * 24 * time.Hour
+	externalStoreInitTimeout            = 30 * time.Second
+	checkpointRetryTimeout              = time.Second
+	backgroundCheckpointTimeout         = 10 * time.Second
+	metricWALCheckpointLimit            = 64 * 1024 * 1024
 )
 
 // MetricStoreConfig 保存 metric store 配置。
@@ -50,7 +57,7 @@ const (
 type MetricStoreConfig struct {
 	Driver                           string `json:"metric_db_driver" default:"sqlite"`                          // 数据库类型: sqlite, mysql, postgresql
 	DSN                              string `json:"metric_db_dsn" default:"./data/metrics.db"`                  // 数据库连接串
-	DownsamplingEnabled              bool   `json:"metric_downsampling_enabled" default:"false"`                // 是否启用三级降采样并删除已汇总的原始点
+	DownsamplingEnabled              bool   `json:"metric_downsampling_enabled" default:"false"`                // true=降采样并删除已汇总原始点；false=保留原始点并仅生成查询加速 rollup
 	RollupMinuteRetentionMinutes     int    `json:"metric_rollup_minute_retention_minutes" default:"600"`       // 1 分钟桶保留分钟数
 	RollupFiveMinuteRetentionMinutes int    `json:"metric_rollup_five_minute_retention_minutes" default:"3000"` // 5 分钟桶保留分钟数
 	RollupHourRetentionHours         int    `json:"metric_rollup_hour_retention_hours" default:"600"`           // 1 小时桶保留小时数
@@ -66,8 +73,9 @@ const (
 	MetricStoreEnabledKey = "metric_store_enabled" // Deprecated: metric store 始终启用
 	MetricDBDriverKey     = "metric_db_driver"
 	MetricDBDSNKey        = "metric_db_dsn"
-	// MetricDownsamplingEnabledKey controls expiry of raw points. Rollups are
-	// always materialized for bounded historical queries; false preserves raw.
+	// MetricDownsamplingEnabledKey selects the storage architecture: true uses
+	// destructive downsampling; false keeps raw points and uses rollups only as
+	// query accelerators.
 	MetricDownsamplingEnabledKey              = "metric_downsampling_enabled"
 	MetricRollupMinuteRetentionMinutesKey     = "metric_rollup_minute_retention_minutes"
 	MetricRollupFiveMinuteRetentionMinutesKey = "metric_rollup_five_minute_retention_minutes"
@@ -163,6 +171,22 @@ func rollupPolicyFromConfig(cfg *MetricStoreConfig) (metric.RollupPolicy, error)
 	if cfg == nil {
 		return metric.RollupPolicy{}, fmt.Errorf("metric store config is nil")
 	}
+	if !cfg.DownsamplingEnabled {
+		return metric.RollupPolicy{
+			Mode:         metric.RollupModePreserveRaw,
+			RawRetention: DefaultRollupMaterializationDelay,
+			PreserveRaw:  true,
+			Tiers: []metric.RollupTier{
+				{Interval: time.Minute, Retention: PreserveRawMinuteRetention},
+				{Interval: 5 * time.Minute, Retention: PreserveRawFiveMinuteRetention},
+				{Interval: 15 * time.Minute, Retention: PreserveRawFifteenMinuteRetention},
+				{Interval: 30 * time.Minute, Retention: PreserveRawThirtyMinuteRetention},
+				{Interval: 45 * time.Minute, Retention: PreserveRawFortyFiveMinuteRetention},
+				{Interval: time.Hour, Retention: defaultRollupTerminalRetention},
+			},
+		}, nil
+	}
+
 	minuteRetention := cfg.RollupMinuteRetentionMinutes
 	fiveMinuteRetention := cfg.RollupFiveMinuteRetentionMinutes
 	hourRetention := cfg.RollupHourRetentionHours
@@ -193,13 +217,10 @@ func rollupPolicyFromConfig(cfg *MetricStoreConfig) (metric.RollupPolicy, error)
 	}
 
 	rawRetention := DefaultRollupRawRetention
-	preserveRaw := !cfg.DownsamplingEnabled
-	if preserveRaw {
-		rawRetention = DefaultRollupMaterializationDelay
-	}
 	policy := metric.RollupPolicy{
+		Mode:         metric.RollupModeDownsample,
 		RawRetention: rawRetention,
-		PreserveRaw:  preserveRaw,
+		PreserveRaw:  false,
 		Tiers: []metric.RollupTier{
 			{Interval: DefaultRollupFinestTier, Retention: minuteDuration},
 			{Interval: 5 * time.Minute, Retention: fiveMinuteDuration},
@@ -213,11 +234,17 @@ func rollupPolicyFromConfig(cfg *MetricStoreConfig) (metric.RollupPolicy, error)
 	return policy, nil
 }
 
-// ValidateDownsamplingPolicy validates the configurable three-tier retention
-// ladder without opening or changing the active metric store.
+// ValidateDownsamplingPolicy validates the configured retention policy without
+// opening or changing the active metric store.
 func ValidateDownsamplingPolicy(cfg *MetricStoreConfig) error {
 	_, err := rollupPolicyFromConfig(cfg)
 	return err
+}
+
+// RollupPolicyForConfig returns the effective policy, including the fixed
+// preserve-raw tier ladder used when downsampling is disabled.
+func RollupPolicyForConfig(cfg MetricStoreConfig) (metric.RollupPolicy, error) {
+	return rollupPolicyFromConfig(&cfg)
 }
 
 func checkedRollupDuration(value int, unit time.Duration) (time.Duration, error) {
@@ -776,7 +803,7 @@ func metricWALCheckpointTimeout(size int64) time.Duration {
 func finishCompactCycle(ctx context.Context, activeStore *metric.Store, now time.Time, allowCheckpoint bool) error {
 	var compactErrors []error
 	if _, err := activeStore.CleanupExpired(ctx, now); err != nil {
-		compactErrors = append(compactErrors, fmt.Errorf("clean up expired raw metrics: %w", err))
+		compactErrors = append(compactErrors, fmt.Errorf("clean up expired metric data and rollups: %w", err))
 	}
 	if activeStore.Driver() == metric.DriverSQLite && allowCheckpoint && !checkpointIsPending() {
 		files, err := activeStore.SQLiteFiles(ctx)

@@ -33,8 +33,8 @@ import (
 func init() {
 	reg("listMetricDefinitions", adminListMetricDefinitions, "List metric definitions and retention policies")
 	reg("updateMetricDefinition", adminUpdateMetricDefinition, "Update a metric definition")
-	reg("getDownsamplingPolicy", adminGetDownsamplingPolicy, "Get the three-tier metric downsampling policy")
-	reg("setDownsamplingPolicy", adminSetDownsamplingPolicy, "Configure three-tier metric downsampling")
+	reg("getDownsamplingPolicy", adminGetDownsamplingPolicy, "Get the metric rollup policy")
+	reg("setDownsamplingPolicy", adminSetDownsamplingPolicy, "Configure the metric rollup policy")
 	reg("getMetricMigrationStatus", adminGetMetricMigrationStatus, "Get metrics store migration status (SQLite -> MySQL/PostgreSQL)")
 	reg("startMetricMigration", adminStartMetricMigration, "Start migrating metrics data from source SQLite to the current MySQL/PostgreSQL target")
 	reg("cancelMetricMigration", adminCancelMetricMigration, "Cancel the currently running metrics store migration")
@@ -60,24 +60,44 @@ func currentDownsamplingPolicy() (downsamplingPolicyResponse, error) {
 	if err != nil {
 		return downsamplingPolicyResponse{}, err
 	}
-	rawRetention := metricstore.DefaultRollupRawRetention
-	if !cfg.DownsamplingEnabled {
-		rawRetention = metricstore.DefaultRollupMaterializationDelay
+	effective, err := metricstore.RollupPolicyForConfig(cfg)
+	if err != nil {
+		return downsamplingPolicyResponse{}, err
 	}
 	policy := downsamplingPolicyResponse{
 		Enabled:                    cfg.DownsamplingEnabled,
-		PreserveRaw:                !cfg.DownsamplingEnabled,
-		RawRetention:               rawRetention.String(),
+		PreserveRaw:                effective.PreservesRaw(),
+		RawRetention:               effective.RawRetention.String(),
 		MinuteRetentionMinutes:     cfg.RollupMinuteRetentionMinutes,
 		FiveMinuteRetentionMinutes: cfg.RollupFiveMinuteRetentionMinutes,
 		HourRetentionHours:         cfg.RollupHourRetentionHours,
 	}
-	policy.Tiers = []downsamplingTierResponse{
-		{Interval: "1m", Retention: (time.Duration(cfg.RollupMinuteRetentionMinutes) * time.Minute).String()},
-		{Interval: "5m", Retention: (time.Duration(cfg.RollupFiveMinuteRetentionMinutes) * time.Minute).String()},
-		{Interval: "1h", Retention: (time.Duration(cfg.RollupHourRetentionHours) * time.Hour).String()},
+	policy.Tiers = make([]downsamplingTierResponse, 0, len(effective.Tiers))
+	for _, tier := range effective.Tiers {
+		policy.Tiers = append(policy.Tiers, downsamplingTierResponse{
+			Interval: rollupIntervalLabel(tier.Interval), Retention: tier.Retention.String(),
+		})
 	}
 	return policy, nil
+}
+
+func rollupIntervalLabel(interval time.Duration) string {
+	switch interval {
+	case time.Minute:
+		return "1m"
+	case 5 * time.Minute:
+		return "5m"
+	case 15 * time.Minute:
+		return "15m"
+	case 30 * time.Minute:
+		return "30m"
+	case 45 * time.Minute:
+		return "45m"
+	case time.Hour:
+		return "1h"
+	default:
+		return interval.String()
+	}
 }
 
 func adminGetDownsamplingPolicy(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {

@@ -107,28 +107,35 @@ func TestBuildMetricConfigKeepsRollupTiersWhenDownsamplingIsDisabled(t *testing.
 	if err != nil {
 		t.Fatalf("build metric config: %v", err)
 	}
-	if !cfg.RollupPolicy.Enabled() || len(cfg.RollupPolicy.Tiers) != 4 {
-		t.Fatal("downsampling-disabled config must retain query rollup tiers")
+	if !cfg.RollupPolicy.Enabled() || len(cfg.RollupPolicy.Tiers) != 6 {
+		t.Fatal("downsampling-disabled config must retain the six query rollup tiers")
 	}
-	if !cfg.RollupPolicy.PreserveRaw {
+	if !cfg.RollupPolicy.PreservesRaw() {
 		t.Fatal("downsampling-disabled config must preserve raw points")
+	}
+	wantIntervals := []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute, 45 * time.Minute, time.Hour}
+	wantRetentions := []time.Duration{PreserveRawMinuteRetention, PreserveRawFiveMinuteRetention, PreserveRawFifteenMinuteRetention, PreserveRawThirtyMinuteRetention, PreserveRawFortyFiveMinuteRetention, defaultRollupTerminalRetention}
+	for i, tier := range cfg.RollupPolicy.Tiers {
+		if tier.Interval != wantIntervals[i] || tier.Retention != wantRetentions[i] {
+			t.Fatalf("preserve-raw tier %d = %#v, want interval %s retention %s", i, tier, wantIntervals[i], wantRetentions[i])
+		}
 	}
 }
 
 func TestRollupPolicyEnablesRawExpiryOnlyWhenRequested(t *testing.T) {
 	disabled := rollupPolicy(false)
 	enabled := rollupPolicy(true)
-	if !disabled.Enabled() || len(disabled.Tiers) != 4 {
+	if !disabled.Enabled() || len(disabled.Tiers) != 6 {
 		t.Fatalf("disabled policy must keep query rollup tiers: %#v", disabled)
 	}
-	if !disabled.PreserveRaw || disabled.RawRetention != DefaultRollupMaterializationDelay {
+	if !disabled.PreservesRaw() || disabled.RawRetention != DefaultRollupMaterializationDelay {
 		t.Fatalf("disabled policy does not preserve raw with delayed rollups: %#v", disabled)
 	}
-	if enabled.PreserveRaw || enabled.RawRetention != DefaultRollupRawRetention {
+	if enabled.PreservesRaw() || enabled.RawRetention != DefaultRollupRawRetention {
 		t.Fatalf("enabled raw retention = %s, want %s", enabled.RawRetention, DefaultRollupRawRetention)
 	}
-	if !reflect.DeepEqual(disabled.Tiers, enabled.Tiers) || len(enabled.Tiers) != 4 {
-		t.Fatal("raw preservation must not change the configured rollup tiers")
+	if reflect.DeepEqual(disabled.Tiers, enabled.Tiers) || len(enabled.Tiers) != 4 {
+		t.Fatal("downsampling and preserve-raw modes must use separate tier ladders")
 	}
 }
 

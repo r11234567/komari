@@ -211,10 +211,15 @@ func TestRuntimeSealingDrainsMoreThanOneSeriesBatch(t *testing.T) {
 func TestIncrementalCompactionPreservesRawWithoutDuplicatingRollups(t *testing.T) {
 	ctx := context.Background()
 	policy := RollupPolicy{
+		Mode:         RollupModePreserveRaw,
 		RawRetention: 2 * time.Hour,
-		PreserveRaw:  true,
 		Tiers: []RollupTier{
-			{Interval: time.Minute, Retention: 24 * time.Hour},
+			{Interval: time.Minute, Retention: 6 * time.Hour},
+			{Interval: 5 * time.Minute, Retention: 24 * time.Hour},
+			{Interval: 15 * time.Minute, Retention: 7 * 24 * time.Hour},
+			{Interval: 30 * time.Minute, Retention: 15 * 24 * time.Hour},
+			{Interval: 45 * time.Minute, Retention: 30 * 24 * time.Hour},
+			{Interval: time.Hour, Retention: 100 * 365 * 24 * time.Hour},
 		},
 	}
 	store := newRollupStore(t, policy)

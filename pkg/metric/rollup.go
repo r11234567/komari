@@ -6,9 +6,10 @@ import (
 	"time"
 )
 
-// RollupTier describes one downsampled resolution: raw points (or the next
-// finer tier) are aggregated into buckets Interval wide, and those buckets are
-// kept for Retention. A policy lists tiers from finest to coarsest, e.g.
+// RollupTier describes one rollup resolution: raw points (or, in destructive
+// mode, the next finer tier) are aggregated into buckets Interval wide, and
+// those buckets are kept for Retention. A policy lists tiers from finest to
+// coarsest, e.g.
 //
 //	1m kept 7d  ->  5m kept 30d  ->  1h kept 1y
 //
@@ -34,13 +35,29 @@ type RollupTier struct {
 	Retention time.Duration `json:"retention"`
 }
 
-// RollupPolicy is the full retention ladder for a store: how long raw points
-// live, then a chain of progressively coarser tiers. Compact materializes the
-// tiers and enforces every retention window.
+// RollupMode selects the ownership model for raw samples.
+//
+// Downsample deletes raw samples after they have been materialized into the
+// finest rollup. PreserveRaw keeps raw samples until the metric definition's
+// own retention cleanup and uses rollups only as query accelerators.
+type RollupMode string
+
+const (
+	RollupModeDownsample  RollupMode = "downsample"
+	RollupModePreserveRaw RollupMode = "preserve_raw"
+)
+
+// RollupPolicy is the full retention ladder for a store. In downsample mode,
+// tiers form a destructive handoff chain. In preserve-raw mode, each tier is
+// materialized independently from raw points and raw retention is governed by
+// each metric definition.
 //
 // RollupPolicy 描述完整保留阶梯：原始点保留多久，以及后续逐级变粗的
 // rollup 层；Compact 会物化这些层并执行保留窗口。
 type RollupPolicy struct {
+	// Mode is the explicit raw-data ownership model. Empty keeps compatibility
+	// with policies written before the mode field was introduced.
+	Mode RollupMode `json:"mode,omitempty"`
 	// RawRetention is the hot-data window before points are materialized into
 	// the finest tier. Compact deletes those points unless PreserveRaw is set.
 	// Zero keeps the historical full-rebuild behavior.
@@ -52,14 +69,15 @@ type RollupPolicy struct {
 	// rollups. The watermark still advances, so background compaction remains
 	// incremental instead of rebuilding retained history on every cycle.
 	PreserveRaw bool `json:"preserve_raw,omitempty"`
-	// Tiers are ordered finest-first. Each Interval must be a positive integer
-	// multiple of the previous tier's Interval (so a coarse bucket is composed
-	// of whole finer buckets), and each Retention must be >= the previous
-	// tier's Retention (coarse data outlives fine data).
+	// Tiers are ordered finest-first. In downsample mode, each Interval must be
+	// a positive integer multiple of the previous tier because buckets are
+	// handed off. Preserve-raw tiers are siblings built directly from raw data,
+	// so they only need to be strictly increasing. Each Retention must be >= the
+	// previous tier's Retention.
 	//
-	// Tiers 按从细到粗排序。每个 Interval 必须是前一层 Interval 的正整数倍
-	// （这样粗桶由完整细桶组成），每个 Retention 必须 >= 前一层 Retention
-	// （粗数据比细数据活得更久）。
+	// Tiers 按从细到粗排序。降采样模式下每个 Interval 必须是前一层的正整数倍
+	// （这样粗桶由完整细桶组成）；保留原始数据模式下各层直接从 raw 生成，只要求
+	// 间隔严格递增。每个 Retention 必须 >= 前一层 Retention（粗数据比细数据活得更久）。
 	Tiers []RollupTier `json:"tiers"`
 	// Compression tunes the per-bucket t-digest (size vs. percentile accuracy).
 	// <=1 uses the default (100).
@@ -67,6 +85,15 @@ type RollupPolicy struct {
 	// Compression 调整每个桶的 t-digest（大小与百分位精度之间的取舍）。
 	// <=1 时使用默认值（100）。
 	Compression float64 `json:"compression"`
+}
+
+// PreservesRaw reports whether compaction must leave raw samples in place.
+// The legacy PreserveRaw field remains accepted for older callers.
+func (p RollupPolicy) PreservesRaw() bool {
+	if p.Mode != "" {
+		return p.Mode == RollupModePreserveRaw
+	}
+	return p.PreserveRaw
 }
 
 // Enabled reports whether the policy actually defines any rollup tiers.
@@ -105,6 +132,15 @@ func (p RollupPolicy) withMetricRetention(retention time.Duration) RollupPolicy 
 
 	out := p
 	out.Tiers = make([]RollupTier, 0, len(p.Tiers))
+	if p.PreservesRaw() {
+		for _, tier := range p.Tiers {
+			if tier.Retention > retention {
+				tier.Retention = retention
+			}
+			out.Tiers = append(out.Tiers, tier)
+		}
+		return out
+	}
 	for i, tier := range p.Tiers {
 		if i == len(p.Tiers)-1 || tier.Retention > retention {
 			tier.Retention = retention
@@ -122,6 +158,9 @@ func (p RollupPolicy) withMetricRetention(retention time.Duration) RollupPolicy 
 //
 // Validate 检查策略结构是否满足级联合成和保留语义所需的约束。
 func (p RollupPolicy) Validate() error {
+	if p.Mode != "" && p.Mode != RollupModeDownsample && p.Mode != RollupModePreserveRaw {
+		return fmt.Errorf("%w: unsupported rollup mode %q", ErrInvalidArgument, p.Mode)
+	}
 	if len(p.Tiers) == 0 {
 		return nil // a store with no tiers simply does no rollup work
 	}
@@ -148,7 +187,7 @@ func (p RollupPolicy) Validate() error {
 			if tr.Interval <= prev.Interval {
 				return fmt.Errorf("%w: tier %d interval must be larger than tier %d", ErrInvalidArgument, i, i-1)
 			}
-			if tr.Interval%prev.Interval != 0 {
+			if !p.PreservesRaw() && tr.Interval%prev.Interval != 0 {
 				return fmt.Errorf("%w: tier %d interval must be a multiple of tier %d interval", ErrInvalidArgument, i, i-1)
 			}
 			if tr.Retention < prev.Retention {

@@ -2046,9 +2046,9 @@ func (s *Store) sqliteV4HasPointsBefore(ctx context.Context, metricName string, 
 	return exists, err
 }
 
-// CleanupExpired deletes expired raw points for every metric.
+// CleanupExpired deletes expired raw points and rollups for every metric.
 //
-// CleanupExpired 根据各指标保留天数清理过期原始点。
+// CleanupExpired 根据各指标保留天数统一清理过期原始点和 rollup。
 func (s *Store) CleanupExpired(ctx context.Context, now time.Time) (int64, error) {
 	defs, err := s.ListMetrics(ctx)
 	if err != nil {
@@ -2073,7 +2073,153 @@ func (s *Store) CleanupExpired(ctx context.Context, now time.Time) (int64, error
 		}
 		total += deleted
 	}
+	rollupDeleted, err := s.CleanupExpiredRollups(ctx, now)
+	return total + rollupDeleted, err
+}
+
+// CleanupExpiredRollups removes rollup buckets outside each metric's effective
+// tier retention. It is intentionally separate from raw cleanup so callers can
+// reclaim rollup-only storage without changing raw-data ownership semantics.
+func (s *Store) CleanupExpiredRollups(ctx context.Context, now time.Time) (int64, error) {
+	defs, err := s.ListMetrics(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, def := range defs {
+		if s.sqlitePingMerged && def.Name == sqliteVirtualPingLossMetric {
+			continue
+		}
+		policy := s.cfg.RollupPolicy.withMetricRetention(time.Duration(def.RetentionDays) * 24 * time.Hour)
+		obsolete, err := s.deleteRollupsOutsidePolicy(ctx, def.Name, policy)
+		if err != nil {
+			return total, err
+		}
+		total += obsolete
+		for _, tier := range policy.Tiers {
+			cutoff := alignRollupRetentionCutoff(now.Add(-tier.Retention), tier.Interval)
+			deleted, err := s.deleteRollupsBefore(ctx, def.Name, tier.Interval, cutoff)
+			if err != nil {
+				return total, err
+			}
+			total += deleted
+		}
+	}
 	return total, nil
+}
+
+func (s *Store) deleteRollupsOutsidePolicy(ctx context.Context, metricName string, policy RollupPolicy) (int64, error) {
+	allowed := make(map[int64]struct{}, len(policy.Tiers))
+	for _, tier := range policy.Tiers {
+		allowed[tier.Interval.Nanoseconds()] = struct{}{}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	resolutionSQL := fmt.Sprintf(`SELECT DISTINCT resolution_nano FROM %s WHERE metric_name = %s`,
+		s.tables.rollups, s.dialect.placeholder(1))
+	if s.sqliteStorageV4 {
+		resolutionSQL = fmt.Sprintf(
+			`SELECT DISTINCT resolution_nano FROM %s WHERE metric_name = %s
+			 UNION SELECT DISTINCT b.resolution_nano FROM %s b JOIN %s s ON s.id = b.series_id WHERE s.metric_name = %s`,
+			s.tables.rollupValues, s.dialect.placeholder(1), s.tables.rollupBlocks, s.tables.series, s.dialect.placeholder(1))
+	}
+	rows, err := tx.QueryContext(ctx, resolutionSQL, metricName)
+	if err != nil {
+		return 0, err
+	}
+	var resolutions []int64
+	for rows.Next() {
+		var resolution int64
+		if err := rows.Scan(&resolution); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		if _, ok := allowed[resolution]; !ok {
+			resolutions = append(resolutions, resolution)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if len(resolutions) == 0 {
+		_ = tx.Rollback()
+		return 0, nil
+	}
+	var deleted int64
+	if s.sqliteStorageV4 {
+		deleted, err = s.deleteSQLiteV4RollupsTx(ctx, tx, Query{MetricName: metricName}, resolutions, nil)
+	} else if len(resolutions) > 0 {
+		placeholders := make([]string, len(resolutions))
+		args := []any{metricName}
+		for i, resolution := range resolutions {
+			placeholders[i] = s.dialect.placeholder(i + 2)
+			args = append(args, resolution)
+		}
+		result, execErr := tx.ExecContext(ctx, fmt.Sprintf(
+			`DELETE FROM %s WHERE metric_name = %s AND resolution_nano IN (%s)`,
+			s.tables.rollups, s.dialect.placeholder(1), strings.Join(placeholders, ",")), args...)
+		if execErr != nil {
+			return 0, execErr
+		}
+		deleted, err = result.RowsAffected()
+	}
+	if err != nil {
+		return deleted, err
+	}
+	if err := s.pruneUnusedSQLiteSeries(ctx, tx); err != nil {
+		return deleted, err
+	}
+	if err := tx.Commit(); err != nil {
+		return deleted, err
+	}
+	return deleted, nil
+}
+
+func (s *Store) deleteRollupsBefore(ctx context.Context, metricName string, interval time.Duration, before time.Time) (int64, error) {
+	if err := s.ensureOpen(); err != nil {
+		return 0, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if s.sqliteStorageV4 {
+		beforeNano := before.UTC().UnixNano()
+		deleted, err := s.deleteSQLiteV4RollupsTx(ctx, tx, Query{MetricName: metricName}, []int64{interval.Nanoseconds()}, &beforeNano)
+		if err != nil {
+			return deleted, err
+		}
+		if err := s.pruneUnusedSQLiteSeries(ctx, tx); err != nil {
+			return deleted, err
+		}
+		if err := tx.Commit(); err != nil {
+			return deleted, err
+		}
+		return deleted, nil
+	}
+	result, err := tx.ExecContext(ctx, fmt.Sprintf(
+		`DELETE FROM %s WHERE metric_name = %s AND resolution_nano = %s AND bucket_nano < %s`,
+		s.tables.rollups, s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3)),
+		metricName, interval.Nanoseconds(), before.UTC().UnixNano())
+	if err != nil {
+		return 0, err
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return deleted, err
+	}
+	if err := tx.Commit(); err != nil {
+		return deleted, err
+	}
+	return deleted, nil
 }
 
 // buildWhere renders the WHERE clause and arguments for a raw query.

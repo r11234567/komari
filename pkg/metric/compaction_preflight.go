@@ -18,7 +18,7 @@ func (s *Store) incrementalCompactionPending(ctx context.Context, metricName str
 	}
 
 	rawCutoff := policy.rawCutoff(now).UnixNano()
-	if policy.PreserveRaw {
+	if policy.PreservesRaw() {
 		watermark, found, err := s.compactionWatermark(ctx, metricName)
 		if err != nil {
 			return false, err
@@ -53,7 +53,7 @@ func (s *Store) incrementalCompactionPending(ctx context.Context, metricName str
 	}
 
 	sealBefore := now.Add(-sqliteV4HotWindow).UnixNano()
-	if !policy.PreserveRaw {
+	if !policy.PreservesRaw() {
 		pending, err := s.sqliteV4MetricPointRowsBefore(ctx, metricName, sealBefore, false)
 		if err != nil || pending {
 			return pending, err
