@@ -304,6 +304,7 @@ func (s *Store) createSQLiteV3PhysicalTables(ctx context.Context, tx *sql.Tx) er
 			UNIQUE(metric_name, entity_id, tags_hash)
 		)`, s.tables.series),
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_series_entity_idx ON %s (entity_id)`, s.cfg.TablePrefix, s.tables.series),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_series_metric_idx ON %s (metric_name, id)`, s.cfg.TablePrefix, s.tables.series),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 			series_id INTEGER NOT NULL REFERENCES %s(id) ON DELETE CASCADE,
 			ts_nano BIGINT NOT NULL,

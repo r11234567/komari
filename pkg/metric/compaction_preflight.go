@@ -77,7 +77,7 @@ func (s *Store) sqliteV4MetricPointRowsBefore(ctx context.Context, metricName st
 	}
 	return queryRowExists(ctx, s.db, fmt.Sprintf(
 		`SELECT 1 FROM %s b JOIN %s s ON s.id = b.series_id
-		 WHERE s.metric_name = ? AND b.start_nano < ? LIMIT 1`,
+		 WHERE s.metric_name = ? AND b.end_nano < ? LIMIT 1`,
 		s.tables.pointBlocks, s.tables.series,
 	), metricName, beforeNano)
 }
@@ -88,7 +88,9 @@ func (s *Store) sqliteV4MetricRollupRows(ctx context.Context, metricName string,
 	args := []any{metricName, resolution}
 	if beforeNano != nil {
 		hotWhere = " AND r.bucket_nano < ?"
-		blockWhere = " AND b.start_nano < ?"
+		// Boundary blocks are handled by the sealing step; only complete blocks
+		// are evidence that more work remains.
+		blockWhere = " AND b.end_nano < ?"
 		args = append(args, *beforeNano)
 	}
 	pending, err := queryRowExists(ctx, s.db, fmt.Sprintf(

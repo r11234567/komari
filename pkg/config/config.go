@@ -457,6 +457,16 @@ func SetMany(cst map[string]any) error {
 	return nil
 }
 
+// Delete removes a retired configuration key. It is intentionally small and
+// is used by migrations when a setting has been replaced by a canonical
+// frontend-managed value.
+func Delete(key string) error {
+	if strings.TrimSpace(key) == "" {
+		return nil
+	}
+	return db.Delete(&ConfigItem{}, "key = ?", key).Error
+}
+
 type ConfigEvent struct {
 	Old map[string]any
 	New map[string]any

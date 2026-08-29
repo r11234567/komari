@@ -143,8 +143,18 @@ func normalizeMetricStorageSettings() error {
 	if err := config.Set(config.LowResourceModeKey, false); err != nil {
 		return err
 	}
-	_, err := config.GetAs[bool](metricstore.MetricDownsamplingEnabledKey, false)
-	return err
+	if _, err := config.GetAs[bool](metricstore.MetricDownsamplingEnabledKey, false); err != nil {
+		return err
+	}
+	// Retention is owned by metric_definitions, which is edited by the admin
+	// frontend. Remove legacy aggregate maps so they cannot diverge from the
+	// values used by cleanup and rollup policy evaluation.
+	for _, key := range []string{"metric_retention_days_by_name", "metric_downsampling_policy"} {
+		if err := config.Delete(key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // InitStores 初始化独立存储组件（metric store）并执行 metrics 迁移。

@@ -80,7 +80,7 @@ func (s *Store) Compact(ctx context.Context, now time.Time) (int, error) {
 // 在新快照上重试。SQLite 在单连接上串行化写入，其默认隔离已提供该保证，
 // 无需提升隔离级别。
 func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.Time) (int, error) {
-	return s.compactMetric(ctx, metricName, now, metricCompactionChunksPerRun)
+	return s.compactMetric(ctx, metricName, now, metricCompactionChunksPerRun, 0)
 }
 
 // CompactMetricStep performs a deliberately small amount of incremental work.
@@ -88,10 +88,10 @@ func (s *Store) CompactMetric(ctx context.Context, metricName string, now time.T
 // keeps the broader CompactMetric budget so maintenance callers can make
 // meaningful progress without monopolizing a constrained server at runtime.
 func (s *Store) CompactMetricStep(ctx context.Context, metricName string, now time.Time) (int, error) {
-	return s.compactMetric(ctx, metricName, now, metricCompactionChunksPerStep)
+	return s.compactMetric(ctx, metricName, now, 0, metricCompactionStepBudget)
 }
 
-func (s *Store) compactMetric(ctx context.Context, metricName string, now time.Time, chunkLimit int) (int, error) {
+func (s *Store) compactMetric(ctx context.Context, metricName string, now time.Time, chunkLimit int, stepBudget time.Duration) (int, error) {
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
 	}
@@ -109,8 +109,9 @@ func (s *Store) compactMetric(ctx context.Context, metricName string, now time.T
 		return 0, err
 	}
 	if def.RetentionDays == 0 {
-		_, err := s.DeleteSeries(ctx, Query{MetricName: metricName})
-		return 0, err
+		// Retention cleanup owns deletion in bounded steps. Compaction must not
+		// turn a disabled metric into an unbounded full-table delete.
+		return 0, nil
 	}
 	if !policy.Enabled() {
 		return 0, nil
@@ -120,7 +121,7 @@ func (s *Store) compactMetric(ctx context.Context, metricName string, now time.T
 	policy = effectivePolicy
 	now = now.UTC()
 	if policy.RawRetention > 0 {
-		return s.compactMetricIncrementalInChunks(ctx, metricName, now, policy, obsoleteIntervals, chunkLimit)
+		return s.compactMetricIncrementalInChunks(ctx, metricName, now, policy, obsoleteIntervals, chunkLimit, stepBudget)
 	}
 
 	// Retry the whole compaction on a transient serialization/deadlock failure.
@@ -158,18 +159,18 @@ const (
 	metricCompactionChunkWindow  = 5 * time.Minute
 	metricCompactionSeriesBatch  = 8
 	metricCompactionChunksPerRun = 16
-	// Low-end VPS instances frequently expose a full vCPU but heavily throttle
-	// it. Two bounded windows make historical materialization cooperative rather
-	// than allowing one scheduled tick to monopolize that vCPU.
-	metricCompactionChunksPerStep = 2
-	metricCompactionVacuumEvery   = 16
-	metricCompactionMinYield      = 100 * time.Millisecond
+	metricCompactionVacuumEvery  = 16
+	metricCompactionMinYield     = 100 * time.Millisecond
+	// Scheduler compaction is time-budgeted rather than tied to a fixed number
+	// of chunks. A throttled CPU therefore yields promptly while a fast host can
+	// drain more backlog in the same invocation.
+	metricCompactionStepBudget = 1200 * time.Millisecond
 )
 
 // compactMetricIncrementalInChunks commits old upgrade data in bounded ranges.
 // A timeout only rolls back the active range; earlier ranges and their persisted
 // watermarks remain available for the next scheduled compaction attempt.
-func (s *Store) compactMetricIncrementalInChunks(ctx context.Context, metricName string, now time.Time, policy RollupPolicy, obsoleteIntervals []time.Duration, chunkLimit int) (int, error) {
+func (s *Store) compactMetricIncrementalInChunks(ctx context.Context, metricName string, now time.Time, policy RollupPolicy, obsoleteIntervals []time.Duration, chunkLimit int, stepBudget time.Duration) (int, error) {
 	pending, err := s.incrementalCompactionPending(ctx, metricName, now, policy, obsoleteIntervals)
 	if err != nil {
 		return 0, err
@@ -180,6 +181,7 @@ func (s *Store) compactMetricIncrementalInChunks(ctx context.Context, metricName
 
 	total := 0
 	chunksSinceVacuum := 0
+	stepStarted := time.Now()
 	for {
 		chunkStarted := time.Now()
 		written, completed, err := s.compactMetricIncrementalChunk(ctx, metricName, now, policy, obsoleteIntervals)
@@ -208,6 +210,9 @@ func (s *Store) compactMetricIncrementalInChunks(ctx context.Context, metricName
 			chunksSinceVacuum = 0
 		}
 		if completed || stepLimitReached {
+			return total, nil
+		}
+		if stepBudget > 0 && time.Since(stepStarted) >= stepBudget {
 			return total, nil
 		}
 		if err := yieldCompactionWriter(ctx, time.Since(chunkStarted)); err != nil {
@@ -309,11 +314,13 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 			}
 		}
 	}
-
 	if completed && !policy.PreservesRaw() {
 		if err := s.deleteRollupsForIntervalsTx(ctx, metricName, obsoleteIntervals, tx); err != nil {
 			return 0, false, err
 		}
+		// Handoff scans the existing fine-tier history. Run it once after the
+		// raw cursor reaches the cutoff, rather than once for every five-minute
+		// raw chunk, so a ping backlog is not decoded repeatedly while catching up.
 		n, err := s.handoffExpiredRollupTiersTx(ctx, metricName, now, policy, tx)
 		if err != nil {
 			return 0, false, err
@@ -341,11 +348,41 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 // one-minute raw timeline.
 func (s *Store) compactMetricPreserveRawRangeWithinTx(ctx context.Context, metricName string, start, before time.Time, policy RollupPolicy, tx *sql.Tx) (int, error) {
 	comp := policy.compression()
-	written := 0
-	for _, tier := range policy.Tiers {
-		buckets, err := s.buildFinestTierRange(ctx, tx, metricName, tier.Interval, comp, start, before)
+	points, err := s.queryRawPointsRange(ctx, tx, metricName, start, before)
+	if err != nil {
+		return 0, err
+	}
+	type indexedPoint struct {
+		point    Point
+		tagsHash string
+		tagsJSON string
+	}
+	indexed := make([]indexedPoint, 0, len(points))
+	for _, point := range points {
+		hash, canonical, err := tagsFingerprint(point.Tags)
 		if err != nil {
-			return written, err
+			return 0, err
+		}
+		indexed = append(indexed, indexedPoint{point: point, tagsHash: hash, tagsJSON: canonical})
+	}
+	written := 0
+	// All preserve-raw tiers are siblings. Read the raw delta once, then fan
+	// each point into the configured bucket widths in memory. Previously every
+	// tier issued the same historical block scan, multiplying ping's decode cost
+	// by six.
+	for _, tier := range policy.Tiers {
+		buckets := make(map[rollupKey]*rollupBucket)
+		for _, item := range indexed {
+			point := item.point
+			key := rollupKey{entityID: point.EntityID, tagsHash: item.tagsHash, bucket: floorDivNano(point.Timestamp.UnixNano(), tier.Interval.Nanoseconds())}
+			bucket := buckets[key]
+			if bucket == nil {
+				bucket = newRollupBucket(comp)
+				bucket.tagsHash = item.tagsHash
+				bucket.tagsJSON = item.tagsJSON
+				buckets[key] = bucket
+			}
+			bucket.addMetricPoint(metricName, point.Value, point.Timestamp.UnixNano())
 		}
 		n, err := s.mergeRollupBucketsTx(ctx, metricName, tier.Interval, buckets, tx)
 		if err != nil {
@@ -354,6 +391,52 @@ func (s *Store) compactMetricPreserveRawRangeWithinTx(ctx context.Context, metri
 		written += n
 	}
 	return written, nil
+}
+
+func (s *Store) queryRawPointsRange(ctx context.Context, q querier, metricName string, start, before time.Time) ([]Point, error) {
+	startNano := int64(math.MinInt64)
+	if !start.IsZero() {
+		startNano = start.UTC().UnixNano()
+	}
+	endNano := int64(math.MaxInt64)
+	if !before.IsZero() {
+		endNano = before.UTC().UnixNano() - 1
+	}
+	if endNano < startNano {
+		return nil, nil
+	}
+	if s.sqliteStorageV4 {
+		return s.querySQLiteV4(ctx, q, Query{MetricName: metricName, Start: time.Unix(0, startNano).UTC(), End: time.Unix(0, endNano).UTC()})
+	}
+	if s.externalPointBlocks {
+		return s.queryExternalPointBlocks(ctx, q, Query{MetricName: metricName, Start: time.Unix(0, startNano).UTC(), End: time.Unix(0, endNano).UTC()})
+	}
+	args := []any{metricName, startNano, endNano}
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(`SELECT s.entity_id, p.ts_nano, p.value, s.tags, p.labels FROM %s p JOIN %s s ON s.id = p.series_id WHERE s.metric_name = %s AND p.ts_nano >= %s AND p.ts_nano <= %s ORDER BY p.ts_nano ASC`, s.tables.pointValues, s.tables.series, s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3)), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var points []Point
+	for rows.Next() {
+		var entityID string
+		var ts int64
+		var value float64
+		var rawTags, rawLabels any
+		if err := rows.Scan(&entityID, &ts, &value, &rawTags, &rawLabels); err != nil {
+			return nil, err
+		}
+		tags, err := decodeMap(rawTags)
+		if err != nil {
+			return nil, err
+		}
+		labels, err := decodeMapString(rawLabels)
+		if err != nil {
+			return nil, err
+		}
+		points = append(points, Point{MetricName: metricName, EntityID: entityID, Timestamp: time.Unix(0, ts).UTC(), Value: value, Tags: tags, Labels: labels})
+	}
+	return points, rows.Err()
 }
 
 // sealSQLiteV4MetricInBatches drains existing hot point and rollup backlogs in
@@ -647,11 +730,7 @@ func (s *Store) compactMetricIncrementalRangeWithinTx(ctx context.Context, metri
 	if err != nil {
 		return 0, err
 	}
-	handedOff, err := s.handoffExpiredRollupTiersTx(ctx, metricName, before, policy, tx)
-	if err != nil {
-		return written, err
-	}
-	return written + handedOff, nil
+	return written, nil
 }
 
 // compactMetricFullWithinTx retains the rebuild behavior required when raw

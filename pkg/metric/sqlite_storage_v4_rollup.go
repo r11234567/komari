@@ -317,6 +317,8 @@ func (s *Store) createSQLiteV4RollupBlocks(ctx context.Context, tx *sql.Tx) erro
 		) WITHOUT ROWID`, s.tables.rollupBlocks, s.tables.series, s.tables.rollupAxes),
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_rollup_blocks_time_idx ON %s (resolution_nano, start_nano, end_nano)`,
 			s.cfg.TablePrefix, s.tables.rollupBlocks),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_rollup_blocks_expiry_idx ON %s (series_id, resolution_nano, end_nano)`,
+			s.cfg.TablePrefix, s.tables.rollupBlocks),
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
@@ -1502,6 +1504,175 @@ func (s *Store) latestSQLiteV4RollupBefore(ctx context.Context, q querier, metri
 }
 
 func (s *Store) deleteSQLiteV4RollupsTx(ctx context.Context, tx *sql.Tx, filter Query, resolutions []int64, beforeNano *int64) (int64, error) {
+	return s.deleteSQLiteV4RollupsBatchTx(ctx, tx, filter, resolutions, beforeNano, 0)
+}
+
+// deleteSQLiteV4RollupsBatchTx deletes complete rollup blocks directly and
+// decodes only boundary blocks. limit bounds the total number of blocks/rows
+// touched by one cooperative step; zero means no limit for explicit
+// administrative deletion.
+func (s *Store) deleteSQLiteV4RollupsBatchTx(ctx context.Context, tx *sql.Tx, filter Query, resolutions []int64, beforeNano *int64, limit int) (int64, error) {
+	series, err := s.sqliteV4MatchingSeries(ctx, tx, filter.MetricName, filter.EntityID, filter.Tags)
+	if err != nil {
+		return 0, err
+	}
+	resolutionSet := make(map[int64]struct{}, len(resolutions))
+	for _, resolution := range resolutions {
+		resolutionSet[resolution] = struct{}{}
+	}
+	var total int64
+	remaining := limit
+	for _, item := range series {
+		if limit > 0 && remaining <= 0 {
+			break
+		}
+		resList := resolutions
+		if len(resList) == 0 {
+			rows, queryErr := tx.QueryContext(ctx, `SELECT DISTINCT resolution_nano FROM `+s.tables.rollupBlocks+` WHERE series_id = ? UNION SELECT DISTINCT resolution_nano FROM `+s.tables.rollupValues+` WHERE series_id = ?`, item.id, item.id)
+			if queryErr != nil {
+				return total, queryErr
+			}
+			for rows.Next() {
+				var resolution int64
+				if scanErr := rows.Scan(&resolution); scanErr != nil {
+					_ = rows.Close()
+					return total, scanErr
+				}
+				resList = append(resList, resolution)
+			}
+			if scanErr := rows.Err(); scanErr != nil {
+				_ = rows.Close()
+				return total, scanErr
+			}
+			_ = rows.Close()
+		}
+		for _, resolution := range resList {
+			if limit > 0 && remaining <= 0 {
+				break
+			}
+			if _, ok := resolutionSet[resolution]; len(resolutions) > 0 && !ok {
+				continue
+			}
+			blockWhere := `series_id = ? AND resolution_nano = ?`
+			blockArgs := []any{item.id, resolution}
+			if beforeNano != nil {
+				blockWhere += ` AND end_nano < ?`
+				blockArgs = append(blockArgs, *beforeNano)
+			}
+			limitSQL := ""
+			if limit > 0 {
+				limitSQL = " LIMIT ?"
+				blockArgs = append(blockArgs, remaining)
+			}
+			var blockCount, blockRows int64
+			if beforeNano == nil {
+				if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*), COALESCE(SUM(bucket_count),0) FROM (SELECT bucket_count FROM %s WHERE %s%s)`, s.tables.rollupBlocks, blockWhere, limitSQL), blockArgs...).Scan(&blockRows, &blockCount); err != nil {
+					return total, err
+				}
+			} else if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*), COALESCE(SUM(bucket_count),0) FROM (SELECT bucket_count FROM %s WHERE %s ORDER BY start_nano%s)`, s.tables.rollupBlocks, blockWhere, limitSQL), blockArgs...).Scan(&blockRows, &blockCount); err != nil {
+				return total, err
+			}
+			if blockCount > 0 {
+				deleteWhere := `series_id = ? AND resolution_nano = ?`
+				subqueryArgs := []any{item.id, resolution}
+				if beforeNano != nil {
+					deleteWhere += ` AND end_nano < ?`
+					subqueryArgs = append(subqueryArgs, *beforeNano)
+				}
+				deleteLimit := ""
+				if limit > 0 {
+					deleteLimit = " LIMIT ?"
+					subqueryArgs = append(subqueryArgs, remaining)
+				}
+				deleteArgs := append([]any{item.id, resolution}, subqueryArgs...)
+				if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE series_id = ? AND resolution_nano = ? AND start_nano IN (SELECT start_nano FROM %s WHERE %s ORDER BY start_nano%s)`, s.tables.rollupBlocks, s.tables.rollupBlocks, deleteWhere, deleteLimit), deleteArgs...); err != nil {
+					return total, err
+				}
+				total += blockCount
+				if limit > 0 {
+					remaining -= int(blockRows)
+				}
+			}
+			if limit > 0 && remaining <= 0 {
+				break
+			}
+			if beforeNano == nil {
+				continue
+			}
+			var startNano, endNano, checksum, digestChecksum int64
+			var count, codec, digestCodec int
+			var payload, digestPayload []byte
+			var axisID, axisCodec, axisChecksum sql.NullInt64
+			var axisPayload []byte
+			row := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT start_nano,end_nano,bucket_count,codec,checksum,payload,digest_codec,digest_checksum,digest_payload,axis_id FROM %s WHERE series_id=? AND resolution_nano=? AND start_nano < ? AND end_nano >= ? ORDER BY start_nano LIMIT 1`, s.tables.rollupBlocks), item.id, resolution, *beforeNano, *beforeNano)
+			err = row.Scan(&startNano, &endNano, &count, &codec, &checksum, &payload, &digestCodec, &digestChecksum, &digestPayload, &axisID)
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return total, err
+			}
+			records, err := s.decodeSQLiteV4RollupBlockFromStorage(ctx, tx, codec, count, uint32(checksum), payload, axisID, digestCodec, uint32(digestChecksum), digestPayload, true)
+			if err != nil {
+				return total, err
+			}
+			kept := make([]sqliteV4RollupRecord, 0, len(records))
+			for _, record := range records {
+				if record.bucketNano < *beforeNano {
+					total++
+				} else {
+					kept = append(kept, record)
+				}
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM `+s.tables.rollupBlocks+` WHERE series_id=? AND resolution_nano=? AND start_nano=?`, item.id, resolution, startNano); err != nil {
+				return total, err
+			}
+			if err := s.writeSQLiteV4RollupBlocksTx(ctx, tx, item.id, resolution, kept); err != nil {
+				return total, err
+			}
+			if limit > 0 {
+				remaining--
+			}
+		}
+		if limit > 0 && remaining <= 0 {
+			continue
+		}
+		hotWhere := `series_id = ?`
+		hotArgs := []any{item.id}
+		if len(resolutionSet) > 0 {
+			placeholders := make([]string, 0, len(resolutionSet))
+			for r := range resolutionSet {
+				placeholders = append(placeholders, "?")
+				hotArgs = append(hotArgs, r)
+			}
+			hotWhere += ` AND resolution_nano IN (` + strings.Join(placeholders, ",") + ")"
+		}
+		if beforeNano != nil {
+			hotWhere += ` AND bucket_nano < ?`
+			hotArgs = append(hotArgs, *beforeNano)
+		}
+		hotLimit := ""
+		if limit > 0 {
+			hotLimit = " LIMIT ?"
+			hotArgs = append(hotArgs, remaining)
+		}
+		result, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE %s%s`, s.tables.rollupValues, hotWhere, hotLimit), hotArgs...)
+		if err != nil {
+			return total, err
+		}
+		hotDeleted, err := result.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += hotDeleted
+		if limit > 0 {
+			remaining -= int(hotDeleted)
+		}
+	}
+	return total, nil
+}
+
+func (s *Store) deleteSQLiteV4RollupsLegacyTx(ctx context.Context, tx *sql.Tx, filter Query, resolutions []int64, beforeNano *int64) (int64, error) {
 	series, err := s.sqliteV4MatchingSeries(ctx, tx, filter.MetricName, filter.EntityID, filter.Tags)
 	if err != nil {
 		return 0, err

@@ -65,6 +65,7 @@ func (s *Store) migrateExternalPointBlocks(ctx context.Context) error {
 		blocksSQL,
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_external_series_lookup_idx ON %s (metric_name, entity_id)`, s.cfg.TablePrefix, s.tables.series),
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_external_blocks_time_idx ON %s (start_nano, end_nano)`, s.cfg.TablePrefix, s.tables.pointBlocks),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_external_blocks_expiry_idx ON %s (series_id, end_nano)`, s.cfg.TablePrefix, s.tables.pointBlocks),
 	}
 	// MySQL cannot use CREATE INDEX IF NOT EXISTS. The unique key and primary
 	// key cover point lookups; optional secondary indexes are omitted there.
@@ -527,6 +528,146 @@ func (s *Store) deleteExternalPointsBeforeTx(ctx context.Context, tx *sql.Tx, me
 	}
 	hotDeleted, err := result.RowsAffected()
 	return deleted + hotDeleted, err
+}
+
+// deleteExternalPointsBeforeBatchTx is the cooperative retention variant for
+// external block stores. Complete blocks are removed by metadata only; at most
+// one boundary block per series is decoded and rewritten, and hot rows are
+// deleted with the same limit. This keeps a cleanup step bounded even when a
+// series has months of history.
+func (s *Store) deleteExternalPointsBeforeBatchTx(ctx context.Context, tx *sql.Tx, metricName string, beforeNano int64, limit int) (int64, bool, error) {
+	series, err := s.matchingExternalPointSeries(ctx, tx, Query{MetricName: metricName})
+	if err != nil {
+		return 0, false, err
+	}
+	var deleted int64
+	remaining := limit
+	for _, item := range series {
+		if limit > 0 && remaining <= 0 {
+			break
+		}
+		limitSQL := ""
+		if limit > 0 {
+			limitSQL = fmt.Sprintf(" LIMIT %d", remaining)
+		}
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT start_nano, point_count FROM %s
+			 WHERE series_id = %s AND end_nano < %s ORDER BY start_nano%s`,
+			s.tables.pointBlocks, s.dialect.placeholder(1), s.dialect.placeholder(2), limitSQL), item.id, beforeNano)
+		if err != nil {
+			return deleted, false, err
+		}
+		var blocks []struct{ start, count int64 }
+		for rows.Next() {
+			var block struct{ start, count int64 }
+			if err := rows.Scan(&block.start, &block.count); err != nil {
+				_ = rows.Close()
+				return deleted, false, err
+			}
+			blocks = append(blocks, block)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return deleted, false, err
+		}
+		if err := rows.Close(); err != nil {
+			return deleted, false, err
+		}
+		for _, block := range blocks {
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE series_id = %s AND start_nano = %s`, s.tables.pointBlocks, s.dialect.placeholder(1), s.dialect.placeholder(2)), item.id, block.start); err != nil {
+				return deleted, false, err
+			}
+			deleted += block.count
+			if limit > 0 {
+				remaining--
+			}
+		}
+		if limit > 0 && remaining <= 0 {
+			break
+		}
+
+		var startNano, endNano, checksum int64
+		var count, codec int
+		var payload []byte
+		err = tx.QueryRowContext(ctx, fmt.Sprintf(
+			`SELECT start_nano, end_nano, point_count, codec, checksum, payload
+			 FROM %s WHERE series_id = %s AND start_nano < %s AND end_nano >= %s
+			 ORDER BY start_nano LIMIT 1`, s.tables.pointBlocks,
+			s.dialect.placeholder(1), s.dialect.placeholder(2), s.dialect.placeholder(3)),
+			item.id, beforeNano, beforeNano).Scan(&startNano, &endNano, &count, &codec, &checksum, &payload)
+		if err == nil {
+			points, decodeErr := decodeSQLiteV4Block(codec, count, uint32(checksum), payload)
+			if decodeErr != nil {
+				return deleted, false, decodeErr
+			}
+			kept := make([]sqliteV4BlockPoint, 0, len(points))
+			for _, point := range points {
+				if point.timestamp < beforeNano {
+					deleted++
+				} else {
+					kept = append(kept, point)
+				}
+			}
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE series_id = %s AND start_nano = %s`, s.tables.pointBlocks, s.dialect.placeholder(1), s.dialect.placeholder(2)), item.id, startNano); err != nil {
+				return deleted, false, err
+			}
+			if err := s.writeExternalBlocks(ctx, tx, item.id, kept); err != nil {
+				return deleted, false, err
+			}
+			if limit > 0 {
+				remaining--
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return deleted, false, err
+		}
+
+		if limit > 0 && remaining <= 0 {
+			break
+		}
+		hotLimit := remaining
+		if hotLimit <= 0 {
+			hotLimit = 1<<31 - 1
+		}
+		hotRows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE metric_name = %s AND ts_nano < %s ORDER BY ts_nano LIMIT %d`, s.tables.points, s.dialect.placeholder(1), s.dialect.placeholder(2), hotLimit), metricName, beforeNano)
+		if err != nil {
+			return deleted, false, err
+		}
+		var hotIDs []int64
+		for hotRows.Next() {
+			var id int64
+			if err := hotRows.Scan(&id); err != nil {
+				_ = hotRows.Close()
+				return deleted, false, err
+			}
+			hotIDs = append(hotIDs, id)
+		}
+		if err := hotRows.Err(); err != nil {
+			_ = hotRows.Close()
+			return deleted, false, err
+		}
+		if err := hotRows.Close(); err != nil {
+			return deleted, false, err
+		}
+		for _, id := range hotIDs {
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE id = %s`, s.tables.points, s.dialect.placeholder(1)), id); err != nil {
+				return deleted, false, err
+			}
+		}
+		deleted += int64(len(hotIDs))
+		if limit > 0 {
+			remaining -= len(hotIDs)
+		}
+	}
+	pending, err := queryRowExists(ctx, tx, fmt.Sprintf(
+		`SELECT 1 FROM %s b JOIN %s s ON s.id = b.series_id WHERE s.metric_name = %s AND b.end_nano < %s LIMIT 1`,
+		s.tables.pointBlocks, s.tables.series, s.dialect.placeholder(1), s.dialect.placeholder(2)), metricName, beforeNano)
+	if err != nil || pending {
+		return deleted, false, err
+	}
+	pending, err = queryRowExists(ctx, tx, fmt.Sprintf(
+		`SELECT 1 FROM %s WHERE metric_name = %s AND ts_nano < %s LIMIT 1`,
+		s.tables.points, s.dialect.placeholder(1), s.dialect.placeholder(2)), metricName, beforeNano)
+	return deleted, !pending, err
 }
 
 func (s *Store) deleteExternalSeriesTx(ctx context.Context, tx *sql.Tx, filter Query) (int64, error) {

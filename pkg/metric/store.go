@@ -2069,35 +2069,221 @@ func (s *Store) CleanupExpired(ctx context.Context, now time.Time) (int64, error
 // Callers can schedule metrics independently so a large metric cannot occupy
 // the database writer for the entire cleanup pass.
 func (s *Store) CleanupExpiredMetric(ctx context.Context, metricName string, now time.Time) (int64, error) {
+	var total int64
+	for {
+		deleted, complete, err := s.CleanupExpiredMetricStep(ctx, metricName, now)
+		total += deleted
+		if err != nil || complete {
+			return total, err
+		}
+	}
+}
+
+// CleanupExpiredMetricStep performs one cooperative retention slice. It is
+// deliberately separate from CleanupExpiredMetric so the background scheduler
+// can requeue unfinished work without holding the writer for an entire metric.
+func (s *Store) CleanupExpiredMetricStep(ctx context.Context, metricName string, now time.Time) (int64, bool, error) {
 	if err := s.ensureOpen(); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	def, err := s.GetMetric(ctx, metricName)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return 0, nil
+			return 0, true, nil
 		}
-		return 0, err
+		return 0, false, err
 	}
 	if s.sqlitePingMerged && def.Name == sqliteVirtualPingLossMetric {
-		return 0, nil
+		return 0, true, nil
 	}
+	const cleanupBatch = 32
 	var total int64
-	if def.RetentionDays == 0 {
-		deleted, err := s.DeleteSeries(ctx, Query{MetricName: def.Name})
-		if err != nil {
-			return 0, err
-		}
-		total += deleted
+	cutoffNano := int64(math.MaxInt64)
+	if def.RetentionDays > 0 {
+		cutoffNano = now.AddDate(0, 0, -def.RetentionDays).UnixNano()
+	}
+	tx, txErr := s.db.BeginTx(ctx, nil)
+	if txErr != nil {
+		return 0, false, txErr
+	}
+	var deleted int64
+	var complete bool
+	if s.sqliteStorageV4 {
+		deleted, complete, txErr = s.deleteSQLiteV4PointsBatchTx(ctx, tx, Query{MetricName: def.Name}, cutoffNano, cleanupBatch)
+	} else if s.externalPointBlocks {
+		deleted, complete, txErr = s.deleteExternalPointsBeforeBatchTx(ctx, tx, def.Name, cutoffNano, cleanupBatch)
 	} else {
-		deleted, err := s.DeleteBefore(ctx, def.Name, now.AddDate(0, 0, -def.RetentionDays))
+		rows, queryErr := tx.QueryContext(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE metric_name = %s AND ts_nano < %s ORDER BY ts_nano LIMIT %d`, s.tables.points, s.dialect.placeholder(1), s.dialect.placeholder(2), cleanupBatch), def.Name, cutoffNano)
+		txErr = queryErr
+		var ids []int64
+		if txErr == nil {
+			for rows.Next() {
+				var id int64
+				if scanErr := rows.Scan(&id); scanErr != nil {
+					txErr = scanErr
+					break
+				}
+				ids = append(ids, id)
+			}
+			if scanErr := rows.Err(); txErr == nil && scanErr != nil {
+				txErr = scanErr
+			}
+			_ = rows.Close()
+		}
+		if txErr == nil {
+			for _, id := range ids {
+				if _, execErr := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE id = %s`, s.tables.points, s.dialect.placeholder(1)), id); execErr != nil {
+					txErr = execErr
+					break
+				}
+			}
+			deleted = int64(len(ids))
+			complete = len(ids) < cleanupBatch
+		}
+	}
+	if txErr != nil {
+		_ = tx.Rollback()
+		return total, false, txErr
+	}
+	if txErr = tx.Commit(); txErr != nil {
+		return total, false, txErr
+	}
+	total += deleted
+	if !complete {
+		return total, false, nil
+	}
+	policy := s.cfg.RollupPolicy.withMetricRetention(time.Duration(def.RetentionDays) * 24 * time.Hour)
+	if def.RetentionDays == 0 {
+		// Zero retention means delete all materialized data. Do not leave the
+		// configured tier windows active, otherwise old rollups would survive a
+		// disabled metric indefinitely.
+		policy.Tiers = nil
+	}
+	// Remove obsolete and expired tiers in bounded transactions. Each tier is
+	// independent, so a timeout cannot roll back previously completed tiers.
+	obsolete := rollupIntervalsOutsidePolicy(s.cfg.RollupPolicy.Tiers, policy.Tiers)
+	if len(obsolete) > 0 {
+		if deleted, err := s.cleanupRollupBatch(ctx, def.Name, obsolete, nil, cleanupBatch); err != nil {
+			return total, false, err
+		} else {
+			total += deleted
+		}
+	}
+	for _, tier := range policy.Tiers {
+		cutoff := alignRollupRetentionCutoff(now.Add(-tier.Retention), tier.Interval)
+		deleted, err := s.cleanupRollupBatch(ctx, def.Name, []time.Duration{tier.Interval}, &cutoff, cleanupBatch)
 		if err != nil {
-			return total, err
+			return total, false, err
 		}
 		total += deleted
 	}
-	rollupDeleted, err := s.cleanupExpiredRollupsMetric(ctx, def, now)
-	return total + rollupDeleted, err
+	complete := s.cleanupMetricComplete(ctx, def, now, policy)
+	if complete && def.RetentionDays == 0 {
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.watermarks, s.dialect.placeholder(1)), def.Name); err != nil {
+			return total, false, err
+		}
+	}
+	return total, complete, nil
+}
+
+func (s *Store) cleanupRollupBatch(ctx context.Context, metricName string, intervals []time.Duration, before *time.Time, limit int) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var deleted int64
+	if s.sqliteStorageV4 {
+		var beforeNano *int64
+		if before != nil {
+			value := before.UTC().UnixNano()
+			beforeNano = &value
+		}
+		resolutions := make([]int64, 0, len(intervals))
+		for _, interval := range intervals {
+			resolutions = append(resolutions, interval.Nanoseconds())
+		}
+		deleted, err = s.deleteSQLiteV4RollupsBatchTx(ctx, tx, Query{MetricName: metricName}, resolutions, beforeNano, limit)
+	} else {
+		for _, interval := range intervals {
+			where := fmt.Sprintf(`metric_name = %s AND resolution_nano = %s`, s.dialect.placeholder(1), s.dialect.placeholder(2))
+			args := []any{metricName, interval.Nanoseconds()}
+			if before != nil {
+				where += " AND bucket_nano < " + s.dialect.placeholder(3)
+				args = append(args, before.UTC().UnixNano())
+			}
+			rows, queryErr := tx.QueryContext(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE %s ORDER BY bucket_nano LIMIT %d`, s.tables.rollups, where, limit), args...)
+			if queryErr != nil {
+				err = queryErr
+				break
+			}
+			var ids []int64
+			for rows.Next() {
+				var id int64
+				if scanErr := rows.Scan(&id); scanErr != nil {
+					err = scanErr
+					break
+				}
+				ids = append(ids, id)
+			}
+			if scanErr := rows.Err(); err == nil && scanErr != nil {
+				err = scanErr
+			}
+			_ = rows.Close()
+			if err != nil {
+				break
+			}
+			for _, id := range ids {
+				if _, execErr := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE id = %s`, s.tables.rollups, s.dialect.placeholder(1)), id); execErr != nil {
+					err = execErr
+					break
+				}
+			}
+			deleted += int64(len(ids))
+			if err != nil {
+				break
+			}
+		}
+	}
+	if err != nil {
+		return deleted, err
+	}
+	if s.sqliteStorageV4 {
+		if err = s.pruneUnusedSQLiteSeries(ctx, tx); err != nil {
+			return deleted, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return deleted, err
+	}
+	return deleted, nil
+}
+
+func (s *Store) cleanupMetricComplete(ctx context.Context, def Definition, now time.Time, policy RollupPolicy) bool {
+	cutoff := int64(math.MaxInt64)
+	if def.RetentionDays > 0 {
+		cutoff = now.AddDate(0, 0, -def.RetentionDays).UnixNano()
+	}
+	if s.sqliteStorageV4 {
+		pending, err := s.sqliteV4MetricPointRowsBefore(ctx, def.Name, cutoff, true)
+		if err != nil || pending {
+			return false
+		}
+		for _, interval := range rollupIntervalsOutsidePolicy(s.cfg.RollupPolicy.Tiers, policy.Tiers) {
+			pending, err = s.sqliteV4MetricRollupRows(ctx, def.Name, interval.Nanoseconds(), nil)
+			if err != nil || pending {
+				return false
+			}
+		}
+		for _, tier := range policy.Tiers {
+			tierCutoff := alignRollupRetentionCutoff(now.Add(-tier.Retention), tier.Interval).UnixNano()
+			pending, err = s.sqliteV4MetricRollupRows(ctx, def.Name, tier.Interval.Nanoseconds(), &tierCutoff)
+			if err != nil || pending {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // CleanupExpiredRollups removes rollup buckets outside each metric's effective

@@ -161,6 +161,10 @@ func RunMaintenance(ctx context.Context, now time.Time) (SchedulerResult, error)
 		}
 		metricMaintenance.nextCleanupAt = now.Add(maintenanceCleanupInterval)
 	}
+	// One fair pass is admitted per invocation. Tasks that make progress are
+	// requeued at the tail for the next pass, so a backlog does not starve
+	// cleanup/checkpoint work and a metric is not tied to the cron interval.
+	compactionQuota := len(metricMaintenance.compactionQueue)
 	metricMaintenance.mu.Unlock()
 
 	deadline := time.Now().Add(maintenanceRunBudget)
@@ -171,7 +175,11 @@ func RunMaintenance(ctx context.Context, now time.Time) (SchedulerResult, error)
 	var errs []error
 	for result.Compactions+result.Cleanups+result.Checkpoints < maintenanceMaxTasks && time.Now().Before(deadline) {
 		metricMaintenance.mu.Lock()
-		task, ok := metricMaintenance.pop(&metricMaintenance.compactionQueue, now)
+		var task maintenanceTask
+		var ok bool
+		if result.Compactions < compactionQuota {
+			task, ok = metricMaintenance.pop(&metricMaintenance.compactionQueue, now)
+		}
 		metricMaintenance.mu.Unlock()
 		if ok {
 			if err := storeOperations.AcquireShared(ctx); err != nil {
@@ -191,8 +199,10 @@ func RunMaintenance(ctx context.Context, now time.Time) (SchedulerResult, error)
 			beginCompactStep(taskStore.Driver(), task.metricName, stepIndex, len(defs), time.Now().UTC())
 			written, compactErr := taskStore.CompactMetricStep(ctx, task.metricName, now)
 			storeOperations.ReleaseShared()
+			compactionRetry := false
 			if metric.IsDigestHandoffDeferred(compactErr) {
 				handleDigestHandoffDeferred(task.metricName, compactErr, time.Now().UTC())
+				compactionRetry = true
 				compactErr = nil
 			} else if errors.Is(compactErr, metric.ErrNotFound) {
 				// A reload or definition deletion can leave a stale queued task.
@@ -209,6 +219,15 @@ func RunMaintenance(ctx context.Context, now time.Time) (SchedulerResult, error)
 				metricMaintenance.queued[fmt.Sprintf("%d:%s", task.kind, task.metricName)] = struct{}{}
 				metricMaintenance.compactionQueue = append(metricMaintenance.compactionQueue, task)
 				metricMaintenance.mu.Unlock()
+			} else if compactErr == nil && (written > 0 || compactionRetry) {
+				// A successful bounded step with output implies more historical
+				// work may remain. Keep it moving without waiting for cron.
+				task.attempts = 0
+				task.due = now
+				metricMaintenance.mu.Lock()
+				metricMaintenance.queued[fmt.Sprintf("%d:%s", task.kind, task.metricName)] = struct{}{}
+				metricMaintenance.compactionQueue = append(metricMaintenance.compactionQueue, task)
+				metricMaintenance.mu.Unlock()
 			}
 			result.Compactions++
 			result.Written += written
@@ -217,7 +236,7 @@ func RunMaintenance(ctx context.Context, now time.Time) (SchedulerResult, error)
 			continue
 		}
 
-		if result.Compactions == 0 || !maintenanceCompactionPending(now) {
+		if result.Compactions == 0 || result.Compactions >= compactionQuota || !maintenanceCompactionPending(now) {
 			if err := storeOperations.AcquireShared(ctx); err != nil {
 				return result, fmt.Errorf("wait for checkpoint maintenance slot: %w", err)
 			}
@@ -269,7 +288,7 @@ func RunMaintenance(ctx context.Context, now time.Time) (SchedulerResult, error)
 			cancel()
 			return result, fmt.Errorf("metric store not initialized")
 		}
-		_, cleanupErr := taskStore.CleanupExpiredMetric(cleanupCtx, cleanupTask.metricName, now)
+		deleted, cleanupComplete, cleanupErr := taskStore.CleanupExpiredMetricStep(cleanupCtx, cleanupTask.metricName, now)
 		storeOperations.ReleaseShared()
 		cancel()
 		result.Cleanups++
@@ -277,6 +296,16 @@ func RunMaintenance(ctx context.Context, now time.Time) (SchedulerResult, error)
 			errs = append(errs, fmt.Errorf("clean up metric %q: %w", cleanupTask.metricName, cleanupErr))
 			cleanupTask.attempts++
 			cleanupTask.due = maintenanceRetryAt(now, cleanupTask.attempts)
+			metricMaintenance.mu.Lock()
+			metricMaintenance.queued[fmt.Sprintf("%d:%s", cleanupTask.kind, cleanupTask.metricName)] = struct{}{}
+			metricMaintenance.cleanupQueue = append(metricMaintenance.cleanupQueue, cleanupTask)
+			metricMaintenance.mu.Unlock()
+		} else if !cleanupComplete || deleted > 0 {
+			// A successful slice may have removed only part of the expired
+			// history. Requeue immediately so cleanup makes steady progress
+			// instead of waiting for the next 30-minute sweep.
+			cleanupTask.attempts = 0
+			cleanupTask.due = now
 			metricMaintenance.mu.Lock()
 			metricMaintenance.queued[fmt.Sprintf("%d:%s", cleanupTask.kind, cleanupTask.metricName)] = struct{}{}
 			metricMaintenance.cleanupQueue = append(metricMaintenance.cleanupQueue, cleanupTask)
