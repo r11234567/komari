@@ -598,7 +598,9 @@ func streamHistoryExportRows(ctx context.Context, writer *csv.Writer, store *met
 					value = device + ": " + value
 				}
 				row := rowFor(point.Timestamp)
-				row.values[column.name] = append(row.values[column.name], value)
+				if len(row.values[column.name]) == 0 {
+					row.values[column.name] = []string{value}
+				}
 			}
 		}
 		if len(pingTasks) > 0 {
