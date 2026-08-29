@@ -10,13 +10,19 @@ package connectapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/komari-monitor/komari/pkg/rpc"
 	jsonRpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
 	adminv1 "github.com/r11234567/komari-proto/gen/go/komari/admin/v1"
 	adminv1connect "github.com/r11234567/komari-proto/gen/go/komari/admin/v1/adminv1connect"
+	"golang.org/x/sync/singleflight"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -24,8 +30,21 @@ type dashboardService struct {
 	adminv1connect.UnimplementedDashboardServiceHandler
 }
 
+var dashboardReadFlight singleflight.Group
+
 func (s *dashboardService) GetDashboardSummary(ctx context.Context, req *connect.Request[adminv1.GetDashboardSummaryRequest]) (*connect.Response[adminv1.GetDashboardSummaryResponse], error) {
-	release, err := acquireMetricReadSlot(ctx)
+	key := dashboardReadKey(ctx, req.Msg)
+	value, err, _ := dashboardReadFlight.Do("summary:"+key, func() (any, error) {
+		return s.getDashboardSummary(ctx, req)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return value.(*connect.Response[adminv1.GetDashboardSummaryResponse]), nil
+}
+
+func (s *dashboardService) getDashboardSummary(ctx context.Context, req *connect.Request[adminv1.GetDashboardSummaryRequest]) (*connect.Response[adminv1.GetDashboardSummaryResponse], error) {
+	release, err := acquireMetricReadSlot(ctx, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +81,18 @@ func (s *dashboardService) GetDashboardSummary(ctx context.Context, req *connect
 }
 
 func (s *dashboardService) GetDashboardCharts(ctx context.Context, req *connect.Request[adminv1.GetDashboardChartsRequest]) (*connect.Response[adminv1.GetDashboardChartsResponse], error) {
-	release, err := acquireMetricReadSlot(ctx)
+	key := dashboardReadKey(ctx, req.Msg)
+	value, err, _ := dashboardReadFlight.Do("charts:"+key, func() (any, error) {
+		return s.getDashboardCharts(ctx, req)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return value.(*connect.Response[adminv1.GetDashboardChartsResponse]), nil
+}
+
+func (s *dashboardService) getDashboardCharts(ctx context.Context, req *connect.Request[adminv1.GetDashboardChartsRequest]) (*connect.Response[adminv1.GetDashboardChartsResponse], error) {
+	release, err := acquireMetricReadSlot(ctx, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +117,16 @@ func (s *dashboardService) GetDashboardCharts(ctx context.Context, req *connect.
 		series.PacketLoss = packetLossToProto(result.PacketLoss)
 	}
 	return connect.NewResponse(&adminv1.GetDashboardChartsResponse{Charts: series}), nil
+}
+
+func dashboardReadKey(ctx context.Context, request proto.Message) string {
+	encoded, _ := (proto.MarshalOptions{Deterministic: true}).Marshal(request)
+	scope := "guest"
+	if meta := rpc.MetaFromContext(ctx); meta != nil && meta.Principal != nil {
+		scope = fmt.Sprintf("%d:%s:%s", meta.Principal.Type, meta.Principal.UserUUID, meta.Principal.ClientUUID)
+	}
+	digest := sha256.Sum256(append([]byte(scope+"\x00"), encoded...))
+	return hex.EncodeToString(digest[:])
 }
 
 func (s *dashboardService) ListDashboardAlertItems(_ context.Context, req *connect.Request[adminv1.ListDashboardAlertItemsRequest]) (*connect.Response[adminv1.ListDashboardAlertItemsResponse], error) {

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,36 +35,44 @@ const (
 	connectMetricSwapTotal     = "swap.total"
 	connectMetricDiskTotal     = "disk.total"
 	connectMetricReadQueueWait = 20 * time.Second
+	connectMetricReadBudget    = int64(4)
 )
 
 var connectMetricReadGate = semaphore.NewWeighted(connectMetricReadCapacity())
 var connectMetricQueryFlight singleflight.Group
+var connectMetricQueryCache struct {
+	sync.Mutex
+	items map[string]metricQueryCacheEntry
+}
+
+type metricQueryCacheEntry struct {
+	expiresAt time.Time
+	value     *connect.Response[metricsv1.QueryMetricsResponse]
+}
 
 func connectMetricReadCapacity() int64 {
-	// Historical metric scans are CPU- and SQLite-heavy. Reserve enough
-	// capacity for responsive dashboards on larger hosts while serializing them
-	// on a one-core instance, where parallel scans only increase contention.
-	capacity := (runtime.GOMAXPROCS(0) + 1) / 2
-	if capacity < 1 {
-		capacity = 1
-	}
-	if capacity > 4 {
-		capacity = 4
-	}
-	return int64(capacity)
+	// This is a cost budget, not a request count. Broad scans consume the whole
+	// budget; small independent reads may share it without an unbounded fan-out.
+	return connectMetricReadBudget
 }
 
 // acquireMetricReadSlot schedules public history scans instead of letting a
 // browser burst run them all at once. It waits long enough for ordinary chart
 // loads, then sheds only a sustained overload. Report ingestion, probe leases,
 // and long-lived agent streams use separate paths and are never queued here.
-func acquireMetricReadSlot(ctx context.Context) (func(), error) {
+func acquireMetricReadSlot(ctx context.Context, weight int64) (func(), error) {
+	if weight < 1 {
+		weight = 1
+	}
+	if weight > connectMetricReadBudget {
+		weight = connectMetricReadBudget
+	}
 	queued, cancel := context.WithTimeout(ctx, connectMetricReadQueueWait)
 	defer cancel()
-	if err := connectMetricReadGate.Acquire(queued, 1); err != nil {
+	if err := connectMetricReadGate.Acquire(queued, weight); err != nil {
 		return nil, connect.NewError(connect.CodeResourceExhausted, errors.New("metric query capacity is busy; retry shortly"))
 	}
-	return func() { connectMetricReadGate.Release(1) }, nil
+	return func() { connectMetricReadGate.Release(weight) }, nil
 }
 
 var connectDerivedMetricDefinitions = []metric.Definition{
@@ -81,8 +88,33 @@ func (s *metricsService) QueryMetrics(ctx context.Context, req *connect.Request[
 	// same window. Share an in-flight read so the request fan-out cannot multiply
 	// SQLite work; the key includes the caller scope because visibility differs.
 	key := connectMetricQueryKey(ctx, req.Msg)
+	connectMetricQueryCache.Lock()
+	if cached := connectMetricQueryCache.items[key]; cached.value != nil && time.Now().Before(cached.expiresAt) {
+		connectMetricQueryCache.Unlock()
+		return cached.value, nil
+	}
+	connectMetricQueryCache.Unlock()
 	value, err, _ := connectMetricQueryFlight.Do(key, func() (any, error) {
-		return s.queryMetrics(ctx, req)
+		result, queryErr := s.queryMetrics(ctx, req)
+		if queryErr == nil {
+			connectMetricQueryCache.Lock()
+			if connectMetricQueryCache.items == nil {
+				connectMetricQueryCache.items = make(map[string]metricQueryCacheEntry)
+			}
+			if len(connectMetricQueryCache.items) >= 512 {
+				for cachedKey, cached := range connectMetricQueryCache.items {
+					if time.Now().After(cached.expiresAt) {
+						delete(connectMetricQueryCache.items, cachedKey)
+					}
+				}
+				if len(connectMetricQueryCache.items) >= 512 {
+					connectMetricQueryCache.items = make(map[string]metricQueryCacheEntry)
+				}
+			}
+			connectMetricQueryCache.items[key] = metricQueryCacheEntry{expiresAt: time.Now().Add(750 * time.Millisecond), value: result}
+			connectMetricQueryCache.Unlock()
+		}
+		return result, queryErr
 	})
 	if err != nil {
 		return nil, err
@@ -119,11 +151,6 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 	if maxPoints < 1 || maxPoints > connectMaxMetricPoints {
 		return nil, connectError(connect.CodeInvalidArgument, fmtRange("max_points must be between 1 and %d", connectMaxMetricPoints))
 	}
-	release, err := acquireMetricReadSlot(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer release()
 	entityIDs, err := connectVisibleAgentIDs(ctx, req.Msg.AgentIds)
 	if err != nil {
 		return nil, err
@@ -132,6 +159,11 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 	if store == nil {
 		return nil, connectError(connect.CodeFailedPrecondition, errors.New("metric store is not initialized"))
 	}
+	release, err := acquireMetricReadSlot(ctx, 1)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	definitions, err := store.ListMetrics(ctx)
 	if err != nil {
 		return nil, connectMetricStoreError(err)
@@ -155,11 +187,20 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 	}
 	interval = store.CompatibleSeriesInterval(start, time.Now().UTC(), interval)
 
-	result := make([]*metricsv1.MetricsSeries, 0, len(req.Msg.Metrics)*len(entityIDs))
+	resultParts := make([][]*metricsv1.MetricsSeries, 0, len(req.Msg.Metrics)*len(entityIDs))
 	derivedTotals, err := connectDerivedMetricValues(entityIDs)
 	if err != nil {
 		return nil, connectError(connect.CodeInternal, err)
 	}
+	queries := make([]metric.AggregateQuery, 0)
+	rawQueries := make([]metric.Query, 0)
+	type pending struct {
+		index      int
+		metricName string
+		agentID    string
+		definition metric.Definition
+	}
+	pendingQueries := make([]pending, 0)
 	for _, metricName := range uniqueStrings(req.Msg.Metrics) {
 		definition, ok := definitionByName[metricName]
 		if !ok {
@@ -167,24 +208,50 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		}
 		for _, agentID := range entityIDs {
 			if value, ok := derivedTotals[metricName][agentID]; ok {
-				result = append(result, connectDerivedMetricSeries(metricName, agentID, definition, value, start, end, downsample, aggregation, interval))
+				resultParts = append(resultParts, connectDerivedMetricSeries(metricName, agentID, definition, value, start, end, downsample, aggregation, interval))
 				continue
 			}
 			query := metric.Query{MetricName: metricName, EntityID: agentID, Start: start, End: end, Tags: req.Msg.Tags, Order: metric.OrderAsc}
 			if downsample {
-				points, queryErr := store.Series(ctx, metric.AggregateQuery{Query: query, Aggregation: aggregation, Interval: interval, PreserveSeries: true}, time.Now().UTC())
-				if queryErr != nil {
-					return nil, connectMetricStoreError(queryErr)
-				}
-				result = append(result, connectAggregateSeries(metricName, agentID, definition, aggregation, interval, req.Msg.FillEmpty, start, end, points)...)
+				pendingQueries = append(pendingQueries, pending{index: len(resultParts), metricName: metricName, agentID: agentID, definition: definition})
+				queries = append(queries, metric.AggregateQuery{Query: query, Aggregation: aggregation, Interval: interval, PreserveSeries: true})
+				resultParts = append(resultParts, nil)
 				continue
 			}
-			points, queryErr := store.Query(ctx, query)
-			if queryErr != nil {
-				return nil, connectMetricStoreError(queryErr)
-			}
-			result = append(result, connectRawSeries(metricName, agentID, definition, points)...)
+			pendingQueries = append(pendingQueries, pending{index: len(resultParts), metricName: metricName, agentID: agentID, definition: definition})
+			rawQueries = append(rawQueries, query)
+			resultParts = append(resultParts, nil)
 		}
+	}
+	if downsample && len(queries) > 0 {
+		batch, queryErr := store.SeriesBatch(ctx, queries, time.Now().UTC())
+		if queryErr != nil {
+			return nil, connectMetricStoreError(queryErr)
+		}
+		for index, item := range pendingQueries {
+			if index >= len(batch) || index >= len(queries) {
+				break
+			}
+			if len(batch[index]) > 0 {
+				resultParts[item.index] = connectAggregateSeries(item.metricName, item.agentID, item.definition, aggregation, interval, req.Msg.FillEmpty, start, end, batch[index])
+			}
+		}
+	}
+	if !downsample && len(rawQueries) > 0 {
+		batch, queryErr := store.QueryRawBatch(ctx, rawQueries)
+		if queryErr != nil {
+			return nil, connectMetricStoreError(queryErr)
+		}
+		for index, item := range pendingQueries {
+			if index >= len(batch) || index >= len(rawQueries) {
+				break
+			}
+			resultParts[item.index] = connectRawSeries(item.metricName, item.agentID, item.definition, batch[index])
+		}
+	}
+	result := make([]*metricsv1.MetricsSeries, 0, len(resultParts))
+	for _, part := range resultParts {
+		result = append(result, part...)
 	}
 	return connect.NewResponse(&metricsv1.QueryMetricsResponse{Series: result}), nil
 }
@@ -232,7 +299,7 @@ func (s *metricsService) GetPingStats(ctx context.Context, req *connect.Request[
 	if maxPoints < 1 || maxPoints > connectMaxMetricPoints {
 		return nil, connectError(connect.CodeInvalidArgument, fmtRange("max_points must be between 1 and %d", connectMaxMetricPoints))
 	}
-	release, err := acquireMetricReadSlot(ctx)
+	release, err := acquireMetricReadSlot(ctx, 2)
 	if err != nil {
 		return nil, err
 	}
