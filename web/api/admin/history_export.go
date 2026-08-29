@@ -28,12 +28,15 @@ import (
 )
 
 const (
-	historyExportTTL          = 48 * time.Hour
-	historyExportQueueDepth   = 8
-	historyExportDirectory    = "data/exports"
-	historyExportBatchWork    = 600 * time.Minute
-	historyExportMinWindow    = 2 * time.Minute
-	historyExportMaxWindow    = 2 * time.Hour
+	historyExportTTL        = 48 * time.Hour
+	historyExportQueueDepth = 8
+	historyExportDirectory  = "data/exports"
+	historyExportBatchWork  = 600 * time.Minute
+	historyExportMinWindow  = 2 * time.Minute
+	historyExportMaxWindow  = 2 * time.Hour
+	historyExportSampleStep = 30 * time.Second
+	// Kept for the legacy batching helpers exercised by older tests. The
+	// production export path uses historyExportSampleStep directly.
 	historyExportPingBatchGap = 10 * time.Second
 	historyExportPingJoinGap  = time.Minute
 )
@@ -542,9 +545,9 @@ func streamHistoryExportRows(ctx context.Context, writer *csv.Writer, store *met
 		next := cursor.Add(scheduler.window)
 		if next.After(job.End) {
 			next = job.End
-		} else if aligned := next.UTC().Truncate(time.Minute); aligned.After(cursor) {
-			// Rows are keyed by minute. Align every chunk boundary to the same
-			// boundary so one minute cannot be emitted by two adjacent chunks.
+		} else if aligned := next.UTC().Truncate(historyExportSampleStep); aligned.After(cursor) {
+			// Rows are keyed by 30-second slots. Align every chunk boundary to the
+			// same boundary so one slot cannot be emitted by two adjacent chunks.
 			next = aligned
 		}
 		queryEnd := next
@@ -572,7 +575,7 @@ func streamHistoryExportRows(ctx context.Context, writer *csv.Writer, store *met
 			pointCount += len(points)
 		}
 		rowFor := func(timestamp time.Time) *exportRow {
-			timestamp = timestamp.UTC().Truncate(time.Minute)
+			timestamp = timestamp.UTC().Truncate(historyExportSampleStep)
 			key := timestamp.UnixNano()
 			row := rows[key]
 			if row == nil {
@@ -607,7 +610,7 @@ func streamHistoryExportRows(ctx context.Context, writer *csv.Writer, store *met
 					})
 				}
 			}
-			attachHistoryExportPingBatches(rows, historyExportPingBatches(observations), rowFor)
+			attachHistoryExportObservations(rows, observations, rowFor)
 		}
 		keys := make([]int64, 0, len(rows))
 		for key := range rows {
@@ -703,6 +706,27 @@ func attachHistoryExportPingBatches(rows map[int64]*exportRow, batches []*export
 			}
 			existing.latency = append(existing.latency, value.latency...)
 			existing.loss = append(existing.loss, value.loss...)
+		}
+	}
+}
+
+// attachHistoryExportObservations places each raw ping observation into its
+// own 30-second slot. A task can contribute at most one latency and one loss
+// value to a cell; extra samples in the same slot are intentionally ignored.
+func attachHistoryExportObservations(rows map[int64]*exportRow, observations []exportPingObservation, rowFor func(time.Time) *exportRow) {
+	for _, observation := range observations {
+		row := rowFor(observation.timestamp)
+		value := row.ping[observation.taskID]
+		if value == nil {
+			value = &exportPingValue{}
+			row.ping[observation.taskID] = value
+		}
+		if observation.loss {
+			if len(value.loss) == 0 {
+				value.loss = append(value.loss, observation.value)
+			}
+		} else if len(value.latency) == 0 {
+			value.latency = append(value.latency, observation.value)
 		}
 	}
 }
@@ -836,8 +860,13 @@ func writeHistoryExportRow(writer *csv.Writer, nodeName string, row *exportRow, 
 	record := []string{nodeName, row.timestamp.UTC().Format(time.RFC3339Nano)}
 	for _, column := range columns {
 		values := row.values[column.name]
-		sort.Strings(values)
-		record = append(record, strings.Join(values, "; "))
+		if len(values) > 1 {
+			// A 30-second cell represents one raw sample. Older exports joined
+			// every sample in the minute with "; ", creating multi-value cells.
+			// Keep the first deterministic sample and discard the rest.
+			values = values[:1]
+		}
+		record = append(record, strings.Join(values, ""))
 	}
 	for _, task := range pingTasks {
 		latency, loss := "", ""
@@ -848,7 +877,9 @@ func writeHistoryExportRow(writer *csv.Writer, nodeName string, row *exportRow, 
 					latencies = append(latencies, strconv.FormatFloat(point, 'f', 2, 64))
 				}
 			}
-			latency = strings.Join(latencies, "; ")
+			if len(latencies) > 0 {
+				latency = latencies[0]
+			}
 			losses := make([]string, 0, len(value.loss))
 			if len(value.loss) > 0 {
 				for _, point := range value.loss {
@@ -863,7 +894,9 @@ func writeHistoryExportRow(writer *csv.Writer, nodeName string, row *exportRow, 
 					}
 				}
 			}
-			loss = strings.Join(losses, "; ")
+			if len(losses) > 0 {
+				loss = losses[0]
+			}
 		}
 		record = append(record, latency, loss)
 	}
