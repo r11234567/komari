@@ -2120,13 +2120,15 @@ func (s *Store) deleteRollupsOutsidePolicy(ctx context.Context, metricName strin
 	defer func() { _ = tx.Rollback() }()
 	resolutionSQL := fmt.Sprintf(`SELECT DISTINCT resolution_nano FROM %s WHERE metric_name = %s`,
 		s.tables.rollups, s.dialect.placeholder(1))
+	resolutionArgs := []any{metricName}
 	if s.sqliteStorageV4 {
 		resolutionSQL = fmt.Sprintf(
-			`SELECT DISTINCT resolution_nano FROM %s WHERE metric_name = %s
+			`SELECT DISTINCT r.resolution_nano FROM %s r JOIN %s s ON s.id = r.series_id WHERE s.metric_name = %s
 			 UNION SELECT DISTINCT b.resolution_nano FROM %s b JOIN %s s ON s.id = b.series_id WHERE s.metric_name = %s`,
-			s.tables.rollupValues, s.dialect.placeholder(1), s.tables.rollupBlocks, s.tables.series, s.dialect.placeholder(1))
+			s.tables.rollupValues, s.tables.series, s.dialect.placeholder(1), s.tables.rollupBlocks, s.tables.series, s.dialect.placeholder(2))
+		resolutionArgs = []any{metricName, metricName}
 	}
-	rows, err := tx.QueryContext(ctx, resolutionSQL, metricName)
+	rows, err := tx.QueryContext(ctx, resolutionSQL, resolutionArgs...)
 	if err != nil {
 		return 0, err
 	}

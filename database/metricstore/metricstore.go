@@ -243,8 +243,8 @@ func ValidateDownsamplingPolicy(cfg *MetricStoreConfig) error {
 
 // RollupPolicyForConfig returns the effective policy, including the fixed
 // preserve-raw tier ladder used when downsampling is disabled.
-func RollupPolicyForConfig(cfg MetricStoreConfig) (metric.RollupPolicy, error) {
-	return rollupPolicyFromConfig(&cfg)
+func RollupPolicyForConfig(cfg *MetricStoreConfig) (metric.RollupPolicy, error) {
+	return rollupPolicyFromConfig(cfg)
 }
 
 func checkedRollupDuration(value int, unit time.Duration) (time.Duration, error) {
