@@ -201,7 +201,8 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		agentID    string
 		definition metric.Definition
 	}
-	pendingQueries := make([]pending, 0)
+	pendingDownsample := make([]pending, 0)
+	pendingRaw := make([]pending, 0)
 	for _, metricName := range uniqueStrings(req.Msg.Metrics) {
 		definition, ok := definitionByName[metricName]
 		if !ok {
@@ -209,17 +210,17 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		}
 		for _, agentID := range entityIDs {
 			if value, ok := derivedTotals[metricName][agentID]; ok {
-				resultParts = append(resultParts, connectDerivedMetricSeries(metricName, agentID, definition, value, start, end, downsample, aggregation, interval))
+				resultParts = append(resultParts, []*metricsv1.MetricsSeries{connectDerivedMetricSeries(metricName, agentID, definition, value, start, end, downsample, aggregation, interval)})
 				continue
 			}
 			query := metric.Query{MetricName: metricName, EntityID: agentID, Start: start, End: end, Tags: req.Msg.Tags, Order: metric.OrderAsc}
 			if downsample {
-				pendingQueries = append(pendingQueries, pending{index: len(resultParts), metricName: metricName, agentID: agentID, definition: definition})
+				pendingDownsample = append(pendingDownsample, pending{index: len(resultParts), metricName: metricName, agentID: agentID, definition: definition})
 				queries = append(queries, metric.AggregateQuery{Query: query, Aggregation: aggregation, Interval: interval, PreserveSeries: true})
 				resultParts = append(resultParts, nil)
 				continue
 			}
-			pendingQueries = append(pendingQueries, pending{index: len(resultParts), metricName: metricName, agentID: agentID, definition: definition})
+			pendingRaw = append(pendingRaw, pending{index: len(resultParts), metricName: metricName, agentID: agentID, definition: definition})
 			rawQueries = append(rawQueries, query)
 			resultParts = append(resultParts, nil)
 		}
@@ -229,7 +230,7 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		if queryErr != nil {
 			return nil, connectMetricStoreError(queryErr)
 		}
-		for index, item := range pendingQueries {
+		for index, item := range pendingDownsample {
 			if index >= len(batch) || index >= len(queries) {
 				break
 			}
@@ -243,7 +244,7 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		if queryErr != nil {
 			return nil, connectMetricStoreError(queryErr)
 		}
-		for index, item := range pendingQueries {
+		for index, item := range pendingRaw {
 			if index >= len(batch) || index >= len(rawQueries) {
 				break
 			}
