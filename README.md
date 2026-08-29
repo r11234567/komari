@@ -17,6 +17,15 @@ Komari is a lightweight, self-hosted server monitoring solution. It provides a s
 - **Web interface**: Provides an intuitive, easy-to-use monitoring dashboard.
 - **Extensible**: Supports custom themes and plugins.
 
+## Improvements in This Version
+
+- **Non-root agent**: The agent can run without root privileges, reducing deployment and security risks.
+- **Agent rescue mode**: Provides a recovery channel for diagnosing and restoring unavailable agents.
+- **Raw CSV export**: Export retained raw metric points for auditing and offline analysis.
+- **Optional downsampling**: Choose whether to use downsampling; raw-data retention and rollups are handled separately.
+- **Connect-RPC transport**: Uses Connect-RPC for consistent, efficient agent and API communication.
+- **Database improvements**: Adds more precise rollups, incremental cleanup, adaptive maintenance, and optimized query/read paths.
+
 
 ## Screenshots
 
@@ -28,5 +37,4 @@ Komari is a lightweight, self-hosted server monitoring solution. It provides a s
 | Web Terminal        | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E7%BD%91%E9%A1%B5%E7%BB%88%E7%AB%AF.webp" width="800" alt="Web Terminal">                             |
 | Customizable Themes | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E4%B8%BB%E9%A2%98%E5%8F%AF%E8%87%AA%E5%AE%9A%E4%B9%89-en.webp" width="800" alt="Customizable Themes"> |
 | Theme Market        | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E4%B8%BB%E9%A2%98%E5%B8%82%E5%9C%BA-en.webp" width="800" alt="Theme Market">                          |
-
 
