@@ -109,9 +109,10 @@ func (s *Store) compactMetric(ctx context.Context, metricName string, now time.T
 		return 0, err
 	}
 	if def.RetentionDays == 0 {
-		// Retention cleanup owns deletion in bounded steps. Compaction must not
-		// turn a disabled metric into an unbounded full-table delete.
-		return 0, nil
+		// Preserve CompactMetric's purge behavior while using the cooperative
+		// cleanup path instead of an unbounded table delete.
+		_, err := s.CleanupExpiredMetric(ctx, metricName, now)
+		return 0, err
 	}
 	if !policy.Enabled() {
 		return 0, nil

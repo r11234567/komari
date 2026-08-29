@@ -1564,35 +1564,36 @@ func (s *Store) deleteSQLiteV4RollupsBatchTx(ctx context.Context, tx *sql.Tx, fi
 				limitSQL = " LIMIT ?"
 				blockArgs = append(blockArgs, remaining)
 			}
-			var blockCount, blockRows int64
-			if beforeNano == nil {
-				if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*), COALESCE(SUM(bucket_count),0) FROM (SELECT bucket_count FROM %s WHERE %s%s)`, s.tables.rollupBlocks, blockWhere, limitSQL), blockArgs...).Scan(&blockRows, &blockCount); err != nil {
-					return total, err
-				}
-			} else if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*), COALESCE(SUM(bucket_count),0) FROM (SELECT bucket_count FROM %s WHERE %s ORDER BY start_nano%s)`, s.tables.rollupBlocks, blockWhere, limitSQL), blockArgs...).Scan(&blockRows, &blockCount); err != nil {
+			rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+				`SELECT start_nano, bucket_count FROM %s WHERE %s ORDER BY start_nano%s`, s.tables.rollupBlocks, blockWhere, limitSQL), blockArgs...)
+			if err != nil {
 				return total, err
 			}
-			if blockCount > 0 {
-				deleteWhere := `series_id = ? AND resolution_nano = ?`
-				subqueryArgs := []any{item.id, resolution}
-				if beforeNano != nil {
-					deleteWhere += ` AND end_nano < ?`
-					subqueryArgs = append(subqueryArgs, *beforeNano)
-				}
-				deleteLimit := ""
-				if limit > 0 {
-					deleteLimit = " LIMIT ?"
-					subqueryArgs = append(subqueryArgs, remaining)
-				}
-				deleteArgs := append([]any{item.id, resolution}, subqueryArgs...)
-				if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE series_id = ? AND resolution_nano = ? AND start_nano IN (SELECT start_nano FROM %s WHERE %s ORDER BY start_nano%s)`, s.tables.rollupBlocks, s.tables.rollupBlocks, deleteWhere, deleteLimit), deleteArgs...); err != nil {
+			type completeRollupBlock struct{ start, count int64 }
+			var blocks []completeRollupBlock
+			for rows.Next() {
+				var block completeRollupBlock
+				if err := rows.Scan(&block.start, &block.count); err != nil {
+					_ = rows.Close()
 					return total, err
 				}
-				total += blockCount
-				if limit > 0 {
-					remaining -= int(blockRows)
-				}
+				blocks = append(blocks, block)
 			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return total, err
+			}
+			if err := rows.Close(); err != nil {
+				return total, err
+			}
+			for _, block := range blocks {
+				if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+					`DELETE FROM %s WHERE series_id = ? AND resolution_nano = ? AND start_nano = ?`, s.tables.rollupBlocks), item.id, resolution, block.start); err != nil {
+					return total, err
+				}
+				total += block.count
+			}
+			remaining -= len(blocks)
 			if limit > 0 && remaining <= 0 {
 				break
 			}
@@ -1655,17 +1656,39 @@ func (s *Store) deleteSQLiteV4RollupsBatchTx(ctx context.Context, tx *sql.Tx, fi
 			hotLimit = " LIMIT ?"
 			hotArgs = append(hotArgs, remaining)
 		}
-		result, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE %s%s`, s.tables.rollupValues, hotWhere, hotLimit), hotArgs...)
+		// Do not rely on SQLite's optional DELETE ... LIMIT extension. Select
+		// bounded composite keys first, then remove those exact rows.
+		hotRows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT resolution_nano, bucket_nano FROM %s WHERE %s ORDER BY resolution_nano, bucket_nano%s`, s.tables.rollupValues, hotWhere, hotLimit), hotArgs...)
 		if err != nil {
 			return total, err
 		}
-		hotDeleted, err := result.RowsAffected()
-		if err != nil {
+		type hotKey struct{ resolution, bucket int64 }
+		var hotKeys []hotKey
+		for hotRows.Next() {
+			var key hotKey
+			if err := hotRows.Scan(&key.resolution, &key.bucket); err != nil {
+				_ = hotRows.Close()
+				return total, err
+			}
+			hotKeys = append(hotKeys, key)
+		}
+		if err := hotRows.Err(); err != nil {
+			_ = hotRows.Close()
 			return total, err
 		}
-		total += hotDeleted
+		if err := hotRows.Close(); err != nil {
+			return total, err
+		}
+		for _, key := range hotKeys {
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+				`DELETE FROM %s WHERE series_id = ? AND resolution_nano = ? AND bucket_nano = ?`, s.tables.rollupValues), item.id, key.resolution, key.bucket); err != nil {
+				return total, err
+			}
+		}
+		total += int64(len(hotKeys))
 		if limit > 0 {
-			remaining -= int(hotDeleted)
+			remaining -= len(hotKeys)
 		}
 	}
 	return total, nil

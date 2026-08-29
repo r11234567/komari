@@ -778,7 +778,7 @@ func (s *Store) deleteSQLiteV4PointsTx(ctx context.Context, tx *sql.Tx, filter Q
 	}
 	var total int64
 	for _, item := range series {
-		hasPoints, err := s.sqliteV4SeriesHasPointsForDelete(ctx, tx, item.id, beforeNano)
+		hasPoints, err := s.sqliteV4SeriesHasPointsForLegacyDelete(ctx, tx, item.id, beforeNano)
 		if err != nil {
 			return total, err
 		}
@@ -865,30 +865,37 @@ func (s *Store) deleteSQLiteV4PointsBatchTx(ctx context.Context, tx *sql.Tx, fil
 				limitSQL = " LIMIT ?"
 				blockArgs = append(blockArgs, remaining)
 			}
-			var completeBlocks, completeCount int64
-			if err := tx.QueryRowContext(ctx, fmt.Sprintf(
-				`SELECT COUNT(*), COALESCE(SUM(point_count), 0) FROM (SELECT point_count FROM %s
-					 WHERE series_id = ? AND end_nano < ? ORDER BY start_nano%s)`, s.tables.pointBlocks, limitSQL), blockArgs...).Scan(&completeBlocks, &completeCount); err != nil {
+			rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+				`SELECT start_nano, point_count FROM %s WHERE series_id = ? AND end_nano < ? ORDER BY start_nano%s`,
+				s.tables.pointBlocks, limitSQL), blockArgs...)
+			if err != nil {
 				return deleted, false, err
 			}
-			if completeCount > 0 {
-				deleteLimit := ""
-				if limit > 0 {
-					deleteLimit = " LIMIT ?"
-				}
-				deleteArgs := []any{item.id, item.id, beforeNano}
-				if limit > 0 {
-					deleteArgs = append(deleteArgs, remaining)
-				}
-				if _, err := tx.ExecContext(ctx, fmt.Sprintf(
-					`DELETE FROM %s WHERE series_id = ? AND start_nano IN
-					 (SELECT start_nano FROM %s WHERE series_id = ? AND end_nano < ? ORDER BY start_nano%s)`,
-					s.tables.pointBlocks, s.tables.pointBlocks, deleteLimit), deleteArgs...); err != nil {
+			type completeBlock struct{ start, count int64 }
+			var blocks []completeBlock
+			for rows.Next() {
+				var block completeBlock
+				if err := rows.Scan(&block.start, &block.count); err != nil {
+					_ = rows.Close()
 					return deleted, false, err
 				}
-				deleted += completeCount
-				remaining -= int(completeBlocks)
+				blocks = append(blocks, block)
 			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return deleted, false, err
+			}
+			if err := rows.Close(); err != nil {
+				return deleted, false, err
+			}
+			for _, block := range blocks {
+				if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+					`DELETE FROM %s WHERE series_id = ? AND start_nano = ?`, s.tables.pointBlocks), item.id, block.start); err != nil {
+					return deleted, false, err
+				}
+				deleted += block.count
+			}
+			remaining -= len(blocks)
 		}
 		if limit != 0 && remaining <= 0 {
 			break
@@ -932,25 +939,44 @@ func (s *Store) deleteSQLiteV4PointsBatchTx(ctx context.Context, tx *sql.Tx, fil
 			return deleted, false, err
 		}
 
-		// Hot rows are already indexed by (series_id, ts_nano).
+		// SQLite builds do not necessarily enable DELETE ... LIMIT. Select the
+		// bounded keys through the composite index first, then delete each key.
 		hotLimit := ""
 		hotArgs := []any{item.id, beforeNano}
 		if limit > 0 {
 			hotLimit = " LIMIT ?"
 			hotArgs = append(hotArgs, remaining)
 		}
-		result, err := tx.ExecContext(ctx, fmt.Sprintf(
-			`DELETE FROM %s WHERE series_id = ? AND ts_nano < ?%s`, s.tables.pointValues, hotLimit), hotArgs...)
+		hotRows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT ts_nano FROM %s WHERE series_id = ? AND ts_nano < ? ORDER BY ts_nano%s`, s.tables.pointValues, hotLimit), hotArgs...)
 		if err != nil {
 			return deleted, false, err
 		}
-		hotDeleted, err := result.RowsAffected()
-		if err != nil {
+		var hotTimestamps []int64
+		for hotRows.Next() {
+			var timestamp int64
+			if err := hotRows.Scan(&timestamp); err != nil {
+				_ = hotRows.Close()
+				return deleted, false, err
+			}
+			hotTimestamps = append(hotTimestamps, timestamp)
+		}
+		if err := hotRows.Err(); err != nil {
+			_ = hotRows.Close()
 			return deleted, false, err
 		}
-		deleted += hotDeleted
+		if err := hotRows.Close(); err != nil {
+			return deleted, false, err
+		}
+		for _, timestamp := range hotTimestamps {
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+				`DELETE FROM %s WHERE series_id = ? AND ts_nano = ?`, s.tables.pointValues), item.id, timestamp); err != nil {
+				return deleted, false, err
+			}
+		}
+		deleted += int64(len(hotTimestamps))
 		if limit > 0 {
-			remaining -= int(hotDeleted)
+			remaining -= len(hotTimestamps)
 		}
 	}
 
@@ -963,6 +989,26 @@ func (s *Store) deleteSQLiteV4PointsBatchTx(ctx context.Context, tx *sql.Tx, fil
 		pending = pending || has
 	}
 	return deleted, !pending, nil
+}
+
+func (s *Store) sqliteV4SeriesHasPointsForLegacyDelete(ctx context.Context, tx *sql.Tx, seriesID int64, beforeNano *int64) (bool, error) {
+	blockWhere := "series_id = ?"
+	hotWhere := "series_id = ?"
+	args := []any{seriesID}
+	if beforeNano != nil {
+		blockWhere += " AND start_nano < ?"
+		hotWhere += " AND ts_nano < ?"
+		args = append(args, *beforeNano, seriesID, *beforeNano)
+	} else {
+		args = append(args, seriesID)
+	}
+	var exists bool
+	err := tx.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT EXISTS(SELECT 1 FROM %s WHERE %s LIMIT 1)
+			 OR EXISTS(SELECT 1 FROM %s WHERE %s LIMIT 1)`,
+		s.tables.pointBlocks, blockWhere, s.tables.pointValues, hotWhere,
+	), args...).Scan(&exists)
+	return exists, err
 }
 
 func (s *Store) sqliteV4SeriesHasPointsForDelete(ctx context.Context, tx *sql.Tx, seriesID int64, beforeNano *int64) (bool, error) {
