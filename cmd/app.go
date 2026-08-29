@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -765,47 +764,15 @@ func compactMetricStore(ctx context.Context) {
 	compactCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	written, cycleCompleted, err := metricstore.CompactStep(compactCtx, time.Now().UTC())
+	result, err := metricstore.RunMaintenance(compactCtx, time.Now().UTC())
 	if errors.Is(err, metricstore.ErrCompactInProgress) {
 		return
 	}
-	metricCompactCycle.add(written, err)
-	if !cycleCompleted {
-		return
-	}
-	cycleWritten, cycleErr := metricCompactCycle.finish()
-	if cycleErr != nil {
-		logger.Errorf("server", "Metric store compact cycle finished after writing %d rollup buckets: %v", cycleWritten, cycleErr)
-		return
-	}
-	if cycleWritten > 0 {
-		logger.Infof("server", "Metric store compacted %d rollup buckets", cycleWritten)
-	}
-}
-
-type metricCompactCycleState struct {
-	sync.Mutex
-	written int
-	errors  []error
-}
-
-var metricCompactCycle metricCompactCycleState
-
-func (s *metricCompactCycleState) add(written int, err error) {
-	s.Lock()
-	defer s.Unlock()
-	s.written += written
 	if err != nil {
-		s.errors = append(s.errors, err)
+		logger.Errorf("server", "Metric store maintenance deferred after writing %d rollup buckets: %v", result.Written, err)
+		return
 	}
-}
-
-func (s *metricCompactCycleState) finish() (int, error) {
-	s.Lock()
-	defer s.Unlock()
-	written := s.written
-	err := errors.Join(s.errors...)
-	s.written = 0
-	s.errors = nil
-	return written, err
+	if result.Written > 0 {
+		logger.Infof("server", "Metric store compacted %d rollup buckets", result.Written)
+	}
 }

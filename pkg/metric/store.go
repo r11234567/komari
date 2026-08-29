@@ -2056,24 +2056,47 @@ func (s *Store) CleanupExpired(ctx context.Context, now time.Time) (int64, error
 	}
 	var total int64
 	for _, def := range defs {
-		if s.sqlitePingMerged && def.Name == sqliteVirtualPingLossMetric {
-			continue
+		deleted, err := s.CleanupExpiredMetric(ctx, def.Name, now)
+		if err != nil {
+			return total, err
 		}
-		if def.RetentionDays == 0 {
-			deleted, err := s.DeleteSeries(ctx, Query{MetricName: def.Name})
-			if err != nil {
-				return total, err
-			}
-			total += deleted
-			continue
+		total += deleted
+	}
+	return total, nil
+}
+
+// CleanupExpiredMetric performs bounded retention maintenance for one metric.
+// Callers can schedule metrics independently so a large metric cannot occupy
+// the database writer for the entire cleanup pass.
+func (s *Store) CleanupExpiredMetric(ctx context.Context, metricName string, now time.Time) (int64, error) {
+	if err := s.ensureOpen(); err != nil {
+		return 0, err
+	}
+	def, err := s.GetMetric(ctx, metricName)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return 0, nil
 		}
+		return 0, err
+	}
+	if s.sqlitePingMerged && def.Name == sqliteVirtualPingLossMetric {
+		return 0, nil
+	}
+	var total int64
+	if def.RetentionDays == 0 {
+		deleted, err := s.DeleteSeries(ctx, Query{MetricName: def.Name})
+		if err != nil {
+			return 0, err
+		}
+		total += deleted
+	} else {
 		deleted, err := s.DeleteBefore(ctx, def.Name, now.AddDate(0, 0, -def.RetentionDays))
 		if err != nil {
 			return total, err
 		}
 		total += deleted
 	}
-	rollupDeleted, err := s.CleanupExpiredRollups(ctx, now)
+	rollupDeleted, err := s.cleanupExpiredRollupsMetric(ctx, def, now)
 	return total + rollupDeleted, err
 }
 
@@ -2087,23 +2110,32 @@ func (s *Store) CleanupExpiredRollups(ctx context.Context, now time.Time) (int64
 	}
 	var total int64
 	for _, def := range defs {
-		if s.sqlitePingMerged && def.Name == sqliteVirtualPingLossMetric {
-			continue
-		}
-		policy := s.cfg.RollupPolicy.withMetricRetention(time.Duration(def.RetentionDays) * 24 * time.Hour)
-		obsolete, err := s.deleteRollupsOutsidePolicy(ctx, def.Name, policy)
+		deleted, err := s.cleanupExpiredRollupsMetric(ctx, def, now)
 		if err != nil {
 			return total, err
 		}
-		total += obsolete
-		for _, tier := range policy.Tiers {
-			cutoff := alignRollupRetentionCutoff(now.Add(-tier.Retention), tier.Interval)
-			deleted, err := s.deleteRollupsBefore(ctx, def.Name, tier.Interval, cutoff)
-			if err != nil {
-				return total, err
-			}
-			total += deleted
+		total += deleted
+	}
+	return total, nil
+}
+
+func (s *Store) cleanupExpiredRollupsMetric(ctx context.Context, def Definition, now time.Time) (int64, error) {
+	if s.sqlitePingMerged && def.Name == sqliteVirtualPingLossMetric {
+		return 0, nil
+	}
+	policy := s.cfg.RollupPolicy.withMetricRetention(time.Duration(def.RetentionDays) * 24 * time.Hour)
+	obsolete, err := s.deleteRollupsOutsidePolicy(ctx, def.Name, policy)
+	if err != nil {
+		return 0, err
+	}
+	total := obsolete
+	for _, tier := range policy.Tiers {
+		cutoff := alignRollupRetentionCutoff(now.Add(-tier.Retention), tier.Interval)
+		deleted, err := s.deleteRollupsBefore(ctx, def.Name, tier.Interval, cutoff)
+		if err != nil {
+			return total, err
 		}
+		total += deleted
 	}
 	return total, nil
 }

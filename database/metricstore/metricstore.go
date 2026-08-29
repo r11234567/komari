@@ -23,6 +23,7 @@ var (
 	storeOperations   = newStoreOperationGate()
 	compactOperations = newStoreOperationGate()
 	compactAt         int
+	cleanupAt         int
 )
 
 var ErrCompactInProgress = errors.New("metric store compact already in progress")
@@ -497,6 +498,7 @@ func InitializeStore() error {
 	storeFingerprint = targetFingerprint(cfg)
 	storeMu.Unlock()
 	resetRuntimeStatus(s.Driver())
+	resetMaintenanceScheduler()
 	clearStoreClosing()
 
 	logger.Infof("metricstore", "Metric store initialized successfully (driver=%s)", ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
@@ -543,6 +545,7 @@ func Reload(ctx context.Context) error {
 	storeFingerprint = targetFingerprint(cfg)
 	storeMu.Unlock()
 	resetRuntimeStatus(s.Driver())
+	resetMaintenanceScheduler()
 
 	if old != nil {
 		if cerr := old.Close(); cerr != nil {
@@ -693,6 +696,17 @@ func digestHandoffDeferredReason(err error) string {
 // keeping scheduled maintenance work short on low-performance single-core
 // servers. A failed metric still advances so it cannot block the other metrics.
 func CompactStep(ctx context.Context, now time.Time) (written int, cycleCompleted bool, err error) {
+	return compactStep(ctx, now, true)
+}
+
+// CompactStepForScheduler performs one compaction task without running
+// cleanup or WAL maintenance inline. The maintenance scheduler owns those
+// lower-priority events so they cannot extend a compaction writer hold.
+func CompactStepForScheduler(ctx context.Context, now time.Time) (written int, cycleCompleted bool, err error) {
+	return compactStep(ctx, now, false)
+}
+
+func compactStep(ctx context.Context, now time.Time, runMaintenance bool) (written int, cycleCompleted bool, err error) {
 	if !compactOperations.TryAcquire() {
 		return 0, false, ErrCompactInProgress
 	}
@@ -708,8 +722,6 @@ func CompactStep(ctx context.Context, now time.Time) (written int, cycleComplete
 	if activeStore == nil {
 		return 0, false, fmt.Errorf("metric store not initialized")
 	}
-	checkpointRetried := retryMetricWALCheckpoint(ctx, activeStore, time.Now().UTC())
-
 	defs, err := activeStore.ListMetrics(ctx)
 	if err != nil {
 		return 0, false, err
@@ -717,7 +729,10 @@ func CompactStep(ctx context.Context, now time.Time) (written int, cycleComplete
 	defs = compactableMetricDefinitions(activeStore, defs)
 	if len(defs) == 0 {
 		compactAt = 0
-		cycleErr := finishCompactCycle(ctx, activeStore, now, !checkpointRetried)
+		var cycleErr error
+		if runMaintenance {
+			cycleErr = finishCompactCycle(ctx, activeStore, now, true)
+		}
 		finishEmptyCompactCycle(activeStore.Driver(), cycleErr, time.Now().UTC())
 		return 0, true, cycleErr
 	}
@@ -740,13 +755,18 @@ func CompactStep(ctx context.Context, now time.Time) (written int, cycleComplete
 		compactErr = fmt.Errorf("compact metric %q: %w", metricName, compactErr)
 	}
 	if !cycleCompleted {
-		if !checkpointRetried {
-			checkpointLargeMetricWAL(ctx, activeStore)
+		if runMaintenance {
+			serviceWALCheckpointEvent(ctx, activeStore, time.Now().UTC())
 		}
 		finishCompactStep(written, false, compactErr, time.Now().UTC())
 		return written, false, compactErr
 	}
-	cycleErr := errors.Join(compactErr, finishCompactCycle(ctx, activeStore, now, !checkpointRetried))
+	var cycleErr error
+	if runMaintenance {
+		serviceWALCheckpointEvent(ctx, activeStore, time.Now().UTC())
+		cycleErr = finishCompactCycle(ctx, activeStore, now, true)
+	}
+	cycleErr = errors.Join(compactErr, cycleErr)
 	finishCompactStep(written, true, cycleErr, time.Now().UTC())
 	return written, true, cycleErr
 }
@@ -778,6 +798,20 @@ func checkpointLargeMetricWAL(ctx context.Context, activeStore *metric.Store) {
 	if err != nil {
 		logger.Warnf("metricstore", "Failed to truncate oversized metric WAL: %v", err)
 	}
+}
+
+// serviceWALCheckpointEvent handles only WAL-driven maintenance. A checkpoint
+// is never scheduled merely because a compaction cycle completed; it is
+// triggered by WAL size or a previously recorded retry deadline.
+func serviceWALCheckpointEvent(ctx context.Context, activeStore *metric.Store, at time.Time) {
+	pending, quickDue, _ := checkpointRetryState(at)
+	if pending {
+		if quickDue {
+			_ = retryMetricWALCheckpoint(ctx, activeStore, at)
+		}
+		return
+	}
+	checkpointLargeMetricWAL(ctx, activeStore)
 }
 
 func checkpointMetricWALAbove(ctx context.Context, activeStore *metric.Store, limit int64) (bool, error) {
@@ -824,6 +858,32 @@ func finishCompactCycle(ctx context.Context, activeStore *metric.Store, now time
 		}
 	}
 	return errors.Join(compactErrors...)
+}
+
+func walCheckpointEventPending(ctx context.Context, activeStore *metric.Store) bool {
+	if activeStore.Driver() != metric.DriverSQLite {
+		return false
+	}
+	files, err := activeStore.SQLiteFiles(ctx)
+	return err == nil && files.WAL >= metricWALCheckpointLimit
+}
+
+func runCleanupMaintenanceStep(ctx context.Context, activeStore *metric.Store, now time.Time) (int64, error) {
+	defs, err := activeStore.ListMetrics(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defs = compactableMetricDefinitions(activeStore, defs)
+	if len(defs) == 0 {
+		cleanupAt = 0
+		return 0, nil
+	}
+	if cleanupAt < 0 || cleanupAt >= len(defs) {
+		cleanupAt = 0
+	}
+	def := defs[cleanupAt]
+	cleanupAt = (cleanupAt + 1) % len(defs)
+	return activeStore.CleanupExpiredMetric(ctx, def.Name, now)
 }
 
 func retryMetricWALCheckpoint(ctx context.Context, activeStore *metric.Store, at time.Time) bool {
@@ -878,10 +938,12 @@ func CloseStoreContext(ctx context.Context) error {
 		store = nil
 		storeFingerprint = ""
 		resetRuntimeStatus("")
+		resetMaintenanceScheduler()
 		return err
 	}
 	storeFingerprint = ""
 	resetRuntimeStatus("")
+	resetMaintenanceScheduler()
 	return nil
 }
 

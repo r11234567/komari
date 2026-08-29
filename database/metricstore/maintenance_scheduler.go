@@ -1,0 +1,318 @@
+package metricstore
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/komari-monitor/komari/pkg/metric"
+	logger "github.com/komari-monitor/komari/utils/log"
+)
+
+const (
+	maintenanceCleanupInterval  = 30 * time.Minute
+	maintenanceRunBudget        = 25 * time.Second
+	maintenanceCleanupBudget    = 2 * time.Second
+	maintenanceCheckpointBudget = 2 * time.Second
+	maintenanceMaxTasks         = 64
+)
+
+type maintenanceTaskKind uint8
+
+const (
+	maintenanceCompact maintenanceTaskKind = iota + 1
+	maintenanceCleanup
+	maintenanceCheckpoint
+)
+
+type maintenanceTask struct {
+	kind       maintenanceTaskKind
+	metricName string
+	due        time.Time
+	attempts   int
+}
+
+// maintenanceScheduler is an in-memory, deduplicating queue. A task is kept
+// until it succeeds; a scheduler tick can therefore never lose a compaction
+// just because the previous tick was still running.
+type maintenanceScheduler struct {
+	mu               sync.Mutex
+	compactionQueue  []maintenanceTask
+	cleanupQueue     []maintenanceTask
+	queued           map[string]struct{}
+	checkpointQueued bool
+	nextCleanupAt    time.Time
+}
+
+var metricMaintenance maintenanceScheduler
+
+// MaintenanceResult describes work completed by one scheduler invocation.
+type MaintenanceResult struct {
+	Compactions int
+	Cleanups    int
+	Checkpoints int
+	Written     int
+}
+
+func resetMaintenanceScheduler() {
+	metricMaintenance.mu.Lock()
+	metricMaintenance.compactionQueue = nil
+	metricMaintenance.cleanupQueue = nil
+	metricMaintenance.queued = nil
+	metricMaintenance.checkpointQueued = false
+	metricMaintenance.nextCleanupAt = time.Time{}
+	metricMaintenance.mu.Unlock()
+}
+
+func (s *maintenanceScheduler) enqueue(kind maintenanceTaskKind, metricName string, due time.Time) {
+	if s.queued == nil {
+		s.queued = make(map[string]struct{})
+	}
+	key := fmt.Sprintf("%d:%s", kind, metricName)
+	if _, exists := s.queued[key]; exists {
+		return
+	}
+	s.queued[key] = struct{}{}
+	task := maintenanceTask{kind: kind, metricName: metricName, due: due}
+	if kind == maintenanceCompact {
+		s.compactionQueue = append(s.compactionQueue, task)
+	} else {
+		s.cleanupQueue = append(s.cleanupQueue, task)
+	}
+}
+
+func (s *maintenanceScheduler) enqueueCheckpoint() {
+	if s.checkpointQueued {
+		return
+	}
+	s.checkpointQueued = true
+}
+
+func (s *maintenanceScheduler) pop(queue *[]maintenanceTask, now time.Time) (maintenanceTask, bool) {
+	for index, task := range *queue {
+		if task.due.After(now) {
+			continue
+		}
+		*queue = append((*queue)[:index], (*queue)[index+1:]...)
+		if task.kind != maintenanceCheckpoint {
+			delete(s.queued, fmt.Sprintf("%d:%s", task.kind, task.metricName))
+		}
+		return task, true
+	}
+	return maintenanceTask{}, false
+}
+
+func maintenanceRetryAt(now time.Time, attempts int) time.Time {
+	if attempts < 1 {
+		attempts = 1
+	}
+	delay := time.Duration(1<<minInt(attempts-1, 5)) * time.Second
+	if delay > 5*time.Minute {
+		delay = 5 * time.Minute
+	}
+	return now.Add(delay)
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+// RunMaintenance is the production maintenance entry point. Compaction tasks
+// always drain before cleanup or WAL checkpoint tasks. Cleanup is bounded to a
+// single metric per invocation, while checkpointing is admitted only when the
+// WAL state raises an event or a prior checkpoint is due for retry.
+func RunMaintenance(ctx context.Context, now time.Time) (MaintenanceResult, error) {
+	if !compactOperations.TryAcquire() {
+		return MaintenanceResult{}, ErrCompactInProgress
+	}
+	defer compactOperations.Release()
+	if err := storeOperations.AcquireShared(ctx); err != nil {
+		return MaintenanceResult{}, fmt.Errorf("wait for metric store operation before maintenance: %w", err)
+	}
+	storeMu.RLock()
+	activeStore := store
+	storeMu.RUnlock()
+	if activeStore == nil {
+		storeOperations.ReleaseShared()
+		return MaintenanceResult{}, fmt.Errorf("metric store not initialized")
+	}
+	defs, err := activeStore.ListMetrics(ctx)
+	if err == nil {
+		defs = compactableMetricDefinitions(activeStore, defs)
+	}
+	storeOperations.ReleaseShared()
+	if err != nil {
+		return MaintenanceResult{}, err
+	}
+
+	now = now.UTC()
+	metricMaintenance.mu.Lock()
+	for _, def := range defs {
+		metricMaintenance.enqueue(maintenanceCompact, def.Name, now)
+	}
+	if metricMaintenance.nextCleanupAt.IsZero() || !now.Before(metricMaintenance.nextCleanupAt) {
+		for _, def := range defs {
+			metricMaintenance.enqueue(maintenanceCleanup, def.Name, now)
+		}
+		metricMaintenance.nextCleanupAt = now.Add(maintenanceCleanupInterval)
+	}
+	metricMaintenance.mu.Unlock()
+
+	deadline := time.Now().Add(maintenanceRunBudget)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	result := MaintenanceResult{}
+	var errs []error
+	for result.Compactions+result.Cleanups+result.Checkpoints < maintenanceMaxTasks && time.Now().Before(deadline) {
+		metricMaintenance.mu.Lock()
+		task, ok := metricMaintenance.pop(&metricMaintenance.compactionQueue, now)
+		metricMaintenance.mu.Unlock()
+		if ok {
+			if err := storeOperations.AcquireShared(ctx); err != nil {
+				return result, fmt.Errorf("wait for compaction maintenance slot: %w", err)
+			}
+			storeMu.RLock()
+			taskStore := store
+			storeMu.RUnlock()
+			if taskStore == nil {
+				storeOperations.ReleaseShared()
+				return result, fmt.Errorf("metric store not initialized")
+			}
+			stepIndex := result.Compactions
+			if len(defs) > 0 {
+				stepIndex %= len(defs)
+			}
+			beginCompactStep(taskStore.Driver(), task.metricName, stepIndex, len(defs), time.Now().UTC())
+			written, compactErr := taskStore.CompactMetricStep(ctx, task.metricName, now)
+			storeOperations.ReleaseShared()
+			if metric.IsDigestHandoffDeferred(compactErr) {
+				handleDigestHandoffDeferred(task.metricName, compactErr, time.Now().UTC())
+				compactErr = nil
+			} else if errors.Is(compactErr, metric.ErrNotFound) {
+				// A reload or definition deletion can leave a stale queued task.
+				// Drop it instead of retrying a metric that no longer exists.
+				compactErr = nil
+			} else if compactErr == nil {
+				clearDigestHandoffDeferred(task.metricName)
+			}
+			if compactErr != nil && !errors.Is(compactErr, metric.ErrNotFound) {
+				errs = append(errs, fmt.Errorf("compact metric %q: %w", task.metricName, compactErr))
+				task.attempts++
+				task.due = maintenanceRetryAt(now, task.attempts)
+				metricMaintenance.mu.Lock()
+				metricMaintenance.queued[fmt.Sprintf("%d:%s", task.kind, task.metricName)] = struct{}{}
+				metricMaintenance.compactionQueue = append(metricMaintenance.compactionQueue, task)
+				metricMaintenance.mu.Unlock()
+			}
+			result.Compactions++
+			result.Written += written
+			cycleCompleted := !maintenanceCompactionPending(now)
+			finishCompactStep(written, cycleCompleted, compactErr, time.Now().UTC())
+			continue
+		}
+
+		if result.Compactions == 0 || !maintenanceCompactionPending(now) {
+			if err := storeOperations.AcquireShared(ctx); err != nil {
+				return result, fmt.Errorf("wait for checkpoint maintenance slot: %w", err)
+			}
+			storeMu.RLock()
+			taskStore := store
+			storeMu.RUnlock()
+			checkpointDue := taskStore != nil && maintenanceCheckpointDue(ctx, taskStore, now)
+			if checkpointDue {
+				metricMaintenance.mu.Lock()
+				metricMaintenance.enqueueCheckpoint()
+				checkpointQueued := metricMaintenance.checkpointQueued
+				if checkpointQueued {
+					metricMaintenance.checkpointQueued = false
+				}
+				metricMaintenance.mu.Unlock()
+				if checkpointQueued {
+					checkpointCtx, cancel := context.WithTimeout(ctx, maintenanceCheckpointBudget)
+					checkpointErr := taskStore.CheckpointWAL(checkpointCtx)
+					cancel()
+					recordCheckpointResult(taskStore.Driver(), checkpointErr, time.Now().UTC())
+					result.Checkpoints++
+					if checkpointErr != nil {
+						errs = append(errs, fmt.Errorf("checkpoint metric WAL: %w", checkpointErr))
+					}
+					storeOperations.ReleaseShared()
+					continue
+				}
+			}
+			storeOperations.ReleaseShared()
+		}
+
+		metricMaintenance.mu.Lock()
+		cleanupTask, cleanupOK := metricMaintenance.pop(&metricMaintenance.cleanupQueue, now)
+		metricMaintenance.mu.Unlock()
+		if !cleanupOK {
+			break
+		}
+		cleanupCtx, cancel := context.WithTimeout(ctx, maintenanceCleanupBudget)
+		if err := storeOperations.AcquireShared(cleanupCtx); err != nil {
+			cancel()
+			errs = append(errs, fmt.Errorf("wait for cleanup maintenance slot: %w", err))
+			break
+		}
+		storeMu.RLock()
+		taskStore := store
+		storeMu.RUnlock()
+		if taskStore == nil {
+			storeOperations.ReleaseShared()
+			cancel()
+			return result, fmt.Errorf("metric store not initialized")
+		}
+		_, cleanupErr := taskStore.CleanupExpiredMetric(cleanupCtx, cleanupTask.metricName, now)
+		storeOperations.ReleaseShared()
+		cancel()
+		result.Cleanups++
+		if cleanupErr != nil {
+			errs = append(errs, fmt.Errorf("clean up metric %q: %w", cleanupTask.metricName, cleanupErr))
+			cleanupTask.attempts++
+			cleanupTask.due = maintenanceRetryAt(now, cleanupTask.attempts)
+			metricMaintenance.mu.Lock()
+			metricMaintenance.queued[fmt.Sprintf("%d:%s", cleanupTask.kind, cleanupTask.metricName)] = struct{}{}
+			metricMaintenance.cleanupQueue = append(metricMaintenance.cleanupQueue, cleanupTask)
+			metricMaintenance.mu.Unlock()
+		}
+		// One cleanup task per invocation is deliberate: the next scheduler tick
+		// gives compaction first chance at the writer.
+		break
+	}
+	if len(errs) > 0 {
+		logger.Warnf("metricstore", "maintenance scheduler completed with %d deferred errors", len(errs))
+	}
+	return result, errors.Join(errs...)
+}
+
+func maintenanceCompactionPending(now time.Time) bool {
+	metricMaintenance.mu.Lock()
+	defer metricMaintenance.mu.Unlock()
+	for _, task := range metricMaintenance.compactionQueue {
+		if !task.due.After(now) {
+			return true
+		}
+	}
+	return false
+}
+
+func maintenanceCheckpointDue(ctx context.Context, activeStore *metric.Store, now time.Time) bool {
+	pending, quickDue, fullDue := checkpointRetryState(now)
+	if pending {
+		// A failed checkpoint is retried on its recorded backoff even when the
+		// WAL remains above the threshold; repeated ticks must not hot-loop.
+		return quickDue || fullDue
+	}
+	if activeStore.Driver() != metric.DriverSQLite {
+		return false
+	}
+	files, err := activeStore.SQLiteFiles(ctx)
+	return err == nil && files.WAL >= metricWALCheckpointLimit
+}
