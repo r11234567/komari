@@ -621,6 +621,8 @@ func (a *App) BuildRouter() error {
 	r.Use(cors.Middleware())
 
 	r.Use(api.IdentityMiddleware())
+	rateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)
+	r.Use(rateLimiter.Middleware())
 	r.Use(api.PrivateSiteMiddleware())
 
 	r.Use(func(c *gin.Context) {
@@ -639,6 +641,9 @@ func (a *App) BuildRouter() error {
 
 	// 集中登记并启动热重载订阅。
 	a.registerReloadHandlers(cors)
+	a.reload.Register("rate-limit", func(event config.ConfigEvent) {
+		rateLimiter.Update(event)
+	})
 	a.reload.Start()
 
 	a.engine = r
@@ -772,7 +777,7 @@ func cleanupScheduledData() {
 }
 
 func compactMetricStore(ctx context.Context) {
-	compactCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	compactCtx, cancel := context.WithTimeout(ctx, metricstore.MaintenanceTimeout(time.Now().UTC()))
 	defer cancel()
 
 	result, err := metricstore.RunMaintenance(compactCtx, time.Now().UTC())

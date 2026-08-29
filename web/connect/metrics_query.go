@@ -2,6 +2,8 @@ package connectapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -20,6 +22,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
 	"golang.org/x/sync/semaphore"
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -36,6 +39,7 @@ const (
 )
 
 var connectMetricReadGate = semaphore.NewWeighted(connectMetricReadCapacity())
+var connectMetricQueryFlight singleflight.Group
 
 func connectMetricReadCapacity() int64 {
 	// Historical metric scans are CPU- and SQLite-heavy. Reserve enough
@@ -73,6 +77,31 @@ var connectDerivedMetricDefinitions = []metric.Definition{
 // QueryMetrics is the canonical public historical-read path. It intentionally
 // reads the metric store directly rather than calling the JSON-RPC adapter.
 func (s *metricsService) QueryMetrics(ctx context.Context, req *connect.Request[metricsv1.QueryMetricsRequest]) (*connect.Response[metricsv1.QueryMetricsResponse], error) {
+	// Dashboard refreshes from several browser tabs commonly ask for the exact
+	// same window. Share an in-flight read so the request fan-out cannot multiply
+	// SQLite work; the key includes the caller scope because visibility differs.
+	key := connectMetricQueryKey(ctx, req.Msg)
+	value, err, _ := connectMetricQueryFlight.Do(key, func() (any, error) {
+		return s.queryMetrics(ctx, req)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return value.(*connect.Response[metricsv1.QueryMetricsResponse]), nil
+}
+
+func connectMetricQueryKey(ctx context.Context, request *metricsv1.QueryMetricsRequest) string {
+	encoded, _ := (proto.MarshalOptions{Deterministic: true}).Marshal(request)
+	meta := rpc.MetaFromContext(ctx)
+	scope := "guest"
+	if meta != nil && meta.Principal != nil {
+		scope = strconv.Itoa(int(meta.Principal.Type)) + ":" + meta.Principal.UserUUID + ":" + meta.Principal.ClientUUID
+	}
+	digest := sha256.Sum256(append([]byte(scope+"\x00"), encoded...))
+	return hex.EncodeToString(digest[:])
+}
+
+func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[metricsv1.QueryMetricsRequest]) (*connect.Response[metricsv1.QueryMetricsResponse], error) {
 	if len(req.Msg.Metrics) == 0 {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("at least one metric is required"))
 	}

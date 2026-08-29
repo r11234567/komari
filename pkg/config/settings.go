@@ -25,6 +25,7 @@ type Settings struct {
 	ScriptDomain           string `json:"script_domain" default:""`                            // 自定义脚本域名
 	SendIpAddrToGuest      bool   `json:"send_ip_addr_to_guest" default:"false"`               // 是否向访客页面发送 IP 地址，默认 false
 	VisitorAuditEnabled    bool   `json:"visitor_audit_enabled" default:"false"`               // 是否允许公开访客事件写入审计日志，默认 false
+	RateLimitEnabled       bool   `json:"rate_limit_enabled" default:"false"`                  // 是否启用客户端与历史读取限流
 	EulaAccepted           bool   `json:"eula_accepted" default:"false"`
 	BaseScriptsURLKey      string `json:"base_scripts_url" default:""`
 	// GeoIP 配置
@@ -75,6 +76,7 @@ const (
 	ScriptDomainKey           = "script_domain"
 	SendIpAddrToGuestKey      = "send_ip_addr_to_guest"
 	VisitorAuditEnabledKey    = "visitor_audit_enabled"
+	RateLimitEnabledKey       = "rate_limit_enabled"
 	// LowResourceModeKey is retained only to normalize databases created by
 	// releases that exposed the removed low-resource mode.
 	LowResourceModeKey       = "low_resource_mode"

@@ -25,6 +25,11 @@ type dashboardService struct {
 }
 
 func (s *dashboardService) GetDashboardSummary(ctx context.Context, req *connect.Request[adminv1.GetDashboardSummaryRequest]) (*connect.Response[adminv1.GetDashboardSummaryResponse], error) {
+	release, err := acquireMetricReadSlot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	sections := make([]jsonRpc.DashboardSection, 0, len(req.Msg.Sections))
 	for _, section := range req.Msg.Sections {
 		if selector, ok := summarySectionSelector(section); ok {
@@ -57,6 +62,11 @@ func (s *dashboardService) GetDashboardSummary(ctx context.Context, req *connect
 }
 
 func (s *dashboardService) GetDashboardCharts(ctx context.Context, req *connect.Request[adminv1.GetDashboardChartsRequest]) (*connect.Response[adminv1.GetDashboardChartsResponse], error) {
+	release, err := acquireMetricReadSlot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	charts := make([]jsonRpc.DashboardChart, 0, len(req.Msg.Charts))
 	for _, chart := range req.Msg.Charts {
 		if selector, ok := chartSelector(chart); ok {

@@ -167,7 +167,7 @@ func RunMaintenance(ctx context.Context, now time.Time) (SchedulerResult, error)
 	compactionQuota := len(metricMaintenance.compactionQueue)
 	metricMaintenance.mu.Unlock()
 
-	deadline := time.Now().Add(maintenanceRunBudget)
+	deadline := time.Now().Add(MaintenanceTimeout(time.Now().UTC()))
 	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
 		deadline = contextDeadline
 	}
