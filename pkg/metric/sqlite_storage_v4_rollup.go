@@ -1602,8 +1602,7 @@ func (s *Store) deleteSQLiteV4RollupsBatchTx(ctx context.Context, tx *sql.Tx, fi
 			var startNano, endNano, checksum, digestChecksum int64
 			var count, codec, digestCodec int
 			var payload, digestPayload []byte
-			var axisID, axisCodec, axisChecksum sql.NullInt64
-			var axisPayload []byte
+			var axisID sql.NullInt64
 			row := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT start_nano,end_nano,bucket_count,codec,checksum,payload,digest_codec,digest_checksum,digest_payload,axis_id FROM %s WHERE series_id=? AND resolution_nano=? AND start_nano < ? AND end_nano >= ? ORDER BY start_nano LIMIT 1`, s.tables.rollupBlocks), item.id, resolution, *beforeNano, *beforeNano)
 			err = row.Scan(&startNano, &endNano, &count, &codec, &checksum, &payload, &digestCodec, &digestChecksum, &digestPayload, &axisID)
 			if errors.Is(err, sql.ErrNoRows) {

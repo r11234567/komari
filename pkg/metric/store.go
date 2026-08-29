@@ -2177,7 +2177,7 @@ func (s *Store) CleanupExpiredMetricStep(ctx context.Context, metricName string,
 		}
 		total += deleted
 	}
-	complete := s.cleanupMetricComplete(ctx, def, now, policy)
+	complete = s.cleanupMetricComplete(ctx, def, now, policy)
 	if complete && def.RetentionDays == 0 {
 		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE metric_name = %s`, s.tables.watermarks, s.dialect.placeholder(1)), def.Name); err != nil {
 			return total, false, err

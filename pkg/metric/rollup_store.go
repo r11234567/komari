@@ -430,7 +430,11 @@ func (s *Store) queryRawPointsRange(ctx context.Context, q querier, metricName s
 		if err != nil {
 			return nil, err
 		}
-		labels, err := decodeMapString(rawLabels)
+		labelsJSON, err := rawTagsToJSON(rawLabels)
+		if err != nil {
+			return nil, err
+		}
+		labels, err := decodeMapString(labelsJSON)
 		if err != nil {
 			return nil, err
 		}

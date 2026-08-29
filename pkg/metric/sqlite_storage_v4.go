@@ -876,15 +876,14 @@ func (s *Store) deleteSQLiteV4PointsBatchTx(ctx context.Context, tx *sql.Tx, fil
 				if limit > 0 {
 					deleteLimit = " LIMIT ?"
 				}
+				deleteArgs := []any{item.id, item.id, beforeNano}
+				if limit > 0 {
+					deleteArgs = append(deleteArgs, remaining)
+				}
 				if _, err := tx.ExecContext(ctx, fmt.Sprintf(
 					`DELETE FROM %s WHERE series_id = ? AND start_nano IN
 					 (SELECT start_nano FROM %s WHERE series_id = ? AND end_nano < ? ORDER BY start_nano%s)`,
-					s.tables.pointBlocks, s.tables.pointBlocks, deleteLimit), item.id, item.id, beforeNano, func() []any {
-					if limit > 0 {
-						return []any{remaining}
-					}
-					return nil
-				}()...); err != nil {
+					s.tables.pointBlocks, s.tables.pointBlocks, deleteLimit), deleteArgs...); err != nil {
 					return deleted, false, err
 				}
 				deleted += completeCount
