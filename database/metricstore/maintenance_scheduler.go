@@ -48,8 +48,8 @@ type maintenanceScheduler struct {
 
 var metricMaintenance maintenanceScheduler
 
-// MaintenanceResult describes work completed by one scheduler invocation.
-type MaintenanceResult struct {
+// SchedulerResult describes work completed by one scheduler invocation.
+type SchedulerResult struct {
 	Compactions int
 	Cleanups    int
 	Checkpoints int
@@ -126,20 +126,20 @@ func minInt(left, right int) int {
 // always drain before cleanup or WAL checkpoint tasks. Cleanup is bounded to a
 // single metric per invocation, while checkpointing is admitted only when the
 // WAL state raises an event or a prior checkpoint is due for retry.
-func RunMaintenance(ctx context.Context, now time.Time) (MaintenanceResult, error) {
+func RunMaintenance(ctx context.Context, now time.Time) (SchedulerResult, error) {
 	if !compactOperations.TryAcquire() {
-		return MaintenanceResult{}, ErrCompactInProgress
+		return SchedulerResult{}, ErrCompactInProgress
 	}
 	defer compactOperations.Release()
 	if err := storeOperations.AcquireShared(ctx); err != nil {
-		return MaintenanceResult{}, fmt.Errorf("wait for metric store operation before maintenance: %w", err)
+		return SchedulerResult{}, fmt.Errorf("wait for metric store operation before maintenance: %w", err)
 	}
 	storeMu.RLock()
 	activeStore := store
 	storeMu.RUnlock()
 	if activeStore == nil {
 		storeOperations.ReleaseShared()
-		return MaintenanceResult{}, fmt.Errorf("metric store not initialized")
+		return SchedulerResult{}, fmt.Errorf("metric store not initialized")
 	}
 	defs, err := activeStore.ListMetrics(ctx)
 	if err == nil {
@@ -147,7 +147,7 @@ func RunMaintenance(ctx context.Context, now time.Time) (MaintenanceResult, erro
 	}
 	storeOperations.ReleaseShared()
 	if err != nil {
-		return MaintenanceResult{}, err
+		return SchedulerResult{}, err
 	}
 
 	now = now.UTC()
@@ -167,7 +167,7 @@ func RunMaintenance(ctx context.Context, now time.Time) (MaintenanceResult, erro
 	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
 		deadline = contextDeadline
 	}
-	result := MaintenanceResult{}
+	result := SchedulerResult{}
 	var errs []error
 	for result.Compactions+result.Cleanups+result.Checkpoints < maintenanceMaxTasks && time.Now().Before(deadline) {
 		metricMaintenance.mu.Lock()
