@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -410,6 +411,9 @@ func writeHistoryExport(ctx context.Context, id string) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
+	if err := compactHistoryExportCSV(partial, len(pingTasks) > 0); err != nil {
+		return err
+	}
 	if err := os.Rename(partial, historyExportCSVPath(job.ID)); err != nil {
 		return err
 	}
@@ -459,6 +463,121 @@ func hasGPUDevice(name string) bool {
 	default:
 		return true
 	}
+}
+
+// compactHistoryExportCSV removes columns and rows that contain no samples.
+// It runs on the completed temporary file so the streaming query path can keep
+// its bounded memory usage while the final CSV still reflects sparse metrics.
+func compactHistoryExportCSV(path string, hasPing bool) error {
+	input, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+
+	reader := csv.NewReader(input)
+	reader.FieldsPerRecord = -1
+	first, err := reader.Read()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	if len(first) > 0 {
+		first[0] = strings.TrimPrefix(first[0], "\ufeff")
+	}
+	headerRows := [][]string{first}
+	if hasPing {
+		second, readErr := reader.Read()
+		if readErr != nil {
+			return readErr
+		}
+		headerRows = append(headerRows, second)
+	}
+
+	dataRows := make([][]string, 0)
+	active := make([]bool, len(first))
+	for {
+		record, readErr := reader.Read()
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return readErr
+		}
+		rowHasSample := false
+		for index := 2; index < len(record); index++ {
+			if strings.TrimSpace(record[index]) == "" {
+				continue
+			}
+			if index >= len(active) {
+				grown := make([]bool, index+1)
+				copy(grown, active)
+				active = grown
+			}
+			active[index] = true
+			rowHasSample = true
+		}
+		if rowHasSample {
+			dataRows = append(dataRows, record)
+		}
+	}
+
+	keep := []int{0, 1}
+	for index := 2; index < len(first); index++ {
+		if index < len(active) && active[index] {
+			keep = append(keep, index)
+		}
+	}
+	compactPath := path + ".compact"
+	output, err := os.OpenFile(compactPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	succeeded := false
+	defer func() {
+		_ = output.Close()
+		if !succeeded {
+			_ = os.Remove(compactPath)
+		}
+	}()
+	if _, err := output.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+		return err
+	}
+	writer := csv.NewWriter(output)
+	for _, header := range headerRows {
+		if err := writer.Write(historyExportProjectCSVRecord(header, keep)); err != nil {
+			return err
+		}
+	}
+	for _, record := range dataRows {
+		if err := writer.Write(historyExportProjectCSVRecord(record, keep)); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return err
+	}
+	if err := output.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(compactPath, path); err != nil {
+		return err
+	}
+	succeeded = true
+	return nil
+}
+
+func historyExportProjectCSVRecord(record []string, keep []int) []string {
+	projected := make([]string, len(keep))
+	for index, source := range keep {
+		if source < len(record) {
+			projected[index] = record[source]
+		}
+	}
+	return projected
 }
 
 func isGPUExportColumn(column exportMetricColumn) bool {

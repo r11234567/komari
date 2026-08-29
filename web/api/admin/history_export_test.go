@@ -1,6 +1,9 @@
 package admin
 
 import (
+	"encoding/csv"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -85,6 +88,56 @@ func TestAttachHistoryExportObservationsKeepsOneSamplePerSlot(t *testing.T) {
 	second := rows[base.Add(30*time.Second).UnixNano()].ping["1"]
 	if second == nil || len(second.latency) != 1 || second.latency[0] != 103 {
 		t.Fatalf("second slot = %#v, want one latency", second)
+	}
+}
+
+func TestCompactHistoryExportCSVRemovesEmptyRowsAndColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.csv")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+		t.Fatal(err)
+	}
+	writer := csv.NewWriter(file)
+	for _, record := range [][]string{
+		{"Server", "Time (UTC)", "CPU", "GPU", "Ping (ms)"},
+		{"node", "2026-08-29T12:00:00Z", "", "", ""},
+		{"node", "2026-08-29T12:00:30Z", "0.00", "", ""},
+	} {
+		if err := writer.Write(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := compactHistoryExportCSV(path, false); err != nil {
+		t.Fatal(err)
+	}
+	compact, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer compact.Close()
+	reader := csv.NewReader(compact)
+	reader.FieldsPerRecord = -1
+	rows := make([][]string, 0, 2)
+	for {
+		record, readErr := reader.Read()
+		if readErr != nil {
+			break
+		}
+		rows = append(rows, record)
+	}
+	if len(rows) != 2 || len(rows[0]) != 3 || len(rows[1]) != 3 || rows[1][2] != "0.00" {
+		t.Fatalf("compacted rows = %#v, want header and one CPU row", rows)
 	}
 }
 
