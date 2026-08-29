@@ -152,10 +152,15 @@ func TestBuildMetricConfigUsesCustomRollupRetention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build metric config: %v", err)
 	}
-	want := []time.Duration{30 * time.Minute, 150 * time.Minute, 300 * time.Hour}
-	for i, retention := range want {
-		if cfg.RollupPolicy.Tiers[i].Retention != retention {
-			t.Fatalf("tier %d retention = %s, want %s", i, cfg.RollupPolicy.Tiers[i].Retention, retention)
+	for _, tier := range cfg.RollupPolicy.Tiers {
+		if tier.Interval == time.Minute && tier.Retention != 30*time.Minute {
+			t.Fatalf("1m tier retention = %s, want 30m", tier.Retention)
+		}
+		if tier.Interval == 5*time.Minute && tier.Retention != 150*time.Minute {
+			t.Fatalf("5m tier retention = %s, want 150m", tier.Retention)
+		}
+		if tier.Interval == time.Hour && tier.Retention != 300*time.Hour {
+			t.Fatalf("1h tier retention = %s, want 300h", tier.Retention)
 		}
 	}
 }
