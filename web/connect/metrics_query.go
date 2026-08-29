@@ -35,11 +35,17 @@ const (
 	connectMetricMemoryTotal   = "memory.total"
 	connectMetricSwapTotal     = "swap.total"
 	connectMetricDiskTotal     = "disk.total"
-	connectMetricReadQueueWait = 20 * time.Second
-	connectMetricReadBudget    = int64(4)
+	// Queueing is deliberately short: the request deadline is reserved for
+	// database execution rather than being consumed by an overloaded queue.
+	connectMetricReadQueueWait = 2 * time.Second
+	connectMetricLightCapacity = int64(8)
+	connectMetricHeavyCapacity = int64(2)
 )
 
-var connectMetricReadGate = semaphore.NewWeighted(connectMetricReadCapacity())
+// Recent reads have their own lane so multi-day scans cannot starve normal
+// dashboard/live views.
+var connectMetricLightReadGate = semaphore.NewWeighted(connectMetricLightCapacity)
+var connectMetricHeavyReadGate = semaphore.NewWeighted(connectMetricHeavyCapacity)
 var connectMetricQueryFlight singleflight.Group
 var connectMetricQueryCache struct {
 	sync.Mutex
@@ -51,12 +57,6 @@ type metricQueryCacheEntry struct {
 	value     *connect.Response[metricsv1.QueryMetricsResponse]
 }
 
-func connectMetricReadCapacity() int64 {
-	// This is a cost budget, not a request count. Broad scans consume the whole
-	// budget; small independent reads may share it without an unbounded fan-out.
-	return connectMetricReadBudget
-}
-
 // acquireMetricReadSlot schedules public history scans instead of letting a
 // browser burst run them all at once. It waits long enough for ordinary chart
 // loads, then sheds only a sustained overload. Report ingestion, probe leases,
@@ -65,15 +65,32 @@ func acquireMetricReadSlot(ctx context.Context, weight int64) (func(), error) {
 	if weight < 1 {
 		weight = 1
 	}
-	if weight > connectMetricReadBudget {
-		weight = connectMetricReadBudget
+	gate := connectMetricLightReadGate
+	capacity := connectMetricLightCapacity
+	if weight > 1 {
+		gate = connectMetricHeavyReadGate
+		capacity = connectMetricHeavyCapacity
+	}
+	if weight > capacity {
+		weight = capacity
 	}
 	queued, cancel := context.WithTimeout(ctx, connectMetricReadQueueWait)
 	defer cancel()
-	if err := connectMetricReadGate.Acquire(queued, weight); err != nil {
+	if err := gate.Acquire(queued, weight); err != nil {
 		return nil, connect.NewError(connect.CodeResourceExhausted, errors.New("metric query capacity is busy; retry shortly"))
 	}
-	return func() { connectMetricReadGate.Release(weight) }, nil
+	return func() { gate.Release(weight) }, nil
+}
+
+func connectMetricReadWeight(start, end time.Time) int64 {
+	duration := end.Sub(start)
+	if duration <= time.Hour {
+		return 1
+	}
+	if duration <= 24*time.Hour {
+		return 2
+	}
+	return 3
 }
 
 var connectDerivedMetricDefinitions = []metric.Definition{
@@ -124,7 +141,32 @@ func (s *metricsService) QueryMetrics(ctx context.Context, req *connect.Request[
 }
 
 func connectMetricQueryKey(ctx context.Context, request *metricsv1.QueryMetricsRequest) string {
-	encoded, _ := (proto.MarshalOptions{Deterministic: true}).Marshal(request)
+	// Browsers compute "now" independently, so equivalent dashboard windows
+	// otherwise miss singleflight by a few milliseconds. Canonicalize only the
+	// cache key; the first request still owns the exact response boundaries.
+	canonical := proto.Clone(request).(*metricsv1.QueryMetricsRequest)
+	const quantum = 5 * time.Second
+	if canonical.StartTime != nil && canonical.StartTime.IsValid() {
+		canonical.StartTime = timestamppb.New(canonical.StartTime.AsTime().UTC().Truncate(quantum))
+	}
+	if canonical.EndTime != nil && canonical.EndTime.IsValid() {
+		canonical.EndTime = timestamppb.New(canonical.EndTime.AsTime().UTC().Truncate(quantum))
+	}
+	// These request spellings have identical server semantics, but protobuf
+	// encoding would otherwise give them different singleflight keys.
+	if canonical.Downsample == nil {
+		defaultDownsample := true
+		canonical.Downsample = &defaultDownsample
+	}
+	if strings.TrimSpace(canonical.Aggregation) == "" {
+		canonical.Aggregation = string(metric.AggAvg)
+	}
+	if canonical.MaxPoints == 0 {
+		canonical.MaxPoints = connectDefaultMetricPoints
+	}
+	sort.Strings(canonical.AgentIds)
+	sort.Strings(canonical.Metrics)
+	encoded, _ := (proto.MarshalOptions{Deterministic: true}).Marshal(canonical)
 	meta := rpc.MetaFromContext(ctx)
 	scope := "guest"
 	if meta != nil && meta.Principal != nil {
@@ -160,7 +202,7 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 	if store == nil {
 		return nil, connectError(connect.CodeFailedPrecondition, errors.New("metric store is not initialized"))
 	}
-	release, err := acquireMetricReadSlot(ctx, 1)
+	release, err := acquireMetricReadSlot(ctx, connectMetricReadWeight(start, end))
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +268,16 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		}
 	}
 	if downsample && len(queries) > 0 {
-		batch, queryErr := store.SeriesBatch(ctx, queries, time.Now().UTC())
+		var batch [][]metric.AggregatePoint
+		var queryErr error
+		// SQLite V4 can route all ordinary dashboard aggregations through one
+		// snapshot. This avoids one block/axis scan per metric in a six-metric
+		// page while retaining SeriesBatch for percentile/rate compatibility.
+		if aggregation == metric.AggAvg || aggregation == metric.AggSum || aggregation == metric.AggLast {
+			batch, queryErr = store.DashboardSeriesBatch(ctx, queries, time.Now().UTC())
+		} else {
+			batch, queryErr = store.SeriesBatch(ctx, queries, time.Now().UTC())
+		}
 		if queryErr != nil {
 			return nil, connectMetricStoreError(queryErr)
 		}
@@ -301,7 +352,7 @@ func (s *metricsService) GetPingStats(ctx context.Context, req *connect.Request[
 	if maxPoints < 1 || maxPoints > connectMaxMetricPoints {
 		return nil, connectError(connect.CodeInvalidArgument, fmtRange("max_points must be between 1 and %d", connectMaxMetricPoints))
 	}
-	release, err := acquireMetricReadSlot(ctx, 2)
+	release, err := acquireMetricReadSlot(ctx, connectMetricReadWeight(start, end))
 	if err != nil {
 		return nil, err
 	}

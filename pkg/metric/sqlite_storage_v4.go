@@ -480,8 +480,11 @@ func (s *Store) sqliteV4MatchingSeries(ctx context.Context, q querier, metricNam
 	if len(parts) > 0 {
 		where = strings.Join(parts, " AND ")
 	}
+	// The caller sorts decoded points itself and does not depend on series
+	// discovery order. Avoiding ORDER BY here lets SQLite use the most selective
+	// metric/entity index without an extra temporary sort for tag-filtered scans.
 	rows, err := q.QueryContext(ctx, fmt.Sprintf(
-		`SELECT id, metric_name, entity_id, tags_hash, tags FROM %s WHERE %s ORDER BY id`,
+		`SELECT id, metric_name, entity_id, tags_hash, tags FROM %s WHERE %s`,
 		s.tables.series, where,
 	), args...)
 	if err != nil {

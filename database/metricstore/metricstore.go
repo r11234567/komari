@@ -37,6 +37,8 @@ const (
 	DefaultRollupMinuteRetentionMinutes     = 600
 	DefaultRollupFiveMinuteRetentionMinutes = 3000
 	DefaultRollupHourRetentionHours         = 600
+	DefaultRollupFifteenMinuteRetention     = 7 * 24 * time.Hour
+	DefaultRollupThirtyMinuteRetention      = 15 * 24 * time.Hour
 	defaultRollupTerminalRetention          = 100 * 365 * 24 * time.Hour
 	// Preserve-raw rollups mirror the dashboard windows. They are query
 	// accelerators only; raw samples remain authoritative until metric expiry.
@@ -217,17 +219,28 @@ func rollupPolicyFromConfig(cfg *MetricStoreConfig) (metric.RollupPolicy, error)
 		return metric.RollupPolicy{}, err
 	}
 
+	// Destructive handoff is a linear chain, so every interval must be a
+	// multiple of its predecessor. 45m remains preserve-raw-only because it is
+	// not divisible by 30m; inserting it here would assign boundary-crossing
+	// 30m buckets to the wrong 45m bucket.
+	detailedTiers := []metric.RollupTier{
+		{Interval: DefaultRollupFinestTier, Retention: minuteDuration},
+		{Interval: 5 * time.Minute, Retention: fiveMinuteDuration},
+	}
+	appendTier := func(interval time.Duration, retention time.Duration) {
+		if retention > detailedTiers[len(detailedTiers)-1].Retention && retention < hourDuration {
+			detailedTiers = append(detailedTiers, metric.RollupTier{Interval: interval, Retention: retention})
+		}
+	}
+	appendTier(15*time.Minute, DefaultRollupFifteenMinuteRetention)
+	appendTier(30*time.Minute, DefaultRollupThirtyMinuteRetention)
+	detailedTiers = append(detailedTiers, metric.RollupTier{Interval: time.Hour, Retention: hourDuration})
 	rawRetention := DefaultRollupRawRetention
 	policy := metric.RollupPolicy{
 		Mode:         metric.RollupModeDownsample,
 		RawRetention: rawRetention,
 		PreserveRaw:  false,
-		Tiers: []metric.RollupTier{
-			{Interval: DefaultRollupFinestTier, Retention: minuteDuration},
-			{Interval: 5 * time.Minute, Retention: fiveMinuteDuration},
-			{Interval: time.Hour, Retention: hourDuration},
-			{Interval: 24 * time.Hour, Retention: defaultRollupTerminalRetention},
-		},
+		Tiers:        detailedTiers,
 	}
 	if err := policy.Validate(); err != nil {
 		return metric.RollupPolicy{}, fmt.Errorf("invalid metric rollup retention policy: %w", err)

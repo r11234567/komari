@@ -24,16 +24,17 @@ func TestDefaultRollupPolicy(t *testing.T) {
 	if policy.RawRetention != DefaultRollupRawRetention {
 		t.Fatalf("raw retention = %s, want %s", policy.RawRetention, DefaultRollupRawRetention)
 	}
-	if len(policy.Tiers) != 4 {
-		t.Fatalf("expected 3 configurable rollup tiers plus terminal tier, got %d", len(policy.Tiers))
+	if len(policy.Tiers) != 5 {
+		t.Fatalf("expected detailed destructive rollup ladder, got %d", len(policy.Tiers))
 	}
 
-	wantIntervals := []time.Duration{time.Minute, 5 * time.Minute, time.Hour, 24 * time.Hour}
+	wantIntervals := []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute, time.Hour}
 	wantRetentions := []time.Duration{
 		DefaultRollupMinuteRetentionMinutes * time.Minute,
 		DefaultRollupFiveMinuteRetentionMinutes * time.Minute,
+		DefaultRollupFifteenMinuteRetention,
+		DefaultRollupThirtyMinuteRetention,
 		DefaultRollupHourRetentionHours * time.Hour,
-		defaultRollupTerminalRetention,
 	}
 	for i := range wantIntervals {
 		if policy.Tiers[i].Interval != wantIntervals[i] {
@@ -92,7 +93,7 @@ func TestBuildMetricConfigLeavesFinalRetentionToMetricDefinition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build metric config: %v", err)
 	}
-	wantRollupRetention := defaultRollupTerminalRetention
+	wantRollupRetention := DefaultRollupHourRetentionHours * time.Hour
 	lastTier := cfg.RollupPolicy.Tiers[len(cfg.RollupPolicy.Tiers)-1]
 	if lastTier.Retention != wantRollupRetention {
 		t.Fatalf("rollup retention = %s, want %s", lastTier.Retention, wantRollupRetention)
@@ -134,7 +135,7 @@ func TestRollupPolicyEnablesRawExpiryOnlyWhenRequested(t *testing.T) {
 	if enabled.PreservesRaw() || enabled.RawRetention != DefaultRollupRawRetention {
 		t.Fatalf("enabled raw retention = %s, want %s", enabled.RawRetention, DefaultRollupRawRetention)
 	}
-	if reflect.DeepEqual(disabled.Tiers, enabled.Tiers) || len(enabled.Tiers) != 4 {
+	if reflect.DeepEqual(disabled.Tiers, enabled.Tiers) || len(enabled.Tiers) != 5 {
 		t.Fatal("downsampling and preserve-raw modes must use separate tier ladders")
 	}
 }
