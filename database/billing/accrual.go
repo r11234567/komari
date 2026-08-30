@@ -16,6 +16,7 @@ var BeijingLocation = time.FixedZone("Asia/Shanghai", 8*60*60)
 
 var accrualCoordination struct {
 	sync.Mutex
+	db      *gorm.DB
 	through time.Time
 	until   time.Time
 }
@@ -26,6 +27,7 @@ const accrualCoordinationTTL = 2 * time.Second
 // changed pricing. It is called after client billing settings are committed.
 func InvalidateAccrualCache() {
 	accrualCoordination.Lock()
+	accrualCoordination.db = nil
 	accrualCoordination.until = time.Time{}
 	accrualCoordination.Unlock()
 }
@@ -45,7 +47,7 @@ func EnsureAccruedThrough(ctx context.Context, db *gorm.DB, through time.Time) e
 	through = BeijingDay(through)
 	accrualCoordination.Lock()
 	defer accrualCoordination.Unlock()
-	if !accrualCoordination.until.IsZero() && time.Now().Before(accrualCoordination.until) && !accrualCoordination.through.Before(through) {
+	if accrualCoordination.db == db && !accrualCoordination.until.IsZero() && time.Now().Before(accrualCoordination.until) && !accrualCoordination.through.Before(through) {
 		return nil
 	}
 	var versions []models.BillingPriceVersion
@@ -106,6 +108,7 @@ func EnsureAccruedThrough(ctx context.Context, db *gorm.DB, through time.Time) e
 			}
 		}
 	}
+	accrualCoordination.db = db
 	accrualCoordination.through = through
 	accrualCoordination.until = time.Now().Add(accrualCoordinationTTL)
 	return nil
