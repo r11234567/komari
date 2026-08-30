@@ -19,6 +19,7 @@ import (
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/billing"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
@@ -758,6 +759,21 @@ func registerScheduledWork() {
 	}
 	if err := corn.AddFunc("notifier:expire", "0 0 9 * * *", notifier.CheckExpireScheduledWork); err != nil {
 		logger.ErrorArgs("server", "Failed to add expire notification scheduled task:", err)
+	}
+	if err := corn.AddContextFunc("billing:fx-refresh", "@every 6h", true, func(ctx context.Context) {
+		if _, refreshErr := billing.RefreshFX(ctx, dbcore.GetDBInstance(), nil, ""); refreshErr != nil {
+			logger.Errorf("billing", "Failed to refresh reference rates: %v", refreshErr)
+		}
+	}); err != nil {
+		logger.ErrorArgs("billing", "Failed to add reference-rate task:", err)
+	}
+	if err := corn.AddFuncInLocation("billing:accrue", "0 10 0 * * *", billing.BeijingLocation, func() {
+		now := time.Now().UTC()
+		if accrueErr := billing.EnsureAccruedThrough(context.Background(), dbcore.GetDBInstance(), billing.BeijingDay(now).AddDate(0, 0, -1)); accrueErr != nil {
+			logger.Errorf("billing", "Failed to accrue the previous billing day: %v", accrueErr)
+		}
+	}); err != nil {
+		logger.ErrorArgs("billing", "Failed to add daily accrual task:", err)
 	}
 
 	notifier.InitTrafficReportSchedule()

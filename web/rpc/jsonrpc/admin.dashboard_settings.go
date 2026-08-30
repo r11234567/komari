@@ -25,6 +25,7 @@ const (
 	dashboardModuleServerStatus      = "server_status"
 	dashboardModuleTrafficSummary    = "traffic_summary"
 	dashboardModuleStorageSummary    = "storage_summary"
+	dashboardModuleCostCenter        = "cost_center"
 	dashboardModuleResourceRanking   = "resource_ranking"
 	dashboardModuleTrafficRanking    = "daily_traffic_ranking"
 	dashboardModuleLatencyRanking    = "latency_ranking"
@@ -42,6 +43,7 @@ var dashboardModuleOrder = []string{
 	dashboardModuleServerStatus,
 	dashboardModuleTrafficSummary,
 	dashboardModuleStorageSummary,
+	dashboardModuleCostCenter,
 	dashboardModuleResourceRanking,
 	dashboardModuleTrafficRanking,
 	dashboardModuleLatencyRanking,
@@ -68,6 +70,7 @@ var dashboardPresetDefinitions = map[string]dashboardPresetDefinition{
 			dashboardModuleServerStatus,
 			dashboardModuleTrafficSummary,
 			dashboardModuleStorageSummary,
+			dashboardModuleCostCenter,
 			dashboardModuleLatencyTrend,
 			dashboardModuleTrafficTrend,
 			dashboardModuleBillingTrend,
@@ -82,6 +85,7 @@ var dashboardPresetDefinitions = map[string]dashboardPresetDefinition{
 			dashboardModuleServerStatus,
 			dashboardModuleTrafficSummary,
 			dashboardModuleStorageSummary,
+			dashboardModuleCostCenter,
 			dashboardModuleLatencyTrend,
 			dashboardModuleTrafficRanking,
 			dashboardModuleLatencyRanking,
@@ -98,6 +102,7 @@ var dashboardPresetDefinitions = map[string]dashboardPresetDefinition{
 		Modules: []string{
 			dashboardModuleServerStatus,
 			dashboardModuleStorageSummary,
+			dashboardModuleCostCenter,
 			dashboardModuleResourceRanking,
 			dashboardModuleAlerts,
 			dashboardModuleStorageDetail,
@@ -109,6 +114,7 @@ var dashboardPresetDefinitions = map[string]dashboardPresetDefinition{
 			dashboardModuleServerStatus,
 			dashboardModuleTrafficSummary,
 			dashboardModuleStorageSummary,
+			dashboardModuleCostCenter,
 			dashboardModuleTrafficRanking,
 			dashboardModuleAlerts,
 			dashboardModuleTrafficTrend,
@@ -121,6 +127,7 @@ var dashboardPresetDefinitions = map[string]dashboardPresetDefinition{
 			dashboardModuleServerStatus,
 			dashboardModuleTrafficSummary,
 			dashboardModuleStorageSummary,
+			dashboardModuleCostCenter,
 			dashboardModuleAlerts,
 			dashboardModuleReturnRoute,
 			dashboardModuleResourceRanking,
@@ -135,6 +142,7 @@ var dashboardPresetDefinitions = map[string]dashboardPresetDefinition{
 		Modules: []string{
 			dashboardModuleServerStatus,
 			dashboardModuleStorageSummary,
+			dashboardModuleCostCenter,
 			dashboardModuleResourceRanking,
 			dashboardModuleAlerts,
 			dashboardModuleStorageDetail,
@@ -378,7 +386,7 @@ func dashboardModuleSpanAllowed(value int) bool {
 
 func dashboardDefaultModuleSpan(id string) int {
 	switch id {
-	case dashboardModuleServerStatus, dashboardModuleTrafficSummary, dashboardModuleStorageSummary:
+	case dashboardModuleServerStatus, dashboardModuleTrafficSummary, dashboardModuleStorageSummary, dashboardModuleCostCenter:
 		return 2
 	case dashboardModuleResourceRanking, dashboardModuleLatencyTrend:
 		return 6

@@ -117,7 +117,25 @@ func (ctrl *RateLimitController) keyAndBudget(c *gin.Context) (string, float64, 
 	if role == "client" || strings.Contains(path, "/report") || strings.Contains(path, "/upload") {
 		return "ingest:" + identity, 20, 40
 	}
-	return "read:" + identity, 8, 16
+	// Count expensive history/dashboard families independently from ordinary
+	// navigation. A complete dashboard is intentionally allowed to burst; only
+	// sustained polling from many pages drains this budget and receives 429.
+	if isHistoricalReadPath(path) {
+		return "history:" + identity, 20, 120
+	}
+	return "read:" + identity, 40, 160
+}
+
+func isHistoricalReadPath(path string) bool {
+	for _, suffix := range []string{
+		"/QueryMetrics", "/GetPingStats", "/GetDashboardCharts",
+		"/GetDashboardSummary", "/GetTrafficTrend",
+	} {
+		if strings.HasSuffix(path, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func isLongLivedRequest(path string) bool {

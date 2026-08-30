@@ -19,6 +19,7 @@ type seriesBatchKey struct {
 type seriesBatchGroup struct {
 	key        seriesBatchKey
 	query      AggregateQuery
+	policy     RollupPolicy
 	indices    []int
 	rawOnly    bool
 	needDigest bool
@@ -57,7 +58,7 @@ func (s *Store) seriesBatchWithinGate(ctx context.Context, queries []AggregateQu
 		}
 		group := groups[key]
 		if group == nil {
-			group = &seriesBatchGroup{key: key, query: query}
+			group = &seriesBatchGroup{key: key, query: query, policy: s.rollupPolicyForMetric(ctx, query.MetricName)}
 			groups[key] = group
 			order = append(order, key)
 		}
@@ -69,7 +70,7 @@ func (s *Store) seriesBatchWithinGate(ctx context.Context, queries []AggregateQu
 	watermarks := make(map[string]seriesBatchWatermark)
 	for _, key := range order {
 		group := groups[key]
-		rawOnly, err := s.seriesPhysicalUsesOnlyRawCached(ctx, group.query, now, watermarks)
+		rawOnly, err := s.seriesPhysicalUsesOnlyRawCached(ctx, group.query, now, group.policy, watermarks)
 		if err != nil {
 			return nil, err
 		}

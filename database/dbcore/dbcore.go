@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/database/billing"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/migrations"
@@ -517,9 +518,21 @@ func doInitialize() error {
 		&models.ClientRescueHelper{},
 		&models.RescueSession{},
 		&models.RescueEvent{},
+		&models.BillingPriceVersion{},
+		&models.BillingFXSnapshot{},
+		&models.BillingEntry{},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create tables: %w", err)
+	}
+	if err := billing.EnsureInitialPriceVersions(instance, time.Now().UTC()); err != nil {
+		return fmt.Errorf("failed to initialize billing price versions: %w", err)
+	}
+	if err := billing.ReconcileStoredCurrencies(instance); err != nil {
+		return fmt.Errorf("failed to reconcile billing currencies: %w", err)
+	}
+	if err := billing.BackfillPriceVersionFX(instance); err != nil {
+		return fmt.Errorf("failed to backfill billing FX snapshots: %w", err)
 	}
 	if copyLegacyReturnRouteNotify {
 		if err := instance.Exec("UPDATE return_route_tasks SET notify_recovery = notify").Error; err != nil {
@@ -672,6 +685,10 @@ func cleanupOrphanedClientData(db *gorm.DB) error {
 			if err := tx.Model(&models.Task{}).Where("task_id = ?", task.TaskId).Update("clients", remaining).Error; err != nil {
 				return fmt.Errorf("clean command task %s clients: %w", task.TaskId, err)
 			}
+		}
+
+		if err := billing.CloseOrphanedPriceVersions(tx, time.Now().UTC()); err != nil {
+			return fmt.Errorf("close orphaned billing versions: %w", err)
 		}
 
 		for _, table := range []string{"records", "records_long_term", "gpu_records", "ping_records"} {

@@ -41,8 +41,7 @@ type relationalSeriesRollupScanKey struct {
 	needDigest bool
 }
 
-func (s *Store) seriesPhysicalUsesOnlyRawCached(ctx context.Context, query AggregateQuery, now time.Time, cache map[string]seriesBatchWatermark) (bool, error) {
-	policy := s.cfg.RollupPolicy
+func (s *Store) seriesPhysicalUsesOnlyRawCached(ctx context.Context, query AggregateQuery, now time.Time, policy RollupPolicy, cache map[string]seriesBatchWatermark) (bool, error) {
 	if !policy.Enabled() {
 		return true, nil
 	}
@@ -115,7 +114,7 @@ func (s *Store) collectRelationalSeriesBatchGroups(ctx context.Context, groups [
 }
 
 func (s *Store) planRelationalSeriesCollect(ctx context.Context, group *seriesBatchGroup, now time.Time, watermarks map[string]seriesBatchWatermark) (*relationalSeriesCollectPlan, []relationalSeriesRollupScan, error) {
-	policy := s.cfg.RollupPolicy
+	policy := group.policy
 	query := group.query
 	q := query.Query.normalized()
 	now = now.UTC()

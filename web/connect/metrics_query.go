@@ -37,9 +37,10 @@ const (
 	connectMetricDiskTotal     = "disk.total"
 	// Queueing is deliberately short: the request deadline is reserved for
 	// database execution rather than being consumed by an overloaded queue.
-	connectMetricReadQueueWait = 2 * time.Second
-	connectMetricLightCapacity = int64(8)
-	connectMetricHeavyCapacity = int64(2)
+	connectMetricReadQueueWait = 3 * time.Second
+	connectMetricLightCapacity = int64(16)
+	connectMetricHeavyCapacity = int64(8)
+	connectMetricCacheTTL      = 5 * time.Second
 )
 
 // Recent reads have their own lane so multi-day scans cannot starve normal
@@ -129,7 +130,7 @@ func (s *metricsService) QueryMetrics(ctx context.Context, req *connect.Request[
 					connectMetricQueryCache.items = make(map[string]metricQueryCacheEntry)
 				}
 			}
-			connectMetricQueryCache.items[key] = metricQueryCacheEntry{expiresAt: time.Now().Add(750 * time.Millisecond), value: result}
+			connectMetricQueryCache.items[key] = metricQueryCacheEntry{expiresAt: time.Now().Add(connectMetricCacheTTL), value: result}
 			connectMetricQueryCache.Unlock()
 		}
 		return result, queryErr
@@ -224,11 +225,10 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 	if aggregation == "" {
 		aggregation = metric.AggAvg
 	}
-	interval := metric.CeilStandardInterval(time.Duration((end.Sub(start).Nanoseconds() + int64(maxPoints) - 1) / int64(maxPoints)))
-	if interval < time.Second {
-		interval = time.Second
+	baseInterval := metric.CeilStandardInterval(time.Duration((end.Sub(start).Nanoseconds() + int64(maxPoints) - 1) / int64(maxPoints)))
+	if baseInterval < time.Second {
+		baseInterval = time.Second
 	}
-	interval = store.CompatibleSeriesInterval(start, time.Now().UTC(), interval)
 
 	resultParts := make([][]*metricsv1.MetricsSeries, 0, len(req.Msg.Metrics)*len(entityIDs))
 	derivedTotals, err := connectDerivedMetricValues(entityIDs)
@@ -239,9 +239,11 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 	rawQueries := make([]metric.Query, 0)
 	type pending struct {
 		index      int
+		queryIndex int
 		metricName string
 		agentID    string
 		definition metric.Definition
+		interval   time.Duration
 	}
 	pendingDownsample := make([]pending, 0)
 	pendingRaw := make([]pending, 0)
@@ -250,21 +252,35 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		if !ok {
 			return nil, connectError(connect.CodeInvalidArgument, fmtRange("unknown metric %q", metricName))
 		}
+		interval := store.CompatibleSeriesIntervalForMetric(ctx, metricName, start, time.Now().UTC(), baseInterval)
+		queryIndex := len(queries)
+		if !downsample {
+			queryIndex = len(rawQueries)
+		}
+		hasPhysicalQuery := false
 		for _, agentID := range entityIDs {
 			if value, ok := derivedTotals[metricName][agentID]; ok {
 				resultParts = append(resultParts, []*metricsv1.MetricsSeries{connectDerivedMetricSeries(metricName, agentID, definition, value, start, end, downsample, aggregation, interval)})
 				continue
 			}
-			query := metric.Query{MetricName: metricName, EntityID: agentID, Start: start, End: end, Tags: req.Msg.Tags, Order: metric.OrderAsc}
 			if downsample {
-				pendingDownsample = append(pendingDownsample, pending{index: len(resultParts), metricName: metricName, agentID: agentID, definition: definition})
-				queries = append(queries, metric.AggregateQuery{Query: query, Aggregation: aggregation, Interval: interval, PreserveSeries: true})
+				pendingDownsample = append(pendingDownsample, pending{index: len(resultParts), queryIndex: queryIndex, metricName: metricName, agentID: agentID, definition: definition, interval: interval})
 				resultParts = append(resultParts, nil)
+				hasPhysicalQuery = true
 				continue
 			}
-			pendingRaw = append(pendingRaw, pending{index: len(resultParts), metricName: metricName, agentID: agentID, definition: definition})
-			rawQueries = append(rawQueries, query)
+			pendingRaw = append(pendingRaw, pending{index: len(resultParts), queryIndex: queryIndex, metricName: metricName, agentID: agentID, definition: definition})
 			resultParts = append(resultParts, nil)
+			hasPhysicalQuery = true
+		}
+		if !hasPhysicalQuery {
+			continue
+		}
+		query := metric.Query{MetricName: metricName, Start: start, End: end, Tags: req.Msg.Tags, Order: metric.OrderAsc}
+		if downsample {
+			queries = append(queries, metric.AggregateQuery{Query: query, Aggregation: aggregation, Interval: interval, PreserveSeries: true})
+		} else {
+			rawQueries = append(rawQueries, query)
 		}
 	}
 	if downsample && len(queries) > 0 {
@@ -281,12 +297,13 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		if queryErr != nil {
 			return nil, connectMetricStoreError(queryErr)
 		}
-		for index, item := range pendingDownsample {
-			if index >= len(batch) || index >= len(queries) {
-				break
+		for _, item := range pendingDownsample {
+			if item.queryIndex >= len(batch) {
+				continue
 			}
-			if len(batch[index]) > 0 {
-				resultParts[item.index] = connectAggregateSeries(item.metricName, item.agentID, item.definition, aggregation, interval, req.Msg.FillEmpty, start, end, batch[index])
+			points := connectAggregatePointsForEntity(batch[item.queryIndex], item.agentID)
+			if len(points) > 0 {
+				resultParts[item.index] = connectAggregateSeries(item.metricName, item.agentID, item.definition, aggregation, item.interval, req.Msg.FillEmpty, start, end, points)
 			}
 		}
 	}
@@ -295,11 +312,11 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		if queryErr != nil {
 			return nil, connectMetricStoreError(queryErr)
 		}
-		for index, item := range pendingRaw {
-			if index >= len(batch) || index >= len(rawQueries) {
-				break
+		for _, item := range pendingRaw {
+			if item.queryIndex >= len(batch) {
+				continue
 			}
-			resultParts[item.index] = connectRawSeries(item.metricName, item.agentID, item.definition, batch[index])
+			resultParts[item.index] = connectRawSeries(item.metricName, item.agentID, item.definition, connectRawPointsForEntity(batch[item.queryIndex], item.agentID))
 		}
 	}
 	result := make([]*metricsv1.MetricsSeries, 0, len(resultParts))
@@ -307,6 +324,26 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		result = append(result, part...)
 	}
 	return connect.NewResponse(&metricsv1.QueryMetricsResponse{Series: result}), nil
+}
+
+func connectAggregatePointsForEntity(points []metric.AggregatePoint, entityID string) []metric.AggregatePoint {
+	result := make([]metric.AggregatePoint, 0, len(points))
+	for _, point := range points {
+		if point.EntityID == entityID {
+			result = append(result, point)
+		}
+	}
+	return result
+}
+
+func connectRawPointsForEntity(points []metric.Point, entityID string) []metric.Point {
+	result := make([]metric.Point, 0, len(points))
+	for _, point := range points {
+		if point.EntityID == entityID {
+			result = append(result, point)
+		}
+	}
+	return result
 }
 
 func (s *metricsService) ListMetricDefinitions(ctx context.Context, _ *connect.Request[metricsv1.ListMetricDefinitionsRequest]) (*connect.Response[metricsv1.ListMetricDefinitionsResponse], error) {
@@ -378,7 +415,7 @@ func (s *metricsService) GetPingStats(ctx context.Context, req *connect.Request[
 		taskFilter[strconv.FormatUint(id, 10)] = true
 	}
 	interval := metric.CeilStandardInterval(time.Duration((end.Sub(start).Nanoseconds() + int64(maxPoints) - 1) / int64(maxPoints)))
-	interval = store.CompatibleSeriesInterval(start, time.Now().UTC(), interval)
+	interval = store.CompatibleSeriesIntervalForMetric(ctx, metricstore.MetricPingLatency, start, time.Now().UTC(), interval)
 	result := make([]*metricsv1.PingStat, 0)
 	for _, agentID := range entityIDs {
 		summary, queryErr := store.PingSeriesSummary(ctx, metric.AggregateQuery{Query: metric.Query{MetricName: metricstore.MetricPingLatency, EntityID: agentID, Start: start, End: end, Order: metric.OrderAsc}, Interval: interval, PreserveSeries: true}, time.Now().UTC())

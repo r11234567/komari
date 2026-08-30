@@ -1,6 +1,7 @@
 package metric
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"time"
@@ -151,6 +152,28 @@ func (p RollupPolicy) withMetricRetention(retention time.Duration) RollupPolicy 
 		out.Tiers = append(out.Tiers, tier)
 	}
 	return out
+}
+
+func (s *Store) physicalRollupMetricName(metricName string) string {
+	if s.sqlitePingMerged && metricName == sqliteVirtualPingLossMetric {
+		return sqliteMergedPingLatencyMetric
+	}
+	return metricName
+}
+
+// rollupPolicyForMetric applies the metric definition's retention while
+// planning reads. This keeps query routing consistent with compaction and
+// cleanup instead of using a single store-wide horizon for every metric.
+func (s *Store) rollupPolicyForMetric(ctx context.Context, metricName string) RollupPolicy {
+	policy := s.cfg.RollupPolicy
+	if !policy.Enabled() {
+		return policy
+	}
+	def, err := s.GetMetric(ctx, s.physicalRollupMetricName(metricName))
+	if err != nil || def.RetentionDays <= 0 {
+		return policy
+	}
+	return policy.withMetricRetention(time.Duration(def.RetentionDays) * 24 * time.Hour)
 }
 
 // Validate enforces the structural rules that make cascading composition and

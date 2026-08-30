@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/pkg/metric"
 	legacyv1 "github.com/komari-monitor/komari/protocol/v1"
 	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -58,5 +59,24 @@ func TestMetricPointsToReportRejectsUnknownAndMissing(t *testing.T) {
 	points[0].Value = math.Inf(1)
 	if _, err := metricPointsToReport(points); err == nil {
 		t.Fatal("expected non-finite value rejection")
+	}
+}
+
+func TestConnectMetricBatchResultsSplitByEntity(t *testing.T) {
+	aggregate := connectAggregatePointsForEntity([]metric.AggregatePoint{
+		{EntityID: "node-a", Value: 1},
+		{EntityID: "node-b", Value: 2},
+		{EntityID: "node-a", Value: 3},
+	}, "node-a")
+	if len(aggregate) != 2 || aggregate[0].Value != 1 || aggregate[1].Value != 3 {
+		t.Fatalf("unexpected aggregate split: %#v", aggregate)
+	}
+
+	raw := connectRawPointsForEntity([]metric.Point{
+		{EntityID: "node-b", Value: 4},
+		{EntityID: "node-a", Value: 5},
+	}, "node-a")
+	if len(raw) != 1 || raw[0].Value != 5 {
+		t.Fatalf("unexpected raw split: %#v", raw)
 	}
 }

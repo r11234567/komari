@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/komari-monitor/komari/database/billing"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
@@ -95,6 +96,9 @@ func deleteClient(db *gorm.DB, clientUuid string) (bool, error) {
 		if err := deleteLegacyClientRows(tx, clientUuid); err != nil {
 			return err
 		}
+		if err := billing.CloseOpenPriceVersions(tx, clientUuid, time.Now()); err != nil {
+			return fmt.Errorf("close client billing versions: %w", err)
+		}
 
 		var pingTasks []models.PingTask
 		if err := tx.Select("id", "clients").Find(&pingTasks).Error; err != nil {
@@ -167,6 +171,9 @@ func deleteClient(db *gorm.DB, clientUuid string) (bool, error) {
 		}
 		return nil
 	})
+	if err == nil {
+		billing.InvalidateAccrualCache()
+	}
 	return pingTasksChanged, err
 }
 
@@ -466,10 +473,37 @@ func applyClientDeploymentStatuses(db *gorm.DB, clientList []models.Client) erro
 }
 
 func SaveClient(updates map[string]interface{}) error {
-	return saveClient(dbcore.GetDBInstance(), updates)
+	return SaveClientWithSource(updates, billing.PriceSourceClientEdit)
 }
 
 func saveClient(db *gorm.DB, updates map[string]interface{}) error {
+	return saveClientWithSource(db, updates, billing.PriceSourceClientEdit)
+}
+
+func SaveClientWithSource(updates map[string]interface{}, source string) error {
+	return saveClientWithSource(dbcore.GetDBInstance(), updates, source)
+}
+
+func saveClientWithSource(db *gorm.DB, updates map[string]interface{}, source string) error {
+	if source == "" {
+		source = billing.PriceSourceClientEdit
+	}
+	cloned := make(map[string]interface{}, len(updates))
+	for key, value := range updates {
+		cloned[key] = value
+	}
+	err := db.Transaction(func(tx *gorm.DB) error {
+		return saveClientTransaction(tx, cloned, source)
+	})
+	if err != nil {
+		return err
+	}
+	billing.InvalidateAccrualCache()
+	trafficledger.InvalidateCalibratedCycleCache()
+	return nil
+}
+
+func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source string) error {
 	clientUUID, ok := updates["uuid"].(string)
 	if !ok || clientUUID == "" {
 		return fmt.Errorf("invalid client UUID")
@@ -481,7 +515,7 @@ func saveClient(db *gorm.DB, updates map[string]interface{}) error {
 	}
 
 	var existing models.Client
-	if err := db.Select("uuid", "region", "region_override", "traffic_limit", "traffic_limit_type", "traffic_reset_day", "traffic_reset_allowance", "traffic_reset_cycle").
+	if err := db.Select("uuid", "name", "region", "group", "price", "billing_cycle", "currency", "expired_at", "region_override", "traffic_limit", "traffic_limit_type", "traffic_reset_day", "traffic_reset_allowance", "traffic_reset_cycle").
 		Where("uuid = ?", clientUUID).First(&existing).Error; err != nil {
 		return err
 	}
@@ -597,11 +631,15 @@ func saveClient(db *gorm.DB, updates map[string]interface{}) error {
 
 	updates["updated_at"] = time.Now().UTC()
 
+	if db.Migrator().HasTable(&models.BillingPriceVersion{}) {
+		if err := billing.CapturePriceVersion(db, existing, updates, source, time.Now().UTC()); err != nil {
+			return err
+		}
+	}
 	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error
 	if err != nil {
 		return err
 	}
-	trafficledger.InvalidateCalibratedCycleCache()
 	return nil
 }
 

@@ -206,12 +206,26 @@ func registerAdminRoutes(r *gin.Engine) {
 		clientGroup.POST("/:uuid/deployment-profile", jsonRpc.Bind("admin:saveClientDeploymentProfile", jsonRpc.WithPath("uuid"), jsonRpc.WithRaw()))
 		clientGroup.GET("/:uuid/traffic-calibration", admin.GetTrafficCalibration)
 		clientGroup.POST("/:uuid/traffic-calibration", admin.UpdateTrafficCalibration)
+		clientGroup.GET("/:uuid/traffic/daily", jsonRpc.Bind("admin:getClientDailyTraffic", jsonRpc.WithPath("uuid"), jsonRpc.WithQuery("days")))
 		clientGroup.POST("/token/rotate", api.RequireSensitive2FA(), jsonRpc.Bind("admin:rotateClientToken"))
 		clientGroup.POST("/order", jsonRpc.Bind("admin:orderClients"))
 		if legacyRemoteCompatEnabled() {
 			clientGroup.GET("/:uuid/terminal", api.RequireSensitive2FA(), terminal.RequestTerminal)
 		}
 	}
+
+	billingGroup := g.Group("/billing")
+	{
+		billingGroup.GET("/overview", jsonRpc.Bind("admin:getBillingOverview", jsonRpc.WithQuery("currency")))
+		billingGroup.GET("/servers", jsonRpc.Bind("admin:getBillingServers", jsonRpc.WithQuery("currency", "q", "native_currencies", "regions", "groups", "expiry", "page", "page_size")))
+		billingGroup.GET("/periods/monthly", jsonRpc.Bind("admin:getBillingMonthly", jsonRpc.WithQuery("currency", "years", "months", "clients", "types", "native_currencies", "page", "page_size")))
+		billingGroup.GET("/periods/yearly", jsonRpc.Bind("admin:getBillingYearly", jsonRpc.WithQuery("currency", "years", "clients", "types", "native_currencies", "page", "page_size")))
+		billingGroup.GET("/entries", jsonRpc.Bind("admin:getBillingEntries", jsonRpc.WithQuery("currency", "client", "from", "to", "types", "q", "page", "page_size")))
+		billingGroup.POST("/entries/:id/void", jsonRpc.Bind("admin:voidBillingEntry", jsonRpc.WithPath("id")))
+	}
+	clientGroup.POST("/:uuid/billing/traffic-reset", jsonRpc.Bind("admin:createBillingTrafficReset", jsonRpc.WithPath("uuid")))
+	clientGroup.POST("/:uuid/billing/ip-change", jsonRpc.Bind("admin:createBillingIPChange", jsonRpc.WithPath("uuid")))
+	clientGroup.POST("/:uuid/billing/one-time", jsonRpc.Bind("admin:createBillingOneTimeFee", jsonRpc.WithPath("uuid")))
 
 	// records、sessions、logs、clipboard、database 读写已迁移到
 	// komari.admin.v1.MaintenanceService；对应 admin:* 方法仍在 /api/rpc2 上保留。
