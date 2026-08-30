@@ -73,6 +73,10 @@ func CapturePriceVersion(tx *gorm.DB, existing models.Client, updates map[string
 			}
 		}
 	}
+	// A new version can change accruals for a date already covered by the
+	// short coordination window. Invalidate even when callers use this helper
+	// directly instead of the higher-level client save path.
+	InvalidateAccrualCache()
 	return nil
 }
 
