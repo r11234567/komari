@@ -53,9 +53,16 @@ var connectMetricQueryCache struct {
 	items map[string]metricQueryCacheEntry
 }
 
+// metricQueryCacheEntry holds the response message rather than the
+// connect.Response wrapping it. A connect.Response carries per-call header and
+// trailer maps, so handing the same one to several concurrent callers would put
+// those maps behind a data race the moment anything writes to them - an
+// interceptor adding a request id or cache-control header is enough, and a
+// concurrent map write is a hard panic rather than a wrong value. The message
+// itself is only ever read after it is cached, which is safe to share.
 type metricQueryCacheEntry struct {
 	expiresAt time.Time
-	value     *connect.Response[metricsv1.QueryMetricsResponse]
+	message   *metricsv1.QueryMetricsResponse
 }
 
 // acquireMetricReadSlot schedules public history scans instead of letting a
@@ -107,38 +114,54 @@ func (s *metricsService) QueryMetrics(ctx context.Context, req *connect.Request[
 	// same window. Share an in-flight read so the request fan-out cannot multiply
 	// SQLite work; the key includes the caller scope because visibility differs.
 	key := connectMetricQueryKey(ctx, req.Msg)
-	connectMetricQueryCache.Lock()
-	if cached := connectMetricQueryCache.items[key]; cached.value != nil && time.Now().Before(cached.expiresAt) {
-		connectMetricQueryCache.Unlock()
-		return cached.value, nil
+	if cached, ok := cachedMetricQueryMessage(key, time.Now()); ok {
+		return connect.NewResponse(cached), nil
 	}
-	connectMetricQueryCache.Unlock()
 	value, err, _ := connectMetricQueryFlight.Do(key, func() (any, error) {
 		result, queryErr := s.queryMetrics(ctx, req)
-		if queryErr == nil {
-			connectMetricQueryCache.Lock()
-			if connectMetricQueryCache.items == nil {
-				connectMetricQueryCache.items = make(map[string]metricQueryCacheEntry)
-			}
-			if len(connectMetricQueryCache.items) >= 512 {
-				for cachedKey, cached := range connectMetricQueryCache.items {
-					if time.Now().After(cached.expiresAt) {
-						delete(connectMetricQueryCache.items, cachedKey)
-					}
-				}
-				if len(connectMetricQueryCache.items) >= 512 {
-					connectMetricQueryCache.items = make(map[string]metricQueryCacheEntry)
-				}
-			}
-			connectMetricQueryCache.items[key] = metricQueryCacheEntry{expiresAt: time.Now().Add(connectMetricCacheTTL), value: result}
-			connectMetricQueryCache.Unlock()
+		if queryErr != nil {
+			return nil, queryErr
 		}
-		return result, queryErr
+		storeMetricQueryMessage(key, result.Msg, time.Now())
+		return result.Msg, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return value.(*connect.Response[metricsv1.QueryMetricsResponse]), nil
+	// Every caller - cache hit or singleflight follower - gets its own wrapper so
+	// the shared message is the only thing they have in common.
+	return connect.NewResponse(value.(*metricsv1.QueryMetricsResponse)), nil
+}
+
+const connectMetricQueryCacheLimit = 512
+
+func cachedMetricQueryMessage(key string, at time.Time) (*metricsv1.QueryMetricsResponse, bool) {
+	connectMetricQueryCache.Lock()
+	defer connectMetricQueryCache.Unlock()
+	cached, ok := connectMetricQueryCache.items[key]
+	if !ok || cached.message == nil || !at.Before(cached.expiresAt) {
+		return nil, false
+	}
+	return cached.message, true
+}
+
+func storeMetricQueryMessage(key string, message *metricsv1.QueryMetricsResponse, at time.Time) {
+	connectMetricQueryCache.Lock()
+	defer connectMetricQueryCache.Unlock()
+	if connectMetricQueryCache.items == nil {
+		connectMetricQueryCache.items = make(map[string]metricQueryCacheEntry)
+	}
+	if len(connectMetricQueryCache.items) >= connectMetricQueryCacheLimit {
+		for cachedKey, cached := range connectMetricQueryCache.items {
+			if at.After(cached.expiresAt) {
+				delete(connectMetricQueryCache.items, cachedKey)
+			}
+		}
+		if len(connectMetricQueryCache.items) >= connectMetricQueryCacheLimit {
+			connectMetricQueryCache.items = make(map[string]metricQueryCacheEntry)
+		}
+	}
+	connectMetricQueryCache.items[key] = metricQueryCacheEntry{expiresAt: at.Add(connectMetricCacheTTL), message: message}
 }
 
 func connectMetricQueryKey(ctx context.Context, request *metricsv1.QueryMetricsRequest) string {
