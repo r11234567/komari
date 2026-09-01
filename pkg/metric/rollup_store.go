@@ -165,7 +165,13 @@ const (
 	// Scheduler compaction is time-budgeted rather than tied to a fixed number
 	// of chunks. A throttled CPU therefore yields promptly while a fast host can
 	// drain more backlog in the same invocation.
-	metricCompactionStepBudget = 1200 * time.Millisecond
+	//
+	// The scheduler grants this budget per metric, so the deployment-wide cost of
+	// one pass is this value times the number of metric definitions. A default
+	// install defines about twenty metrics, so keep the slice small enough that a
+	// full pass stays well inside maintenanceRunBudget instead of overrunning the
+	// cron interval and making every pass collide with the next one.
+	metricCompactionStepBudget = 400 * time.Millisecond
 )
 
 // compactMetricIncrementalInChunks commits old upgrade data in bounded ranges.
@@ -185,7 +191,7 @@ func (s *Store) compactMetricIncrementalInChunks(ctx context.Context, metricName
 	stepStarted := time.Now()
 	for {
 		chunkStarted := time.Now()
-		written, completed, err := s.compactMetricIncrementalChunk(ctx, metricName, now, policy, obsoleteIntervals)
+		written, completed, frontierNano, err := s.compactMetricIncrementalChunk(ctx, metricName, now, policy, obsoleteIntervals)
 		if err != nil {
 			return total, err
 		}
@@ -196,9 +202,9 @@ func (s *Store) compactMetricIncrementalInChunks(ctx context.Context, metricName
 			sealBefore := now.Add(-sqliteV4HotWindow).UnixNano()
 			var sealErr error
 			if policy.PreservesRaw() {
-				sealErr = s.sealSQLiteV4RollupsInBatches(ctx, metricName, sealBefore)
+				sealErr = s.sealSQLiteV4RollupsInBatches(ctx, metricName, sealBefore, frontierNano)
 			} else {
-				sealErr = s.sealSQLiteV4MetricInBatches(ctx, metricName, sealBefore)
+				sealErr = s.sealSQLiteV4MetricInBatches(ctx, metricName, sealBefore, frontierNano)
 			}
 			if sealErr != nil {
 				return total, sealErr
@@ -236,26 +242,30 @@ func yieldCompactionWriter(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func (s *Store) compactMetricIncrementalChunk(ctx context.Context, metricName string, now time.Time, policy RollupPolicy, obsoleteIntervals []time.Duration) (int, bool, error) {
+// compactMetricIncrementalChunk reports the raw timestamp its chunk advanced
+// through in addition to the bucket count. That frontier tells the seal step
+// which rollup buckets are already complete, so buckets that later chunks will
+// still add to are not frozen into compressed blocks first.
+func (s *Store) compactMetricIncrementalChunk(ctx context.Context, metricName string, now time.Time, policy RollupPolicy, obsoleteIntervals []time.Duration) (int, bool, int64, error) {
 	const maxAttempts = 5
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		written, completed, err := s.compactMetricIncrementalChunkOnce(ctx, metricName, now, policy, obsoleteIntervals)
+		written, completed, frontierNano, err := s.compactMetricIncrementalChunkOnce(ctx, metricName, now, policy, obsoleteIntervals)
 		if err == nil {
-			return written, completed, nil
+			return written, completed, frontierNano, nil
 		}
 		if !isRetryableSerializationError(err) {
-			return 0, false, err
+			return 0, false, 0, err
 		}
 		lastErr = err
 	}
-	return 0, false, fmt.Errorf("compact metric %q chunk: exhausted retries after serialization failures: %w", metricName, lastErr)
+	return 0, false, 0, fmt.Errorf("compact metric %q chunk: exhausted retries after serialization failures: %w", metricName, lastErr)
 }
 
-func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricName string, now time.Time, policy RollupPolicy, obsoleteIntervals []time.Duration) (int, bool, error) {
+func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricName string, now time.Time, policy RollupPolicy, obsoleteIntervals []time.Duration) (int, bool, int64, error) {
 	tx, err := s.db.BeginTx(ctx, s.dialect.compactTxOptions())
 	if err != nil {
-		return 0, false, err
+		return 0, false, 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -265,7 +275,7 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 	if policy.PreservesRaw() {
 		watermark, hasWatermark, err := s.compactionWatermarkFrom(ctx, tx, metricName)
 		if err != nil {
-			return 0, false, err
+			return 0, false, 0, err
 		}
 		if hasWatermark {
 			chunkStart = watermark
@@ -273,14 +283,14 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 		} else {
 			chunkStart, found, err = s.oldestRawTimestampBeforeTx(ctx, tx, metricName, rawCutoff)
 			if err != nil {
-				return 0, false, err
+				return 0, false, 0, err
 			}
 		}
 	} else {
 		var err error
 		chunkStart, found, err = s.oldestRawTimestampBeforeTx(ctx, tx, metricName, rawCutoff)
 		if err != nil {
-			return 0, false, err
+			return 0, false, 0, err
 		}
 	}
 	chunkEnd := rawCutoff
@@ -290,7 +300,7 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 		windowNano := metricCompactionChunkWindow.Nanoseconds()
 		candidate, addErr := checkedAddInt64(floorDivNano(chunkStart.UnixNano(), windowNano), windowNano)
 		if addErr != nil {
-			return 0, false, addErr
+			return 0, false, 0, addErr
 		}
 		if candidate < rawCutoff.UnixNano() {
 			chunkEnd = time.Unix(0, candidate).UTC()
@@ -302,7 +312,7 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 			written, err = s.compactMetricIncrementalRangeWithinTx(ctx, metricName, chunkStart, chunkEnd, policy, tx)
 		}
 		if err != nil {
-			return 0, false, err
+			return 0, false, 0, err
 		}
 		if !policy.PreservesRaw() {
 			if s.sqliteStorageV4 {
@@ -311,35 +321,35 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 				_, err = s.DeleteBeforeTx(ctx, metricName, chunkEnd, tx)
 			}
 			if err != nil {
-				return 0, false, err
+				return 0, false, 0, err
 			}
 		}
 	}
 	if completed && !policy.PreservesRaw() {
 		if err := s.deleteRollupsForIntervalsTx(ctx, metricName, obsoleteIntervals, tx); err != nil {
-			return 0, false, err
+			return 0, false, 0, err
 		}
 		// Handoff scans the existing fine-tier history. Run it once after the
 		// raw cursor reaches the cutoff, rather than once for every five-minute
 		// raw chunk, so a ping backlog is not decoded repeatedly while catching up.
 		n, err := s.handoffExpiredRollupTiersTx(ctx, metricName, now, policy, tx)
 		if err != nil {
-			return 0, false, err
+			return 0, false, 0, err
 		}
 		written += n
 	}
 	if err := s.persistCompactionWatermarkTx(ctx, metricName, chunkEnd, tx); err != nil {
-		return 0, false, err
+		return 0, false, 0, err
 	}
 	if completed {
 		if err := s.pruneUnusedSQLiteSeries(ctx, tx); err != nil {
-			return 0, false, err
+			return 0, false, 0, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, false, err
+		return 0, false, 0, err
 	}
-	return written, completed, nil
+	return written, completed, chunkEnd.UnixNano(), nil
 }
 
 // compactMetricPreserveRawRange materializes every configured query tier
@@ -448,7 +458,7 @@ func (s *Store) queryRawPointsRange(ctx context.Context, q querier, metricName s
 // bounded transactions for destructive retention policies. PreserveRaw uses
 // sealSQLiteV4RollupsInBatches so retained raw history is never repeatedly
 // decoded and rewritten while live reports are waiting for SQLite's writer.
-func (s *Store) sealSQLiteV4MetricInBatches(ctx context.Context, metricName string, beforeNano int64) error {
+func (s *Store) sealSQLiteV4MetricInBatches(ctx context.Context, metricName string, beforeNano, frontierNano int64) error {
 	pointSeries, err := s.sqliteV4PointSeriesIDsBefore(ctx, s.db, metricName, beforeNano)
 	if err != nil {
 		return err
@@ -476,10 +486,10 @@ func (s *Store) sealSQLiteV4MetricInBatches(ctx context.Context, metricName stri
 			}
 		}
 	}
-	return s.sealSQLiteV4RollupsInBatches(ctx, metricName, beforeNano)
+	return s.sealSQLiteV4RollupsInBatches(ctx, metricName, beforeNano, frontierNano)
 }
 
-func (s *Store) sealSQLiteV4RollupsInBatches(ctx context.Context, metricName string, beforeNano int64) error {
+func (s *Store) sealSQLiteV4RollupsInBatches(ctx context.Context, metricName string, beforeNano, frontierNano int64) error {
 	rollupSeries, err := s.sqliteV4MatchingSeries(ctx, s.db, metricName, "", nil)
 	if err != nil {
 		return err
@@ -494,7 +504,7 @@ func (s *Store) sealSQLiteV4RollupsInBatches(ctx context.Context, metricName str
 		if err != nil {
 			return err
 		}
-		if err := s.sealSQLiteV4RollupSeriesTx(ctx, tx, rollupSeries[start:end], beforeNano); err != nil {
+		if err := s.sealSQLiteV4RollupSeriesTx(ctx, tx, rollupSeries[start:end], beforeNano, frontierNano); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
@@ -612,7 +622,7 @@ func (s *Store) compactMetricOnce(ctx context.Context, metricName string, now ti
 		return written, err
 	}
 	if s.sqliteStorageV4 {
-		if err := s.sealSQLiteV4RollupHotTx(ctx, tx, metricName, now.Add(-sqliteV4HotWindow).UnixNano()); err != nil {
+		if err := s.sealSQLiteV4RollupHotTx(ctx, tx, metricName, now.Add(-sqliteV4HotWindow).UnixNano(), policy.rawCutoff(now).UnixNano()); err != nil {
 			return written, err
 		}
 	}

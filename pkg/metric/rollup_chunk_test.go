@@ -61,7 +61,7 @@ func TestCompactionChunksCommitResumeAndPreserveRollups(t *testing.T) {
 
 	effective := policy.withMetricRetention(30 * 24 * time.Hour)
 	obsolete := rollupIntervalsOutsidePolicy(policy.Tiers, effective.Tiers)
-	written, completed, err := chunked.compactMetricIncrementalChunk(ctx, metricName, now, effective, obsolete)
+	written, completed, _, err := chunked.compactMetricIncrementalChunk(ctx, metricName, now, effective, obsolete)
 	if err != nil {
 		t.Fatalf("first chunk: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestCompactionChunksCommitResumeAndPreserveRollups(t *testing.T) {
 
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, _, err := chunked.compactMetricIncrementalChunk(cancelled, metricName, now, effective, obsolete); !errors.Is(err, context.Canceled) {
+	if _, _, _, err := chunked.compactMetricIncrementalChunk(cancelled, metricName, now, effective, obsolete); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled chunk error=%v, want context.Canceled", err)
 	}
 	watermark, ok, err = chunked.compactionWatermark(ctx, metricName)
@@ -138,7 +138,7 @@ func TestCompactionChunksCommitResumeAndPreserveRollups(t *testing.T) {
 		}
 	}
 	previousWatermark := rawCutoff
-	if _, completed, err := chunked.compactMetricIncrementalChunk(ctx, metricName, now.Add(time.Minute), effective, obsolete); err != nil || completed {
+	if _, completed, _, err := chunked.compactMetricIncrementalChunk(ctx, metricName, now.Add(time.Minute), effective, obsolete); err != nil || completed {
 		t.Fatalf("late chunk completed=%v err=%v, want an old partial range", completed, err)
 	}
 	watermark, ok, err = chunked.compactionWatermark(ctx, metricName)

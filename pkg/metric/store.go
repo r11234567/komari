@@ -2096,7 +2096,12 @@ func (s *Store) CleanupExpiredMetricStep(ctx context.Context, metricName string,
 	if s.sqlitePingMerged && def.Name == sqliteVirtualPingLossMetric {
 		return 0, true, nil
 	}
-	const cleanupBatch = 32
+	// The batch is a budget shared across every series of the metric, and one
+	// scheduler pass runs a bounded number of cleanup steps. A batch of a few
+	// dozen cannot keep up with a metric that spans hundreds of series, which
+	// lets rollup tiers grow far past their configured retention. Each step still
+	// runs in its own bounded transaction under the caller's deadline.
+	const cleanupBatch = 512
 	var total int64
 	cutoffNano := int64(math.MaxInt64)
 	if def.RetentionDays > 0 {

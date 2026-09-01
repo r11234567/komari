@@ -1192,7 +1192,7 @@ func TestSQLiteStorageV4PartiallyDeletesAndMergesLateRollups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.sealSQLiteV4RollupHotTx(ctx, tx, "late", base.Add(701*time.Minute).UnixNano()); err != nil {
+	if err := store.sealSQLiteV4RollupHotTx(ctx, tx, "late", base.Add(701*time.Minute).UnixNano(), sqliteV4NoRollupFrontier); err != nil {
 		_ = tx.Rollback()
 		t.Fatal(err)
 	}
@@ -1265,7 +1265,7 @@ func TestSQLiteStorageV4LateRollupGapFallsBackLosslessly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.sealSQLiteV4RollupHotTx(ctx, tx, "gap", base.Add(10*time.Minute).UnixNano()); err != nil {
+	if err := store.sealSQLiteV4RollupHotTx(ctx, tx, "gap", base.Add(10*time.Minute).UnixNano(), sqliteV4NoRollupFrontier); err != nil {
 		_ = tx.Rollback()
 		t.Fatal(err)
 	}
@@ -1336,7 +1336,7 @@ func TestSQLiteStorageV4DefersMutableCoarseRollupRewrite(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := store.sealSQLiteV4RollupHotTx(ctx, tx, "mutable", before.UnixNano()); err != nil {
+		if err := store.sealSQLiteV4RollupHotTx(ctx, tx, "mutable", before.UnixNano(), sqliteV4NoRollupFrontier); err != nil {
 			_ = tx.Rollback()
 			t.Fatal(err)
 		}
@@ -1410,7 +1410,7 @@ func TestSQLiteStorageV4RollupTailFlushPreservesLargeBlocks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := store.sealSQLiteV4RollupHotTx(ctx, tx, "tail", before.UnixNano()); err != nil {
+		if err := store.sealSQLiteV4RollupHotTx(ctx, tx, "tail", before.UnixNano(), sqliteV4NoRollupFrontier); err != nil {
 			_ = tx.Rollback()
 			t.Fatal(err)
 		}

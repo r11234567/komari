@@ -1819,15 +1819,45 @@ func (s *Store) deleteSQLiteV4RollupsLegacyTx(ctx context.Context, tx *sql.Tx, f
 	return total, nil
 }
 
-func (s *Store) sealSQLiteV4RollupHotTx(ctx context.Context, tx *sql.Tx, metricName string, beforeNano int64) error {
+func (s *Store) sealSQLiteV4RollupHotTx(ctx context.Context, tx *sql.Tx, metricName string, beforeNano, frontierNano int64) error {
 	series, err := s.sqliteV4MatchingSeries(ctx, tx, metricName, "", nil)
 	if err != nil {
 		return err
 	}
-	return s.sealSQLiteV4RollupSeriesTx(ctx, tx, series, beforeNano)
+	return s.sealSQLiteV4RollupSeriesTx(ctx, tx, series, beforeNano, frontierNano)
 }
 
-func (s *Store) sealSQLiteV4RollupSeriesTx(ctx context.Context, tx *sql.Tx, series []sqliteV4Series, beforeNano int64) error {
+// sqliteV4NoRollupFrontier disables the completeness clamp for callers that
+// already know no further raw data can land in the buckets being sealed.
+const sqliteV4NoRollupFrontier = int64(math.MaxInt64)
+
+// rollupSealCutoff limits sealing to buckets whose tier window has already
+// closed at the compaction frontier.
+//
+// A bucket keyed at bucket_nano covers [bucket_nano, bucket_nano+resolution).
+// Until compaction has consumed raw data past that end the bucket is still
+// accumulating, so sealing it into a compressed block forces every later update
+// to decode and re-encode that whole block. With a two-hour materialization
+// delay and a five-minute hot window every coarse bucket was written far enough
+// in the past to look immediately sealable, which turned one open hour-bucket
+// per series into sixty block rewrites per hour that produced no new buckets.
+func rollupSealCutoff(beforeNano, frontierNano, resolution int64) (int64, bool) {
+	cutoff := beforeNano
+	if frontierNano != sqliteV4NoRollupFrontier && resolution > 0 {
+		if frontierNano < math.MinInt64+resolution {
+			return 0, false
+		}
+		if closed := frontierNano - resolution + 1; closed < cutoff {
+			cutoff = closed
+		}
+	}
+	if cutoff == math.MinInt64 {
+		return 0, false
+	}
+	return cutoff, true
+}
+
+func (s *Store) sealSQLiteV4RollupSeriesTx(ctx context.Context, tx *sql.Tx, series []sqliteV4Series, beforeNano, frontierNano int64) error {
 	for _, item := range series {
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
 			`SELECT DISTINCT resolution_nano FROM %s WHERE series_id = ? AND bucket_nano < ?`,
@@ -1851,12 +1881,16 @@ func (s *Store) sealSQLiteV4RollupSeriesTx(ctx context.Context, tx *sql.Tx, seri
 		}
 		_ = rows.Close()
 		for _, resolution := range resolutions {
+			sealBefore, sealable := rollupSealCutoff(beforeNano, frontierNano, resolution)
+			if !sealable {
+				continue
+			}
 			var maxEnd sql.NullInt64
 			if err := tx.QueryRowContext(ctx, `SELECT MAX(end_nano) FROM `+s.tables.rollupBlocks+` WHERE series_id = ? AND resolution_nano = ?`, item.id, resolution).Scan(&maxEnd); err != nil {
 				return err
 			}
 			if maxEnd.Valid {
-				lateBeforeNano := beforeNano - (sqliteV4RollupFlushWindow - sqliteV4HotWindow).Nanoseconds() - resolution
+				lateBeforeNano := sealBefore - (sqliteV4RollupFlushWindow - sqliteV4HotWindow).Nanoseconds() - resolution
 				var lateCount int
 				if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+s.tables.rollupValues+` WHERE series_id = ? AND resolution_nano = ? AND bucket_nano <= ? AND bucket_nano <= ?`, item.id, resolution, maxEnd.Int64, lateBeforeNano).Scan(&lateCount); err != nil {
 					return err
@@ -1880,13 +1914,13 @@ func (s *Store) sealSQLiteV4RollupSeriesTx(ctx context.Context, tx *sql.Tx, seri
 				lower = maxEnd.Int64
 			}
 			var count int
-			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+s.tables.rollupValues+` WHERE series_id = ? AND resolution_nano = ? AND bucket_nano > ? AND bucket_nano < ?`, item.id, resolution, lower, beforeNano).Scan(&count); err != nil {
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+s.tables.rollupValues+` WHERE series_id = ? AND resolution_nano = ? AND bucket_nano > ? AND bucket_nano < ?`, item.id, resolution, lower, sealBefore).Scan(&count); err != nil {
 				return err
 			}
 			if count < minimum {
 				continue
 			}
-			if _, err := s.appendSQLiteV4RollupTailTx(ctx, tx, item.id, resolution, beforeNano); err != nil {
+			if _, err := s.appendSQLiteV4RollupTailTx(ctx, tx, item.id, resolution, sealBefore); err != nil {
 				return err
 			}
 		}

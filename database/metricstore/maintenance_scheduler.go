@@ -12,11 +12,19 @@ import (
 )
 
 const (
-	maintenanceCleanupInterval  = 30 * time.Minute
-	maintenanceRunBudget        = 25 * time.Second
-	maintenanceCleanupBudget    = 2 * time.Second
+	maintenanceCleanupInterval = 30 * time.Minute
+	// The compact cron ticks every 30s. A pass that is allowed to run for most of
+	// that interval leaves no idle time: the following tick finds the gate held,
+	// gives up, and the pass after that starts immediately, so the process never
+	// settles. Keep the budget a fraction of the tick so a pass finishes, yields
+	// the writer, and leaves the box idle until the next tick.
+	maintenanceRunBudget        = 8 * time.Second
+	maintenanceCleanupBudget    = 3 * time.Second
 	maintenanceCheckpointBudget = 2 * time.Second
 	maintenanceMaxTasks         = 64
+	// Cleanup steps admitted per pass. Retention has to keep pace with ingest
+	// across every series of a metric, which a single step per pass cannot do.
+	maintenanceCleanupQuota = 4
 )
 
 type maintenanceTaskKind uint8
@@ -236,7 +244,12 @@ func RunMaintenance(ctx context.Context, now time.Time) (SchedulerResult, error)
 			continue
 		}
 
-		if result.Compactions == 0 || result.Compactions >= compactionQuota || !maintenanceCompactionPending(now) {
+		// At most one checkpoint per invocation. maintenanceCheckpointDue re-reads
+		// the WAL size against a fixed `now`, so a checkpoint that succeeds without
+		// shrinking the WAL - normal when a reader still pins an old snapshot -
+		// reports due again immediately and would otherwise spin here until the
+		// task or deadline cap is hit.
+		if result.Checkpoints == 0 && (result.Compactions == 0 || result.Compactions >= compactionQuota || !maintenanceCompactionPending(now)) {
 			if err := storeOperations.AcquireShared(ctx); err != nil {
 				return result, fmt.Errorf("wait for checkpoint maintenance slot: %w", err)
 			}
@@ -311,9 +324,12 @@ func RunMaintenance(ctx context.Context, now time.Time) (SchedulerResult, error)
 			metricMaintenance.cleanupQueue = append(metricMaintenance.cleanupQueue, cleanupTask)
 			metricMaintenance.mu.Unlock()
 		}
-		// One cleanup task per invocation is deliberate: the next scheduler tick
-		// gives compaction first chance at the writer.
-		break
+		// Compaction is popped first on every iteration and re-enqueued for all
+		// metrics at the start of each pass, so admitting a few cleanup steps here
+		// cannot starve it. The deadline and task cap still bound the pass.
+		if result.Cleanups >= maintenanceCleanupQuota {
+			break
+		}
 	}
 	if len(errs) > 0 {
 		logger.Warnf("metricstore", "maintenance scheduler completed with %d deferred errors", len(errs))
