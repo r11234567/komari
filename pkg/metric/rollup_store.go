@@ -200,11 +200,18 @@ func (s *Store) compactMetricIncrementalInChunks(ctx context.Context, metricName
 		stepLimitReached := s.sqliteStorageV4 && chunkLimit > 0 && chunksSinceVacuum >= chunkLimit
 		if (completed || stepLimitReached) && s.sqliteStorageV4 {
 			sealBefore := now.Add(-sqliteV4HotWindow).UnixNano()
+			// Sealing walks every series of the metric, so it needs its own share of
+			// the step budget; without one, a metric with many series overruns the
+			// whole maintenance pass and reports it as a failure.
+			sealDeadline := time.Time{}
+			if stepBudget > 0 {
+				sealDeadline = stepStarted.Add(stepBudget)
+			}
 			var sealErr error
 			if policy.PreservesRaw() {
-				sealErr = s.sealSQLiteV4RollupsInBatches(ctx, metricName, sealBefore, frontierNano)
+				sealErr = s.sealSQLiteV4RollupsInBatches(ctx, metricName, sealBefore, frontierNano, sealDeadline)
 			} else {
-				sealErr = s.sealSQLiteV4MetricInBatches(ctx, metricName, sealBefore, frontierNano)
+				sealErr = s.sealSQLiteV4MetricInBatches(ctx, metricName, sealBefore, frontierNano, sealDeadline)
 			}
 			if sealErr != nil {
 				return total, sealErr
@@ -458,12 +465,15 @@ func (s *Store) queryRawPointsRange(ctx context.Context, q querier, metricName s
 // bounded transactions for destructive retention policies. PreserveRaw uses
 // sealSQLiteV4RollupsInBatches so retained raw history is never repeatedly
 // decoded and rewritten while live reports are waiting for SQLite's writer.
-func (s *Store) sealSQLiteV4MetricInBatches(ctx context.Context, metricName string, beforeNano, frontierNano int64) error {
+func (s *Store) sealSQLiteV4MetricInBatches(ctx context.Context, metricName string, beforeNano, frontierNano int64, deadline time.Time) error {
 	pointSeries, err := s.sqliteV4PointSeriesIDsBefore(ctx, s.db, metricName, beforeNano)
 	if err != nil {
 		return err
 	}
 	for start := 0; start < len(pointSeries); start += metricCompactionSeriesBatch {
+		if !deadline.IsZero() && start > 0 && !time.Now().Before(deadline) {
+			return nil
+		}
 		batchStarted := time.Now()
 		end := start + metricCompactionSeriesBatch
 		if end > len(pointSeries) {
@@ -486,15 +496,24 @@ func (s *Store) sealSQLiteV4MetricInBatches(ctx context.Context, metricName stri
 			}
 		}
 	}
-	return s.sealSQLiteV4RollupsInBatches(ctx, metricName, beforeNano, frontierNano)
+	return s.sealSQLiteV4RollupsInBatches(ctx, metricName, beforeNano, frontierNano, deadline)
 }
 
-func (s *Store) sealSQLiteV4RollupsInBatches(ctx context.Context, metricName string, beforeNano, frontierNano int64) error {
+// sealSQLiteV4RollupsInBatches seals one series batch per transaction, yielding
+// the writer between batches. A metric with hundreds of series therefore costs
+// far more wall time than one compaction chunk, which is not covered by the
+// caller's chunk budget. deadline lets the caller stop after a committed batch
+// instead of overrunning the pass and failing the whole invocation; a zero
+// deadline drains every series. Series left over are sealed by the next pass.
+func (s *Store) sealSQLiteV4RollupsInBatches(ctx context.Context, metricName string, beforeNano, frontierNano int64, deadline time.Time) error {
 	rollupSeries, err := s.sqliteV4MatchingSeries(ctx, s.db, metricName, "", nil)
 	if err != nil {
 		return err
 	}
 	for start := 0; start < len(rollupSeries); start += metricCompactionSeriesBatch {
+		if !deadline.IsZero() && start > 0 && !time.Now().Before(deadline) {
+			return nil
+		}
 		batchStarted := time.Now()
 		end := start + metricCompactionSeriesBatch
 		if end > len(rollupSeries) {

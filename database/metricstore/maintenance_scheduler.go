@@ -18,8 +18,11 @@ const (
 	// gives up, and the pass after that starts immediately, so the process never
 	// settles. Keep the budget a fraction of the tick so a pass finishes, yields
 	// the writer, and leaves the box idle until the next tick.
-	maintenanceRunBudget        = 8 * time.Second
-	maintenanceCleanupBudget    = 3 * time.Second
+	maintenanceRunBudget = 8 * time.Second
+	// Deleting expired rollup buckets can require decoding the block and axis
+	// payloads that contain them, so give a cleanup step enough room to commit its
+	// batch rather than roll back at the deadline having done nothing.
+	maintenanceCleanupBudget    = 5 * time.Second
 	maintenanceCheckpointBudget = 2 * time.Second
 	maintenanceMaxTasks         = 64
 	// Cleanup steps admitted per pass. Retention has to keep pace with ingest

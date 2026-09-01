@@ -2099,9 +2099,13 @@ func (s *Store) CleanupExpiredMetricStep(ctx context.Context, metricName string,
 	// The batch is a budget shared across every series of the metric, and one
 	// scheduler pass runs a bounded number of cleanup steps. A batch of a few
 	// dozen cannot keep up with a metric that spans hundreds of series, which
-	// lets rollup tiers grow far past their configured retention. Each step still
-	// runs in its own bounded transaction under the caller's deadline.
-	const cleanupBatch = 512
+	// lets rollup tiers grow far past their configured retention.
+	//
+	// Each step runs in its own transaction under the caller's deadline, so the
+	// batch must be small enough to commit inside it: deleting a rollup bucket can
+	// mean decoding the block and axis that hold it, and a batch that overruns the
+	// deadline rolls back and makes no progress at all.
+	const cleanupBatch = 128
 	var total int64
 	cutoffNano := int64(math.MaxInt64)
 	if def.RetentionDays > 0 {
