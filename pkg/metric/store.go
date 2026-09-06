@@ -49,6 +49,12 @@ type Store struct {
 	// prevents dashboard query acceleration from scaling memory with fleet size.
 	axisCacheMu sync.Mutex
 	axisCache   *sqliteAxisCache
+	// rollupSealOffsets records, per metric, the series offset the next seal pass
+	// resumes from. A pass is time-bounded and a metric can have far more series
+	// than one pass covers, so without this the tail is never reached and its
+	// closed buckets stay in the hot table indefinitely.
+	rollupSealMu      sync.Mutex
+	rollupSealOffsets map[string]int
 	// dialect renders backend-specific SQL.
 	//
 	// dialect 渲染后端专用 SQL。

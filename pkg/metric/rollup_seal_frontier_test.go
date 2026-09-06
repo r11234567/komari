@@ -329,3 +329,85 @@ func TestClosedBucketsDoNotAccumulateInTheHotTable(t *testing.T) {
 		t.Fatal("preserve-raw history must survive sealing")
 	}
 }
+
+// TestSealVisitsEverySeriesAcrossPasses guards the sealing sweep against
+// starvation by position. A pass is time-bounded and seals series in small
+// batches, so a metric with more series than one pass covers - ping has one per
+// target - would never seal the tail of its series list if every pass restarted
+// at zero. Those series' closed buckets would then sit in the hot table forever,
+// which is precisely the backlog this file's other test measures.
+func TestSealVisitsEverySeriesAcrossPasses(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		Mode:         RollupModePreserveRaw,
+		PreserveRaw:  true,
+		RawRetention: 2 * time.Hour,
+		Tiers: []RollupTier{
+			{Interval: time.Minute, Retention: 6 * time.Hour},
+			{Interval: time.Hour, Retention: 30 * 24 * time.Hour},
+		},
+	}
+	store := newRollupStore(t, policy)
+	if !store.sqliteStorageV4 {
+		t.Fatal("regression must exercise SQLite V4 sealed rollup blocks")
+	}
+
+	const metricName = "many-series"
+	// More series than a single deadline-bounded pass can cover in one sweep.
+	const seriesCount = metricCompactionSeriesBatch*3 + 3
+	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	if err := store.CreateMetric(ctx, Definition{Name: metricName, Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatalf("create metric: %v", err)
+	}
+	points := make([]Point, 0, seriesCount*180)
+	for entity := 0; entity < seriesCount; entity++ {
+		id := fmt.Sprintf("node-%02d", entity)
+		for i := 0; i < 180; i++ {
+			points = append(points, Point{
+				MetricName: metricName,
+				EntityID:   id,
+				Timestamp:  base.Add(time.Duration(i) * time.Minute),
+				Value:      float64(i%53 + 1),
+			})
+		}
+	}
+	if err := store.WriteBatch(ctx, points); err != nil {
+		t.Fatalf("seed points: %v", err)
+	}
+
+	// Each pass carries a deadline that already expired, so it commits exactly
+	// one batch. Enough passes must still cover every series.
+	sealBefore := base.Add(3 * time.Hour).UnixNano()
+	frontier := base.Add(3 * time.Hour).UnixNano()
+	expired := time.Now().Add(-time.Second)
+	seen := make(map[int]struct{})
+	for pass := 0; pass < seriesCount; pass++ {
+		before := store.rollupSealCursor(metricName, seriesCount)
+		seen[before] = struct{}{}
+		if err := store.sealSQLiteV4RollupsInBatches(ctx, metricName, sealBefore, frontier, expired); err != nil {
+			t.Fatalf("seal pass %d: %v", pass, err)
+		}
+		if store.rollupSealCursor(metricName, seriesCount) == 0 && before != 0 {
+			// Wrapped around: the sweep covered the whole series list.
+			break
+		}
+	}
+	if len(seen) < 2 {
+		t.Fatalf("the cursor never advanced past offset %v: passes cannot reach later series", seen)
+	}
+
+	// Every series must now have sealed history, not just the first batch.
+	query := fmt.Sprintf(
+		`SELECT COUNT(DISTINCT b.series_id) FROM %s AS b JOIN %s AS s ON s.id = b.series_id
+		 WHERE s.metric_name = ? AND b.resolution_nano = ?`,
+		store.tables.rollupBlocks, store.tables.series,
+	)
+	var sealedSeries int
+	if err := store.db.QueryRow(query, metricName, int64(time.Hour)).Scan(&sealedSeries); err != nil {
+		t.Fatalf("count sealed series: %v", err)
+	}
+	if sealedSeries != seriesCount {
+		t.Fatalf("%d of %d series have sealed hour blocks: later series are starved",
+			sealedSeries, seriesCount)
+	}
+}

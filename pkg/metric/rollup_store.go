@@ -510,15 +510,31 @@ func (s *Store) sealSQLiteV4RollupsInBatches(ctx context.Context, metricName str
 	if err != nil {
 		return err
 	}
-	for start := 0; start < len(rollupSeries); start += metricCompactionSeriesBatch {
-		if !deadline.IsZero() && start > 0 && !time.Now().Before(deadline) {
+	if len(rollupSeries) == 0 {
+		return nil
+	}
+	// Resume where the previous pass stopped. The deadline usually allows only a
+	// few batches, so restarting at zero every time would mean the series after
+	// them are never sealed at all: on a metric with many series - ping has one
+	// per target - their closed buckets would stay in the hot table forever.
+	offset := s.rollupSealCursor(metricName, len(rollupSeries))
+	visited := 0
+	for visited < len(rollupSeries) {
+		if !deadline.IsZero() && visited > 0 && !time.Now().Before(deadline) {
+			s.storeRollupSealCursor(metricName, offset)
 			return nil
 		}
 		batchStarted := time.Now()
+		start := offset
 		end := start + metricCompactionSeriesBatch
 		if end > len(rollupSeries) {
 			end = len(rollupSeries)
 		}
+		offset = end
+		if offset >= len(rollupSeries) {
+			offset = 0
+		}
+		visited += end - start
 		tx, err := s.db.BeginTx(ctx, s.dialect.compactTxOptions())
 		if err != nil {
 			return err
@@ -530,13 +546,41 @@ func (s *Store) sealSQLiteV4RollupsInBatches(ctx context.Context, metricName str
 		if err := tx.Commit(); err != nil {
 			return err
 		}
-		if end < len(rollupSeries) {
+		if visited < len(rollupSeries) {
 			if err := yieldCompactionWriter(ctx, time.Since(batchStarted)); err != nil {
+				s.storeRollupSealCursor(metricName, offset)
 				return err
 			}
 		}
 	}
+	// A full sweep completed, so the next pass may as well start from the top.
+	s.storeRollupSealCursor(metricName, 0)
 	return nil
+}
+
+// rollupSealCursor returns the series offset the next seal pass should start
+// from, clamped in case the series set shrank since it was recorded.
+func (s *Store) rollupSealCursor(metricName string, total int) int {
+	s.rollupSealMu.Lock()
+	defer s.rollupSealMu.Unlock()
+	offset := s.rollupSealOffsets[metricName]
+	if offset < 0 || offset >= total {
+		return 0
+	}
+	return offset
+}
+
+func (s *Store) storeRollupSealCursor(metricName string, offset int) {
+	s.rollupSealMu.Lock()
+	defer s.rollupSealMu.Unlock()
+	if s.rollupSealOffsets == nil {
+		s.rollupSealOffsets = make(map[string]int)
+	}
+	if offset == 0 {
+		delete(s.rollupSealOffsets, metricName)
+		return
+	}
+	s.rollupSealOffsets[metricName] = offset
 }
 
 func (s *Store) oldestRawTimestampBeforeTx(ctx context.Context, tx *sql.Tx, metricName string, before time.Time) (time.Time, bool, error) {
