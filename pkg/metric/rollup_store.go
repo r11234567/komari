@@ -172,6 +172,11 @@ const (
 	// full pass stays well inside maintenanceRunBudget instead of overrunning the
 	// cron interval and making every pass collide with the next one.
 	metricCompactionStepBudget = 400 * time.Millisecond
+	// Sealing gets its own slice rather than sharing the chunk budget, which is
+	// already spent by the time it runs. It walks series in batches with a yield
+	// between them, so this has to cover several batches for the sweep to keep up
+	// with ingest across a metric with many series.
+	metricCompactionSealBudget = 600 * time.Millisecond
 )
 
 // compactMetricIncrementalInChunks commits old upgrade data in bounded ranges.
@@ -200,12 +205,15 @@ func (s *Store) compactMetricIncrementalInChunks(ctx context.Context, metricName
 		stepLimitReached := s.sqliteStorageV4 && chunkLimit > 0 && chunksSinceVacuum >= chunkLimit
 		if (completed || stepLimitReached) && s.sqliteStorageV4 {
 			sealBefore := now.Add(-sqliteV4HotWindow).UnixNano()
-			// Sealing walks every series of the metric, so it needs its own share of
-			// the step budget; without one, a metric with many series overruns the
-			// whole maintenance pass and reports it as a failure.
+			// Sealing runs after the chunk loop has already spent the step budget, so
+			// deriving its deadline from stepStarted leaves it expired on arrival and
+			// it commits a single batch before bailing. A metric with many series then
+			// seals 8 of them per maintenance pass while ingest adds rows to all of
+			// them, and the hot table grows without bound. Give sealing its own slice,
+			// measured from now; the cursor carries the sweep across passes.
 			sealDeadline := time.Time{}
 			if stepBudget > 0 {
-				sealDeadline = stepStarted.Add(stepBudget)
+				sealDeadline = time.Now().Add(metricCompactionSealBudget)
 			}
 			var sealErr error
 			if policy.PreservesRaw() {
