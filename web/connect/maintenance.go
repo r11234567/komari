@@ -55,7 +55,10 @@ func (s *maintenanceService) ListSessions(ctx context.Context, _ *connect.Reques
 	}
 	current := ""
 	if meta := rpc.MetaFromContext(ctx); meta != nil {
-		current = meta.SessionToken
+		// Sessions are stored as digests, so the caller's raw cookie would never
+		// match a row and the client could not tell which entry is its own. Report
+		// the same form the list carries.
+		current = accounts.StoredSessionKey(meta.SessionToken)
 	}
 	return connect.NewResponse(&adminv1.ListSessionsResponse{CurrentSession: current, Sessions: sessions}), nil
 }

@@ -71,7 +71,9 @@ func adminGetSessions(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.Jso
 	}
 	current := ""
 	if meta := rpc.MetaFromContext(ctx); meta != nil {
-		current = meta.SessionToken
+		// Match the stored form the list carries; a raw cookie never equals a
+		// digest, and the client uses this to mark its own row.
+		current = accounts.StoredSessionKey(meta.SessionToken)
 	}
 	return map[string]any{"current": current, "data": ss}, nil
 }
