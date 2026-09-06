@@ -31,7 +31,7 @@ func TestDashboardModuleCacheCoalescesConcurrentLoads(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			value, err := cache.get(context.Background(), now, "same", time.Minute, func() (int, error) {
+			value, err := cache.get(context.Background(), now, "same", time.Minute, func(context.Context) (int, error) {
 				calls.Add(1)
 				time.Sleep(10 * time.Millisecond)
 				return 42, nil
@@ -71,7 +71,7 @@ func TestDashboardModuleCacheHonorsFifteenSecondRefresh(t *testing.T) {
 	var cache dashboardModuleCache[int]
 	var calls atomic.Int32
 	now := time.Now().UTC()
-	load := func() (int, error) {
+	load := func(context.Context) (int, error) {
 		return int(calls.Add(1)), nil
 	}
 
