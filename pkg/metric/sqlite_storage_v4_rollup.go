@@ -581,6 +581,12 @@ func (s *Store) writeSQLiteV4RollupBlocksTx(ctx context.Context, tx *sql.Tx, ser
 	return nil
 }
 
+// sqliteV4RollupHotBacklogLimit is the number of closed hot buckets, for one
+// series and resolution, past which sealing ignores the flush minimum. Hot rows
+// are read on every query for the series, so a backlog is far more expensive
+// than the slightly smaller block that sealing it early produces.
+const sqliteV4RollupHotBacklogLimit = 32
+
 func sqliteV4RollupFlushMinimum(resolution int64) int {
 	if resolution <= 0 {
 		return 1
@@ -1896,6 +1902,12 @@ func (s *Store) sealSQLiteV4RollupSeriesTx(ctx context.Context, tx *sql.Tx, seri
 					return err
 				}
 				if lateCount > 0 {
+					// Fold updates that belong inside already-sealed blocks back into
+					// them, then fall through to append the closed tail. Returning here
+					// instead would starve the append for as long as any late row keeps
+					// arriving, which on a metric with steady traffic is forever: closed
+					// buckets then accumulate in the hot table indefinitely and every
+					// read has to scan them.
 					rewritten, err := s.rewriteSQLiteV4LateRollupBlocksTx(ctx, tx, item.id, resolution, maxEnd.Int64, lateBeforeNano)
 					if err != nil {
 						return err
@@ -1905,7 +1917,10 @@ func (s *Store) sealSQLiteV4RollupSeriesTx(ctx context.Context, tx *sql.Tx, seri
 							return err
 						}
 					}
-					continue
+					// maxEnd may have moved, so re-read it before computing the tail.
+					if err := tx.QueryRowContext(ctx, `SELECT MAX(end_nano) FROM `+s.tables.rollupBlocks+` WHERE series_id = ? AND resolution_nano = ?`, item.id, resolution).Scan(&maxEnd); err != nil {
+						return err
+					}
 				}
 			}
 			minimum := sqliteV4RollupFlushMinimum(resolution)
@@ -1917,7 +1932,11 @@ func (s *Store) sealSQLiteV4RollupSeriesTx(ctx context.Context, tx *sql.Tx, seri
 			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+s.tables.rollupValues+` WHERE series_id = ? AND resolution_nano = ? AND bucket_nano > ? AND bucket_nano < ?`, item.id, resolution, lower, sealBefore).Scan(&count); err != nil {
 				return err
 			}
-			if count < minimum {
+			// The minimum keeps sealing from producing tiny blocks, but it must not
+			// hold closed buckets in the hot table forever: those rows are scanned by
+			// every read of this series. Once enough of them have piled up, seal them
+			// even though the batch is small.
+			if count < minimum && count < sqliteV4RollupHotBacklogLimit {
 				continue
 			}
 			if _, err := s.appendSQLiteV4RollupTailTx(ctx, tx, item.id, resolution, sealBefore); err != nil {

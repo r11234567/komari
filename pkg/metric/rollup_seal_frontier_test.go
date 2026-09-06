@@ -226,3 +226,106 @@ func snapshotRollupBlocks(t *testing.T, store *Store, metricName string, resolut
 	}
 	return snapshot
 }
+
+// TestClosedBucketsDoNotAccumulateInTheHotTable pins the other half of the
+// sealing contract. Holding an open bucket hot is correct; letting closed ones
+// pile up there is not, because every read of the series scans those rows.
+//
+// Two guards could each starve the append indefinitely: the late-rewrite branch
+// used to return before reaching it, and the flush minimum can exceed the number
+// of buckets a slowly advancing frontier ever exposes at once. With steady
+// traffic both hold forever, and the hot table grows without bound - it reached
+// 82k rows for one metric in production, and dashboard reads took 15s.
+func TestClosedBucketsDoNotAccumulateInTheHotTable(t *testing.T) {
+	ctx := context.Background()
+	policy := RollupPolicy{
+		Mode:         RollupModePreserveRaw,
+		PreserveRaw:  true,
+		RawRetention: 2 * time.Hour,
+		Tiers: []RollupTier{
+			{Interval: time.Minute, Retention: 6 * time.Hour},
+			{Interval: time.Hour, Retention: 30 * 24 * time.Hour},
+		},
+	}
+	store := newRollupStore(t, policy)
+	if !store.sqliteStorageV4 {
+		t.Fatal("regression must exercise SQLite V4 sealed rollup blocks")
+	}
+
+	const metricName = "hot-backlog"
+	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	if err := store.CreateMetric(ctx, Definition{Name: metricName, Type: TypeGauge, RetentionDays: 30}); err != nil {
+		t.Fatalf("create metric: %v", err)
+	}
+	// A full day of one-minute samples, so many hour buckets close over the run.
+	points := make([]Point, 0, 24*60)
+	for i := 0; i < 24*60; i++ {
+		points = append(points, Point{
+			MetricName: metricName,
+			EntityID:   "node-a",
+			Timestamp:  base.Add(time.Duration(i) * time.Minute),
+			Value:      float64(i%97 + 1),
+		})
+	}
+	if err := store.WriteBatch(ctx, points); err != nil {
+		t.Fatalf("seed points: %v", err)
+	}
+
+	// Advance the frontier the way the cron does, a minute at a time, well past
+	// the point where many hour buckets have closed.
+	for i := 0; i < 400; i++ {
+		at := base.Add(3*time.Hour + time.Duration(i)*time.Minute)
+		if _, err := store.CompactMetricStep(ctx, metricName, at); err != nil {
+			t.Fatalf("compaction pass %d: %v", i, err)
+		}
+	}
+
+	watermark, ok, err := store.compactionWatermark(ctx, metricName)
+	if err != nil || !ok {
+		t.Fatalf("read watermark: ok=%v err=%v", ok, err)
+	}
+	const hourResolution = int64(time.Hour)
+	// Every hour bucket that ends at or before the frontier is closed.
+	closedThrough := watermark.Truncate(time.Hour)
+
+	var closedHot int
+	query := fmt.Sprintf(
+		`SELECT COUNT(*) FROM %s AS v JOIN %s AS s ON s.id = v.series_id
+		 WHERE s.metric_name = ? AND v.resolution_nano = ? AND v.bucket_nano < ?`,
+		store.tables.rollupValues, store.tables.series,
+	)
+	if err := store.db.QueryRow(query, metricName, hourResolution, closedThrough.UnixNano()).Scan(&closedHot); err != nil {
+		t.Fatalf("count closed hot buckets: %v", err)
+	}
+	if closedHot > sqliteV4RollupHotBacklogLimit {
+		t.Fatalf("%d closed hour buckets left in the hot table, want at most %d: sealing is starved",
+			closedHot, sqliteV4RollupHotBacklogLimit)
+	}
+
+	// The sealed history must still be complete and readable: the hour buckets
+	// that were sealed have to add up to the raw samples they covered.
+	var sealedBuckets int
+	blockQuery := fmt.Sprintf(
+		`SELECT COALESCE(SUM(b.bucket_count), 0) FROM %s AS b JOIN %s AS s ON s.id = b.series_id
+		 WHERE s.metric_name = ? AND b.resolution_nano = ?`,
+		store.tables.rollupBlocks, store.tables.series,
+	)
+	if err := store.db.QueryRow(blockQuery, metricName, hourResolution).Scan(&sealedBuckets); err != nil {
+		t.Fatalf("count sealed buckets: %v", err)
+	}
+	if sealedBuckets == 0 {
+		t.Fatal("nothing was sealed at all")
+	}
+
+	points, err = store.Query(ctx, Query{
+		MetricName: metricName,
+		Start:      base,
+		End:        watermark,
+	})
+	if err != nil {
+		t.Fatalf("query raw history after sealing: %v", err)
+	}
+	if len(points) == 0 {
+		t.Fatal("preserve-raw history must survive sealing")
+	}
+}
