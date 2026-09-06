@@ -1229,8 +1229,28 @@ func convertedLockedForecast(amount int64, version models.BillingPriceVersion, t
 	return &value
 }
 
+// isLongTermExpiry reports whether an expiry date is a "never expires"
+// placeholder rather than a real one.
+//
+// Operators mark permanent servers with a far-future sentinel - 9999-12-31 is
+// the usual choice. Treating that as a date makes remainingValue prorate nearly
+// three million days of a billing cycle into prepaid value, which then lands in
+// the dashboard total and swamps every real figure. A zero or absurdly early
+// date is equally meaningless and is rejected the same way.
+func isLongTermExpiry(expiry *time.Time) bool {
+	if expiry == nil || expiry.IsZero() {
+		return true
+	}
+	year := expiry.UTC().Year()
+	return year < 2 || year > 2200
+}
+
 func remainingValue(version models.BillingPriceVersion, currency string, rates map[string]string, now time.Time) (*string, *int) {
 	if version.ExpiredAt == nil || version.PriceMicros <= 0 || version.BillingCycleDays <= 0 {
+		return nil, nil
+	}
+	if isLongTermExpiry(version.ExpiredAt) {
+		// No meaningful remaining value: the server is not on a countdown.
 		return nil, nil
 	}
 	remaining := version.ExpiredAt.Sub(now)

@@ -15,6 +15,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/migrations"
+	"github.com/komari-monitor/komari/utils/fsmove"
 	logger "github.com/komari-monitor/komari/utils/log"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -243,11 +244,14 @@ func restoreStagedBackup(dataDir string) error {
 	if err := os.RemoveAll(oldDir); err != nil {
 		return fmt.Errorf("prepare previous data path: %w", err)
 	}
-	if err := os.Rename(dataDir, oldDir); err != nil {
+	// data/ is usually a bind mount or volume, so a plain rename fails with
+	// EXDEV/EBUSY on exactly the deployments that need restore to work - and the
+	// rollback below, written the same way, would fail with it.
+	if err := fsmove.Directory(dataDir, oldDir); err != nil {
 		return fmt.Errorf("move current data aside: %w", err)
 	}
-	if err := os.Rename(stageDir, dataDir); err != nil {
-		rollbackErr := os.Rename(oldDir, dataDir)
+	if err := fsmove.Directory(stageDir, dataDir); err != nil {
+		rollbackErr := fsmove.Directory(oldDir, dataDir)
 		if rollbackErr != nil {
 			return fmt.Errorf("publish restored data: %v; restore previous data: %w", err, rollbackErr)
 		}

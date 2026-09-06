@@ -8,7 +8,9 @@ import (
 )
 
 func ForwardTerminal(id string) {
+	TerminalSessionsMutex.Lock()
 	session, exists := TerminalSessions[id]
+	TerminalSessionsMutex.Unlock()
 
 	if !exists || session == nil || session.Agent == nil || session.Browser == nil {
 		return

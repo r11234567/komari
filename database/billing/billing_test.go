@@ -845,3 +845,58 @@ func TestGetEntriesShowsCommittedBaseInsteadOfDailyAccrual(t *testing.T) {
 		assert.NotEqual(t, EntryTypeBaseAccrual, row.Type)
 	}
 }
+
+// A far-future date is how operators mark a server that never expires. Treated
+// as a real expiry it prorates millions of days of a billing cycle into prepaid
+// value, and remainingValueSummary adds that to the dashboard total, where it
+// swamps every genuine figure.
+func TestRemainingValueIgnoresLongTermExpirySentinels(t *testing.T) {
+	now := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+	base := models.BillingPriceVersion{
+		PriceMicros:      10 * MicrosPerUnit,
+		BillingCycleDays: 30,
+		Currency:         "USD",
+	}
+
+	sentinels := []time.Time{
+		time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC),
+		time.Date(2999, 1, 1, 0, 0, 0, 0, time.UTC),
+		{}, // zero value
+		time.Date(1, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	for _, expiry := range sentinels {
+		version := base
+		value := expiry
+		version.ExpiredAt = &value
+		if amount, days := remainingValue(version, "USD", nil, now); amount != nil || days != nil {
+			t.Errorf("expiry %s produced value=%v days=%v, want both nil",
+				expiry, derefString(amount), derefInt(days))
+		}
+	}
+
+	// A real expiry must still be prorated.
+	real := base
+	realExpiry := now.AddDate(0, 0, 15)
+	real.ExpiredAt = &realExpiry
+	amount, days := remainingValue(real, "USD", nil, now)
+	if amount == nil || days == nil {
+		t.Fatal("a genuine expiry must still produce a remaining value")
+	}
+	if *days != 15 {
+		t.Errorf("days = %d, want 15", *days)
+	}
+}
+
+func derefString(value *string) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func derefInt(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}

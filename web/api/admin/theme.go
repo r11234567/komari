@@ -21,6 +21,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/utils/fsmove"
 	"github.com/komari-monitor/komari/utils/safepath"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/public"
@@ -464,14 +465,14 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 	_ = os.Remove(backupDir)
 	hadPrevious := false
 	if _, err := os.Stat(themeDir); err == nil {
-		if err := os.Rename(themeDir, backupDir); err != nil {
+		if err := fsmove.Directory(themeDir, backupDir); err != nil {
 			return themeInfo, fmt.Errorf("暂存原有主题失败: %v", err)
 		}
 		hadPrevious = true
 	}
-	if err := os.Rename(stageDir, themeDir); err != nil {
+	if err := fsmove.Directory(stageDir, themeDir); err != nil {
 		if hadPrevious {
-			_ = os.Rename(backupDir, themeDir)
+			_ = fsmove.Directory(backupDir, themeDir)
 		}
 		return themeInfo, fmt.Errorf("启用新主题失败: %v", err)
 	}

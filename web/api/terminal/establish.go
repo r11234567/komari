@@ -9,11 +9,27 @@ import (
 
 func EstablishConnection(c *gin.Context) {
 	session_id := c.GetHeader("X-Komari-Terminal-Session")
+
+	TerminalSessionsMutex.Lock()
 	session, exists := TerminalSessions[session_id]
+	TerminalSessionsMutex.Unlock()
 	if !exists || session == nil || session.Browser == nil {
 		c.JSON(404, gin.H{"status": "error", "error": "Session not found"})
 		return
 	}
+
+	// The route admits any enrolled agent, so the caller has to be the agent this
+	// session was opened against. Without this an agent that learns a session id
+	// could answer another machine's session and become the PTY backend for an
+	// administrator's shell. Report it as not-found so a caller cannot probe for
+	// which session ids exist.
+	callerUUID, _ := c.Get("client_uuid")
+	agentUUID, _ := callerUUID.(string)
+	if agentUUID == "" || agentUUID != session.UUID {
+		c.JSON(404, gin.H{"status": "error", "error": "Session not found"})
+		return
+	}
+
 	// Upgrade the connection to WebSocket
 	if !api.IsWebSocketUpgrade(c) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Require WebSocket upgrade"})
@@ -29,12 +45,25 @@ func EstablishConnection(c *gin.Context) {
 		TerminalSessionsMutex.Unlock()
 		return
 	}
+
+	// Claim the session under the lock: two agents racing here would otherwise
+	// both install themselves, and the loser's connection would leak.
+	TerminalSessionsMutex.Lock()
+	if session.Agent != nil {
+		TerminalSessionsMutex.Unlock()
+		conn.Close()
+		return
+	}
 	session.Agent = conn
+	TerminalSessionsMutex.Unlock()
 	conn.SetCloseHandler(func(code int, text string) error {
+		TerminalSessionsMutex.Lock()
 		delete(TerminalSessions, session_id)
+		browser := session.Browser
+		TerminalSessionsMutex.Unlock()
 		// 通知 Browser 关闭终端连接
-		if session.Browser != nil {
-			session.Browser.Close()
+		if browser != nil {
+			browser.Close()
 		}
 		return nil
 	})

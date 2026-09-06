@@ -20,6 +20,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/utils/fsmove"
 	websecurity "github.com/komari-monitor/komari/web/security"
 )
 
@@ -290,12 +291,12 @@ func installEmbeddedThemeWithReplace(root, themeID string, replace bool) error {
 	backupDir := finalDir + ".previous"
 	_ = os.RemoveAll(backupDir)
 	if _, err := os.Stat(finalDir); err == nil {
-		if err := os.Rename(finalDir, backupDir); err != nil {
+		if err := fsmove.Directory(finalDir, backupDir); err != nil {
 			return err
 		}
 	}
-	if err := os.Rename(stageDir, finalDir); err != nil {
-		_ = os.Rename(backupDir, finalDir)
+	if err := fsmove.Directory(stageDir, finalDir); err != nil {
+		_ = fsmove.Directory(backupDir, finalDir)
 		return err
 	}
 	_ = os.RemoveAll(backupDir)
