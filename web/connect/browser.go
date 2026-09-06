@@ -172,9 +172,18 @@ func (s *browserService) GetTrafficTrend(ctx context.Context, req *connect.Reque
 		clientIDs = append(clientIDs, item.UUID)
 	}
 	now := time.Now().UTC()
-	buckets, err := dashboardapp.LoadTrafficTrend(ctx, clientIDs, now, window, interval)
+	// Bound the wait for the store's heavy-read slot. Without a deadline a burst
+	// of panels holds its connections open for as long as the client will wait,
+	// and each abandoned request keeps scanning after the browser has retried.
+	loadCtx, cancel := context.WithTimeout(ctx, trafficTrendLoadBudget)
+	defer cancel()
+	buckets, err := dashboardapp.LoadTrafficTrend(loadCtx, clientIDs, now, window, interval)
 	if err != nil {
-		return nil, connectError(connect.CodeInvalidArgument, err)
+		// Only a bad window/interval is the caller's fault. Reporting a store
+		// timeout as InvalidArgument tells the dashboard its request was malformed,
+		// so it retries immediately and the retries pile onto the very contention
+		// that caused the timeout.
+		return nil, connectError(trafficTrendErrorCode(ctx, err), err)
 	}
 	response := &browserv1.GetTrafficTrendResponse{
 		Buckets:     make([]*browserv1.TrafficTrendBucket, 0, len(buckets)),
@@ -189,6 +198,28 @@ func (s *browserService) GetTrafficTrend(ctx context.Context, req *connect.Reque
 		})
 	}
 	return connect.NewResponse(response), nil
+}
+
+// trafficTrendLoadBudget caps how long one panel waits for the shared traffic
+// scan. Long enough for a cold scan on a slow disk, short enough that a client
+// gets a definite answer instead of an open connection.
+const trafficTrendLoadBudget = 8 * time.Second
+
+// trafficTrendErrorCode maps a traffic trend failure onto the status the
+// dashboard should act on. Contention and cancellation are transient, so they
+// must not be reported as a malformed request: the client treats that as
+// permanent-but-retryable and hammers the store while it is already saturated.
+func trafficTrendErrorCode(ctx context.Context, err error) connect.Code {
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(ctx.Err(), context.Canceled):
+		return connect.CodeCanceled
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return connect.CodeUnavailable
+	case errors.Is(err, dashboardapp.ErrTrafficTrendBadRequest):
+		return connect.CodeInvalidArgument
+	default:
+		return connect.CodeInternal
+	}
 }
 
 func browserDuration(value *durationpb.Duration, fallback time.Duration) (time.Duration, error) {
