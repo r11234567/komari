@@ -401,6 +401,18 @@ func GetDBInstance() *gorm.DB {
 	return instance
 }
 
+// TryGetDBInstance 返回全局数据库实例；当数据库尚未就绪或初始化失败时返回 nil，
+// 而不是终止进程。
+//
+// 适用于「有数据库更好、没有也必须能继续」的路径：这类调用点若用
+// GetDBInstance，一次瞬时的数据库不可用就会让整个进程退出。
+func TryGetDBInstance() *gorm.DB {
+	if err := Initialize(); err != nil {
+		return nil
+	}
+	return instance
+}
+
 // Close 关闭底层数据库连接，供关闭流程调用。
 func Close() error {
 	if instance == nil {

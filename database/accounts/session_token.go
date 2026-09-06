@@ -71,36 +71,61 @@ func sessionDigestKey() []byte {
 		return sessionDigestKeyOnce.key
 	}
 
-	db := dbcore.GetDBInstance()
-	var item struct {
-		Key   string `gorm:"column:key"`
-		Value string `gorm:"column:value"`
+	if persisted := loadOrCreateSessionDigestKey(); len(persisted) == 32 {
+		sessionDigestKeyOnce.key = persisted
+		return sessionDigestKeyOnce.key
 	}
-	if err := db.Table("configs").Where("key = ?", sessionDigestKeyName).First(&item).Error; err == nil {
-		if decoded, decodeErr := hex.DecodeString(item.Value); decodeErr == nil && len(decoded) == 32 {
-			sessionDigestKeyOnce.key = decoded
-			return sessionDigestKeyOnce.key
+
+	// The database is unavailable or has no usable key. Fall back to a
+	// process-lifetime key rather than a fixed one: hashing still holds, and the
+	// only cost is that sessions do not survive a restart in this state. A
+	// predictable fallback would be worse than not hashing at all, since an
+	// attacker could then compute the stored value for a token of their choosing.
+	generated := make([]byte, 32)
+	if _, err := rand.Read(generated); err != nil {
+		panic("accounts: cannot generate session digest key: " + err.Error())
+	}
+	sessionDigestKeyOnce.key = generated
+	return sessionDigestKeyOnce.key
+}
+
+// loadOrCreateSessionDigestKey reads the instance key, creating it on first
+// use. It returns nil when the database cannot serve one; callers must cope.
+func loadOrCreateSessionDigestKey() []byte {
+	// Deliberately not GetDBInstance: that exits the process when the database
+	// is not ready, which would turn a transient outage - or a unit test that
+	// never configures one - into a crash.
+	db := dbcore.TryGetDBInstance()
+	if db == nil {
+		return nil
+	}
+	read := func() []byte {
+		var item struct {
+			Value string `gorm:"column:value"`
 		}
+		if err := db.Table("configs").Where("key = ?", sessionDigestKeyName).First(&item).Error; err != nil {
+			return nil
+		}
+		decoded, err := hex.DecodeString(item.Value)
+		if err != nil || len(decoded) != 32 {
+			return nil
+		}
+		return decoded
+	}
+	if existing := read(); existing != nil {
+		return existing
 	}
 
 	generated := make([]byte, 32)
 	if _, err := rand.Read(generated); err != nil {
-		// Refuse to fall back to a predictable key: a guessable digest key would
-		// let an attacker forge the stored value for a token of their choosing.
-		panic("accounts: cannot generate session digest key: " + err.Error())
+		return nil
 	}
-	encoded := hex.EncodeToString(generated)
 	// Insert-if-absent so two instances racing on a shared database converge on
-	// one key instead of invalidating each other's sessions.
+	// one key instead of invalidating each other's sessions; re-read to adopt
+	// whichever value won.
 	if err := db.Table("configs").Clauses(clause.OnConflict{DoNothing: true}).
-		Create(map[string]any{"key": sessionDigestKeyName, "value": encoded}).Error; err == nil {
-		if err := db.Table("configs").Where("key = ?", sessionDigestKeyName).First(&item).Error; err == nil {
-			if decoded, decodeErr := hex.DecodeString(item.Value); decodeErr == nil && len(decoded) == 32 {
-				sessionDigestKeyOnce.key = decoded
-				return sessionDigestKeyOnce.key
-			}
-		}
+		Create(map[string]any{"key": sessionDigestKeyName, "value": hex.EncodeToString(generated)}).Error; err != nil {
+		return nil
 	}
-	sessionDigestKeyOnce.key = generated
-	return sessionDigestKeyOnce.key
+	return read()
 }
