@@ -375,39 +375,59 @@ func TestSealVisitsEverySeriesAcrossPasses(t *testing.T) {
 		t.Fatalf("seed points: %v", err)
 	}
 
-	// Each pass carries a deadline that already expired, so it commits exactly
-	// one batch. Enough passes must still cover every series.
-	sealBefore := base.Add(3 * time.Hour).UnixNano()
-	frontier := base.Add(3 * time.Hour).UnixNano()
+	// Sealing only moves rows that already exist in the hot rollup table, so the
+	// buckets have to be materialized first. Drain compaction to the raw cutoff.
+	materializeNow := base.Add(5 * time.Hour)
+	cutoff := policy.withMetricRetention(30 * 24 * time.Hour).rawCutoff(materializeNow)
+	drained := false
+	for i := 0; i < 200 && !drained; i++ {
+		if _, err := store.CompactMetricStep(ctx, metricName, materializeNow); err != nil {
+			t.Fatalf("materialize pass %d: %v", i, err)
+		}
+		watermark, ok, err := store.compactionWatermark(ctx, metricName)
+		if err != nil {
+			t.Fatalf("read watermark: %v", err)
+		}
+		drained = ok && !watermark.Before(cutoff)
+	}
+	if !drained {
+		t.Fatal("compaction never reached the raw cutoff")
+	}
+
+	// Each pass carries a deadline that already expired, so it commits exactly one
+	// batch before giving up. The cursor is what lets successive passes reach the
+	// series beyond that first batch.
+	sealBefore := cutoff.UnixNano()
+	frontier := cutoff.UnixNano()
 	expired := time.Now().Add(-time.Second)
-	seen := make(map[int]struct{})
-	for pass := 0; pass < seriesCount; pass++ {
-		before := store.rollupSealCursor(metricName, seriesCount)
-		seen[before] = struct{}{}
+
+	offsets := []int{store.rollupSealCursor(metricName, seriesCount)}
+	wrapped := false
+	for pass := 0; pass < 4*seriesCount && !wrapped; pass++ {
 		if err := store.sealSQLiteV4RollupsInBatches(ctx, metricName, sealBefore, frontier, expired); err != nil {
 			t.Fatalf("seal pass %d: %v", pass, err)
 		}
-		if store.rollupSealCursor(metricName, seriesCount) == 0 && before != 0 {
-			// Wrapped around: the sweep covered the whole series list.
+		offset := store.rollupSealCursor(metricName, seriesCount)
+		if offset == 0 {
+			wrapped = true
 			break
 		}
+		offsets = append(offsets, offset)
 	}
-	if len(seen) < 2 {
-		t.Fatalf("the cursor never advanced past offset %v: passes cannot reach later series", seen)
+	if !wrapped {
+		t.Fatalf("the sweep never wrapped; cursor visited %v", offsets)
 	}
-
-	// Every series must now have sealed history, not just the first batch.
-	query := fmt.Sprintf(
-		`SELECT COUNT(DISTINCT b.series_id) FROM %s AS b JOIN %s AS s ON s.id = b.series_id
-		 WHERE s.metric_name = ? AND b.resolution_nano = ?`,
-		store.tables.rollupBlocks, store.tables.series,
-	)
-	var sealedSeries int
-	if err := store.db.QueryRow(query, metricName, int64(time.Hour)).Scan(&sealedSeries); err != nil {
-		t.Fatalf("count sealed series: %v", err)
+	// A single batch per pass means the sweep must take several passes, each
+	// starting where the last stopped rather than back at the first series.
+	if len(offsets) < 3 {
+		t.Fatalf("sweep finished in %d passes (offsets %v), want it to advance in batches", len(offsets), offsets)
 	}
-	if sealedSeries != seriesCount {
-		t.Fatalf("%d of %d series have sealed hour blocks: later series are starved",
-			sealedSeries, seriesCount)
+	for i := 1; i < len(offsets); i++ {
+		if offsets[i] <= offsets[i-1] {
+			t.Fatalf("cursor did not advance monotonically: %v", offsets)
+		}
+	}
+	if last := offsets[len(offsets)-1]; last <= metricCompactionSeriesBatch {
+		t.Fatalf("cursor only reached offset %d of %d series: later series are starved", last, seriesCount)
 	}
 }
