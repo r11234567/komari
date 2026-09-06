@@ -14,6 +14,23 @@ import (
 
 const dashboardCacheMaxEntries = 4
 
+// dashboardModuleLoadBudget caps a shared dashboard module load. These scans
+// take the metric store's heavy-read slot, which is a single slot on a
+// small host, so an abandoned scan must not hold it indefinitely.
+const dashboardModuleLoadBudget = 30 * time.Second
+
+// dashboardModuleLoadContext derives the context for a shared module load.
+//
+// The load is shared by every caller asking for the same module, so it must not
+// inherit the context of whichever caller happened to start it: a dashboard tab
+// that navigates away or times out would otherwise cancel the scan for all the
+// callers still waiting, and each retry would restart it from scratch while the
+// store's single heavy-read slot stays contended. Request values are preserved
+// so authorization and tracing still work.
+func dashboardModuleLoadContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), dashboardModuleLoadBudget)
+}
+
 type dashboardCacheEntry[T any] struct {
 	value T
 	at    time.Time
@@ -27,12 +44,17 @@ type dashboardModuleCache[T any] struct {
 	flight  singleflight.Group
 }
 
+// get returns the cached module value, joining an in-flight load when one is
+// already running. load receives its own context rather than the caller's: the
+// select below lets a caller stop waiting, and if that cancelled the shared
+// load, one tab navigating away would fail every other caller waiting on it and
+// throw away work that was about to land in the cache.
 func (cache *dashboardModuleCache[T]) get(
 	ctx context.Context,
 	now time.Time,
 	key string,
 	ttl time.Duration,
-	load func() (T, error),
+	load func(context.Context) (T, error),
 ) (T, error) {
 	if value, ok := cache.current(now, key, ttl); ok {
 		return value, nil
@@ -42,7 +64,9 @@ func (cache *dashboardModuleCache[T]) get(
 		if value, ok := cache.current(now, key, ttl); ok {
 			return value, nil
 		}
-		value, err := load()
+		loadCtx, cancel := dashboardModuleLoadContext(ctx)
+		defer cancel()
+		value, err := load(loadCtx)
 		if err != nil {
 			return nil, err
 		}
@@ -125,7 +149,7 @@ func buildDashboardCached(ctx context.Context, now time.Time, sections dashboard
 
 	if sections&dashboardSectionServers != 0 {
 		result.Servers, err = dashboardServersModuleCache.get(ctx, now, "servers", cacheTTL,
-			func() (dashboardServerSummary, error) { return buildDashboardServers(clientList), nil })
+			func(context.Context) (dashboardServerSummary, error) { return buildDashboardServers(clientList), nil })
 		if err != nil {
 			return dashboardResponse{}, err
 		}
@@ -133,7 +157,7 @@ func buildDashboardCached(ctx context.Context, now time.Time, sections dashboard
 	if sections&dashboardSectionResources != 0 {
 		key := strconv.Itoa(rankingLimit)
 		result.Resources, err = dashboardResourcesModuleCache.get(ctx, now, key, cacheTTL,
-			func() (dashboardResourceSummary, error) {
+			func(context.Context) (dashboardResourceSummary, error) {
 				return buildDashboardResources(clientList, rankingLimit), nil
 			})
 		if err != nil {
@@ -142,9 +166,9 @@ func buildDashboardCached(ctx context.Context, now time.Time, sections dashboard
 	}
 	if sections&dashboardSectionStorage != 0 {
 		storage, loadErr := dashboardStorageModuleCache.get(ctx, now, "storage", cacheTTL,
-			func() (dashboardStorageModule, error) {
+			func(loadCtx context.Context) (dashboardStorageModule, error) {
 				main := mainDatabaseStatus()
-				monitoring := monitoringDatabaseStatus(ctx)
+				monitoring := monitoringDatabaseStatus(loadCtx)
 				legacySize := int64(0)
 				if main.Size != nil {
 					legacySize = *main.Size
@@ -154,7 +178,7 @@ func buildDashboardCached(ctx context.Context, now time.Time, sections dashboard
 						Type: main.Driver, Size: legacySize, Main: main, Monitoring: monitoring,
 						LocalTotal: localDatabaseTotal(main, monitoring),
 					},
-					storage: buildDashboardStorage(ctx, main, monitoring),
+					storage: buildDashboardStorage(loadCtx, main, monitoring),
 				}, nil
 			})
 		if loadErr != nil {
@@ -165,14 +189,16 @@ func buildDashboardCached(ctx context.Context, now time.Time, sections dashboard
 	}
 	if sections&dashboardSectionReturnRoute != 0 {
 		result.ReturnRoute, err = dashboardRouteModuleCache.get(ctx, now, "return_route", cacheTTL,
-			func() (dashboardReturnRouteSummary, error) { return buildDashboardReturnRoute(), nil })
+			func(context.Context) (dashboardReturnRouteSummary, error) { return buildDashboardReturnRoute(), nil })
 		if err != nil {
 			return dashboardResponse{}, err
 		}
 	}
 	if sections&dashboardSectionAlerts != 0 {
 		result.Alerts, err = dashboardAlertsModuleCache.get(ctx, now, "alerts", cacheTTL,
-			func() (dashboardAlertSummaries, error) { return buildDashboardAlerts(clientList, now), nil })
+			func(context.Context) (dashboardAlertSummaries, error) {
+				return buildDashboardAlerts(clientList, now), nil
+			})
 		if err != nil {
 			return dashboardResponse{}, err
 		}
@@ -205,8 +231,8 @@ func buildDashboardChartsCached(ctx context.Context, now time.Time, sections das
 	key := strconv.Itoa(rankingLimit)
 	if sections&dashboardChartTraffic != 0 {
 		result.Traffic, err = dashboardTrafficModuleCache.get(ctx, now, key, cacheTTL,
-			func() (dashboardTrafficSummary, error) {
-				return loadDashboardTraffic(ctx, clientList, now, rankingLimit)
+			func(loadCtx context.Context) (dashboardTrafficSummary, error) {
+				return loadDashboardTraffic(loadCtx, clientList, now, rankingLimit)
 			})
 		if err != nil {
 			result.Traffic = dashboardTrafficSummary{Error: err.Error()}
@@ -214,8 +240,8 @@ func buildDashboardChartsCached(ctx context.Context, now time.Time, sections das
 	}
 	if sections&dashboardChartLatency != 0 {
 		result.Latency, err = dashboardLatencyModuleCache.get(ctx, now, key, cacheTTL,
-			func() (dashboardLatencySummary, error) {
-				return loadDashboardLatency(ctx, clientList, now, rankingLimit)
+			func(loadCtx context.Context) (dashboardLatencySummary, error) {
+				return loadDashboardLatency(loadCtx, clientList, now, rankingLimit)
 			})
 		if err != nil {
 			result.Latency.Error = err.Error()
@@ -223,8 +249,8 @@ func buildDashboardChartsCached(ctx context.Context, now time.Time, sections das
 	}
 	if sections&dashboardChartLatencyJitter != 0 {
 		result.Latency.JitterRanking, err = dashboardJitterModuleCache.get(ctx, now, key, cacheTTL,
-			func() ([]dashboardLatencyJitterRankItem, error) {
-				return loadDashboardLatencyJitter(ctx, clientList, now, rankingLimit)
+			func(loadCtx context.Context) ([]dashboardLatencyJitterRankItem, error) {
+				return loadDashboardLatencyJitter(loadCtx, clientList, now, rankingLimit)
 			})
 		if err != nil {
 			result.Latency.JitterError = err.Error()
@@ -232,8 +258,8 @@ func buildDashboardChartsCached(ctx context.Context, now time.Time, sections das
 	}
 	if sections&dashboardChartPacketLoss != 0 {
 		result.PacketLoss, err = dashboardPacketLossModuleCache.get(ctx, now, key, cacheTTL,
-			func() (dashboardPacketLossSummary, error) {
-				return loadDashboardPacketLoss(ctx, clientList, now, rankingLimit)
+			func(loadCtx context.Context) (dashboardPacketLossSummary, error) {
+				return loadDashboardPacketLoss(loadCtx, clientList, now, rankingLimit)
 			})
 		if err != nil {
 			result.PacketLoss.Error = err.Error()
