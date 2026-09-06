@@ -480,6 +480,16 @@ func downloadThemeMarketURL(rawURL string, maxSize int64) ([]byte, error) {
 	}
 	client := &http.Client{
 		Timeout: 45 * time.Second,
+		// validate resolves the hostname, then the dialer resolves it again, so a
+		// DNS answer that changes between the two calls defeats the check on its
+		// own. dialPublicAddress re-checks the address actually being connected to,
+		// on every redirect hop, which is the only point where rebinding cannot
+		// slip past.
+		Transport: &http.Transport{
+			DialContext:           dialPublicAddress,
+			TLSHandshakeTimeout:   15 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return errors.New("too many redirects")

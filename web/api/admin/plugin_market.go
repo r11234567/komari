@@ -471,6 +471,13 @@ func downloadPluginMarketURL(rawURL string, maxSize int64) ([]byte, error) {
 	}
 	client := &http.Client{
 		Timeout: 45 * time.Second,
+		// See downloadThemeMarketURL: URL-level validation resolves the name a
+		// second time at dial, so the connected address has to be re-checked.
+		Transport: &http.Transport{
+			DialContext:           dialPublicAddress,
+			TLSHandshakeTimeout:   15 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return errors.New("too many redirects")

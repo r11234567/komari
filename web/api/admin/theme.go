@@ -572,9 +572,48 @@ func isPrivateIP(host string) bool {
 	return false
 }
 
+// blockedNonPublicRanges covers addresses that are routable enough for net's
+// own predicates to call them global unicast, yet still reach infrastructure
+// rather than the public internet. CGNAT in particular is where cloud providers
+// put internal endpoints, so it has to be refused explicitly.
+var blockedNonPublicRanges = func() []*net.IPNet {
+	prefixes := []string{
+		"100.64.0.0/10",   // RFC 6598 CGNAT
+		"192.0.0.0/24",    // RFC 6890 IETF protocol assignments
+		"192.0.2.0/24",    // TEST-NET-1
+		"198.18.0.0/15",   // RFC 2544 benchmarking
+		"198.51.100.0/24", // TEST-NET-2
+		"203.0.113.0/24",  // TEST-NET-3
+		"240.0.0.0/4",     // reserved, includes 255.255.255.255
+		"fec0::/10",       // deprecated site-local
+		"2001:db8::/32",   // documentation
+		"64:ff9b::/96",    // NAT64, can map onto private IPv4
+	}
+	nets := make([]*net.IPNet, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		if _, network, err := net.ParseCIDR(prefix); err == nil {
+			nets = append(nets, network)
+		}
+	}
+	return nets
+}()
+
 func blockedThemeAddress(ip net.IP) bool {
-	return ip == nil || !ip.IsGlobalUnicast() || ip.IsLoopback() || ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
+	if ip == nil || !ip.IsGlobalUnicast() || ip.IsLoopback() || ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		// An IPv4-mapped or 6to4/Teredo-embedded address must be judged on the
+		// IPv4 address it actually reaches.
+		ip = v4
+	}
+	for _, network := range blockedNonPublicRanges {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // dialPublicAddress validates the address returned at connection time, closing
