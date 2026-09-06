@@ -521,6 +521,7 @@ func doInitialize() error {
 		&models.BillingPriceVersion{},
 		&models.BillingFXSnapshot{},
 		&models.BillingEntry{},
+		&models.TwoFactorCounter{},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create tables: %w", err)

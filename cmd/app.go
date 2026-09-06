@@ -790,6 +790,9 @@ func cleanupScheduledData() {
 
 	auditlog.RemoveOldLogs()
 	accounts.RemoveExpiredSessions()
+	if err := accounts.RemoveExpiredTOTPCounters(); err != nil {
+		logger.Errorf("server", "Failed to clean spent 2FA counters: %v", err)
+	}
 }
 
 func compactMetricStore(ctx context.Context) {

@@ -87,6 +87,17 @@ type User struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// TwoFactorCounter records TOTP time steps that have already been accepted, so
+// a code cannot be used twice. The composite primary key is the enforcement:
+// a second insert for the same step is rejected by the database rather than by
+// a read-then-write that two concurrent logins could both pass.
+type TwoFactorCounter struct {
+	UUID      string    `json:"uuid" gorm:"type:varchar(36);primaryKey"`
+	Counter   int64     `json:"counter" gorm:"primaryKey"`
+	UsedAt    time.Time `json:"used_at" gorm:"type:timestamp"`
+	ExpiresAt time.Time `json:"expires_at" gorm:"index"`
+}
+
 // Session manages user sessions
 type Session struct {
 	UUID            string    `json:"uuid" gorm:"type:varchar(36)"`
