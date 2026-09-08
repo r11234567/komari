@@ -32,6 +32,23 @@ func TestHTTPErrorNoticeIsInjectedOnce(t *testing.T) {
 	}
 }
 
+func TestHTTPErrorNoticeMarkersDoNotOverlap(t *testing.T) {
+	// The idempotence check counts the script marker, so the DOM host's
+	// attribute must not contain it as a substring - otherwise a single
+	// injection reads as two and the guard cannot be trusted.
+	if strings.Contains(httpErrorNoticeHostMarker, httpErrorNoticeMarker) {
+		t.Fatalf("host marker %q contains the script marker %q",
+			httpErrorNoticeHostMarker, httpErrorNoticeMarker)
+	}
+	if strings.Contains(httpErrorNoticeMarker, httpErrorNoticeHostMarker) {
+		t.Fatalf("script marker %q contains the host marker %q",
+			httpErrorNoticeMarker, httpErrorNoticeHostMarker)
+	}
+	if count := strings.Count(injectHTTPErrorNotice("<html><head></head><body></body></html>"), httpErrorNoticeMarker); count != 1 {
+		t.Fatalf("one injection counted as %d", count)
+	}
+}
+
 func TestHTTPErrorNoticeFallsBackWithoutHead(t *testing.T) {
 	// A theme is free to ship an unusual document. The notice must still land
 	// somewhere rather than being silently dropped.

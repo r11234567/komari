@@ -2,9 +2,14 @@ package public
 
 import "strings"
 
-// httpErrorNoticeMarker identifies the injected notice so a document is never
-// given two copies of it.
+// httpErrorNoticeMarker identifies the injected script tag so a document is
+// never given two copies of it.
 const httpErrorNoticeMarker = "data-komari-http-notice"
+
+// httpErrorNoticeHostMarker identifies the notice's own DOM container. It is
+// deliberately not a superstring of httpErrorNoticeMarker, so that counting the
+// script marker in a document stays an exact count of injected copies.
+const httpErrorNoticeHostMarker = "data-komari-http-host"
 
 // httpErrorNoticeScript surfaces HTTP rejections - 429, 401, 403 and 5xx - to
 // whoever is looking at the panel.
@@ -99,7 +104,7 @@ const httpErrorNoticeScript = `<script ` + httpErrorNoticeMarker + `>
     if (root) { return root; }
     try {
       host = document.createElement("div");
-      host.setAttribute(` + "\"" + httpErrorNoticeMarker + "\"" + `, "");
+      host.setAttribute(` + "\"" + httpErrorNoticeHostMarker + "\"" + `, "");
       // isolation and a maximal z-index keep the notice above theme overlays
       // without depending on where in the document it was attached.
       host.style.cssText = "position:fixed;z-index:2147483647;top:0;right:0;left:0;pointer-events:none;isolation:isolate;";
