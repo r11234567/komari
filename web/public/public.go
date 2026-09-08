@@ -416,7 +416,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		// private applications on the built-in document prevents public CSS and
 		// scripts from changing the admin or terminal interfaces.
 		if privateApplication {
-			c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(htmlStr))
+			c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(injectHTTPErrorNotice(htmlStr)))
 			return
 		}
 
@@ -434,7 +434,11 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			),
 			cfg[config.SitenameKey].(string),
 		)
-		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(injectThemeChangeReload(rendered)))
+		// The notice is injected for every theme, not only the bundled one: a
+		// theme replaces the whole application, so a rejected request would
+		// otherwise leave a blank chart with nothing explaining why.
+		c.Data(http.StatusOK, "text/html; charset=utf-8",
+			[]byte(injectHTTPErrorNotice(injectThemeChangeReload(rendered))))
 	}
 
 	// ================= 路由定义 =================
