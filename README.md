@@ -25,7 +25,67 @@ Komari is a lightweight, self-hosted server monitoring solution. It provides a s
 - **Optional downsampling**: Choose whether to use downsampling; raw-data retention and rollups are handled separately.
 - **Connect-RPC transport**: Uses Connect-RPC for consistent, efficient agent and API communication.
 - **Database improvements**: Adds more precise rollups, incremental cleanup, adaptive maintenance, and optimized query/read paths.
+- **Trustworthy client addresses**: `KOMARI_TRUSTED_PROXIES` declares which peers may set forwarding headers, so rate limiting and audit logs record an address the caller cannot choose.
+- **Visible rejections**: HTTP 429/401/403/5xx raise an on-page notice that works under any theme, instead of leaving a chart blank.
+- **Proxy-friendly identification**: Every response carries `X-Komari-Principal`, so a reverse proxy can separate authenticated traffic from probes without guessing at URLs.
 
+
+## Running behind a reverse proxy or an IP banning layer
+
+### Declare your trusted proxies
+
+Set `KOMARI_TRUSTED_PROXIES` to say which peers are allowed to declare the real
+client address through `X-Forwarded-For` / `X-Real-Ip`:
+
+| Value | Meaning |
+| --- | --- |
+| unset | Trust every peer's forwarding headers. Backwards-compatible, and **the client address becomes caller-controlled**. |
+| `127.0.0.1,::1` | A reverse proxy runs on the same host. Use this for the common setup. |
+| `none` | Komari is exposed directly. Forwarding headers are ignored and the transport peer is used. |
+| a comma-separated list | Trust exactly these hosts or CIDRs, e.g. `10.0.0.0/8,192.168.1.5`. |
+
+Leaving it unset is not merely imprecise. The client address is what the rate
+limiter buckets on and what the audit log and login sessions record, so while
+every peer is trusted a caller can rotate the header to get a fresh rate-limit
+budget per request, attribute its traffic to somebody else's address, or forge
+the source address in the audit log. A malformed value fails at startup rather
+than silently falling back to trusting everything.
+
+### How an external banning layer should judge Komari traffic
+
+Every response carries `X-Komari-Principal`, naming how the request
+authenticated: `agent`, `user`, `api-key`, or `anonymous`. Log that header and
+decide on it, rather than pattern-matching URLs:
+
+- **Do not count** requests where the header is `agent`, `user` or `api-key`.
+  These are authenticated Komari clients. Their addresses change - a home
+  broadband agent's prefix is not stable - so an address-based allowlist cannot
+  express this, while an allowlist of API paths would also excuse an attacker
+  who guessed those paths.
+- **Do count** requests where the header is `anonymous`, and requests with no
+  such header at all. That covers scanners probing `/actuator`, `/.env` and
+  friends, unauthenticated traffic against real API paths, and anything not
+  served by Komari.
+- `anonymous` deliberately does not distinguish "presented no credential" from
+  "presented one that was rejected", because reporting that difference in a
+  proxy log would tell an observer which tokens and accounts exist.
+
+Two things worth knowing before you set thresholds:
+
+- **HTTP 429 is a normal, self-correcting outcome, not evidence of an attack.**
+  It is returned by the optional request rate limiting, and independently by
+  expensive historical reads when they shed load - the latter regardless of
+  whether the rate-limit setting is on. A browser opening several charts at
+  once can legitimately see one. Every 429 carries an accurate `Retry-After`.
+- **Do not add a concurrency cap on the metric-read endpoints.** Those reads
+  already coalesce identical in-flight queries, cache briefly, and bound their
+  own concurrency, so an external cap is a second, tighter limit on the same
+  work and mostly punishes a dashboard loading its charts.
+
+Note also that the panel accepts an agent token through a query parameter for
+backwards compatibility, so exclude query strings from your access log format
+if agents may use that form - otherwise tokens end up in the log the banning
+layer reads.
 
 ## Screenshots
 

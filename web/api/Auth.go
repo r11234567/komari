@@ -14,6 +14,7 @@ import (
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/web/security"
 	"gorm.io/gorm"
 )
 
@@ -31,6 +32,11 @@ func IdentityMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		p := IdentifyPrincipal(c)
 		SetPrincipal(c, p)
+
+		// 让反向代理与其访问日志能区分「已认证的 Komari 流量」与「未认证请求」，
+		// 使基于日志的封禁策略无需靠猜测路径来放行 agent/管理流量。
+		// 在 handler 之前设置，确保 4xx 响应同样带上该头部。
+		security.SetPrincipalHeader(c, p)
 
 		// 写入兼容字段。
 		c.Set("role", p.PrimaryRole())

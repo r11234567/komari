@@ -618,6 +618,20 @@ func (a *App) BuildRouter() error {
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
 
+	// Establish who may declare the client address before any middleware reads
+	// it. gin's default trusts every proxy, which makes ClientIP() - and so the
+	// rate limit bucket, the audit log source and the session address - a value
+	// the caller supplies.
+	trustedProxies := security.TrustedProxiesFromEnv()
+	if err := security.ConfigureTrustedProxies(r, trustedProxies); err != nil {
+		return fmt.Errorf("invalid %s: %w", security.TrustedProxyEnv, err)
+	}
+	if security.ClientIPIsSpoofable(trustedProxies) {
+		logger.Warnf("server",
+			"%s is not set: X-Forwarded-For is honoured from any peer, so client addresses in rate limiting and audit logs are caller-controlled. Set it to %q behind a local reverse proxy, or to \"none\" when exposed directly.",
+			security.TrustedProxyEnv, security.LoopbackProxies)
+	}
+
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
 	r.Use(cors.Middleware())
 
