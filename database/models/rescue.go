@@ -33,12 +33,17 @@ type RescueSession struct {
 	IdempotencyKey   string     `json:"-" gorm:"type:varchar(128);index"`
 	ErrorCode        string     `json:"-" gorm:"type:varchar(64)"`
 	ErrorMessage     string     `json:"-" gorm:"type:varchar(512)"`
+	SSHPort          uint32     `json:"-" gorm:"not null;default:0"`
 	CreatedAt        time.Time  `json:"-"`
 	StartedAt        *time.Time `json:"-"`
 	FinishedAt       *time.Time `json:"-"`
 	UpdatedAt        time.Time  `json:"-"`
 }
 
+// RescueEvent stores one helper-reported event. Diagnostics and SSHAccess hold
+// the typed result of an action in protobuf wire format rather than as parsed
+// columns: they are replayed verbatim to a watching panel, never queried, and
+// keeping them opaque means a later field addition needs no migration here.
 type RescueEvent struct {
 	Session      string    `json:"-" gorm:"type:varchar(64);primaryKey"`
 	Sequence     uint64    `json:"-" gorm:"primaryKey"`
@@ -46,6 +51,8 @@ type RescueEvent struct {
 	State        int32     `json:"-" gorm:"not null"`
 	Stream       int32     `json:"-" gorm:"not null"`
 	Output       []byte    `json:"-" gorm:"type:blob"`
+	Diagnostics  []byte    `json:"-" gorm:"type:blob"`
+	SSHAccess    []byte    `json:"-" gorm:"type:blob"`
 	ErrorCode    string    `json:"-" gorm:"type:varchar(64)"`
 	ErrorMessage string    `json:"-" gorm:"type:varchar(512)"`
 }
