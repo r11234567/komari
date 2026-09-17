@@ -3,6 +3,7 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"strconv"
 	"time"
 
 	"connectrpc.com/connect"
@@ -35,15 +36,50 @@ func (s *rescueService) GetRescueStatus(_ context.Context, req *connect.Request[
 
 func (s *rescueService) CreateRescueSession(ctx context.Context, req *connect.Request[rescuev1.CreateRescueSessionRequest]) (*connect.Response[rescuev1.CreateRescueSessionResponse], error) {
 	meta := rpc.MetaFromContext(ctx)
-	if err := verifyConnectTwoFactor(meta, req.Msg.TwoFactor); err != nil {
-		return nil, connectError(connect.CodeUnauthenticated, err)
+	// Administrator authentication is required for every action, including the
+	// ones exempt from a second factor. Previously the two-factor check was
+	// also what established the caller was an administrator at all, so
+	// skipping it for diagnostics without this would leave them reachable by
+	// any authenticated principal.
+	if err := requireRescueAdministrator(meta); err != nil {
+		return nil, err
 	}
-	session, err := rescueapp.Create(req.Msg.AgentId, req.Msg.Action, req.Msg.Arguments, req.Msg.Timeout, req.Msg.MaxOutputBytes, req.Msg.IdempotencyKey)
+	if rescueapp.RequiresTwoFactor(req.Msg.Action) {
+		if err := verifyConnectTwoFactor(meta, req.Msg.TwoFactor); err != nil {
+			return nil, connectError(connect.CodeUnauthenticated, err)
+		}
+	}
+	session, err := rescueapp.Create(req.Msg.AgentId, req.Msg.Action, req.Msg.Arguments, req.Msg.Timeout, req.Msg.MaxOutputBytes, req.Msg.IdempotencyKey, req.Msg.GetSshPort())
 	if err != nil {
 		return nil, connectError(connect.CodeFailedPrecondition, err)
 	}
-	auditlog.Log(meta.RemoteIP, meta.Principal.UserUUID, "create rescue session:"+session.SessionId+", client:"+session.AgentId, "warn")
+	// Read-only diagnostics are logged at a lower severity so that routine
+	// performance inspection does not bury the privileged operations an
+	// operator actually needs to notice in the audit trail.
+	severity := "warn"
+	if !rescueapp.RequiresTwoFactor(req.Msg.Action) {
+		severity = "info"
+	}
+	detail := "create rescue session:" + session.SessionId + ", client:" + session.AgentId + ", action:" + session.Action.String()
+	if session.SshPort != nil {
+		detail += ", ssh_port:" + strconv.FormatUint(uint64(session.GetSshPort()), 10)
+	}
+	auditlog.Log(meta.RemoteIP, meta.Principal.UserUUID, detail, severity)
 	return connect.NewResponse(&rescuev1.CreateRescueSessionResponse{Session: session}), nil
+}
+
+// requireRescueAdministrator accepts the same principals the two-factor check
+// did: an administrator session, or an API key acting as one.
+func requireRescueAdministrator(meta *rpc.ContextMeta) error {
+	if meta == nil || meta.Principal == nil {
+		return connectError(connect.CodePermissionDenied, errors.New("administrator authentication is required"))
+	}
+	switch meta.Principal.Type {
+	case rpc.PrincipalUser, rpc.PrincipalAPIKey:
+		return nil
+	default:
+		return connectError(connect.CodePermissionDenied, errors.New("administrator authentication is required"))
+	}
 }
 
 func (s *rescueService) WatchRescueSession(ctx context.Context, req *connect.Request[rescuev1.WatchRescueSessionRequest], stream *connect.ServerStream[rescuev1.WatchRescueSessionResponse]) error {

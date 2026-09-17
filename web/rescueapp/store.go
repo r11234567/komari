@@ -15,7 +15,9 @@ import (
 	"github.com/komari-monitor/komari/utils"
 	deploymentapp "github.com/komari-monitor/komari/web/deployment"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
+	diagv1 "github.com/r11234567/komari-proto/gen/go/komari/diag/v1"
 	rescuev1 "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"gorm.io/gorm"
@@ -29,6 +31,7 @@ const (
 	maximumOutput    = 1 << 20
 	maxArgumentCount = 16
 	maxArgumentBytes = 4096
+	defaultSSHPort   = 22
 )
 
 var signals = struct {
@@ -155,7 +158,7 @@ func ClearConnectionError(agentID, helperInstanceID string) error {
 		}).Error
 }
 
-func Create(agentID string, action rescuev1.RescueAction, arguments []string, timeout *durationpb.Duration, maxOutput uint64, idempotencyKey string) (*rescuev1.RescueSession, error) {
+func Create(agentID string, action rescuev1.RescueAction, arguments []string, timeout *durationpb.Duration, maxOutput uint64, idempotencyKey string, sshPort uint32) (*rescuev1.RescueSession, error) {
 	createMu.Lock()
 	defer createMu.Unlock()
 	profile, saved, err := clients.GetDeploymentProfile(agentID)
@@ -167,6 +170,13 @@ func Create(agentID string, action rescuev1.RescueAction, arguments []string, ti
 	}
 	if !allowedAction(action) {
 		return nil, errors.New("unsupported rescue action")
+	}
+	// The port is validated here rather than in the helper so that the value
+	// reaching a privileged process has already been bounded, and so a bad
+	// request fails immediately instead of after a lease round trip.
+	resolvedPort, err := resolveSSHPort(action, sshPort)
+	if err != nil {
+		return nil, err
 	}
 	if len(arguments) > maxArgumentCount {
 		return nil, errors.New("too many rescue arguments")
@@ -212,7 +222,7 @@ func Create(agentID string, action rescuev1.RescueAction, arguments []string, ti
 	row := models.RescueSession{
 		ID: utils.GenerateRandomString(32), Client: agentID, Action: int32(action), Arguments: string(encodedArguments),
 		State: int32(commonv1.OperationState_OPERATION_STATE_QUEUED), TimeoutSeconds: int64(duration / time.Second),
-		MaxOutputBytes: maxOutput, IdempotencyKey: idempotencyKey, CreatedAt: now,
+		MaxOutputBytes: maxOutput, IdempotencyKey: idempotencyKey, SSHPort: resolvedPort, CreatedAt: now,
 	}
 	if row.ID == "" {
 		return nil, errors.New("failed to create rescue session ID")
@@ -233,6 +243,10 @@ func Create(agentID string, action rescuev1.RescueAction, arguments []string, ti
 func allowedAction(action rescuev1.RescueAction) bool {
 	switch action {
 	case rescuev1.RescueAction_RESCUE_ACTION_DIAGNOSTICS,
+		rescuev1.RescueAction_RESCUE_ACTION_DETAILED_CPU_METRICS,
+		rescuev1.RescueAction_RESCUE_ACTION_DETAILED_MEMORY_METRICS,
+		rescuev1.RescueAction_RESCUE_ACTION_TEMPORARY_SSH_ACCESS,
+		rescuev1.RescueAction_RESCUE_ACTION_REVOKE_TEMPORARY_SSH_ACCESS,
 		rescuev1.RescueAction_RESCUE_ACTION_SHUTDOWN,
 		rescuev1.RescueAction_RESCUE_ACTION_REBOOT,
 		rescuev1.RescueAction_RESCUE_ACTION_BLOCK_PUBLIC_INTERFACES,
@@ -243,6 +257,52 @@ func allowedAction(action rescuev1.RescueAction) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// resolveSSHPort validates the requested port and normalizes it.
+//
+// A port is meaningful only for the grant action. Rejecting it elsewhere keeps
+// a stored session from carrying a value that nothing will act on, which would
+// otherwise read as an exposure that is not actually configured. Revocation
+// deliberately takes no port: it closes whatever window is recorded on the
+// host, so accepting one here would invite a caller to believe they can close
+// a port other than the one that was opened.
+func resolveSSHPort(action rescuev1.RescueAction, requested uint32) (uint32, error) {
+	if action != rescuev1.RescueAction_RESCUE_ACTION_TEMPORARY_SSH_ACCESS {
+		if requested != 0 {
+			return 0, errors.New("an SSH port applies only to temporary SSH access")
+		}
+		return 0, nil
+	}
+	if requested == 0 {
+		return defaultSSHPort, nil
+	}
+	if requested > 65535 {
+		return 0, errors.New("SSH port must be between 1 and 65535")
+	}
+	return requested, nil
+}
+
+// RequiresTwoFactor reports whether an action needs a fresh two-factor proof.
+//
+// The default branch requires one. That direction is deliberate: a new action
+// added without being classified here inherits the strict treatment, so the
+// failure mode of forgetting to update this function is an inconvenient
+// prompt rather than an unauthenticated privileged operation.
+//
+// Only the read-only performance diagnostics are exempt. They read kernel
+// counters, change nothing, and need no privilege, so requiring a second
+// factor to look at a CPU breakdown would discourage exactly the routine
+// inspection the panel exists to make easy. Administrator authentication is
+// still enforced for them by the transport.
+func RequiresTwoFactor(action rescuev1.RescueAction) bool {
+	switch action {
+	case rescuev1.RescueAction_RESCUE_ACTION_DETAILED_CPU_METRICS,
+		rescuev1.RescueAction_RESCUE_ACTION_DETAILED_MEMORY_METRICS:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -436,9 +496,24 @@ func ReportEvent(agentID, helperInstanceID string, event *rescuev1.RescueEvent) 
 		errorCode = sanitize(event.Error.Code, 64)
 		errorMessage = sanitize(event.Error.Message, 512)
 	}
+	// Typed results are stored in wire format. Marshalling failures are not
+	// fatal: losing the structured view of a diagnostic is far better than
+	// rejecting the event that also carries its terminal state.
+	var diagnostics, sshAccess []byte
+	if event.Diagnostics != nil {
+		if encoded, err := proto.Marshal(event.Diagnostics); err == nil {
+			diagnostics = encoded
+		}
+	}
+	if event.SshAccess != nil {
+		if encoded, err := proto.Marshal(event.SshAccess); err == nil {
+			sshAccess = encoded
+		}
+	}
 	row := models.RescueEvent{
 		Session: event.SessionId, Sequence: event.Sequence, OccurredAt: when, State: int32(event.State),
 		Stream: int32(event.Stream), Output: append([]byte(nil), event.Output...), ErrorCode: errorCode, ErrorMessage: errorMessage,
+		Diagnostics: diagnostics, SSHAccess: sshAccess,
 	}
 	acceptedSequence := uint64(0)
 	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
@@ -511,6 +586,12 @@ func sessionToProto(row models.RescueSession) *rescuev1.RescueSession {
 		SessionId: row.ID, AgentId: row.Client, Action: rescuev1.RescueAction(row.Action), Arguments: arguments,
 		State: commonv1.OperationState(row.State), CreatedAt: timestamppb.New(row.CreatedAt), OutputBytes: row.OutputBytes,
 	}
+	// Only set for the action that uses it, so a helper never sees a port on a
+	// session that has nothing to do with SSH.
+	if row.SSHPort != 0 {
+		port := row.SSHPort
+		result.SshPort = &port
+	}
 	if row.StartedAt != nil {
 		result.StartedAt = timestamppb.New(*row.StartedAt)
 		result.DeadlineAt = timestamppb.New(row.StartedAt.Add(time.Duration(row.TimeoutSeconds) * time.Second))
@@ -528,6 +609,20 @@ func eventToProto(row models.RescueEvent) *rescuev1.RescueEvent {
 	result := &rescuev1.RescueEvent{
 		SessionId: row.Session, Sequence: row.Sequence, OccurredAt: timestamppb.New(row.OccurredAt),
 		State: commonv1.OperationState(row.State), Stream: rescuev1.RescueOutputStream(row.Stream), Output: append([]byte(nil), row.Output...),
+	}
+	// A stored payload that no longer decodes is dropped rather than failing
+	// the replay: the event's state and text output remain useful on their own.
+	if len(row.Diagnostics) > 0 {
+		var diagnostics diagv1.DiagnosticsReport
+		if err := proto.Unmarshal(row.Diagnostics, &diagnostics); err == nil {
+			result.Diagnostics = &diagnostics
+		}
+	}
+	if len(row.SSHAccess) > 0 {
+		var access rescuev1.TemporarySSHAccess
+		if err := proto.Unmarshal(row.SSHAccess, &access); err == nil {
+			result.SshAccess = &access
+		}
 	}
 	if row.ErrorCode != "" || row.ErrorMessage != "" {
 		result.Error = &commonv1.ErrorDetail{Code: row.ErrorCode, Message: row.ErrorMessage}
