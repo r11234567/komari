@@ -253,7 +253,8 @@ func allowedAction(action rescuev1.RescueAction) bool {
 		rescuev1.RescueAction_RESCUE_ACTION_BLOCK_TAILSCALE_INTERFACES,
 		rescuev1.RescueAction_RESCUE_ACTION_ISOLATE_CONTROL_PLANE,
 		rescuev1.RescueAction_RESCUE_ACTION_RESTORE_NETWORK,
-		rescuev1.RescueAction_RESCUE_ACTION_ROLLBACK_ONLINE_CONFIG:
+		rescuev1.RescueAction_RESCUE_ACTION_ROLLBACK_ONLINE_CONFIG,
+		rescuev1.RescueAction_RESCUE_ACTION_ROLLBACK_PRIVILEGED_CONFIG:
 		return true
 	default:
 		return false
