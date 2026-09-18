@@ -13,6 +13,7 @@ import (
 	browserv1connect "github.com/r11234567/komari-proto/gen/go/komari/browser/v1/browserv1connect"
 	configv1connect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
 	deploymentv1connect "github.com/r11234567/komari-proto/gen/go/komari/deployment/v1/deploymentv1connect"
+	enrollmentv1connect "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1/enrollmentv1connect"
 	execv1connect "github.com/r11234567/komari-proto/gen/go/komari/exec/v1/execv1connect"
 	metricsv1connect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
 	networkv1connect "github.com/r11234567/komari-proto/gen/go/komari/network/v1/networkv1connect"
@@ -40,6 +41,8 @@ func Register(r *gin.Engine) {
 		newHandler(adminv1connect.NewMaintenanceServiceHandler(&maintenanceService{}, opts...)),
 		newHandler(adminv1connect.NewPingTaskServiceHandler(&pingTaskService{}, opts...)),
 		newHandler(configv1connect.NewConfigServiceHandler(&configService{}, opts...)),
+		newHandler(configv1connect.NewPrivilegedDeliveryServiceHandler(&privilegedDeliveryService{}, opts...)),
+		newHandler(enrollmentv1connect.NewEnrollmentServiceHandler(&enrollmentService{}, opts...)),
 		newHandler(deploymentv1connect.NewDeploymentServiceHandler(&deploymentService{}, opts...)),
 		newHandler(reportv1connect.NewAgentReportServiceHandler(&reportService{}, opts...)),
 		newHandler(metricsv1connect.NewMetricsServiceHandler(&metricsService{}, opts...)),
