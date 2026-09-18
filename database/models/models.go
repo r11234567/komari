@@ -72,6 +72,128 @@ type ClientDeploymentProfile struct {
 	UpdatedAt         time.Time  `json:"-"`
 }
 
+// ClientPrivilegedRevision stores one privileged configuration revision and
+// the state of the human decision attached to it.
+//
+// It is a separate table from ClientDeploymentProfile on purpose. The ordinary
+// profile is a desired state an Agent converges on unattended; these settings
+// widen what the Agent is allowed to do, so their lifecycle is a sequence of
+// human approvals rather than a convergence loop, and mixing the two would
+// invite a code path that treats one like the other.
+type ClientPrivilegedRevision struct {
+	Client   string `json:"-" gorm:"type:varchar(36);primaryKey"`
+	Revision uint64 `json:"-" gorm:"primaryKey"`
+	// Config is the serialized PrivilegedConfig for this revision.
+	Config string `json:"-" gorm:"type:text;not null"`
+	// UpgradeClass and Reasons record how the panel classified this revision
+	// when it was saved, so the classification cannot drift after the fact.
+	UpgradeClass      int32  `json:"-" gorm:"not null;default:0"`
+	Reasons           string `json:"-" gorm:"type:text;not null;default:''"`
+	FromPrivilegeMode int32  `json:"-" gorm:"not null;default:0"`
+	ToPrivilegeMode   int32  `json:"-" gorm:"not null;default:0"`
+	State             int32  `json:"-" gorm:"not null;default:0"`
+	// TaskID and Nonce belong to a manual upgrade. The nonce is single-use and
+	// is what proves an upgrade actually ran on the host rather than being
+	// claimed from somewhere else.
+	TaskID       string     `json:"-" gorm:"type:varchar(64);index"`
+	Nonce        string     `json:"-" gorm:"type:varchar(128);index"`
+	NonceExpires *time.Time `json:"-"`
+	NonceUsedAt  *time.Time `json:"-"`
+	// Operator and LocalAuthentication describe who completed the upgrade and
+	// how they were verified on the host. The credential itself never reaches
+	// the panel.
+	Operator            string     `json:"-" gorm:"type:varchar(128)"`
+	LocalAuthentication string     `json:"-" gorm:"type:varchar(64)"`
+	ActivePrivilegeMode int32      `json:"-" gorm:"not null;default:0"`
+	ErrorDetail         string     `json:"-" gorm:"type:varchar(512);not null;default:''"`
+	PreviousRevision    uint64     `json:"-" gorm:"not null;default:0"`
+	SavedAt             time.Time  `json:"-"`
+	ConfirmedAt         *time.Time `json:"-"`
+	FinishedAt          *time.Time `json:"-"`
+	CreatedAt           time.Time  `json:"-"`
+	UpdatedAt           time.Time  `json:"-"`
+}
+
+// AgentEnrollment is one device authorization attempt.
+//
+// Rows are short-lived: an attempt that nobody approves expires, and the
+// device code stops being usable. Keeping them in their own table rather than
+// on the client record means an unapproved attempt never creates a half-real
+// machine in the panel.
+type AgentEnrollment struct {
+	DeviceCode string `json:"-" gorm:"type:varchar(128);primaryKey"`
+	// UserCode is what a human types or reads back. It is indexed because the
+	// approval page looks an attempt up by it.
+	UserCode string `json:"-" gorm:"type:varchar(32);uniqueIndex;not null"`
+	State    int32  `json:"-" gorm:"not null;default:0"`
+	// AgentPublicKey binds the credentials this attempt will issue to a key
+	// the requesting host generated and never transmitted in private form.
+	AgentPublicKey    string `json:"-" gorm:"type:text;not null"`
+	AgentKeyID        string `json:"-" gorm:"type:varchar(64)"`
+	KeyAlgorithm      int32  `json:"-" gorm:"not null;default:0"`
+	Hostname          string `json:"-" gorm:"type:varchar(255)"`
+	OperatingSystem   string `json:"-" gorm:"type:varchar(64)"`
+	Architecture      string `json:"-" gorm:"type:varchar(32)"`
+	AgentVersion      string `json:"-" gorm:"type:varchar(64)"`
+	HostFingerprint   string `json:"-" gorm:"type:varchar(128);index"`
+	RequestedScopes   string `json:"-" gorm:"type:text;not null;default:''"`
+	RemoteIP          string `json:"-" gorm:"type:varchar(64)"`
+	// Client is set once an approval binds this attempt to a machine, either a
+	// newly created one or an existing one being re-enrolled.
+	Client     string     `json:"-" gorm:"type:varchar(36);index"`
+	ApprovedBy string     `json:"-" gorm:"type:varchar(36)"`
+	ApprovedAt *time.Time `json:"-"`
+	ExpiresAt  time.Time  `json:"-"`
+	// LastPolledAt supports slow-down responses without a separate counter.
+	LastPolledAt *time.Time `json:"-"`
+	CreatedAt    time.Time  `json:"-"`
+	UpdatedAt    time.Time  `json:"-"`
+}
+
+// AgentCredential is one issued access/refresh pair.
+//
+// The refresh token is stored hashed. A panel database that leaks must not
+// hand over working credentials for every machine, and the server only ever
+// needs to check a presented token rather than reproduce one.
+type AgentCredential struct {
+	Client string `json:"-" gorm:"type:varchar(36);primaryKey"`
+	// AccessTokenHash and RefreshTokenHash are hex SHA-256 digests.
+	AccessTokenHash  string `json:"-" gorm:"type:varchar(64);index"`
+	RefreshTokenHash string `json:"-" gorm:"type:varchar(64);index"`
+	// PreviousRefreshHash keeps the superseded token usable for a short grace
+	// period, so an Agent that crashes between receiving a rotation and
+	// persisting it is not locked out.
+	PreviousRefreshHash    string     `json:"-" gorm:"type:varchar(64);index"`
+	PreviousRefreshExpires *time.Time `json:"-"`
+	AccessExpiresAt        time.Time  `json:"-"`
+	RefreshExpiresAt       time.Time  `json:"-"`
+	// AgentPublicKey is what refresh proofs are verified against, which is
+	// what stops a leaked refresh token from being usable on its own.
+	AgentPublicKey string     `json:"-" gorm:"type:text;not null"`
+	AgentKeyID     string     `json:"-" gorm:"type:varchar(64)"`
+	KeyAlgorithm   int32      `json:"-" gorm:"not null;default:0"`
+	Scopes         string     `json:"-" gorm:"type:text;not null;default:''"`
+	RevokedAt      *time.Time `json:"-"`
+	RevokedReason  string     `json:"-" gorm:"type:varchar(255)"`
+	CreatedAt      time.Time  `json:"-"`
+	UpdatedAt      time.Time  `json:"-"`
+}
+
+// ControlPlaneKey is a signing key the panel uses for signed instructions.
+//
+// Only the public half is stored here; the private half lives in the secure
+// config store. Agents pin these on first contact, so rotation adds a row
+// rather than replacing one, letting old and new coexist during a migration.
+type ControlPlaneKey struct {
+	KeyID     string     `json:"-" gorm:"type:varchar(64);primaryKey"`
+	Algorithm int32      `json:"-" gorm:"not null;default:0"`
+	PublicKey string     `json:"-" gorm:"type:text;not null"`
+	NotBefore time.Time  `json:"-"`
+	NotAfter  *time.Time `json:"-"`
+	CreatedAt time.Time  `json:"-"`
+	UpdatedAt time.Time  `json:"-"`
+}
+
 // User represents an authenticated user
 type User struct {
 	UUID      string    `json:"uuid,omitempty" gorm:"type:varchar(36);primaryKey"`
