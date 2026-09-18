@@ -128,16 +128,16 @@ type AgentEnrollment struct {
 	State    int32  `json:"-" gorm:"not null;default:0"`
 	// AgentPublicKey binds the credentials this attempt will issue to a key
 	// the requesting host generated and never transmitted in private form.
-	AgentPublicKey    string `json:"-" gorm:"type:text;not null"`
-	AgentKeyID        string `json:"-" gorm:"type:varchar(64)"`
-	KeyAlgorithm      int32  `json:"-" gorm:"not null;default:0"`
-	Hostname          string `json:"-" gorm:"type:varchar(255)"`
-	OperatingSystem   string `json:"-" gorm:"type:varchar(64)"`
-	Architecture      string `json:"-" gorm:"type:varchar(32)"`
-	AgentVersion      string `json:"-" gorm:"type:varchar(64)"`
-	HostFingerprint   string `json:"-" gorm:"type:varchar(128);index"`
-	RequestedScopes   string `json:"-" gorm:"type:text;not null;default:''"`
-	RemoteIP          string `json:"-" gorm:"type:varchar(64)"`
+	AgentPublicKey  string `json:"-" gorm:"type:text;not null"`
+	AgentKeyID      string `json:"-" gorm:"type:varchar(64)"`
+	KeyAlgorithm    int32  `json:"-" gorm:"not null;default:0"`
+	Hostname        string `json:"-" gorm:"type:varchar(255)"`
+	OperatingSystem string `json:"-" gorm:"type:varchar(64)"`
+	Architecture    string `json:"-" gorm:"type:varchar(32)"`
+	AgentVersion    string `json:"-" gorm:"type:varchar(64)"`
+	HostFingerprint string `json:"-" gorm:"type:varchar(128);index"`
+	RequestedScopes string `json:"-" gorm:"type:text;not null;default:''"`
+	RemoteIP        string `json:"-" gorm:"type:varchar(64)"`
 	// Client is set once an approval binds this attempt to a machine, either a
 	// newly created one or an existing one being re-enrolled.
 	Client     string     `json:"-" gorm:"type:varchar(36);index"`
