@@ -98,6 +98,17 @@ func TestPolicyDeclaresEveryGeneratedProcedure(t *testing.T) {
 		"/komari.rescue.v1.RescueService/LeaseRescueSessions",
 		"/komari.rescue.v1.RescueService/ReportRescueEvent",
 		"/komari.rescue.v1.RescueService/ReportRescueStatus",
+		"/komari.config.v1.PrivilegedDeliveryService/GetPrivilegedDelivery",
+		"/komari.config.v1.PrivilegedDeliveryService/WatchPrivilegedDelivery",
+		"/komari.config.v1.PrivilegedDeliveryService/UpdatePrivilegedDelivery",
+		"/komari.config.v1.PrivilegedDeliveryService/ConfirmPrivilegedDelivery",
+		"/komari.config.v1.PrivilegedDeliveryService/ReportPrivilegedDelivery",
+		"/komari.config.v1.PrivilegedDeliveryService/CompleteManualUpgrade",
+		"/komari.enrollment.v1.EnrollmentService/BeginEnrollment",
+		"/komari.enrollment.v1.EnrollmentService/PollEnrollment",
+		"/komari.enrollment.v1.EnrollmentService/RefreshCredentials",
+		"/komari.enrollment.v1.EnrollmentService/RevokeCredentials",
+		"/komari.enrollment.v1.EnrollmentService/GetTrustBundle",
 	}
 	for _, procedure := range expected {
 		if _, ok := interceptor.policies[procedure]; !ok {
