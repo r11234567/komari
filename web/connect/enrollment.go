@@ -171,7 +171,7 @@ func (s *enrollmentService) RevokeCredentials(ctx context.Context, req *connect.
 }
 
 func (s *enrollmentService) GetTrustBundle(ctx context.Context, req *connect.Request[enrollmentv1.GetTrustBundleRequest]) (*connect.Response[enrollmentv1.GetTrustBundleResponse], error) {
-	keys, err := listControlPlaneKeys()
+	keys, err := enrollment.ListControlPlaneKeys()
 	if err != nil {
 		return nil, connectError(connect.CodeInternal, err)
 	}
