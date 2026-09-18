@@ -25,6 +25,8 @@ func newPolicyInterceptor() *policyInterceptor {
 		pingTask    = "/komari.admin.v1.PingTaskService/"
 		browser     = "/komari.browser.v1.BrowserService/"
 		config      = "/komari.config.v1.ConfigService/"
+		privileged  = "/komari.config.v1.PrivilegedDeliveryService/"
+		enroll      = "/komari.enrollment.v1.EnrollmentService/"
 		deploy      = "/komari.deployment.v1.DeploymentService/"
 		report      = "/komari.report.v1.AgentReportService/"
 		metrics     = "/komari.metrics.v1.MetricsService/"
@@ -55,6 +57,15 @@ func newPolicyInterceptor() *policyInterceptor {
 	add(config, rpc.RoleClient, 30*time.Second, "GetDesiredConfig", "AcknowledgeConfig")
 	add(config, rpc.RoleClient, 30*time.Minute, "WatchDesiredConfig")
 	add(config, rpc.RoleAdmin, 30*time.Second, "UpdateDesiredConfig")
+	add(privileged, rpc.RoleClient, 30*time.Second, "GetPrivilegedDelivery", "ReportPrivilegedDelivery", "CompleteManualUpgrade")
+	add(privileged, rpc.RoleClient, 30*time.Minute, "WatchPrivilegedDelivery")
+	add(privileged, rpc.RoleAdmin, 30*time.Second, "UpdatePrivilegedDelivery", "ConfirmPrivilegedDelivery")
+	// Beginning and polling an enrollment are necessarily unauthenticated: an
+	// Agent that has never enrolled holds no credential. Neither grants
+	// anything by itself, since approval happens in the panel behind a session,
+	// and polling requires a device code the server issued to one caller.
+	add(enroll, rpc.RoleGuest, 30*time.Second, "BeginEnrollment", "PollEnrollment", "RefreshCredentials", "GetTrustBundle")
+	add(enroll, rpc.RoleAdmin, 30*time.Second, "RevokeCredentials")
 	add(deploy, rpc.RoleAdmin, 30*time.Second, "GetDeployment", "SaveDeploymentProfile", "GenerateInstallCommand")
 	add(report, rpc.RoleClient, 15*time.Second, "SubmitReport")
 	add(metrics, rpc.RoleClient, 30*time.Second, "SubmitMetrics")
