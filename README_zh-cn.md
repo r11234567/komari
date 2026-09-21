@@ -1,3 +1,12 @@
+> **Fork 声明**
+>
+> 本仓库是 [komari-monitor/komari](https://github.com/komari-monitor/komari) 的 Fork，主要用于个人使用、部署、测试和定制。
+>
+> 本仓库**并非上游项目的官方仓库**，此处所做的修改不应视为上游项目的一部分。
+>
+> 如需了解官方项目、文档、版本发布及相关支持，请以[komari-monitor/komari]为准。
+>
+> 上游项目的版权、许可证及贡献者署名均保持不变。
 # Komari
 
 ![komari](https://socialify.git.ci/komari-monitor/komari/image?description=1&font=Inter&forks=1&issues=1&language=1&logo=https%3A%2F%2Fraw.githubusercontent.com%2Fkomari-monitor%2Fkomari-web%2Fd54ce1288df41ead08aa19f8700186e68028a889%2Fpublic%2Ffavicon.png&name=1&owner=1&pattern=Plus&pulls=1&stargazers=1&theme=Auto)
