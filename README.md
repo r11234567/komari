@@ -1,3 +1,16 @@
+> **Fork Notice**
+>
+> This repository is a fork of [komari-monitor/komari](https://github.com/komari-monitor/komari), maintained primarily
+> for personal use, deployment, testing, and customization.
+>
+> It is **not an official upstream repository**, and changes made here
+> should not be considered part of the upstream project.
+>
+> Please refer to the upstream repository for the official project,
+> documentation, releases, and support.
+>
+> Upstream copyright, licensing, and attribution remain unchanged.
+
 # Komari
 
 ![komari](https://socialify.git.ci/komari-monitor/komari/image?description=1&font=Inter&forks=1&issues=1&language=1&logo=https%3A%2F%2Fraw.githubusercontent.com%2Fkomari-monitor%2Fkomari-web%2Fd54ce1288df41ead08aa19f8700186e68028a889%2Fpublic%2Ffavicon.png&name=1&owner=1&pattern=Plus&pulls=1&stargazers=1&theme=Auto)
