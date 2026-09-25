@@ -142,16 +142,42 @@ func (s *enrollmentService) RefreshCredentials(ctx context.Context, req *connect
 	if err := verifyRefreshProof(req.Msg.GetProof(), record.AgentPublicKey, record.Client); err != nil {
 		return nil, connectError(connect.CodeUnauthenticated, err)
 	}
-	return connect.NewResponse(&enrollmentv1.RefreshCredentialsResponse{
-		Credentials: &enrollmentv1.AgentCredentials{
-			AgentId:               issued.AgentID,
-			AccessToken:           issued.AccessToken,
-			AccessTokenExpiresAt:  timestamppb.New(issued.AccessTokenExpiresAt),
-			RefreshToken:          issued.RefreshToken,
-			RefreshTokenExpiresAt: timestamppb.New(issued.RefreshTokenExpiresAt),
-			Scopes:                issued.Scopes,
-		},
-	}), nil
+
+	creds := &enrollmentv1.AgentCredentials{
+		AgentId:               issued.AgentID,
+		AccessToken:           issued.AccessToken,
+		AccessTokenExpiresAt:  timestamppb.New(issued.AccessTokenExpiresAt),
+		RefreshToken:          issued.RefreshToken,
+		RefreshTokenExpiresAt: timestamppb.New(issued.RefreshTokenExpiresAt),
+		Scopes:                issued.Scopes,
+	}
+
+	// Sign the response so the Agent can verify it really came from this panel
+	// rather than from something positioned between them. The payload is the
+	// agent ID plus the new access token, which is enough to bind the signature
+	// to this specific rotation without re-serializing the whole credentials
+	// struct across versions.
+	response := &enrollmentv1.RefreshCredentialsResponse{Credentials: creds}
+	payload := []byte(issued.AgentID + "\n" + issued.AccessToken)
+	keyID, algorithm, sig, signErr := enrollment.Sign(payload)
+	if signErr == nil {
+		response.Proof = &securityv1.SignedEnvelope{
+			Payload: payload,
+			Signatures: []*securityv1.Signature{{
+				Algorithm: securityv1.SignatureAlgorithm(algorithm),
+				Value:     sig,
+				KeyId:     keyID,
+			}},
+		}
+	}
+	// A signing failure is not fatal: the agent accepts an absent proof for
+	// backward compatibility. Log it so an operator can diagnose a key-store
+	// problem, but do not break an otherwise valid rotation.
+	if signErr != nil {
+		_ = fmt.Errorf("refresh response signing failed (non-fatal): %w", signErr)
+	}
+
+	return connect.NewResponse(response), nil
 }
 
 func (s *enrollmentService) RevokeCredentials(ctx context.Context, req *connect.Request[enrollmentv1.RevokeCredentialsRequest]) (*connect.Response[enrollmentv1.RevokeCredentialsResponse], error) {

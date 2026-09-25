@@ -11,6 +11,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/pkg/config"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	deploymentapp "github.com/komari-monitor/komari/web/deployment"
@@ -34,17 +35,23 @@ func (s *deploymentService) GenerateInstallCommand(_ context.Context, req *conne
 	if !saved {
 		return nil, connectError(connect.CodeFailedPrecondition, errors.New("save the deployment profile before generating an install command"))
 	}
-	agent, err := clients.GetClientByUUID(req.Msg.AgentId)
-	if err != nil {
-		return nil, connectError(connect.CodeNotFound, errors.New("agent not found"))
-	}
 	endpoint, err := deploymentEndpoint(req)
 	if err != nil {
 		return nil, connectError(connect.CodeFailedPrecondition, err)
 	}
 	platform := platformFromProto(req.Msg.Platform)
 	profile.Platform = platform
-	command, err := deploymentCommand(profile, endpoint, agent.Token)
+
+	// Issue a single-use install token so the permanent agent token never
+	// appears in a shell command that may end up in logs, chat history, or a
+	// ticket. The token is valid for 24 hours and is redeemed exactly once
+	// when the installer calls home for the first time.
+	installToken, _, tokenErr := enrollment.IssueInstallToken(req.Msg.AgentId)
+	if tokenErr != nil {
+		return nil, connectError(connect.CodeInternal, fmt.Errorf("issue install token: %w", tokenErr))
+	}
+
+	command, err := deploymentCommand(profile, endpoint, installToken)
 	if err != nil {
 		return nil, connectError(connect.CodeInvalidArgument, err)
 	}

@@ -208,6 +208,28 @@ type ControlPlanePrivateKey struct {
 // TableName keeps the historical name stable.
 func (ControlPlanePrivateKey) TableName() string { return "control_plane_private_keys" }
 
+// InstallToken is a single-use token embedded in a generated install command.
+//
+// It is intentionally separate from Client.Token: a permanent token embedded
+// in a shell command that gets posted in a chat, a ticket, or a repo leaks
+// indefinitely. An install token is usable exactly once and expires on its
+// own, so a leaked command stops working after one install or after the
+// deadline, whichever comes first.
+type InstallToken struct {
+	// Token is the plaintext value placed in the install command. It is stored
+	// in plain form here because it is short-lived and single-use; there is
+	// no value in hashing something that cannot authenticate any resource
+	// beyond a single enrollment.
+	Token     string    `json:"-" gorm:"type:varchar(128);primaryKey;uniqueIndex"`
+	// Client is the agent this token will connect as on first use.
+	Client    string    `json:"-" gorm:"type:varchar(36);index;not null"`
+	// UsedAt is set the first time the token is presented. Any subsequent
+	// presentation is rejected, even before ExpiresAt.
+	UsedAt    *time.Time `json:"-"`
+	ExpiresAt time.Time  `json:"-" gorm:"index"`
+	CreatedAt time.Time  `json:"-"`
+}
+
 // User represents an authenticated user
 type User struct {
 	UUID      string    `json:"uuid,omitempty" gorm:"type:varchar(36);primaryKey"`
