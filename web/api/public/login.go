@@ -20,7 +20,7 @@ type LoginRequest struct {
 	TwoFa    string `json:"2fa_code"`
 }
 
-const sessionCookieMaxAge = 2592000
+const sessionCookieMaxAge = 86400 // 24 hours
 
 func setSessionCookie(c *gin.Context, value string, maxAge int) {
 	security.SetSensitiveCookie(c, "session_token", value, maxAge)

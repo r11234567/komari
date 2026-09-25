@@ -85,12 +85,12 @@ func registerAgentRoutes(r *gin.Engine) {
 
 	tokenAuthorized := r.Group("/api/clients", api.RequireRole(api.RoleAdmin, api.RoleClient))
 	{
-		// 上报类（WS / 原始流 / 兼容协议）保留 REST handler。
+		// 上报类（WS / 原始流）保留 REST handler。
+		// v2 JSON-RPC 路由已移除：所有 agent 必须使用 Connect RPC (komari.report.v1)，
+		// 不再接受旧的 WebSocket/POST JSON-RPC 上报路径。
 		tokenAuthorized.GET("/report", client.WebSocketReport)
 		tokenAuthorized.POST("/uploadBasicInfo", client.UploadBasicInfo)
 		tokenAuthorized.POST("/report", client.UploadReport)
-		tokenAuthorized.GET("/v2/rpc", client.WebSocketV2RPC)
-		tokenAuthorized.POST("/v2/rpc", client.UploadV2RPC)
 
 		// Agent 侧遗留终端/远程通道。Connect 的 WebSSHService.AttachSession 已覆盖，
 		// 仅在显式开启兼容开关时挂载。

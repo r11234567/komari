@@ -2,7 +2,6 @@ package api
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,12 +10,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
-	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/security"
-	"gorm.io/gorm"
 )
 
 const (
@@ -235,25 +232,15 @@ func extractClientToken(c *gin.Context) string {
 }
 
 func checkTokenAndGetUUID(token string) (string, error) {
-	// Enrolled Agents present a short-lived access token issued by the device
-	// authorization flow. It is checked first because it is the current
-	// mechanism; the static client token remains accepted for Agents that
-	// have not enrolled yet.
+	// Only short-lived access tokens issued by the device-authorization enrollment
+	// flow are accepted for agent identity. Permanent static client tokens are no
+	// longer valid for agent RPC — agents must enroll via the device-code flow and
+	// present an AT. This closes the path where a leaked permanent token could
+	// authenticate an agent indefinitely without any rotation or expiry.
 	if uuid, err := enrollment.ResolveAccessToken(token); err == nil && uuid != "" {
 		return uuid, nil
 	}
-	uuid, err := clients.GetClientUUIDByToken(token)
-
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	if err == gorm.ErrRecordNotFound {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return uuid, nil
+	return "", nil
 }
 
 func isApiKeyValid(apiKey string) bool {
