@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/security"
@@ -234,6 +235,13 @@ func extractClientToken(c *gin.Context) string {
 }
 
 func checkTokenAndGetUUID(token string) (string, error) {
+	// Enrolled Agents present a short-lived access token issued by the device
+	// authorization flow. It is checked first because it is the current
+	// mechanism; the static client token remains accepted for Agents that
+	// have not enrolled yet.
+	if uuid, err := enrollment.ResolveAccessToken(token); err == nil && uuid != "" {
+		return uuid, nil
+	}
 	uuid, err := clients.GetClientUUIDByToken(token)
 
 	if err == sql.ErrNoRows {

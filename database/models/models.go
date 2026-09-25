@@ -194,6 +194,20 @@ type ControlPlaneKey struct {
 	UpdatedAt time.Time  `json:"-"`
 }
 
+// ControlPlanePrivateKey holds the sealed private half of a signing key.
+//
+// It is a separate table from ControlPlaneKey so a routine dump or listing of
+// published keys cannot include private material by accident. The value is
+// encrypted with the secure config key before it is stored.
+type ControlPlanePrivateKey struct {
+	KeyID     string    `json:"-" gorm:"type:varchar(64);primaryKey"`
+	Sealed    string    `json:"-" gorm:"type:text;not null"`
+	CreatedAt time.Time `json:"-"`
+}
+
+// TableName keeps the historical name stable.
+func (ControlPlanePrivateKey) TableName() string { return "control_plane_private_keys" }
+
 // User represents an authenticated user
 type User struct {
 	UUID      string    `json:"uuid,omitempty" gorm:"type:varchar(36);primaryKey"`

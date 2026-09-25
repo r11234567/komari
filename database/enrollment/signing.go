@@ -24,7 +24,6 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/secureconfig"
-	"gorm.io/gorm"
 )
 
 // algorithmEd25519 mirrors securityv1.SIGNATURE_ALGORITHM_ED25519 without
@@ -140,30 +139,13 @@ func generateSigningKey(now time.Time) (SigningKey, error) {
 	return SigningKey{KeyID: keyID, Algorithm: algorithmEd25519, PublicKey: public, PrivateKey: private}, nil
 }
 
-// privateKeyRecord holds a sealed private key. It is stored in its own table
-// so a routine dump of the published keys cannot include it by accident.
-type privateKeyRecord struct {
-	KeyID     string    `gorm:"type:varchar(64);primaryKey"`
-	Sealed    string    `gorm:"type:text;not null"`
-	CreatedAt time.Time `gorm:""`
-}
-
-// TableName keeps the table name explicit rather than inferred, since this
-// type is deliberately unexported.
-func (privateKeyRecord) TableName() string { return "control_plane_private_keys" }
-
-// EnsurePrivateKeyTable creates the private key table.
-func EnsurePrivateKeyTable(db *gorm.DB) error {
-	return db.AutoMigrate(&privateKeyRecord{})
-}
-
 func storePrivateKey(keyID, sealed string) error {
-	row := privateKeyRecord{KeyID: keyID, Sealed: sealed, CreatedAt: time.Now().UTC()}
+	row := models.ControlPlanePrivateKey{KeyID: keyID, Sealed: sealed, CreatedAt: time.Now().UTC()}
 	return dbcore.GetDBInstance().Create(&row).Error
 }
 
 func loadPrivateKey(key models.ControlPlaneKey) (SigningKey, error) {
-	var row privateKeyRecord
+	var row models.ControlPlanePrivateKey
 	if err := dbcore.GetDBInstance().Where("key_id = ?", key.KeyID).First(&row).Error; err != nil {
 		return SigningKey{}, err
 	}

@@ -191,3 +191,5 @@ gorm.io/driver/sqlite v1.5.7/go.mod h1:U+J8craQU6Fzkcvu8oLeAQmi50TkwPEhHDEjQZXDa
 gorm.io/gorm v1.26.1 h1:ghB2gUI9FkS46luZtn6DLZ0f6ooBJ5IbVej2ENFDjRw=
 gorm.io/gorm v1.26.1/go.mod h1:8Z33v652h4//uMA76KjeDH8mJXPm1QNCYrMeatR0DOE=
 nullprogram.com/x/optparse v1.0.0/go.mod h1:KdyPE+Igbe0jQUrVfMqDMeJQIJZEuyV7pjYmp6pbG50=
+github.com/r11234567/komari-proto v0.1.32 h1:TaUNUAQ0n6wDxThOWnwS9AQFYjjsGM6SjVqQ9VsqyB4=
+github.com/r11234567/komari-proto v0.1.32/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=

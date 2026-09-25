@@ -43,6 +43,7 @@ func Register(r *gin.Engine) {
 		newHandler(configv1connect.NewConfigServiceHandler(&configService{}, opts...)),
 		newHandler(configv1connect.NewPrivilegedDeliveryServiceHandler(&privilegedDeliveryService{}, opts...)),
 		newHandler(enrollmentv1connect.NewEnrollmentServiceHandler(&enrollmentService{}, opts...)),
+		newHandler(enrollmentv1connect.NewEnrollmentAdminServiceHandler(&enrollmentAdminService{}, opts...)),
 		newHandler(deploymentv1connect.NewDeploymentServiceHandler(&deploymentService{}, opts...)),
 		newHandler(reportv1connect.NewAgentReportServiceHandler(&reportService{}, opts...)),
 		newHandler(metricsv1connect.NewMetricsServiceHandler(&metricsService{}, opts...)),

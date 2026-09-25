@@ -22,12 +22,16 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/database/privilegeddelivery"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/utils"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	configv1connect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
 	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
+	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -48,7 +52,11 @@ func (s *privilegedDeliveryService) GetPrivilegedDelivery(ctx context.Context, r
 	}
 	response := &configv1.GetPrivilegedDeliveryResponse{}
 	if found {
-		response.Revision = privilegedRevisionToProto(revision)
+		signed, err := signedPrivilegedRevision(revision)
+		if err != nil {
+			return nil, connectError(connect.CodeInternal, err)
+		}
+		response.Revision = signed
 	}
 	return connect.NewResponse(response), nil
 }
@@ -65,9 +73,11 @@ func (s *privilegedDeliveryService) WatchPrivilegedDelivery(ctx context.Context,
 			return connectError(connect.CodeInternal, err)
 		}
 		if found {
-			if err := stream.Send(&configv1.WatchPrivilegedDeliveryResponse{
-				Revision: privilegedRevisionToProto(revision),
-			}); err != nil {
+			signed, err := signedPrivilegedRevision(revision)
+			if err != nil {
+				return connectError(connect.CodeInternal, err)
+			}
+			if err := stream.Send(&configv1.WatchPrivilegedDeliveryResponse{Revision: signed}); err != nil {
 				return err
 			}
 			after = revision.Revision
@@ -188,6 +198,88 @@ func (s *privilegedDeliveryService) CompleteManualUpgrade(ctx context.Context, r
 	return connect.NewResponse(&configv1.CompleteManualUpgradeResponse{
 		Accepted: true, Revision: privilegedRevisionToProto(revision),
 	}), nil
+}
+
+func (s *privilegedDeliveryService) ListPrivilegedRevisions(ctx context.Context, req *connect.Request[configv1.ListPrivilegedRevisionsRequest]) (*connect.Response[configv1.ListPrivilegedRevisionsResponse], error) {
+	if err := requireRescueAdministrator(rpc.MetaFromContext(ctx)); err != nil {
+		return nil, err
+	}
+	agentID := strings.TrimSpace(req.Msg.GetAgentId())
+	if agentID == "" {
+		return nil, connectError(connect.CodeInvalidArgument, errors.New("an agent ID is required"))
+	}
+	history, err := privilegeddelivery.History(agentID, int(req.Msg.GetLimit()))
+	if err != nil {
+		return nil, connectError(connect.CodeInternal, err)
+	}
+	response := &configv1.ListPrivilegedRevisionsResponse{
+		InstalledPrivilegeMode: reportv1.PrivilegeMode(privilegeddelivery.InstalledPrivilegeMode(agentID)),
+	}
+	for _, revision := range history {
+		// The applied revision is the newest one the host reported delivered,
+		// which can be older than the newest saved: that gap is exactly what
+		// the panel needs to show.
+		if revision.State == privilegeddelivery.StateDelivered && revision.Revision > response.AppliedRevision {
+			response.AppliedRevision = revision.Revision
+		}
+		response.Revisions = append(response.Revisions, privilegedRevisionToProto(revision))
+	}
+	return connect.NewResponse(response), nil
+}
+
+// privilegedInstructionType must match what the Agent expects the signature to
+// cover; a signature over any other instruction type is refused.
+const privilegedInstructionType = "komari.config.v1.PrivilegedRevision"
+
+// privilegedSignatureLifetime bounds how long a delivered revision's signature
+// stays usable. The Agent records each nonce, so this only limits how long a
+// captured copy is worth anything before it would be refused as expired.
+const privilegedSignatureLifetime = 10 * time.Minute
+
+// signedPrivilegedRevision attaches an end-to-end signature to a revision
+// before it is sent to an Agent.
+//
+// The signed body is the deterministic encoding of exactly the fields the
+// Agent re-derives and compares, so any change to the settings, the plan or
+// the revision number under a valid signature is detected. A fresh nonce per
+// send means a watch that resends a revision never trips replay protection,
+// while a captured copy still cannot be replayed.
+func signedPrivilegedRevision(revision privilegeddelivery.Revision) (*configv1.PrivilegedRevision, error) {
+	message := privilegedRevisionToProto(revision)
+	body, err := proto.MarshalOptions{Deterministic: true}.Marshal(&configv1.PrivilegedRevision{
+		AgentId:    message.GetAgentId(),
+		Revision:   message.GetRevision(),
+		Privileged: message.GetPrivileged(),
+		Plan:       message.GetPlan(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode privileged revision for signing: %w", err)
+	}
+	now := time.Now().UTC()
+	instruction, err := proto.Marshal(&securityv1.SignedInstruction{
+		AgentId:         message.GetAgentId(),
+		Nonce:           utils.GenerateRandomString(32),
+		IssuedAt:        timestamppb.New(now),
+		ExpiresAt:       timestamppb.New(now.Add(privilegedSignatureLifetime)),
+		InstructionType: privilegedInstructionType,
+		Body:            body,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode signed instruction: %w", err)
+	}
+	keyID, algorithm, signature, err := enrollment.Sign(instruction)
+	if err != nil {
+		return nil, fmt.Errorf("sign privileged revision: %w", err)
+	}
+	message.Signature = &securityv1.SignedEnvelope{
+		Payload: instruction,
+		Signatures: []*securityv1.Signature{{
+			Algorithm: securityv1.SignatureAlgorithm(algorithm),
+			Value:     signature,
+			KeyId:     keyID,
+		}},
+	}
+	return message, nil
 }
 
 func privilegedRevisionToProto(revision privilegeddelivery.Revision) *configv1.PrivilegedRevision {

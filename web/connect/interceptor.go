@@ -27,6 +27,7 @@ func newPolicyInterceptor() *policyInterceptor {
 		config      = "/komari.config.v1.ConfigService/"
 		privileged  = "/komari.config.v1.PrivilegedDeliveryService/"
 		enroll      = "/komari.enrollment.v1.EnrollmentService/"
+		enrollAdmin = "/komari.enrollment.v1.EnrollmentAdminService/"
 		deploy      = "/komari.deployment.v1.DeploymentService/"
 		report      = "/komari.report.v1.AgentReportService/"
 		metrics     = "/komari.metrics.v1.MetricsService/"
@@ -91,6 +92,8 @@ func newPolicyInterceptor() *policyInterceptor {
 	add(rescue, rpc.RoleAdmin, 30*time.Minute, "WatchRescueSession")
 	add(rescue, rpc.RoleClient, 30*time.Minute, "LeaseRescueSessions")
 	add(rescue, rpc.RoleClient, 30*time.Second, "ReportRescueEvent", "ReportRescueStatus")
+	add(enrollAdmin, rpc.RoleAdmin, 30*time.Second, "ListPendingEnrollments", "GetPendingEnrollment", "ApproveEnrollment", "DenyEnrollment")
+	add(privileged, rpc.RoleAdmin, 30*time.Second, "ListPrivilegedRevisions")
 	return &policyInterceptor{policies: policies}
 }
 

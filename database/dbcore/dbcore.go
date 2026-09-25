@@ -538,6 +538,7 @@ func doInitialize() error {
 		&models.AgentEnrollment{},
 		&models.AgentCredential{},
 		&models.ControlPlaneKey{},
+		&models.ControlPlanePrivateKey{},
 		&models.BillingPriceVersion{},
 		&models.BillingFXSnapshot{},
 		&models.BillingEntry{},

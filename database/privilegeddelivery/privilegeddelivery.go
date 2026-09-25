@@ -343,7 +343,8 @@ func classify(clientUUID string, settings Settings) (class int32, reasons []stri
 // last report: a report describes a process that may already have been
 // restarted, while the profile describes what the service will be next time it
 // starts, which is what an upgrade has to change.
-func installedPrivilegeMode(clientUUID string) int32 {
+// InstalledPrivilegeMode reports what the Agent service is installed as.
+func InstalledPrivilegeMode(clientUUID string) int32 {
 	profile, saved, err := clients.GetDeploymentProfile(clientUUID)
 	if err != nil || !saved {
 		return privilegeUnspecified

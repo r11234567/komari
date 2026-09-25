@@ -500,3 +500,75 @@ func trim(value string, limit int) string {
 	}
 	return trimmed[:limit]
 }
+
+// Candidate is an existing machine an attempt may be a re-enrollment of.
+type Candidate struct {
+	ClientUUID       string
+	Name             string
+	MatchReason      string
+	FingerprintMatch bool
+}
+
+// Candidates suggests existing machines for an attempt, strongest first.
+//
+// A host fingerprint recorded by an earlier approved enrollment is strong
+// evidence, since it derives from the machine ID rather than anything the
+// operator named. A matching name is weak and is offered only as a hint: two
+// hosts can share a hostname, and the administrator decides either way.
+func Candidates(attempt Attempt) ([]Candidate, error) {
+	db := dbcore.GetDBInstance()
+	seen := make(map[string]bool)
+	var result []Candidate
+
+	if attempt.HostFingerprint != "" {
+		var previous []models.AgentEnrollment
+		if err := db.Where("host_fingerprint = ? AND state = ? AND client <> ''",
+			attempt.HostFingerprint, StateApproved).
+			Order("approved_at DESC").Limit(5).Find(&previous).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range previous {
+			if seen[row.Client] {
+				continue
+			}
+			var client models.Client
+			if err := db.Where("uuid = ?", row.Client).First(&client).Error; err != nil {
+				continue
+			}
+			seen[row.Client] = true
+			result = append(result, Candidate{
+				ClientUUID: client.UUID, Name: client.Name,
+				MatchReason: "same host fingerprint as an earlier enrollment", FingerprintMatch: true,
+			})
+		}
+	}
+
+	if hostname := strings.TrimSpace(attempt.Hostname); hostname != "" {
+		var byName []models.Client
+		if err := db.Where("name = ?", hostname).Limit(5).Find(&byName).Error; err != nil {
+			return nil, err
+		}
+		for _, client := range byName {
+			if seen[client.UUID] {
+				continue
+			}
+			seen[client.UUID] = true
+			result = append(result, Candidate{
+				ClientUUID: client.UUID, Name: client.Name,
+				MatchReason: "machine name matches the reported hostname",
+			})
+		}
+	}
+	return result, nil
+}
+
+// KeyFingerprint renders the agent key the way the Agent's CLI prints it, so an
+// administrator can compare the two by eye.
+func (attempt Attempt) KeyFingerprint() string {
+	raw, err := attempt.PublicKeyBytes()
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(raw)
+	return base64.RawStdEncoding.EncodeToString(digest[:])
+}
