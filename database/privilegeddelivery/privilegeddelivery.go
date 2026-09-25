@@ -305,7 +305,7 @@ func RedeemNonce(clientUUID, nonce, operator, localAuth string, resultingMode in
 // capabilities without being reinstalled, so the panel cannot deliver them by
 // itself no matter how they are confirmed.
 func classify(clientUUID string, settings Settings) (class int32, reasons []string, from, to int32) {
-	from = installedPrivilegeMode(clientUUID)
+	from = InstalledPrivilegeMode(clientUUID)
 	to = from
 
 	widening := settings.RemoteControlEnabled || settings.WebSSHEnabled ||
