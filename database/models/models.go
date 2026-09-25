@@ -220,9 +220,9 @@ type InstallToken struct {
 	// in plain form here because it is short-lived and single-use; there is
 	// no value in hashing something that cannot authenticate any resource
 	// beyond a single enrollment.
-	Token     string    `json:"-" gorm:"type:varchar(128);primaryKey;uniqueIndex"`
+	Token string `json:"-" gorm:"type:varchar(128);primaryKey;uniqueIndex"`
 	// Client is the agent this token will connect as on first use.
-	Client    string    `json:"-" gorm:"type:varchar(36);index;not null"`
+	Client string `json:"-" gorm:"type:varchar(36);index;not null"`
 	// UsedAt is set the first time the token is presented. Any subsequent
 	// presentation is rejected, even before ExpiresAt.
 	UsedAt    *time.Time `json:"-"`
