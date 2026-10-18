@@ -36,7 +36,7 @@ type enrollmentService struct {
 
 // verificationPath is where an operator approves a machine. It is rendered by
 // the panel UI, which is also what forces a panel login before approving.
-const verificationPath = "/admin/agents/enroll"
+const verificationPath = "/bind"
 
 func (s *enrollmentService) BeginEnrollment(ctx context.Context, req *connect.Request[enrollmentv1.BeginEnrollmentRequest]) (*connect.Response[enrollmentv1.BeginEnrollmentResponse], error) {
 	key := req.Msg.GetAgentPublicKey()
