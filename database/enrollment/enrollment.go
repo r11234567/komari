@@ -14,6 +14,7 @@
 package enrollment
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -176,6 +177,11 @@ func Poll(deviceCode string) (Attempt, *Issued, error) {
 			return err
 		}
 		issued = &credentials
+		// Atomic single-use invalidation: once credentials have been issued, the attempt row is deleted
+		// immediately so the device code cannot be replayed or hijacked.
+		if err := tx.Delete(&row).Error; err != nil {
+			return err
+		}
 		return nil
 	})
 	if errors.Is(err, errSlowDown) {
@@ -354,6 +360,19 @@ func GetCredential(clientUUID string) (models.AgentCredential, error) {
 	var row models.AgentCredential
 	err := dbcore.GetDBInstance().Where("client = ?", clientUUID).First(&row).Error
 	return row, err
+}
+
+// ResolveAgentPublicKey decodes and returns the registered Ed25519 public key for an agent.
+func ResolveAgentPublicKey(clientUUID string) (ed25519.PublicKey, error) {
+	cred, err := GetCredential(clientUUID)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := base64.StdEncoding.DecodeString(cred.AgentPublicKey)
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		return nil, errors.New("invalid agent public key")
+	}
+	return ed25519.PublicKey(raw), nil
 }
 
 // issueLocked mints a pair inside an open transaction.

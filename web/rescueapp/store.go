@@ -9,14 +9,17 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils"
 	deploymentapp "github.com/komari-monitor/komari/web/deployment"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	diagv1 "github.com/r11234567/komari-proto/gen/go/komari/diag/v1"
 	rescuev1 "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1"
+	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -420,7 +423,48 @@ func NextAssignment(agentID, helperInstanceID, afterAssignmentID string) (*rescu
 		return nil, err
 	}
 	expires := time.Now().UTC().Add(time.Duration(row.TimeoutSeconds) * time.Second)
-	return &rescuev1.RescueAssignment{AssignmentId: row.ID, Session: sessionToProto(row), LeaseExpiresAt: timestamppb.New(expires)}, nil
+	sessProto := sessionToProto(row)
+	envelope, _ := buildRescueEnvelope(agentID, sessProto, expires)
+	return &rescuev1.RescueAssignment{
+		AssignmentId:   row.ID,
+		Session:        sessProto,
+		LeaseExpiresAt: timestamppb.New(expires),
+		Envelope:       envelope,
+	}, nil
+}
+
+func buildRescueEnvelope(agentID string, session *rescuev1.RescueSession, leaseExpires time.Time) (*securityv1.SignedEnvelope, error) {
+	sessionBytes, err := proto.Marshal(session)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	instruction := &securityv1.SignedInstruction{
+		AgentId:         agentID,
+		Nonce:           uuid.NewString(),
+		IssuedAt:        timestamppb.New(now),
+		ExpiresAt:       timestamppb.New(leaseExpires),
+		InstructionType: "rescue:v1",
+		Body:            sessionBytes,
+	}
+	payloadBytes, err := proto.Marshal(instruction)
+	if err != nil {
+		return nil, err
+	}
+	keyID, algo, sigValue, err := enrollment.Sign(payloadBytes)
+	if err != nil {
+		return nil, err
+	}
+	return &securityv1.SignedEnvelope{
+		Payload: payloadBytes,
+		Signatures: []*securityv1.Signature{
+			{
+				Algorithm: securityv1.SignatureAlgorithm(algo),
+				Value:     sigValue,
+				KeyId:     keyID,
+			},
+		},
+	}, nil
 }
 
 func EventsAfter(sessionID string, sequence uint64) ([]*rescuev1.RescueEvent, error) {

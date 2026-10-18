@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/database/tasks"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	execv1 "github.com/r11234567/komari-proto/gen/go/komari/exec/v1"
+	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -240,8 +242,12 @@ func NextDispatch(ctx context.Context, agentID, afterAssignment string, delivere
 			if assignable && (task.AssignmentID != afterAssignment || !delivered["assign:"+task.AssignmentID]) {
 				task.LeaseExpiresAt = now.Add(leaseDuration)
 				delivered["assign:"+task.AssignmentID] = true
+				envelope, _ := buildExecutionEnvelope(task.AgentID, task.Spec, task.LeaseExpiresAt)
 				result := &Dispatch{Assignment: &execv1.ExecutionAssignment{
-					AssignmentId: task.AssignmentID, Execution: cloneExecution(task.Execution), LeaseExpiresAt: timestamppb.New(task.LeaseExpiresAt), Spec: cloneSpec(task.Spec),
+					AssignmentId:   task.AssignmentID,
+					Execution:      cloneExecution(task.Execution),
+					LeaseExpiresAt: timestamppb.New(task.LeaseExpiresAt),
+					Envelope:       envelope,
 				}}
 				task.mu.Unlock()
 				store.Unlock()
@@ -473,3 +479,38 @@ func pruneLocked(now time.Time) {
 		}
 	}
 }
+
+func buildExecutionEnvelope(agentID string, spec *execv1.ExecutionSpec, leaseExpires time.Time) (*securityv1.SignedEnvelope, error) {
+	specBytes, err := proto.Marshal(spec)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	instruction := &securityv1.SignedInstruction{
+		AgentId:         agentID,
+		Nonce:           uuid.NewString(),
+		IssuedAt:        timestamppb.New(now),
+		ExpiresAt:       timestamppb.New(leaseExpires),
+		InstructionType: "exec:v1",
+		Body:            specBytes,
+	}
+	payloadBytes, err := proto.Marshal(instruction)
+	if err != nil {
+		return nil, err
+	}
+	keyID, algo, sigValue, err := enrollment.Sign(payloadBytes)
+	if err != nil {
+		return nil, err
+	}
+	return &securityv1.SignedEnvelope{
+		Payload: payloadBytes,
+		Signatures: []*securityv1.Signature{
+			{
+				Algorithm: securityv1.SignatureAlgorithm(algo),
+				Value:     sigValue,
+				KeyId:     keyID,
+			},
+		},
+	}, nil
+}
+

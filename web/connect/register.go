@@ -76,6 +76,13 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 		if principal == nil {
 			principal = api.IdentifyPrincipal(c)
 		}
+		if err := verifyDPoP(c, principal); err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"code":    "UNAUTHENTICATED",
+				"message": err.Error(),
+			})
+			return
+		}
 		meta := &rpc.ContextMeta{
 			Principal:      principal,
 			Permission:     principal.PrimaryRole(),
