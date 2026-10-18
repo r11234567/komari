@@ -8,6 +8,7 @@
 *.so
 *.dylib
 __debug*
+bin/
 
 # local development data
 komari.db
