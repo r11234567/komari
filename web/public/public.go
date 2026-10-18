@@ -51,8 +51,8 @@ const (
 const themeBundleMigrationKey = "theme_bundle_migration_v1"
 
 // Increment whenever the embedded official default theme must replace an
-// already-installed bundle. Version 6 ships the overhauled Connect RPC default theme and /bind route.
-const currentThemeBundleMigration = 6
+// already-installed bundle. Version 7 ships the updated live data stream handling.
+const currentThemeBundleMigration = 7
 
 const themeChangeReloadScript = `<script>(()=>{window.addEventListener("storage",(event)=>{if(event.key==="komari-active-theme-changed"){window.location.reload();}});})();</script>`
 
