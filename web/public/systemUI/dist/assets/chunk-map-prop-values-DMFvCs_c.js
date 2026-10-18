@@ -1,0 +1,1 @@
+var e={highContrast:{type:`boolean`,className:`rt-high-contrast`,default:void 0}};function t(e,t){if(e!==void 0)return typeof e==`string`?t(e):Object.fromEntries(Object.entries(e).map(([e,n])=>[e,t(n)]))}function n(e){return e===`3`?`3`:`2`}function r(e){switch(e){case`1`:return`1`;case`2`:case`3`:return`2`;case`4`:return`3`}}export{e as i,r as n,t as r,n as t};

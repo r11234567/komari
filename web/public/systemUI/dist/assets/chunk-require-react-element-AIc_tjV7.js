@@ -1,0 +1,1 @@
+import{n as e,s as t}from"./chunk-jsx-runtime-CFxkZ0bB.js";var n=t(e()),r=e=>{if(!n.isValidElement(e))throw Error(`Expected a single React Element child, but got: ${n.Children.toArray(e).map(e=>typeof e==`object`&&`type`in e&&typeof e.type==`string`?e.type:typeof e).join(`, `)}`);return e};export{r as t};

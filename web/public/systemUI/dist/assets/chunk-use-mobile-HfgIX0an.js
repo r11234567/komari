@@ -1,0 +1,1 @@
+import{n as e,s as t}from"./chunk-jsx-runtime-CFxkZ0bB.js";var n=t(e(),1),r=768;function i(){let[e,t]=n.useState(void 0);return n.useEffect(()=>{let e=window.matchMedia(`(max-width: 767px)`),n=()=>{t(window.innerWidth<r)};return e.addEventListener(`change`,n),t(window.innerWidth<r),()=>e.removeEventListener(`change`,n)},[]),!!e}export{i as t};

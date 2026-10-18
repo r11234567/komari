@@ -1,0 +1,1 @@
+import{t as e}from"./chunk-jsx-runtime-CFxkZ0bB.js";var t=e();function n({children:e,description:n}){return(0,t.jsxs)(`div`,{className:`min-w-0`,children:[(0,t.jsx)(`h1`,{className:`text-xl font-semibold leading-7 text-foreground`,children:e}),n?(0,t.jsx)(`p`,{className:`mt-1 max-w-3xl text-sm leading-6 text-muted-foreground`,children:n}):null]})}export{n as t};

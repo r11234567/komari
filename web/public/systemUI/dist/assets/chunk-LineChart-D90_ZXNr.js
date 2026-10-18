@@ -1,0 +1,1 @@
+import{a as e,i as t,l as n,o as r,s as i}from"./chunk-chart-DhoKliGe.js";var a=t({chartName:`LineChart`,GraphicalChild:i,axisComponents:[{axisType:`xAxis`,AxisComp:r},{axisType:`yAxis`,AxisComp:e}],formatAxisMap:n});export{a as t};

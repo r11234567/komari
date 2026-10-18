@@ -1,0 +1,1 @@
+function e(e){let t=e.trim().toLowerCase();return!t.startsWith(`mysql://`)&&!t.startsWith(`postgres://`)&&!t.startsWith(`postgresql://`)&&!t.includes(`@tcp(`)&&!t.includes(`@unix(`)&&!t.includes(`dbname=`)}export{e as t};

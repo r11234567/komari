@@ -1,0 +1,1 @@
+var e=`/admin/dashboard`;function t(t){return!t||!t.startsWith(`/`)||t.startsWith(`//`)?e:t===`/bind`||t.startsWith(`/bind?`)||t.startsWith(`/bind/`)||t===`/admin`||t.startsWith(`/admin/`)?t:e}function n(e,t=``,n=``){let r=`${e}${t}${n}`;return`/login?returnTo=${encodeURIComponent(r)}`}export{t as n,n as t};

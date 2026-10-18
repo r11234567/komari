@@ -1,0 +1,1 @@
+import{n as e,s as t}from"./chunk-jsx-runtime-CFxkZ0bB.js";import{n}from"./chunk-as-child.prop-Isttt9ns.js";import{t as r}from"./chunk-base-button-C6yRSzD-.js";var i=t(e()),a=t(n()),o=i.forwardRef(({className:e,...t},n)=>i.createElement(r,{...t,ref:n,className:(0,a.default)(`rt-IconButton`,e)}));o.displayName=`IconButton`;export{o as t};
