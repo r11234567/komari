@@ -970,4 +970,3 @@ func TestDualEnd_PrivilegedDeliveryAndElevation(t *testing.T) {
 	}
 	t.Logf("Dual-end PrivilegedDelivery & Elevation succeeded: Revision=%d, Nonce burned, RemoteControlAllowed=true", rev.Revision)
 }
-
