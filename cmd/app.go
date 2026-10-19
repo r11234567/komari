@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database"
@@ -333,7 +335,7 @@ func (a *App) RunInstallGuide() (bool, error) {
 	})
 
 	a.engine = r
-	a.server = &http.Server{Addr: flags.Listen, Handler: r}
+	a.server = &http.Server{Addr: flags.Listen, Handler: h2c.NewHandler(r, &http2.Server{})}
 	serverErr := make(chan error, 1)
 	logger.Infof("server", "First-run installation guide is available on %s", flags.Listen)
 	go func() {
@@ -406,7 +408,7 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 	})
 
 	a.engine = r
-	a.server = &http.Server{Addr: flags.Listen, Handler: r}
+	a.server = &http.Server{Addr: flags.Listen, Handler: h2c.NewHandler(r, &http2.Server{})}
 	serverErr := make(chan error, 1)
 	logger.Infof("server", "Legacy monitoring data requires the 1.2.7 upgrade wizard on %s", flags.Listen)
 	go func() {
@@ -480,7 +482,7 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 	})
 
 	a.engine = r
-	a.server = &http.Server{Addr: flags.Listen, Handler: r}
+	a.server = &http.Server{Addr: flags.Listen, Handler: h2c.NewHandler(r, &http2.Server{})}
 	serverErr := make(chan error, 1)
 	logger.Infof("server", "Metric storage upgrade progress is available on %s", flags.Listen)
 	go func() {
@@ -683,9 +685,10 @@ func (a *App) Run() error {
 		return httpsserver.Default.Shutdown(ctx)
 	})
 
+	rootHandler := httpsserver.Default.HTTPRedirectHandler(plugin.HTMLInjectHandler(plugin.WrapHandler(a.engine)))
 	a.server = &http.Server{
 		Addr:    flags.Listen,
-		Handler: httpsserver.Default.HTTPRedirectHandler(plugin.HTMLInjectHandler(plugin.WrapHandler(a.engine))),
+		Handler: h2c.NewHandler(rootHandler, &http2.Server{}),
 	}
 
 	serverErr := make(chan error, 1)

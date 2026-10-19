@@ -111,7 +111,11 @@ func defaultDeploymentProfile(client models.Client) DeploymentProfile {
 }
 
 func GetDeploymentProfile(clientUUID string) (DeploymentProfile, bool, error) {
-	return getDeploymentProfile(dbcore.GetDBInstance(), clientUUID)
+	return GetDeploymentProfileWithDB(dbcore.GetDBInstance(), clientUUID)
+}
+
+func GetDeploymentProfileWithDB(db *gorm.DB, clientUUID string) (DeploymentProfile, bool, error) {
+	return getDeploymentProfile(db, clientUUID)
 }
 
 func GetDeploymentProfileWithDelivery(clientUUID string) (DeploymentProfile, bool, DeploymentDeliveryState, error) {

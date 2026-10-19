@@ -94,8 +94,13 @@ type Revision struct {
 // editing the same machine must not silently overwrite each other, because the
 // losing edit could be the one that narrowed privileges.
 func Save(clientUUID string, settings Settings, expectedRevision uint64, reason string) (Revision, error) {
+	return SaveWithDB(dbcore.GetDBInstance(), clientUUID, settings, expectedRevision, reason)
+}
+
+// SaveWithDB stores a new revision using the provided database connection.
+func SaveWithDB(db *gorm.DB, clientUUID string, settings Settings, expectedRevision uint64, reason string) (Revision, error) {
 	var result Revision
-	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
 		latest, found, err := latestLocked(tx, clientUUID)
 		if err != nil {
 			return err
@@ -109,7 +114,7 @@ func Save(clientUUID string, settings Settings, expectedRevision uint64, reason 
 				expectedRevision, current)
 		}
 
-		class, reasons, from, to := classify(clientUUID, settings)
+		class, reasons, from, to := classify(tx, clientUUID, settings)
 		now := time.Now().UTC()
 		row := models.ClientPrivilegedRevision{
 			Client:            clientUUID,
@@ -304,8 +309,8 @@ func RedeemNonce(clientUUID, nonce, operator, localAuth string, resultingMode in
 // what the Agent is installed as: a service account cannot gain those
 // capabilities without being reinstalled, so the panel cannot deliver them by
 // itself no matter how they are confirmed.
-func classify(clientUUID string, settings Settings) (class int32, reasons []string, from, to int32) {
-	from = InstalledPrivilegeMode(clientUUID)
+func classify(db *gorm.DB, clientUUID string, settings Settings) (class int32, reasons []string, from, to int32) {
+	from = InstalledPrivilegeModeWithDB(db, clientUUID)
 	to = from
 
 	widening := settings.RemoteControlEnabled || settings.WebSSHEnabled ||
@@ -345,7 +350,12 @@ func classify(clientUUID string, settings Settings) (class int32, reasons []stri
 // starts, which is what an upgrade has to change.
 // InstalledPrivilegeMode reports what the Agent service is installed as.
 func InstalledPrivilegeMode(clientUUID string) int32 {
-	profile, saved, err := clients.GetDeploymentProfile(clientUUID)
+	return InstalledPrivilegeModeWithDB(dbcore.GetDBInstance(), clientUUID)
+}
+
+// InstalledPrivilegeModeWithDB reports what the Agent service is installed as using the provided DB/tx instance.
+func InstalledPrivilegeModeWithDB(db *gorm.DB, clientUUID string) int32 {
+	profile, saved, err := clients.GetDeploymentProfileWithDB(db, clientUUID)
 	if err != nil || !saved {
 		return privilegeUnspecified
 	}
