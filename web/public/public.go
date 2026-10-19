@@ -51,8 +51,8 @@ const (
 const themeBundleMigrationKey = "theme_bundle_migration_v1"
 
 // Increment whenever the embedded official default theme must replace an
-// already-installed bundle. Version 7 ships the updated live data stream handling.
-const currentThemeBundleMigration = 7
+// already-installed bundle. Version 8 ships P0 web audit fixes, proto v0.1.37 compatibility, and modernized state lifecycle.
+const currentThemeBundleMigration = 8
 
 const themeChangeReloadScript = `<script>(()=>{window.addEventListener("storage",(event)=>{if(event.key==="komari-active-theme-changed"){window.location.reload();}});})();</script>`
 
@@ -580,7 +580,7 @@ func setNoStoreHeaders(c *gin.Context) {
 }
 
 func isPrivateApplicationPath(requestPath string) bool {
-	for _, prefix := range []string{"/admin", "/login", "/terminal", "/install", "/manage", "/bind"} {
+	for _, prefix := range []string{"/admin", "/login", "/terminal", "/install", "/manage", "/bind", "/enroll"} {
 		if requestPath == prefix || strings.HasPrefix(requestPath, prefix+"/") {
 			return true
 		}

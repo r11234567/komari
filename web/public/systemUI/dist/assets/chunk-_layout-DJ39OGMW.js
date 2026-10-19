@@ -1,1 +1,0 @@
-import{t as e}from"./chunk-jsx-runtime-CFxkZ0bB.js";import{t}from"./chunk-flex-oHUWisYA.js";import{c as n}from"./entry-index-Bsp2vcoP.js";var r=e();function i(){return(0,r.jsx)(t,{direction:`column`,gap:`3`,className:`km-admin-settings-layout km-admin-settings-content p-0 md:p-4`,children:(0,r.jsx)(n,{})})}export{i as default};
