@@ -21,6 +21,7 @@ import (
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/billing"
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	d_notification "github.com/komari-monitor/komari/database/notification"
@@ -116,6 +117,9 @@ func (a *App) Bootstrap() error {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
 	a.dbReady = true
+	if _, err := enrollment.ActiveSigningKey(); err != nil {
+		logger.Warnf("server", "failed to initialize active signing key: %v", err)
+	}
 	a.addCleanup("database", func(context.Context) error {
 		return dbcore.Close()
 	})

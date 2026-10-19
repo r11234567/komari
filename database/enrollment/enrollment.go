@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -134,15 +135,59 @@ func Begin(publicKey []byte, keyID string, algorithm int32, device Attempt) (Att
 	return toAttempt(row), nil
 }
 
+var (
+	pollGraceCache sync.Map // map[string]*cachedPollResult
+)
+
+type cachedPollResult struct {
+	attempt   Attempt
+	issued    Issued
+	expiresAt time.Time
+}
+
+func init() {
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			now := time.Now().UTC()
+			pollGraceCache.Range(func(key, value any) bool {
+				if entry, ok := value.(*cachedPollResult); ok {
+					if now.After(entry.expiresAt) {
+						pollGraceCache.Delete(key)
+					}
+				}
+				return true
+			})
+		}
+	}()
+}
+
 // Poll advances an attempt for the Agent that owns the device code.
 //
 // It returns the attempt and, when approved, the credentials to hand over. The
 // approval itself happens in the panel; this only observes it.
 func Poll(deviceCode string) (Attempt, *Issued, error) {
+	code := strings.TrimSpace(deviceCode)
+	if code == "" {
+		return Attempt{}, nil, errors.New("a device code is required")
+	}
+
+	// Idempotent grace window: if this device code was recently approved and consumed within 60s,
+	// return the same issued credentials to handle network packet loss on the initial response.
+	if val, ok := pollGraceCache.Load(code); ok {
+		cached := val.(*cachedPollResult)
+		if time.Now().UTC().Before(cached.expiresAt) {
+			issuedCopy := cached.issued
+			return cached.attempt, &issuedCopy, nil
+		}
+		pollGraceCache.Delete(code)
+	}
+
 	var attempt Attempt
 	var issued *Issued
 	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
-		row, err := lockAttempt(tx, "device_code = ?", strings.TrimSpace(deviceCode))
+		row, err := lockAttempt(tx, "device_code = ?", code)
 		if err != nil {
 			return err
 		}
@@ -177,8 +222,14 @@ func Poll(deviceCode string) (Attempt, *Issued, error) {
 			return err
 		}
 		issued = &credentials
+		// Cache for 60s grace window before deleting row
+		pollGraceCache.Store(code, &cachedPollResult{
+			attempt:   attempt,
+			issued:    credentials,
+			expiresAt: now.Add(60 * time.Second),
+		})
 		// Atomic single-use invalidation: once credentials have been issued, the attempt row is deleted
-		// immediately so the device code cannot be replayed or hijacked.
+		// immediately so the device code cannot be replayed or hijacked after the grace window.
 		if err := tx.Delete(&row).Error; err != nil {
 			return err
 		}
@@ -287,41 +338,60 @@ func ListPending() ([]Attempt, error) {
 	return attempts, nil
 }
 
+// ValidateRefreshToken checks if the refresh token is valid and returns the credential record without mutating DB.
+func ValidateRefreshToken(refreshToken string) (models.AgentCredential, error) {
+	digest := hashToken(refreshToken)
+	if digest == "" {
+		return models.AgentCredential{}, errors.New("a refresh token is required")
+	}
+	var row models.AgentCredential
+	if err := dbcore.GetDBInstance().Where("refresh_token_hash = ? OR (previous_refresh_hash = ? AND previous_refresh_expires > ?)",
+		digest, digest, time.Now().UTC()).First(&row).Error; err != nil {
+		return models.AgentCredential{}, err
+	}
+	if row.RevokedAt != nil {
+		return models.AgentCredential{}, errors.New("these credentials were revoked")
+	}
+	now := time.Now().UTC()
+	if now.After(row.RefreshExpiresAt) {
+		return models.AgentCredential{}, errors.New("the sign-in has expired; enroll the machine again")
+	}
+	return row, nil
+}
+
+// RotateCredential rotates the credentials in database after proof has been verified.
+func RotateCredential(record models.AgentCredential) (Issued, error) {
+	var issued Issued
+	now := time.Now().UTC()
+	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
+		var cur models.AgentCredential
+		if err := tx.Where("client = ?", record.Client).First(&cur).Error; err != nil {
+			return err
+		}
+		if cur.RevokedAt != nil {
+			return errors.New("these credentials were revoked")
+		}
+		credentials, err := issueLocked(tx, cur.Client, cur.AgentPublicKey, cur.AgentKeyID, cur.KeyAlgorithm, decodeScopes(cur.Scopes), now)
+		if err != nil {
+			return err
+		}
+		issued = credentials
+		return nil
+	})
+	return issued, err
+}
+
 // Refresh rotates a credential pair presented by its refresh token.
 //
 // The previous token stays valid for a grace period rather than being revoked
 // immediately, because the Agent may fail to persist the new pair, and the
 // alternative to a grace window is an Agent locked out by a badly timed crash.
 func Refresh(refreshToken string) (Issued, models.AgentCredential, error) {
-	var issued Issued
-	var record models.AgentCredential
-	digest := hashToken(refreshToken)
-	if digest == "" {
-		return issued, record, errors.New("a refresh token is required")
+	record, err := ValidateRefreshToken(refreshToken)
+	if err != nil {
+		return Issued{}, models.AgentCredential{}, err
 	}
-	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
-		var row models.AgentCredential
-		// The previous hash is accepted so a retry inside the grace window
-		// succeeds instead of appearing to be a stolen token.
-		if err := tx.Where("refresh_token_hash = ? OR (previous_refresh_hash = ? AND previous_refresh_expires > ?)",
-			digest, digest, time.Now().UTC()).First(&row).Error; err != nil {
-			return err
-		}
-		if row.RevokedAt != nil {
-			return errors.New("these credentials were revoked")
-		}
-		now := time.Now().UTC()
-		if now.After(row.RefreshExpiresAt) {
-			return errors.New("the sign-in has expired; enroll the machine again")
-		}
-		credentials, err := issueLocked(tx, row.Client, row.AgentPublicKey, row.AgentKeyID, row.KeyAlgorithm, decodeScopes(row.Scopes), now)
-		if err != nil {
-			return err
-		}
-		issued = credentials
-		record = row
-		return nil
-	})
+	issued, err := RotateCredential(record)
 	return issued, record, err
 }
 
@@ -390,6 +460,9 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 	err := tx.Where("client = ?", clientUUID).First(&existing).Error
 	switch {
 	case err == nil:
+		if existing.RevokedAt != nil {
+			return Issued{}, errors.New("cannot issue credentials for a revoked agent")
+		}
 		updates := map[string]any{
 			"access_token_hash":        hashToken(accessToken),
 			"refresh_token_hash":       hashToken(refreshToken),
@@ -401,12 +474,7 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 			"agent_key_id":             keyID,
 			"key_algorithm":            algorithm,
 			"scopes":                   encodeScopes(scopes),
-			// Re-enrolling or refreshing clears a prior revocation: the
-			// credential presented was accepted, so continuing to treat the
-			// row as revoked would reject a machine that just proved itself.
-			"revoked_at":     nil,
-			"revoked_reason": "",
-			"updated_at":     now,
+			"updated_at":               now,
 		}
 		if err := tx.Model(&existing).Updates(updates).Error; err != nil {
 			return Issued{}, err

@@ -20,29 +20,84 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
+const maxNonceCacheEntries = 65536
+
 var (
-	nonceCache sync.Map
+	nonceMu    sync.Mutex
+	nonceStore = make(map[string]time.Time)
 )
+
+func init() {
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			cleanupExpiredNonces()
+		}
+	}()
+}
+
+func cleanupExpiredNonces() {
+	nonceMu.Lock()
+	defer nonceMu.Unlock()
+	now := time.Now()
+	for k, exp := range nonceStore {
+		if now.After(exp) {
+			delete(nonceStore, k)
+		}
+	}
+}
 
 func recordAndVerifyNonce(nonce string, ttl time.Duration) bool {
 	if strings.TrimSpace(nonce) == "" {
 		return false
 	}
+	nonceMu.Lock()
+	defer nonceMu.Unlock()
+
 	now := time.Now()
-	val, loaded := nonceCache.LoadOrStore(nonce, now.Add(ttl))
-	if loaded {
-		exp, ok := val.(time.Time)
-		if ok && now.Before(exp) {
+	if exp, exists := nonceStore[nonce]; exists {
+		if now.Before(exp) {
 			return false // replayed
 		}
-		nonceCache.Store(nonce, now.Add(ttl))
 	}
+
+	if len(nonceStore) >= maxNonceCacheEntries {
+		// Prune expired entries immediately
+		for k, exp := range nonceStore {
+			if now.After(exp) {
+				delete(nonceStore, k)
+			}
+		}
+		if len(nonceStore) >= maxNonceCacheEntries {
+			// If still full, reject to protect memory
+			return false
+		}
+	}
+
+	nonceStore[nonce] = now.Add(ttl)
 	return true
 }
 
 func verifyDPoP(c *gin.Context, principal *rpc.Principal) error {
-	sig := c.GetHeader("X-Komari-Signature")
+	// Check whether the caller is an enrolled agent with a registered public key.
+	var hasPublicKey bool
+	var pubKey ed25519.PublicKey
+	if principal != nil && principal.Type == rpc.PrincipalAgent && principal.ClientUUID != "" {
+		pk, err := enrollment.ResolveAgentPublicKey(principal.ClientUUID)
+		if err == nil && len(pk) == ed25519.PublicKeySize {
+			hasPublicKey = true
+			pubKey = pk
+		}
+	}
+
+	sig := strings.TrimSpace(c.GetHeader("X-Komari-Signature"))
 	if sig == "" {
+		// For agents enrolled with Ed25519 public keys, DPoP signatures are mandatory.
+		if hasPublicKey {
+			return errors.New("dpop: missing required X-Komari-Signature header for enrolled agent")
+		}
+		// Unauthenticated or legacy tokens without enrolled keys pass through without DPoP.
 		return nil
 	}
 
@@ -67,7 +122,7 @@ func verifyDPoP(c *gin.Context, principal *rpc.Principal) error {
 	if nonce == "" {
 		return errors.New("dpop: missing X-Komari-Nonce header")
 	}
-	if !recordAndVerifyNonce(nonce, 120*time.Second) {
+	if !recordAndVerifyNonce("dpop:"+principal.ClientUUID+":"+nonce, 120*time.Second) {
 		return errors.New("dpop: nonce replay detected")
 	}
 
@@ -80,20 +135,32 @@ func verifyDPoP(c *gin.Context, principal *rpc.Principal) error {
 	tokenDigest := sha256.Sum256([]byte(token))
 	tokenHash := hex.EncodeToString(tokenDigest[:])
 
-	var bodyBytes []byte
-	if c.Request.Body != nil {
-		bodyBytes, err = io.ReadAll(c.Request.Body)
-		if err != nil {
-			return errors.New("dpop: failed to read request body")
-		}
-		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	}
-	bodyDigest := sha256.Sum256(bodyBytes)
-	bodyHash := hex.EncodeToString(bodyDigest[:])
+	var bodyHash string
+	isStream := c.GetHeader("X-Komari-Body-Mode") == "stream" ||
+		(strings.HasPrefix(c.GetHeader("Content-Type"), "application/connect+") && c.Request.ContentLength < 0)
 
-	pubKey, err := enrollment.ResolveAgentPublicKey(principal.ClientUUID)
-	if err != nil {
-		return fmt.Errorf("dpop: resolve agent public key: %w", err)
+	if isStream {
+		bodyDigest := sha256.Sum256(nil)
+		bodyHash = hex.EncodeToString(bodyDigest[:])
+	} else {
+		var bodyBytes []byte
+		if c.Request.Body != nil {
+			bodyBytes, err = io.ReadAll(io.LimitReader(c.Request.Body, 10<<20)) // 10MB limit
+			if err != nil {
+				return errors.New("dpop: failed to read request body")
+			}
+			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
+		bodyDigest := sha256.Sum256(bodyBytes)
+		bodyHash = hex.EncodeToString(bodyDigest[:])
+	}
+
+	if !hasPublicKey {
+		pk, err := enrollment.ResolveAgentPublicKey(principal.ClientUUID)
+		if err != nil {
+			return fmt.Errorf("dpop: resolve agent public key: %w", err)
+		}
+		pubKey = pk
 	}
 
 	// Canonical payload: Method + "\n" + URI_Path + "\n" + Timestamp + "\n" + Nonce + "\n" + SHA256(AccessToken) + "\n" + SHA256(RequestBody)

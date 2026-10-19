@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,9 +165,61 @@ func TestDualEnd_PermissionEnforcement(t *testing.T) {
 	t.Logf("Dual-end interceptor correctly rejected unauthenticated report: %v", err)
 }
 
-// TestDualEnd_AuthenticatedAgentReport tests real agent report transmission over HTTP with Bearer token.
+type testDPoPTransport struct {
+	base    http.RoundTripper
+	token   string
+	privKey ed25519.PrivateKey
+}
+
+func (t *testDPoPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	isStream := req.Body != nil && req.Body != http.NoBody && req.ContentLength < 0 && req.GetBody == nil
+	var bodyBytes []byte
+	if !isStream && req.Body != nil && req.Body != http.NoBody {
+		var err error
+		bodyBytes, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}
+	tokenDigest := sha256.Sum256([]byte(t.token))
+	tokenHash := hex.EncodeToString(tokenDigest[:])
+	var bodyHash string
+	if isStream {
+		bodyDigest := sha256.Sum256(nil)
+		bodyHash = hex.EncodeToString(bodyDigest[:])
+		req.Header.Set("X-Komari-Body-Mode", "stream")
+	} else {
+		bodyDigest := sha256.Sum256(bodyBytes)
+		bodyHash = hex.EncodeToString(bodyDigest[:])
+	}
+	tsStr := strconv.FormatInt(time.Now().Unix(), 10)
+	nonce := uuid.NewString()
+	payload := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s", req.Method, req.URL.Path, tsStr, nonce, tokenHash, bodyHash)
+	sig := ed25519.Sign(t.privKey, []byte(payload))
+
+	req.Header.Set("Authorization", "Bearer "+t.token)
+	req.Header.Set("X-Komari-Signature", base64.StdEncoding.EncodeToString(sig))
+	req.Header.Set("X-Komari-Timestamp", tsStr)
+	req.Header.Set("X-Komari-Nonce", nonce)
+
+	return t.base.RoundTrip(req)
+}
+
+func newDPoPTestClient(token string, privKey ed25519.PrivateKey) *http.Client {
+	return &http.Client{
+		Transport: &testDPoPTransport{
+			base:    testServer.Client().Transport,
+			token:   token,
+			privKey: privKey,
+		},
+	}
+}
+
+// TestDualEnd_AuthenticatedAgentReport tests real agent report transmission over HTTP with full DPoP authentication.
 func TestDualEnd_AuthenticatedAgentReport(t *testing.T) {
-	reportClient := reportv1connect.NewAgentReportServiceClient(testServer.Client(), testServer.URL)
+	dpopClient := newDPoPTestClient(testAccessToken, testAgentPrivKey)
+	reportClient := reportv1connect.NewAgentReportServiceClient(dpopClient, testServer.URL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -194,7 +247,6 @@ func TestDualEnd_AuthenticatedAgentReport(t *testing.T) {
 			},
 		},
 	})
-	req.Header().Set("Authorization", "Bearer "+testAccessToken)
 
 	resp, err := reportClient.SubmitReport(ctx, req)
 	if err != nil {
@@ -207,9 +259,10 @@ func TestDualEnd_AuthenticatedAgentReport(t *testing.T) {
 	t.Logf("Dual-end SubmitReport succeeded: acknowledged by server successfully")
 }
 
-// TestDualEnd_AuthenticatedMetricsSubmit tests real metric points ingestion over HTTP.
+// TestDualEnd_AuthenticatedMetricsSubmit tests real metric points ingestion over HTTP with full DPoP authentication.
 func TestDualEnd_AuthenticatedMetricsSubmit(t *testing.T) {
-	metricsClient := metricsv1connect.NewMetricsServiceClient(testServer.Client(), testServer.URL)
+	dpopClient := newDPoPTestClient(testAccessToken, testAgentPrivKey)
+	metricsClient := metricsv1connect.NewMetricsServiceClient(dpopClient, testServer.URL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -220,7 +273,6 @@ func TestDualEnd_AuthenticatedMetricsSubmit(t *testing.T) {
 		Sequence: 1,
 		Points:   points,
 	})
-	req.Header().Set("Authorization", "Bearer "+testAccessToken)
 
 	resp, err := metricsClient.SubmitMetrics(ctx, req)
 	if err != nil {
@@ -503,20 +555,24 @@ func TestDualEnd_SingleUseDeviceCode(t *testing.T) {
 		t.Fatal("expected credentials in first poll")
 	}
 
-	// 4. Second Poll: immediately returns EXPIRED because device code was atomically consumed
+	// 4. Second Poll: inside 60-second grace window returns the same APPROVED credentials (preventing packet loss lockout)
 	poll2, err := enrollClient.PollEnrollment(ctx, connect.NewRequest(&enrollmentv1.PollEnrollmentRequest{
 		DeviceCode: devCode,
 	}))
 	if err != nil {
 		t.Fatalf("Poll 2 failed: %v", err)
 	}
-	if poll2.Msg.GetState() != enrollmentv1.EnrollmentState_ENROLLMENT_STATE_EXPIRED {
-		t.Fatalf("expected EXPIRED on reused device code, got %v", poll2.Msg.GetState())
+	if poll2.Msg.GetState() != enrollmentv1.EnrollmentState_ENROLLMENT_STATE_APPROVED {
+		t.Fatalf("expected APPROVED within grace window on network retry, got %v", poll2.Msg.GetState())
 	}
-	t.Log("Single-use device code verified: successfully consumed on first use and blocked on replay")
+	if poll2.Msg.GetCredentials().GetAccessToken() != poll1.Msg.GetCredentials().GetAccessToken() {
+		t.Fatalf("expected identical AccessToken within grace window, got %q vs %q",
+			poll2.Msg.GetCredentials().GetAccessToken(), poll1.Msg.GetCredentials().GetAccessToken())
+	}
+	t.Log("Device code grace window verified: subsequent poll within 60s returns same credentials")
 }
 
-// TestDualEnd_Execution_SignedEnvelopeLease tests command leasing with Ed25519 SignedEnvelope
+// TestDualEnd_Execution_SignedEnvelopeLease tests command leasing with Ed25519 SignedEnvelope over DPoP
 func TestDualEnd_Execution_SignedEnvelopeLease(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -533,9 +589,9 @@ func TestDualEnd_Execution_SignedEnvelopeLease(t *testing.T) {
 		t.Fatal("expected non-empty executions")
 	}
 
-	execClient := execv1connect.NewExecutionServiceClient(testServer.Client(), testServer.URL)
+	dpopClient := newDPoPTestClient(testAccessToken, testAgentPrivKey)
+	execClient := execv1connect.NewExecutionServiceClient(dpopClient, testServer.URL)
 	leaseReq := connect.NewRequest(&execv1.LeaseExecutionRequest{AgentId: testClientUUID})
-	leaseReq.Header().Set("Authorization", "Bearer "+testAccessToken)
 
 	stream, err := execClient.LeaseExecution(ctx, leaseReq)
 	if err != nil {
@@ -581,4 +637,135 @@ func TestDualEnd_Execution_SignedEnvelopeLease(t *testing.T) {
 		t.Fatalf("command mismatch: %q", spec.GetCommand())
 	}
 	t.Log("Execution SignedEnvelope leasing and cryptographic unpacking verified successfully")
+}
+
+// TestDualEnd_DPoP_MissingSignatureRejected verifies that an enrolled agent omitting X-Komari-Signature is strictly rejected with 401.
+func TestDualEnd_DPoP_MissingSignatureRejected(t *testing.T) {
+	reportClient := reportv1connect.NewAgentReportServiceClient(testServer.Client(), testServer.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req := connect.NewRequest(&reportv1.SubmitReportRequest{
+		Report: &reportv1.AgentReport{
+			AgentId: testClientUUID,
+			System: &reportv1.SystemInfo{
+				Hostname: "unsigned-dpop-node",
+			},
+		},
+	})
+	// Only set Authorization header, omit X-Komari-Signature
+	req.Header().Set("Authorization", "Bearer "+testAccessToken)
+
+	_, err := reportClient.SubmitReport(ctx, req)
+	if err == nil {
+		t.Fatal("expected 401 UNAUTHENTICATED error when X-Komari-Signature is omitted, got nil error")
+	}
+	if connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Fatalf("expected CodeUnauthenticated (401), got %v", connect.CodeOf(err))
+	}
+	t.Logf("Mandatory DPoP correctly rejected request missing X-Komari-Signature: %v", err)
+}
+
+// TestDualEnd_GetTrustBundle_NeverEmptyOnFreshServer verifies GetTrustBundle lazily generates signing keys.
+func TestDualEnd_GetTrustBundle_NeverEmptyOnFreshServer(t *testing.T) {
+	enrollClient := enrollmentv1connect.NewEnrollmentServiceClient(testServer.Client(), testServer.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := enrollClient.GetTrustBundle(ctx, connect.NewRequest(&enrollmentv1.GetTrustBundleRequest{}))
+	if err != nil {
+		t.Fatalf("GetTrustBundle failed: %v", err)
+	}
+	if len(resp.Msg.GetSigningKeys()) == 0 {
+		t.Fatal("GetTrustBundle returned 0 keys; expected at least 1 lazily generated Ed25519 key")
+	}
+	t.Logf("GetTrustBundle returned %d signing keys; primary KeyID=%s", len(resp.Msg.GetSigningKeys()), resp.Msg.GetSigningKeys()[0].GetKeyId())
+}
+
+// TestDualEnd_RefreshCredentials_ProofRequiredAndNoDestruction verifies that an invalid refresh proof does NOT destroy valid tokens.
+func TestDualEnd_RefreshCredentials_ProofRequiredAndNoDestruction(t *testing.T) {
+	enrollClient := enrollmentv1connect.NewEnrollmentServiceClient(testServer.Client(), testServer.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// 1. Attempt refresh with nil proof
+	_, err := enrollClient.RefreshCredentials(ctx, connect.NewRequest(&enrollmentv1.RefreshCredentialsRequest{
+		RefreshToken: testAccessToken, // in TestMain refresh_token_hash was seeded with testAccessToken
+		Proof:        nil,
+	}))
+	if err == nil {
+		t.Fatal("expected error on RefreshCredentials without proof, got success")
+	}
+	if connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Fatalf("expected CodeUnauthenticated, got %v", connect.CodeOf(err))
+	}
+
+	// 2. Critical verification: testAccessToken MUST STILL BE VALID!
+	dpopClient := newDPoPTestClient(testAccessToken, testAgentPrivKey)
+	reportClient := reportv1connect.NewAgentReportServiceClient(dpopClient, testServer.URL)
+
+	req := connect.NewRequest(&reportv1.SubmitReportRequest{
+		Report: &reportv1.AgentReport{
+			AgentId: testClientUUID,
+			System:  &reportv1.SystemInfo{Hostname: "still-alive-node"},
+		},
+	})
+	resp, err := reportClient.SubmitReport(ctx, req)
+	if err != nil {
+		t.Fatalf("access token was destroyed by failed refresh attempt! %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	t.Log("RefreshCredentials verified: invalid proof rejected without destroying active credentials")
+}
+
+// TestDualEnd_RefreshCredentials_ValidProofRotatesTokens verifies that a valid signed refresh proof rotates credentials.
+func TestDualEnd_RefreshCredentials_ValidProofRotatesTokens(t *testing.T) {
+	enrollClient := enrollmentv1connect.NewEnrollmentServiceClient(testServer.Client(), testServer.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Construct komari-agent standard proof payload:
+	// "komari-refresh-v1\n<AgentID>\n<RefreshToken>\n<Timestamp RFC3339>"
+	proofPayload := []byte(strings.Join([]string{
+		"komari-refresh-v1",
+		testClientUUID,
+		testAccessToken,
+		time.Now().UTC().Format(time.RFC3339),
+	}, "\n"))
+
+	sig := ed25519.Sign(testAgentPrivKey, proofPayload)
+	proof := &securityv1.SignedEnvelope{
+		Payload: proofPayload,
+		Signatures: []*securityv1.Signature{{
+			Algorithm: securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ED25519,
+			Value:     sig,
+			KeyId:     "key-1",
+		}},
+	}
+
+	resp, err := enrollClient.RefreshCredentials(ctx, connect.NewRequest(&enrollmentv1.RefreshCredentialsRequest{
+		RefreshToken: testAccessToken,
+		Proof:        proof,
+	}))
+	if err != nil {
+		t.Fatalf("RefreshCredentials with valid proof failed: %v", err)
+	}
+
+	creds := resp.Msg.GetCredentials()
+	if creds.GetAccessToken() == "" || creds.GetRefreshToken() == "" {
+		t.Fatalf("expected non-empty rotated credentials, got %+v", creds)
+	}
+	if creds.GetAccessToken() == testAccessToken {
+		t.Fatal("expected new AccessToken to be different from old token")
+	}
+
+	// Update testAccessToken to the newly issued one for any subsequent test runs
+	testAccessToken = creds.GetAccessToken()
+	t.Logf("RefreshCredentials succeeded with valid proof: new AccessToken=%s", creds.GetAccessToken())
 }

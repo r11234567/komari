@@ -424,7 +424,10 @@ func NextAssignment(agentID, helperInstanceID, afterAssignmentID string) (*rescu
 	}
 	expires := time.Now().UTC().Add(time.Duration(row.TimeoutSeconds) * time.Second)
 	sessProto := sessionToProto(row)
-	envelope, _ := buildRescueEnvelope(agentID, sessProto, expires)
+	envelope, err := buildRescueEnvelope(agentID, sessProto, expires)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign rescue envelope: %w", err)
+	}
 	return &rescuev1.RescueAssignment{
 		AssignmentId:   row.ID,
 		Session:        sessProto,

@@ -13,8 +13,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -132,15 +135,22 @@ func (s *enrollmentService) PollEnrollment(ctx context.Context, req *connect.Req
 }
 
 func (s *enrollmentService) RefreshCredentials(ctx context.Context, req *connect.Request[enrollmentv1.RefreshCredentialsRequest]) (*connect.Response[enrollmentv1.RefreshCredentialsResponse], error) {
-	issued, record, err := enrollment.Refresh(req.Msg.GetRefreshToken())
+	refreshToken := req.Msg.GetRefreshToken()
+	record, err := enrollment.ValidateRefreshToken(refreshToken)
 	if err != nil {
 		return nil, connectError(connect.CodeUnauthenticated, err)
 	}
+
 	// The proof is what makes a leaked refresh token insufficient on its own.
-	// It is verified after the token resolves, because the key to check
-	// against is the one recorded for that machine.
-	if err := verifyRefreshProof(req.Msg.GetProof(), record.AgentPublicKey, record.Client); err != nil {
+	// We verify it BEFORE rotating anything in the database, ensuring that
+	// an invalid or missing proof NEVER destroys the current valid credentials.
+	if err := verifyRefreshProof(req.Msg.GetProof(), record.AgentPublicKey, record.Client, refreshToken); err != nil {
 		return nil, connectError(connect.CodeUnauthenticated, err)
+	}
+
+	issued, err := enrollment.RotateCredential(record)
+	if err != nil {
+		return nil, connectError(connect.CodeInternal, err)
 	}
 
 	creds := &enrollmentv1.AgentCredentials{
@@ -197,6 +207,9 @@ func (s *enrollmentService) RevokeCredentials(ctx context.Context, req *connect.
 }
 
 func (s *enrollmentService) GetTrustBundle(ctx context.Context, req *connect.Request[enrollmentv1.GetTrustBundleRequest]) (*connect.Response[enrollmentv1.GetTrustBundleResponse], error) {
+	if _, err := enrollment.ActiveSigningKey(); err != nil {
+		return nil, connectError(connect.CodeInternal, err)
+	}
 	keys, err := enrollment.ListControlPlaneKeys()
 	if err != nil {
 		return nil, connectError(connect.CodeInternal, err)
@@ -234,8 +247,8 @@ func (s *enrollmentService) GetTrustBundle(ctx context.Context, req *connect.Req
 	}), nil
 }
 
-// verifyRefreshProof checks the signature an Agent makes over its refresh.
-func verifyRefreshProof(envelope *securityv1.SignedEnvelope, storedKey, clientUUID string) error {
+// verifyRefreshProof checks the signature and bound payload an Agent makes over its refresh.
+func verifyRefreshProof(envelope *securityv1.SignedEnvelope, storedKey, clientUUID, expectedRefreshToken string) error {
 	if envelope == nil || len(envelope.GetSignatures()) == 0 {
 		return errors.New("a signed refresh proof is required")
 	}
@@ -247,20 +260,87 @@ func verifyRefreshProof(envelope *securityv1.SignedEnvelope, storedKey, clientUU
 	if len(payload) == 0 {
 		return errors.New("the refresh proof has no payload")
 	}
-	// The payload must name this machine, so a proof captured from one Agent
-	// cannot be replayed to refresh another's credentials.
-	if !strings.Contains(string(payload), clientUUID) {
-		return errors.New("the refresh proof does not match this agent")
-	}
+
+	validSig := false
 	for _, signature := range envelope.GetSignatures() {
 		if signature.GetAlgorithm() != securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ED25519 {
 			continue
 		}
 		if ed25519.Verify(ed25519.PublicKey(raw), payload, signature.GetValue()) {
-			return nil
+			sigHash := hex.EncodeToString(signature.GetValue())
+			if !recordAndVerifyNonce("refresh-sig:"+sigHash, 120*time.Second) {
+				return errors.New("the refresh proof signature was already used (replay rejected)")
+			}
+			validSig = true
+			break
 		}
 	}
-	return errors.New("the refresh proof signature is not valid")
+	if !validSig {
+		return errors.New("the refresh proof signature is not valid")
+	}
+
+	// 1. komari-agent standard wire format:
+	// lines[0]: "komari-refresh-v1"
+	// lines[1]: AgentID
+	// lines[2]: RefreshToken
+	// lines[3]: RFC3339 Timestamp
+	lines := strings.Split(string(payload), "\n")
+	if len(lines) >= 4 && lines[0] == "komari-refresh-v1" {
+		agentID := lines[1]
+		token := lines[2]
+		tsStr := lines[3]
+
+		if agentID != clientUUID {
+			return errors.New("the refresh proof agent ID does not match this agent")
+		}
+		if token != expectedRefreshToken {
+			return errors.New("the refresh proof token does not match the presented refresh token")
+		}
+		t, err := time.Parse(time.RFC3339, tsStr)
+		if err != nil {
+			return errors.New("invalid timestamp in refresh proof")
+		}
+		if math.Abs(time.Since(t).Seconds()) > 120 {
+			return errors.New("the refresh proof timestamp drift exceeds allowed window (120s)")
+		}
+		return nil
+	}
+
+	// 2. Structured JSON payload (e.g. RefreshProofPayload / SignedInstruction)
+	var proofObj struct {
+		AgentID      string `json:"agent_id"`
+		RefreshToken string `json:"refresh_token"`
+		Timestamp    string `json:"timestamp"`
+		Nonce        string `json:"nonce"`
+	}
+	if err := json.Unmarshal(payload, &proofObj); err == nil && proofObj.AgentID != "" {
+		if proofObj.AgentID != clientUUID {
+			return errors.New("the refresh proof agent ID does not match this agent")
+		}
+		if proofObj.RefreshToken != "" && proofObj.RefreshToken != expectedRefreshToken {
+			return errors.New("the refresh proof token does not match the presented refresh token")
+		}
+		if proofObj.Timestamp != "" {
+			t, err := time.Parse(time.RFC3339, proofObj.Timestamp)
+			if err == nil && math.Abs(time.Since(t).Seconds()) > 120 {
+				return errors.New("the refresh proof timestamp drift exceeds allowed window (120s)")
+			}
+		}
+		if proofObj.Nonce != "" && !recordAndVerifyNonce("proof-nonce:"+proofObj.Nonce, 120*time.Second) {
+			return errors.New("the refresh proof nonce was already used (replay rejected)")
+		}
+		return nil
+	}
+
+	// 3. Fallback: must at least contain both clientUUID and expectedRefreshToken
+	if !strings.Contains(string(payload), clientUUID) {
+		return errors.New("the refresh proof does not match this agent")
+	}
+	if !strings.Contains(string(payload), expectedRefreshToken) {
+		return errors.New("the refresh proof does not match the presented refresh token")
+	}
+
+	return nil
 }
 
 func enrollmentStateToProto(state int32) enrollmentv1.EnrollmentState {

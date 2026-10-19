@@ -242,11 +242,17 @@ func NextDispatch(ctx context.Context, agentID, afterAssignment string, delivere
 			if assignable && (task.AssignmentID != afterAssignment || !delivered["assign:"+task.AssignmentID]) {
 				task.LeaseExpiresAt = now.Add(leaseDuration)
 				delivered["assign:"+task.AssignmentID] = true
-				envelope, _ := buildExecutionEnvelope(task.AgentID, task.Spec, task.LeaseExpiresAt)
+				envelope, err := buildExecutionEnvelope(task.AgentID, task.Spec, task.LeaseExpiresAt)
+				if err != nil {
+					task.mu.Unlock()
+					store.Unlock()
+					return nil, fmt.Errorf("failed to sign execution envelope: %w", err)
+				}
 				result := &Dispatch{Assignment: &execv1.ExecutionAssignment{
 					AssignmentId:   task.AssignmentID,
 					Execution:      cloneExecution(task.Execution),
 					LeaseExpiresAt: timestamppb.New(task.LeaseExpiresAt),
+					Spec:           cloneSpec(task.Spec),
 					Envelope:       envelope,
 				}}
 				task.mu.Unlock()
