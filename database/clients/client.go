@@ -314,6 +314,11 @@ func CreateClient() (clientUUID, token string, err error) {
 	if err := tasks.AddDefaultOnClientUUID(clientUUID); err != nil {
 		logger.ErrorArgs("clients", "Failed to apply default-on ping tasks to new client:", err)
 	}
+	// Initialize default safe deployment profile (Revision 1, remote_control=false)
+	defaultProfile := DefaultDeploymentProfile(client)
+	if _, _, _, err := saveDeploymentProfileForDispatch(db, clientUUID, defaultProfile, true); err != nil {
+		logger.ErrorArgs("clients", "Failed to initialize default deployment profile for new client:", err)
+	}
 	return clientUUID, token, nil
 }
 
@@ -332,6 +337,11 @@ func CreateClientWithName(name string) (clientUUID, token string, err error) {
 	}
 	if err := tasks.AddDefaultOnClientUUID(clientUUID); err != nil {
 		logger.ErrorArgs("clients", "Failed to apply default-on ping tasks to new client:", err)
+	}
+	// Initialize default safe deployment profile (Revision 1, remote_control=false)
+	defaultProfile := DefaultDeploymentProfile(client)
+	if _, _, _, err := saveDeploymentProfileForDispatch(db, clientUUID, defaultProfile, true); err != nil {
+		logger.ErrorArgs("clients", "Failed to initialize default deployment profile for new client:", err)
 	}
 	return clientUUID, token, nil
 }

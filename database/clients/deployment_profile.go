@@ -81,27 +81,40 @@ type DeploymentProfile struct {
 	MonthRotate              int     `json:"month_rotate"`
 }
 
-// UnmarshalJSON preserves the historical remote-control default for profiles
-// saved before remote_control_enabled existed. New profiles always serialize
-// the explicit field, including false.
 func (profile *DeploymentProfile) UnmarshalJSON(data []byte) error {
 	type profileAlias DeploymentProfile
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
 	decoded := profileAlias{
-		RemoteControlEnabled: true,
-		RuntimeIdentity:      AgentRuntimeIdentityPrivileged,
+		RuntimeIdentity: AgentRuntimeIdentityServiceAccount,
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
+	}
+	if _, hasRemote := raw["remote_control_enabled"]; !hasRemote {
+		if _, hasLegacy := raw["disable_web_ssh"]; hasLegacy {
+			decoded.RemoteControlEnabled = !decoded.DisableWebSSH
+		} else {
+			decoded.RemoteControlEnabled = false
+		}
 	}
 	*profile = DeploymentProfile(decoded)
 	return nil
 }
 
 func defaultDeploymentProfile(client models.Client) DeploymentProfile {
+	return DefaultDeploymentProfile(client)
+}
+
+func DefaultDeploymentProfile(client models.Client) DeploymentProfile {
 	profile := DeploymentProfile{
 		Platform:             "linux",
 		RuntimeIdentity:      AgentRuntimeIdentityServiceAccount,
 		RemoteControlEnabled: false,
+		EnableInterval:       true,
+		Interval:             defaultReportInterval,
 	}
 	if client.TrafficResetDay != nil && *client.TrafficResetDay > 0 {
 		profile.EnableMonthRotate = true
@@ -131,16 +144,16 @@ func GetDeploymentProfileWithDelivery(clientUUID string) (DeploymentProfile, boo
 	return profile, true, deploymentDeliveryState(stored), nil
 }
 
-// RemoteControlAllowed preserves legacy behavior for unmanaged agents. Once a
-// deployment profile is managed online, its explicit runtime switch is
-// authoritative for exec, terminal, and remote desktop paths.
+// RemoteControlAllowed enforces zero-trust default-deny. For unconfigured or unmanaged
+// agents, remote control is strictly forbidden until explicitly enabled by an
+// authorized deployment profile or privileged grant.
 func RemoteControlAllowed(clientUUID string) (bool, error) {
 	profile, saved, err := GetDeploymentProfile(clientUUID)
 	if err != nil {
 		return false, err
 	}
 	if !saved {
-		return true, nil
+		return false, nil
 	}
 	return profile.RemoteControlEnabled, nil
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	deploymentapp "github.com/komari-monitor/komari/web/deployment"
 	enrollmentv1 "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1"
 	"github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1/enrollmentv1connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -107,6 +108,12 @@ func (s *enrollmentAdminService) ApproveEnrollment(ctx context.Context, req *con
 			return nil, connectError(connect.CodeNotFound, fmt.Errorf("agent %s was not found", uuid))
 		}
 		clientUUID = uuid
+		if _, saved, _, _ := clients.GetDeploymentProfileWithDelivery(clientUUID); !saved {
+			if client, err := clients.GetClientByUUID(clientUUID); err == nil {
+				profile := clients.DefaultDeploymentProfile(client)
+				_, _ = deploymentapp.Save(clientUUID, profile, true)
+			}
+		}
 
 	case *enrollmentv1.ApproveEnrollmentRequest_NewAgent:
 		name := strings.TrimSpace(target.NewAgent.GetName())
