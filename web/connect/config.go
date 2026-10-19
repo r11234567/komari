@@ -33,7 +33,7 @@ func (s *configService) GetDesiredConfig(ctx context.Context, req *connect.Reque
 	response := &configv1.GetDesiredConfigResponse{DeliveryState: deliveryState(state.Status)}
 	if saved {
 		response.Desired = &configv1.DesiredConfig{
-			AgentId: agentID, Revision: state.Revision, Runtime: runtimeToProto(profile.RuntimeConfig()),
+			AgentId: agentID, Revision: state.Revision, Runtime: runtimeToProto(profile),
 			SavedAt: timestamppb.New(state.SavedAt),
 		}
 		_, _ = clients.MarkDeploymentConfigSent(agentID, state.Revision)
@@ -92,7 +92,7 @@ func (s *configService) UpdateDesiredConfig(ctx context.Context, req *connect.Re
 	return connect.NewResponse(&configv1.UpdateDesiredConfigResponse{
 		Desired: &configv1.DesiredConfig{
 			AgentId: req.Msg.AgentId, Revision: result.Delivery.Revision,
-			Runtime: runtimeToProto(result.Profile.RuntimeConfig()), SavedAt: timestamppb.New(result.Delivery.SavedAt),
+			Runtime: runtimeToProto(result.Profile), SavedAt: timestamppb.New(result.Delivery.SavedAt),
 		},
 		DeliveryState: deliveryState(result.Delivery.Status),
 	}), nil
@@ -111,7 +111,7 @@ func (s *configService) WatchDesiredConfig(ctx context.Context, req *connect.Req
 		return nil
 	}
 	if err := stream.Send(&configv1.WatchDesiredConfigResponse{Desired: &configv1.DesiredConfig{
-		AgentId: agentID, Revision: state.Revision, Runtime: runtimeToProto(profile.RuntimeConfig()), SavedAt: timestamppb.New(state.SavedAt),
+		AgentId: agentID, Revision: state.Revision, Runtime: runtimeToProto(profile), SavedAt: timestamppb.New(state.SavedAt),
 	}}); err != nil {
 		return err
 	}

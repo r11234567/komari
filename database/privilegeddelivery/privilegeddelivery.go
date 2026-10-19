@@ -242,6 +242,18 @@ func Report(clientUUID string, revision uint64, state, activeMode int32, detail 
 		if err := tx.Model(&row).Updates(updates).Error; err != nil {
 			return err
 		}
+		if state == StateDelivered {
+			settings := decodeSettings(row.Config)
+			identity := clients.AgentRuntimeIdentityServiceAccount
+			if isPrivilegedMode(activeMode) {
+				identity = clients.AgentRuntimeIdentityPrivileged
+			}
+			if err := clients.UpdatePrivilegedStatusInDeploymentProfileWithDB(tx, clientUUID, settings.RemoteControlEnabled, identity); err != nil {
+				return err
+			}
+		} else if state == StateRolledBack {
+			_ = clients.UpdatePrivilegedStatusInDeploymentProfileWithDB(tx, clientUUID, false, clients.AgentRuntimeIdentityServiceAccount)
+		}
 		row.State = state
 		row.ActivePrivilegeMode = activeMode
 		row.ErrorDetail = truncate(detail, 512)
@@ -288,6 +300,14 @@ func RedeemNonce(clientUUID, nonce, operator, localAuth string, resultingMode in
 			"updated_at":            now,
 		}
 		if err := tx.Model(&row).Updates(updates).Error; err != nil {
+			return err
+		}
+		settings := decodeSettings(row.Config)
+		identity := clients.AgentRuntimeIdentityServiceAccount
+		if isPrivilegedMode(resultingMode) {
+			identity = clients.AgentRuntimeIdentityPrivileged
+		}
+		if err := clients.UpdatePrivilegedStatusInDeploymentProfileWithDB(tx, clientUUID, settings.RemoteControlEnabled, identity); err != nil {
 			return err
 		}
 		row.NonceUsedAt = &now

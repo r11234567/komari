@@ -28,9 +28,13 @@ import (
 	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/privilegeddelivery"
+	deploymentapp "github.com/komari-monitor/komari/web/deployment"
 	"github.com/komari-monitor/komari/web/executionapp"
 	browserv1 "github.com/r11234567/komari-proto/gen/go/komari/browser/v1"
 	browserv1connect "github.com/r11234567/komari-proto/gen/go/komari/browser/v1/browserv1connect"
+	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
+	configv1connect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
 	enrollmentv1 "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1"
 	enrollmentv1connect "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1/enrollmentv1connect"
 	execv1 "github.com/r11234567/komari-proto/gen/go/komari/exec/v1"
@@ -769,3 +773,201 @@ func TestDualEnd_RefreshCredentials_ValidProofRotatesTokens(t *testing.T) {
 	testAccessToken = creds.GetAccessToken()
 	t.Logf("RefreshCredentials succeeded with valid proof: new AccessToken=%s", creds.GetAccessToken())
 }
+
+// TestDualEnd_RuntimeConfigNegotiation tests bidirectional version negotiation and configuration delivery.
+func TestDualEnd_RuntimeConfigNegotiation(t *testing.T) {
+	dpopClient := newDPoPTestClient(testAccessToken, testAgentPrivKey)
+	configClient := configv1connect.NewConfigServiceClient(dpopClient, testServer.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// 1. Initial State: Agent polls GetDesiredConfig with applied_revision = 0
+	getResp, err := configClient.GetDesiredConfig(ctx, connect.NewRequest(&configv1.GetDesiredConfigRequest{
+		AgentId:         testClientUUID,
+		AppliedRevision: 0,
+	}))
+	if err != nil {
+		t.Fatalf("GetDesiredConfig initial poll failed: %v", err)
+	}
+	initialRev := uint64(0)
+	if getResp.Msg.GetDesired() != nil {
+		initialRev = getResp.Msg.GetDesired().GetRevision()
+	}
+
+	// 2. Server dispatches updated runtime configuration (interval=7s, memory_cache=true, get_ip_from_nic=true)
+	profile, saved, err := clients.GetDeploymentProfile(testClientUUID)
+	if err != nil {
+		t.Fatalf("GetDeploymentProfile failed: %v", err)
+	}
+	if !saved {
+		client, _ := clients.GetClientByUUID(testClientUUID)
+		profile = clients.DefaultDeploymentProfile(client)
+	}
+	profile.EnableInterval = true
+	profile.Interval = 7.0
+	profile.MemoryIncludeCache = true
+	profile.GetIPAddrFromNIC = true
+
+	saveResult, err := deploymentapp.Save(testClientUUID, profile, false)
+	if err != nil {
+		t.Fatalf("SaveDeploymentProfile failed: %v", err)
+	}
+	newRev := saveResult.Delivery.Revision
+	if newRev <= initialRev {
+		t.Fatalf("expected server to increment revision, got %d <= %d", newRev, initialRev)
+	}
+
+	// 3. Agent polls again with applied_revision = initialRev
+	getResp2, err := configClient.GetDesiredConfig(ctx, connect.NewRequest(&configv1.GetDesiredConfigRequest{
+		AgentId:         testClientUUID,
+		AppliedRevision: initialRev,
+	}))
+	if err != nil {
+		t.Fatalf("GetDesiredConfig after update failed: %v", err)
+	}
+	desired := getResp2.Msg.GetDesired()
+	if desired == nil {
+		t.Fatalf("expected non-nil DesiredConfig for revision %d", newRev)
+	}
+	if desired.GetRevision() != newRev {
+		t.Fatalf("desired revision = %d, want %d", desired.GetRevision(), newRev)
+	}
+	if desired.GetRuntime().GetReportInterval().GetSeconds() != 7 {
+		t.Fatalf("expected report interval 7s, got %v", desired.GetRuntime().GetReportInterval())
+	}
+	if !desired.GetRuntime().GetMemoryIncludeCache() {
+		t.Fatalf("expected memory_include_cache true, got false")
+	}
+	if !desired.GetRuntime().GetGetIpAddrFromNic() {
+		t.Fatalf("expected get_ip_addr_from_nic true, got false")
+	}
+
+	// 4. Agent simulates local atomic apply and sends terminal AcknowledgeConfig
+	ackResp, err := configClient.AcknowledgeConfig(ctx, connect.NewRequest(&configv1.AcknowledgeConfigRequest{
+		AgentId:  testClientUUID,
+		Revision: newRev,
+		Status:   configv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED,
+	}))
+	if err != nil {
+		t.Fatalf("AcknowledgeConfig failed: %v", err)
+	}
+	if !ackResp.Msg.GetAccepted() {
+		t.Fatalf("expected ACK to be accepted by server")
+	}
+
+	// 5. Verify Server state in DB: AppliedRevision == DesiredRevision, Status == APPLIED
+	_, savedAfter, stateAfter, err := clients.GetDeploymentProfileWithDelivery(testClientUUID)
+	if err != nil || !savedAfter {
+		t.Fatalf("GetDeploymentProfileWithDelivery failed: %v", err)
+	}
+	if stateAfter.AppliedRevision != newRev {
+		t.Fatalf("server applied_revision = %d, want %d", stateAfter.AppliedRevision, newRev)
+	}
+	if stateAfter.Status != clients.DeploymentDeliveryApplied {
+		t.Fatalf("server status = %s, want applied", stateAfter.Status)
+	}
+	t.Logf("Dual-end RuntimeConfig negotiation succeeded: DesiredRevision=%d, AppliedRevision=%d, Status=%s",
+		stateAfter.Revision, stateAfter.AppliedRevision, stateAfter.Status)
+}
+
+// TestDualEnd_PrivilegedDeliveryAndElevation tests privileged delivery, human verification, and host elevation nonce redemption.
+func TestDualEnd_PrivilegedDeliveryAndElevation(t *testing.T) {
+	dpopClient := newDPoPTestClient(testAccessToken, testAgentPrivKey)
+	privClient := configv1connect.NewPrivilegedDeliveryServiceClient(dpopClient, testServer.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// 1. Initial State: Verify RemoteControl is disabled by default (Zero-Trust Default-Deny)
+	allowed, err := clients.RemoteControlAllowed(testClientUUID)
+	if err != nil {
+		t.Fatalf("RemoteControlAllowed check failed: %v", err)
+	}
+	if allowed {
+		t.Fatalf("zero-trust default-deny violation: RemoteControl is allowed before authorization")
+	}
+
+	// 2. Server administrator creates a PrivilegedDelivery task to enable Remote Control & WebSSH
+	rev, err := privilegeddelivery.Save(testClientUUID, privilegeddelivery.Settings{
+		RemoteControlEnabled:  true,
+		WebSSHEnabled:         true,
+		ExecutionEnabled:      true,
+		RequiredPrivilegeMode: int32(reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT),
+	}, 0, "Security joint elevation test")
+	if err != nil {
+		t.Fatalf("privilegeddelivery.Save failed: %v", err)
+	}
+	if rev.UpgradeClass != privilegeddelivery.ClassManualPrivileged {
+		t.Fatalf("expected ClassManualPrivileged, got %v", rev.UpgradeClass)
+	}
+	if rev.Nonce == "" {
+		t.Fatalf("expected non-empty single-use nonce for manual elevation")
+	}
+
+	// 3. Admin confirms in panel (2FA) -> state advances to StateNeedsManualAuthorization
+	confirmed, err := privilegeddelivery.Confirm(testClientUUID, rev.Revision, "admin-test-uuid")
+	if err != nil {
+		t.Fatalf("privilegeddelivery.Confirm failed: %v", err)
+	}
+	if confirmed.State != privilegeddelivery.StateNeedsManualAuthorization {
+		t.Fatalf("expected StateNeedsManualAuthorization, got %v", confirmed.State)
+	}
+
+	// 4. Agent polls GetPrivilegedDelivery
+	getResp, err := privClient.GetPrivilegedDelivery(ctx, connect.NewRequest(&configv1.GetPrivilegedDeliveryRequest{
+		AgentId:         testClientUUID,
+		AppliedRevision: 0,
+	}))
+	if err != nil {
+		t.Fatalf("GetPrivilegedDelivery failed: %v", err)
+	}
+	deliveredRev := getResp.Msg.GetRevision()
+	if deliveredRev == nil {
+		t.Fatalf("expected non-nil PrivilegedRevision delivered to agent")
+	}
+	if deliveredRev.GetRevision() != rev.Revision {
+		t.Fatalf("expected revision %d, got %d", rev.Revision, deliveredRev.GetRevision())
+	}
+	if deliveredRev.GetSignature() == nil {
+		t.Fatalf("expected Ed25519 SignedEnvelope on delivered privileged revision")
+	}
+
+	// 5. Host-side elevation: Operator runs on the host and calls CompleteManualUpgrade with the Nonce
+	redeemResp, err := privClient.CompleteManualUpgrade(ctx, connect.NewRequest(&configv1.CompleteManualUpgradeRequest{
+		AgentId:                testClientUUID,
+		Nonce:                  rev.Nonce,
+		LocalAuthentication:    "pam_unix",
+		Operator:               "root",
+		ResultingPrivilegeMode: reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT,
+	}))
+	if err != nil {
+		t.Fatalf("CompleteManualUpgrade failed: %v", err)
+	}
+	if !redeemResp.Msg.GetAccepted() {
+		t.Fatalf("expected CompleteManualUpgrade to be accepted")
+	}
+
+	// 6. Verify Server state: Nonce burned, StateDelivered, and RemoteControlAllowed is now TRUE!
+	allowedAfter, err := clients.RemoteControlAllowed(testClientUUID)
+	if err != nil {
+		t.Fatalf("RemoteControlAllowed check failed: %v", err)
+	}
+	if !allowedAfter {
+		t.Fatalf("expected RemoteControlAllowed=true after successful elevation, got false")
+	}
+
+	// 7. Replaying the nonce MUST fail!
+	_, replayErr := privClient.CompleteManualUpgrade(ctx, connect.NewRequest(&configv1.CompleteManualUpgradeRequest{
+		AgentId:                testClientUUID,
+		Nonce:                  rev.Nonce,
+		LocalAuthentication:    "pam_unix",
+		Operator:               "root",
+		ResultingPrivilegeMode: reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT,
+	}))
+	if replayErr == nil {
+		t.Fatalf("expected replaying burned nonce to fail, but it succeeded")
+	}
+	t.Logf("Dual-end PrivilegedDelivery & Elevation succeeded: Revision=%d, Nonce burned, RemoteControlAllowed=true", rev.Revision)
+}
+

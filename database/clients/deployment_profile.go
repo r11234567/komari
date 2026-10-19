@@ -158,6 +158,35 @@ func RemoteControlAllowed(clientUUID string) (bool, error) {
 	return profile.RemoteControlEnabled, nil
 }
 
+// UpdatePrivilegedStatusInDeploymentProfileWithDB syncs newly confirmed/redeemed privileged settings
+// directly into the node's deployment profile, ensuring immediate authorization without restart.
+func UpdatePrivilegedStatusInDeploymentProfileWithDB(db *gorm.DB, clientUUID string, remoteControl bool, runtimeIdentity string) error {
+	profile, saved, err := getDeploymentProfile(db, clientUUID)
+	if err != nil {
+		return err
+	}
+	if !saved {
+		var client models.Client
+		if err := db.Select("uuid", "traffic_reset_day").First(&client, "uuid = ?", clientUUID).Error; err != nil {
+			return err
+		}
+		profile = defaultDeploymentProfile(client)
+	}
+	profile.RemoteControlEnabled = remoteControl
+	if runtimeIdentity != "" {
+		profile.RuntimeIdentity = runtimeIdentity
+	}
+	encoded, err := json.Marshal(profile)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	return db.Model(&models.ClientDeploymentProfile{}).Where("client = ?", clientUUID).Updates(map[string]any{
+		"config":     string(encoded),
+		"updated_at": now,
+	}).Error
+}
+
 func getDeploymentProfile(db *gorm.DB, clientUUID string) (DeploymentProfile, bool, error) {
 	var client models.Client
 	if err := db.Select("uuid", "traffic_reset_day").First(&client, "uuid = ?", clientUUID).Error; err != nil {
@@ -255,7 +284,8 @@ func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile De
 			} else {
 				previous.MonthRotate = 0
 			}
-			runtimeValuesChanged = !reflect.DeepEqual(previous.RuntimeConfig(), profile.RuntimeConfig())
+			runtimeValuesChanged = !reflect.DeepEqual(previous.RuntimeConfig(), profile.RuntimeConfig()) ||
+				previous.GetIPAddrFromNIC != profile.GetIPAddrFromNIC
 			runtimeChanged = forceDispatch || runtimeValuesChanged ||
 				existing.DeliveryStatus == DeploymentDeliveryFailed
 		}
@@ -359,6 +389,7 @@ func copyDeploymentRuntime(target *DeploymentProfile, source DeploymentProfile) 
 	target.IncludeMountpoints = source.IncludeMountpoints
 	target.MemoryIncludeCache = source.MemoryIncludeCache
 	target.DetailedGPU = source.DetailedGPU
+	target.GetIPAddrFromNIC = source.GetIPAddrFromNIC
 }
 
 func MarkDeploymentConfigSent(clientUUID string, revision uint64) (bool, error) {

@@ -9,7 +9,6 @@ import (
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/pkg/rpc"
-	legacyv2 "github.com/komari-monitor/komari/protocol/v2"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	deploymentv1 "github.com/r11234567/komari-proto/gen/go/komari/deployment/v1"
@@ -54,10 +53,12 @@ func deliveryState(status string) commonv1.DeliveryState {
 	}
 }
 
-func runtimeToProto(config legacyv2.ConfigParams) *configv1.RuntimeConfig {
+func runtimeToProto(profile clients.DeploymentProfile) *configv1.RuntimeConfig {
+	config := profile.RuntimeConfig()
 	result := &configv1.RuntimeConfig{
 		MemoryIncludeCache: config.MemoryIncludeCache,
 		DetailedGpu:        config.DetailedGPU,
+		GetIpAddrFromNic:   &profile.GetIPAddrFromNIC,
 	}
 	if config.IncludeNics != nil {
 		result.IncludeNics = splitList(*config.IncludeNics, ",")
@@ -112,6 +113,9 @@ func applyRuntime(profile *clients.DeploymentProfile, runtime *configv1.RuntimeC
 	if runtime.DetailedGpu != nil {
 		profile.DetailedGPU = *runtime.DetailedGpu
 	}
+	if runtime.GetIpAddrFromNic != nil {
+		profile.GetIPAddrFromNIC = *runtime.GetIpAddrFromNic
+	}
 	return nil
 }
 
@@ -135,7 +139,7 @@ func deploymentToProto(agentID string, profile clients.DeploymentProfile) *deplo
 				Enabled: profile.RescueEnabled,
 			},
 		},
-		Runtime: runtimeToProto(profile.RuntimeConfig()),
+		Runtime: runtimeToProto(profile),
 	}
 }
 
