@@ -20,19 +20,16 @@ require (
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/image v0.41.0
 	golang.org/x/sys v0.47.0
-	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.11
 	gorm.io/driver/sqlite v1.5.7
 	gorm.io/gorm v1.26.1
 )
 
-require google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
-
 require github.com/dop251/base64dec v0.0.0-20231022112746-c6c9f9a96217 // indirect
 
 require golang.org/x/crypto v0.55.0
 
-require golang.org/x/net v0.58.0 // indirect
+require golang.org/x/net v0.58.0
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
