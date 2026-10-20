@@ -22,7 +22,7 @@ import (
 	_ "github.com/dop251/goja_nodejs/buffer"
 	"github.com/dop251/goja_nodejs/eventloop"
 	"github.com/dop251/goja_nodejs/require"
-	_ "github.com/dop251/goja_nodejs/url"
+	urlmodule "github.com/komari-monitor/komari/pkg/jsruntime/url"
 	_ "github.com/dop251/goja_nodejs/util"
 	childprocess "github.com/komari-monitor/komari/pkg/jsruntime/child_process"
 	"github.com/komari-monitor/komari/pkg/jsruntime/console"
@@ -125,6 +125,7 @@ type Runtime struct {
 	netModule           *netmodule.Module
 	httpModule          *httpmodule.Module
 	cryptoModule        *cryptomodule.Module
+	urlModule           *urlmodule.Module
 	resourceMu          sync.Mutex
 	resourceID          uint64
 	resources           map[uint64]func()
@@ -215,6 +216,9 @@ func New(script string, options Options) (*Runtime, error) {
 	runtime.consoleMod = console.New(options.Console)
 	runtime.timersMod = timers.New(host)
 	runtime.fetchMod = fetch.New(host, client, maxHTTPBodyBytes)
+	runtime.urlModule = urlmodule.New()
+	registry.RegisterNativeModule("url", runtime.urlModule.Load)
+	registry.RegisterNativeModule("node:url", runtime.urlModule.Load)
 	filesystem, fsErr := fs.New(host, fileRoot, fileRoot, extraRoots, options.AllowAllFileAccess)
 	if fsErr != nil {
 		runtimeLoop.Terminate()

@@ -287,6 +287,113 @@ func TestRequireProvidesSupportedCoreModules(t *testing.T) {
 	}
 }
 
+func TestURLOriginPreservesPortAndFollowsWHATWG(t *testing.T) {
+	runtime, err := New(`
+		function verify() {
+			function assert(cond, msg) {
+				if (!cond) throw new Error(msg);
+			}
+
+			// 1. URL and URLSearchParams are globally available without require
+			assert(typeof URL === "function", "1. URL global");
+			assert(typeof URLSearchParams === "function", "1. URLSearchParams global");
+			assert(typeof globalThis.URL === "function", "1. globalThis.URL");
+			assert(typeof globalThis.URLSearchParams === "function", "1. globalThis.URLSearchParams");
+
+			// 2. Non-default ports are preserved in URL.origin
+			const u1 = new URL("http://127.0.0.1:8080/api/v1");
+			assert(u1.origin === "http://127.0.0.1:8080", "2. u1.origin=" + u1.origin);
+
+			// 3. Default port (80 for http) is omitted
+			const u2 = new URL("http://127.0.0.1:80/api/v1");
+			assert(u2.origin === "http://127.0.0.1", "3. u2.origin=" + u2.origin);
+
+			// 4. Non-default HTTPS port is preserved
+			const u3 = new URL("https://example.com:8443/test");
+			assert(u3.origin === "https://example.com:8443", "4. u3.origin=" + u3.origin);
+
+			// 5. Default HTTPS port (443) is omitted
+			const u4 = new URL("https://example.com:443/test");
+			assert(u4.origin === "https://example.com", "5. u4.origin=" + u4.origin);
+
+			// 6. Standard URL without port
+			const u5 = new URL("https://example.com/test");
+			assert(u5.origin === "https://example.com", "6. u5.origin=" + u5.origin);
+
+			// 7. ws and wss protocols
+			const u6 = new URL("ws://127.0.0.1:9090/ws");
+			assert(u6.origin === "ws://127.0.0.1:9090", "7. u6.origin=" + u6.origin);
+			const u7 = new URL("wss://127.0.0.1:9443/ws");
+			assert(u7.origin === "wss://127.0.0.1:9443", "7. u7.origin=" + u7.origin);
+
+			// 8. ftp protocol
+			const u8 = new URL("ftp://ftp.example.com:2121/");
+			assert(u8.origin === "ftp://ftp.example.com:2121", "8. u8.origin=" + u8.origin);
+
+			// 9. file: URL origin is "null"
+			const u9 = new URL("file:///etc/hosts");
+			assert(u9.origin === "null", "9. u9.origin=" + u9.origin);
+
+			// 10. mailto: URL origin is "null"
+			const u10 = new URL("mailto:admin@example.com");
+			assert(u10.origin === "null", "10. u10.origin=" + u10.origin);
+
+			// 11. blob: URL origin inherits inner URL
+			const u11 = new URL("blob:http://127.0.0.1:8080/some-guid");
+			assert(u11.origin === "http://127.0.0.1:8080", "11. u11.origin=" + u11.origin);
+
+			// 12. Dynamic port mutations update origin
+			const u12 = new URL("http://127.0.0.1:8080/foo");
+			u12.port = "3000";
+			assert(u12.origin === "http://127.0.0.1:3000", "12a. u12.origin=" + u12.origin);
+			u12.port = "80";
+			assert(u12.origin === "http://127.0.0.1", "12b. u12.origin=" + u12.origin);
+
+			// 13. URL with username and password does NOT include userinfo in origin
+			const u13 = new URL("http://user:pass@127.0.0.1:8080/foo");
+			assert(u13.origin === "http://127.0.0.1:8080", "13. u13.origin=" + u13.origin);
+
+			// 14. IPv6 with port
+			const u14 = new URL("http://[::1]:8080/foo");
+			assert(u14.origin === "http://[::1]:8080", "14. u14.origin=" + u14.origin);
+
+			// 15. require("url") and require("node:url") return same URL and URLSearchParams constructors
+			const urlMod = require("url");
+			const nodeUrlMod = require("node:url");
+			assert(urlMod.URL === URL, "15a. urlMod.URL === URL");
+			assert(nodeUrlMod.URL === URL, "15b. nodeUrlMod.URL === URL");
+			assert(urlMod.URLSearchParams === URLSearchParams, "15c. urlMod.URLSearchParams");
+			assert(nodeUrlMod.URLSearchParams === URLSearchParams, "15d. nodeUrlMod.URLSearchParams");
+
+			// 16. URL.canParse
+			assert(typeof URL.canParse === "function", "16a. typeof URL.canParse");
+			assert(URL.canParse("http://127.0.0.1:8080/test"), "16b. canParse valid");
+			assert(URL.canParse("/foo", "http://127.0.0.1:8080"), "16c. canParse with base");
+			assert(!URL.canParse("invalid url without base"), "16d. canParse invalid");
+
+			// 17. Calling origin getter on plain object throws TypeError
+			let threw = false;
+			try {
+				const desc = Object.getOwnPropertyDescriptor(URL.prototype, "origin");
+				desc.get.call({});
+			} catch (e) {
+				threw = e instanceof TypeError;
+			}
+			assert(threw, "17. threw TypeError on plain object");
+
+			return true;
+		}
+	`, Options{Console: io.Discard, Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	if err := runtime.Call("verify"); err != nil {
+		t.Fatalf("URL origin verification failed: %v", err)
+	}
+}
+
 func TestRequireConfigurationComposesWithBaseDir(t *testing.T) {
 	baseDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(baseDir, "module.js"), []byte(`

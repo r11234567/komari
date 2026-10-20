@@ -16,6 +16,9 @@ func (r *Runtime) injectGlobals() error {
 	if err := r.timersMod.Inject(r.vm); err != nil {
 		return fmt.Errorf("inject timers: %w", err)
 	}
+	if err := r.urlModule.Inject(r.vm); err != nil {
+		return fmt.Errorf("inject URL globals: %w", err)
+	}
 	if r.nodeJS {
 		if err := r.injectNodeGlobals(); err != nil {
 			return err

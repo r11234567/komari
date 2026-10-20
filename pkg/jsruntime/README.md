@@ -185,7 +185,8 @@ registry.RegisterNativeModule("node:path", loader)
 | timers | `部分实现` | timeout、interval、immediate 及 clear。 |
 | Fetch API | `部分实现` | `fetch` 及常用请求、响应、body、表单和取消对象。全部 body 都在内存中缓冲。 |
 | XHR | `部分实现` | 异步与同步请求、状态、响应头、超时、取消和常用响应类型。 |
-| `buffer`、`url`、`util` 模块 | `部分实现` | 来自固定版本的 `goja_nodejs`。 |
+| WHATWG URL 全局对象 | `可用` | `URL` 与 `URLSearchParams` 已作为全局构造函数注入（亦支持 `require("url")` / `require("node:url")`），且 `URL.origin` 正确保留非默认端口，遵循 WHATWG 标准。 |
+| `buffer`、`url`、`util` 模块 | `部分实现` | 来自 `goja_nodejs` 并对 `url` 模块的 `origin` 计算与 `canParse` 进行了 WHATWG 标准补丁。 |
 
 ### `NodeJS: true` 时额外注入
 
@@ -360,16 +361,20 @@ const value = Buffer.from("komari").toString("hex");
 
 | 接口 | 状态 |
 | --- | --- |
-| `URL` | `部分实现`：`host/hash/hostname/href/pathname/origin/password/username/port/protocol/search/searchParams`、`toString/toJSON` |
+| `URL` | `部分实现`：`host/hash/hostname/href/pathname/origin/password/username/port/protocol/search/searchParams`、`toString/toJSON`、`canParse`（`origin` 已修复丢端口问题，遵循 WHATWG 标准正确保留非默认端口） |
 | `URLSearchParams` | `可用`：`append/delete/entries/forEach/get/getAll/has/keys/set/sort/size/toString/values` 和 iterator |
 | `domainToASCII/domainToUnicode` | `可用` |
 | 旧式 `parse/format/resolve/resolveObject/urlToHttpOptions` | `未实现` |
 
-`URL` 和 `URLSearchParams` 不会自动成为全局变量，应从模块取得：
+`URL` 和 `URLSearchParams` 已自动注入为全局变量（遵循 WHATWG 及 Node.js 10+ 规范），亦可通过 CommonJS 模块引入：
 
 ```js
+// 直接使用全局构造函数：
+const url = new URL("/api", "https://example.com:8080");
+console.log(url.origin); // "https://example.com:8080"
+
+// 或按需从模块引入：
 const { URL, URLSearchParams } = require("node:url");
-const url = new URL("/api", "https://example.com");
 url.search = new URLSearchParams({ page: "1" }).toString();
 ```
 
