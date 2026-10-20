@@ -302,6 +302,8 @@ func (m *Module) spawnChild(vm *goja.Runtime, command string, arguments []string
 	stdoutDone := m.pipeChildOutput(vm, stdoutReader, stdout, options.encoding)
 	stderrDone := m.pipeChildOutput(vm, stderrReader, stderr, options.encoding)
 	go func() {
+		<-stdoutDone
+		<-stderrDone
 		err := cmd.Wait()
 		cancel()
 		m.runtime.RemoveResource(resourceID)
@@ -319,8 +321,6 @@ func (m *Module) spawnChild(vm *goja.Runtime, command string, arguments []string
 				return events.Emit(vm, child, "exit", exitCode, goja.Null())
 			})
 		})
-		<-stdoutDone
-		<-stderrDone
 		m.runtime.RunOnLoop(func(vm *goja.Runtime) {
 			_ = m.runtime.RunJob(vm, "child_process.close", func() error {
 				return events.Emit(vm, child, "close", exitCode, goja.Null())
@@ -445,12 +445,17 @@ func (m *Module) pipeChildOutput(vm *goja.Runtime, reader io.Reader, stream *goj
 				<-delivered
 			}
 			if err != nil {
-				m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+				delivered := make(chan struct{})
+				if !m.runtime.RunOnLoop(func(vm *goja.Runtime) {
+					defer close(delivered)
 					_ = m.runtime.RunJob(vm, "child_process stream close", func() error {
 						_, pushErr := push(stream, goja.Null())
 						return pushErr
 					})
-				})
+				}) {
+					return
+				}
+				<-delivered
 				return
 			}
 		}
