@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -20,6 +19,12 @@ const (
 
 	// TicketType identifies tickets meant specifically for /bind enrollment.
 	TicketType = "bind_ticket"
+
+	// TicketAudience scopes these tokens to enrollment binding only.
+	TicketAudience = "enrollment-bind"
+
+	// TicketScope is the complete capability set available during the ticket's lifetime.
+	TicketScope = "enrollment:read enrollment:approve enrollment:deny"
 )
 
 var (
@@ -27,30 +32,33 @@ var (
 	ErrInvalidSignature  = errors.New("invalid bind ticket signature")
 	ErrTicketExpired     = errors.New("bind ticket has expired")
 	ErrInvalidTicketType = errors.New("invalid ticket type")
-	ErrTicketAlreadyUsed = errors.New("bind ticket has already been used")
+	ErrInvalidAudience   = errors.New("invalid bind ticket audience")
+	ErrInvalidScope      = errors.New("invalid bind ticket scope")
 	ErrMissingKey        = errors.New("secret key cannot be empty")
 )
 
 type Claims struct {
-	Sub  string `json:"sub"`
-	Type string `json:"type"`
-	Jti  string `json:"jti"`
-	Iat  int64  `json:"iat"`
-	Exp  int64  `json:"exp"`
+	Sub   string `json:"sub"`
+	Type  string `json:"type"`
+	Aud   string `json:"aud"`
+	Scope string `json:"scope"`
+	Jti   string `json:"jti"`
+	Iat   int64  `json:"iat"`
+	Exp   int64  `json:"exp"`
 }
 
-var (
-	redeemedTickets sync.Map // jti -> int64 (expiry unix seconds)
-	lastCleanupTime int64
-	cleanupMutex    sync.Mutex
-)
-
-// Issue creates a new signed 2-minute ticket for the specified user.
+// Issue creates a reusable signed 2-minute ticket for the specified user.
 func Issue(userUUID string, key []byte) (string, int64, error) {
+	return issueAt(userUUID, key, time.Now().UTC())
+}
+
+func issueAt(userUUID string, key []byte, now time.Time) (string, int64, error) {
 	if len(key) == 0 {
 		return "", 0, ErrMissingKey
 	}
-	now := time.Now().UTC()
+	if strings.TrimSpace(userUUID) == "" {
+		return "", 0, ErrInvalidToken
+	}
 	exp := now.Add(TicketDuration).Unix()
 
 	nonceBytes := make([]byte, 16)
@@ -68,11 +76,13 @@ func Issue(userUUID string, key []byte) (string, int64, error) {
 		return "", 0, err
 	}
 	claims := Claims{
-		Sub:  userUUID,
-		Type: TicketType,
-		Jti:  jti,
-		Iat:  now.Unix(),
-		Exp:  exp,
+		Sub:   userUUID,
+		Type:  TicketType,
+		Aud:   TicketAudience,
+		Scope: TicketScope,
+		Jti:   jti,
+		Iat:   now.Unix(),
+		Exp:   exp,
 	}
 	claimsJSON, err := json.Marshal(claims)
 	if err != nil {
@@ -90,35 +100,32 @@ func Issue(userUUID string, key []byte) (string, int64, error) {
 	return signingInput + "." + signatureB64, exp, nil
 }
 
-// Verify verifies the signature, validity, and expiration of a ticket without consuming it.
+// Verify validates all ticket claims. Tickets remain valid until their expiry
+// and may authorize multiple enrollment operations during that window.
 func Verify(token string, key []byte) (*Claims, error) {
 	claims, _, err := parseAndVerifySignature(token, key)
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC().Unix()
-	if now > claims.Exp {
+	now := time.Now().UTC()
+	if claims.Sub == "" || claims.Jti == "" {
+		return nil, ErrInvalidToken
+	}
+	if claims.Iat > now.Add(30*time.Second).Unix() {
+		return nil, ErrInvalidToken
+	}
+	if !now.Before(time.Unix(claims.Exp, 0)) {
 		return nil, ErrTicketExpired
 	}
 	if claims.Type != TicketType {
 		return nil, ErrInvalidTicketType
 	}
-	return claims, nil
-}
-
-// VerifyAndConsume validates the ticket and marks it as used (one-time ticket).
-func VerifyAndConsume(token string, key []byte) (*Claims, error) {
-	claims, err := Verify(token, key)
-	if err != nil {
-		return nil, err
+	if claims.Aud != TicketAudience {
+		return nil, ErrInvalidAudience
 	}
-
-	// Single-use check: if jti is already in redeemedTickets, reject
-	if _, loaded := redeemedTickets.LoadOrStore(claims.Jti, claims.Exp); loaded {
-		return nil, ErrTicketAlreadyUsed
+	if claims.Scope != TicketScope {
+		return nil, ErrInvalidScope
 	}
-
-	maybePruneRedeemedTickets()
 	return claims, nil
 }
 
@@ -130,6 +137,22 @@ func parseAndVerifySignature(token string, key []byte) (*Claims, []byte, error) 
 	if len(parts) != 3 {
 		return nil, nil, ErrInvalidToken
 	}
+
+	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, nil, ErrInvalidToken
+	}
+	var header struct {
+		Alg string `json:"alg"`
+		Typ string `json:"typ"`
+	}
+	if err := json.Unmarshal(headerJSON, &header); err != nil {
+		return nil, nil, ErrInvalidToken
+	}
+	if header.Alg != "HS256" || header.Typ != "JWT" {
+		return nil, nil, ErrInvalidToken
+	}
+
 	signingInput := parts[0] + "." + parts[1]
 	providedSig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
@@ -153,30 +176,4 @@ func parseAndVerifySignature(token string, key []byte) (*Claims, []byte, error) 
 		return nil, nil, ErrInvalidToken
 	}
 	return &claims, claimsJSON, nil
-}
-
-func maybePruneRedeemedTickets() {
-	now := time.Now().UTC().Unix()
-	if now-lastCleanupTime < 60 {
-		return
-	}
-	cleanupMutex.Lock()
-	defer cleanupMutex.Unlock()
-	if now-lastCleanupTime < 60 {
-		return
-	}
-	lastCleanupTime = now
-
-	redeemedTickets.Range(func(key, value any) bool {
-		if exp, ok := value.(int64); ok && now > exp {
-			redeemedTickets.Delete(key)
-		}
-		return true
-	})
-}
-
-// ResetRedeemedTicketsForTest resets the redeemed tickets tracking in tests.
-func ResetRedeemedTicketsForTest() {
-	redeemedTickets = sync.Map{}
-	lastCleanupTime = 0
 }

@@ -6,7 +6,6 @@ import (
 )
 
 func TestIssueAndVerify(t *testing.T) {
-	ResetRedeemedTicketsForTest()
 	key := []byte("01234567890123456789012345678901")
 	userUUID := "user-1234-uuid"
 
@@ -32,14 +31,24 @@ func TestIssueAndVerify(t *testing.T) {
 	if claims.Type != TicketType {
 		t.Fatalf("Claims Type = %q, want %q", claims.Type, TicketType)
 	}
-
-	// Read-only verify should be repeatable
-	claims2, err := Verify(ticket, key)
-	if err != nil {
-		t.Fatalf("Second Verify failed: %v", err)
+	if claims.Aud != TicketAudience {
+		t.Fatalf("Claims Aud = %q, want %q", claims.Aud, TicketAudience)
 	}
-	if claims2.Jti != claims.Jti {
-		t.Fatalf("Second Verify returned different Jti")
+	if claims.Scope != TicketScope {
+		t.Fatalf("Claims Scope = %q, want %q", claims.Scope, TicketScope)
+	}
+	if claims.Jti == "" {
+		t.Fatal("Claims Jti is empty")
+	}
+
+	for attempt := 2; attempt <= 4; attempt++ {
+		claimsN, err := Verify(ticket, key)
+		if err != nil {
+			t.Fatalf("Verify attempt %d failed: %v", attempt, err)
+		}
+		if claimsN.Jti != claims.Jti {
+			t.Fatalf("Verify attempt %d returned different Jti", attempt)
+		}
 	}
 
 	// Verify with wrong key fails
@@ -49,43 +58,23 @@ func TestIssueAndVerify(t *testing.T) {
 	}
 }
 
-func TestVerifyAndConsumeSingleUse(t *testing.T) {
-	ResetRedeemedTicketsForTest()
+func TestExpiredTicket(t *testing.T) {
 	key := []byte("01234567890123456789012345678901")
-	userUUID := "user-single-use-uuid"
-
-	ticket, _, err := Issue(userUUID, key)
+	ticket, _, err := issueAt("expired-user", key, time.Now().UTC().Add(-TicketDuration-time.Second))
 	if err != nil {
 		t.Fatalf("Issue failed: %v", err)
 	}
-
-	// First redemption must succeed
-	claims, err := VerifyAndConsume(ticket, key)
-	if err != nil {
-		t.Fatalf("VerifyAndConsume first time failed: %v", err)
-	}
-	if claims.Sub != userUUID {
-		t.Fatalf("Sub = %q, want %q", claims.Sub, userUUID)
-	}
-
-	// Second redemption of same ticket must fail (one-time ticket)
-	if _, err := VerifyAndConsume(ticket, key); err != ErrTicketAlreadyUsed {
-		t.Fatalf("VerifyAndConsume second time err = %v, want ErrTicketAlreadyUsed", err)
+	if _, err := Verify(ticket, key); err != ErrTicketExpired {
+		t.Fatalf("Verify expired ticket error = %v, want ErrTicketExpired", err)
 	}
 }
 
-func TestExpiredTicket(t *testing.T) {
-	ResetRedeemedTicketsForTest()
+func TestIssueRejectsMissingKeyAndSubject(t *testing.T) {
 	key := []byte("01234567890123456789012345678901")
-
-	// Issue a ticket, but manually test with expired exp
-	ticket, _, err := Issue("test-user", key)
-	if err != nil {
-		t.Fatal(err)
+	if _, _, err := Issue("user", nil); err != ErrMissingKey {
+		t.Fatalf("Issue with missing key error = %v, want ErrMissingKey", err)
 	}
-
-	// Verify normal ticket works
-	if _, err := Verify(ticket, key); err != nil {
-		t.Fatalf("Expected ticket to be valid, got %v", err)
+	if _, _, err := Issue("", key); err != ErrInvalidToken {
+		t.Fatalf("Issue with empty subject error = %v, want ErrInvalidToken", err)
 	}
 }

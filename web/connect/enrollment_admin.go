@@ -5,14 +5,13 @@ package connectapi
 // The approval step is where an administrator decides what a pending request
 // becomes. Two paths exist:
 //
-//   - Create a new machine: grants nothing that did not exist before, so it
-//     costs only a session, not a second factor.
+//   - Create a new machine: grants nothing that did not exist before.
 //   - Bind to an existing machine: hands the requester everything belonging to
-//     an existing machine — its history, delivered configuration and access —
-//     so it requires a fresh second factor.
+//     an existing machine — its history, delivered configuration and access.
 //
-// Neither path is reachable without a session, which is the one gate that made
-// the BeginEnrollment/PollEnrollment cycle safe to expose without credentials.
+// Both paths require a completed console login and a short-lived bind ticket.
+// The ticket is reusable until expiry; it is an additional authorization window,
+// not a one-shot nonce.
 
 import (
 	"context"
@@ -38,28 +37,85 @@ type enrollmentAdminService struct {
 	enrollmentv1connect.UnimplementedEnrollmentAdminServiceHandler
 }
 
-func verifyBindTicket(reqHeader http.Header, consume bool) error {
-	ticket := strings.TrimSpace(reqHeader.Get("X-Bind-Ticket"))
-	if ticket == "" {
-		return errors.New("bind ticket is required; please authenticate on /bind to obtain a 2-minute ticket")
-	}
-	key := accounts.SessionDigestKey()
-	if consume {
-		if _, err := bindticket.VerifyAndConsume(ticket, key); err != nil {
-			return fmt.Errorf("bind ticket verification failed: %w", err)
-		}
-	} else {
-		if _, err := bindticket.Verify(ticket, key); err != nil {
-			return fmt.Errorf("bind ticket verification failed: %w", err)
-		}
-	}
-	return nil
+const bindTicketReasonHeader = "Bind-Ticket-Reason"
+
+type bindTicketFailure struct {
+	code   connect.Code
+	reason string
+	err    error
 }
 
-func (s *enrollmentAdminService) ListPendingEnrollments(ctx context.Context, req *connect.Request[enrollmentv1.ListPendingEnrollmentsRequest]) (*connect.Response[enrollmentv1.ListPendingEnrollmentsResponse], error) {
+func (e *bindTicketFailure) Error() string {
+	return e.err.Error()
+}
+
+func (e *bindTicketFailure) Unwrap() error {
+	return e.err
+}
+
+func newBindTicketFailure(code connect.Code, reason string, err error) error {
+	return &bindTicketFailure{code: code, reason: reason, err: err}
+}
+
+func bindTicketConnectError(err error) error {
+	var failure *bindTicketFailure
+	if !errors.As(err, &failure) {
+		failure = &bindTicketFailure{code: connect.CodeInternal, reason: "internal", err: err}
+	}
+	connectErr := connect.NewError(failure.code, failure.err)
+	connectErr.Meta().Set(bindTicketReasonHeader, failure.reason)
+	return connectErr
+}
+
+func verifyBindTicket(reqHeader http.Header, principal *rpc.Principal) (*bindticket.Claims, error) {
+	ticket := strings.TrimSpace(reqHeader.Get("X-Bind-Ticket"))
+	if ticket == "" {
+		return nil, newBindTicketFailure(
+			connect.CodeUnauthenticated,
+			"bind_ticket_missing",
+			errors.New("bind ticket is required; complete login on /bind-login first"),
+		)
+	}
+	if principal == nil || principal.UserUUID == "" || !principal.HasRole(rpc.RoleAdmin) {
+		return nil, newBindTicketFailure(
+			connect.CodePermissionDenied,
+			"console_session_required",
+			errors.New("administrator authentication is required"),
+		)
+	}
+	key := accounts.SessionDigestKey()
+	claims, err := bindticket.Verify(ticket, key)
+	if err != nil {
+		switch {
+		case errors.Is(err, bindticket.ErrTicketExpired):
+			return nil, newBindTicketFailure(connect.CodeUnauthenticated, "bind_ticket_expired", err)
+		case errors.Is(err, bindticket.ErrMissingKey):
+			return nil, newBindTicketFailure(connect.CodeInternal, "internal", err)
+		default:
+			return nil, newBindTicketFailure(connect.CodeUnauthenticated, "bind_ticket_invalid", err)
+		}
+	}
+	if claims.Sub != principal.UserUUID {
+		return nil, newBindTicketFailure(
+			connect.CodePermissionDenied,
+			"bind_ticket_subject_mismatch",
+			errors.New("bind ticket does not belong to the authenticated administrator"),
+		)
+	}
+	return claims, nil
+}
+
+func requireEnrollmentAdmin(ctx context.Context) (*rpc.ContextMeta, error) {
 	meta := rpc.MetaFromContext(ctx)
 	if meta == nil || meta.Principal == nil || !meta.Principal.HasRole(rpc.RoleAdmin) {
 		return nil, connectError(connect.CodePermissionDenied, errors.New("administrator access is required"))
+	}
+	return meta, nil
+}
+
+func (s *enrollmentAdminService) ListPendingEnrollments(ctx context.Context, req *connect.Request[enrollmentv1.ListPendingEnrollmentsRequest]) (*connect.Response[enrollmentv1.ListPendingEnrollmentsResponse], error) {
+	if _, err := requireEnrollmentAdmin(ctx); err != nil {
+		return nil, err
 	}
 	attempts, err := enrollment.ListPending()
 	if err != nil {
@@ -73,12 +129,12 @@ func (s *enrollmentAdminService) ListPendingEnrollments(ctx context.Context, req
 }
 
 func (s *enrollmentAdminService) GetPendingEnrollment(ctx context.Context, req *connect.Request[enrollmentv1.GetPendingEnrollmentRequest]) (*connect.Response[enrollmentv1.GetPendingEnrollmentResponse], error) {
-	meta := rpc.MetaFromContext(ctx)
-	if meta == nil || meta.Principal == nil || !meta.Principal.HasRole(rpc.RoleAdmin) {
-		return nil, connectError(connect.CodePermissionDenied, errors.New("administrator access is required"))
+	meta, err := requireEnrollmentAdmin(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if err := verifyBindTicket(req.Header(), false); err != nil {
-		return nil, connectError(connect.CodeUnauthenticated, err)
+	if _, err := verifyBindTicket(req.Header(), meta.Principal); err != nil {
+		return nil, bindTicketConnectError(err)
 	}
 	if strings.TrimSpace(req.Msg.GetUserCode()) == "" {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("a verification code is required"))
@@ -105,12 +161,13 @@ func (s *enrollmentAdminService) GetPendingEnrollment(ctx context.Context, req *
 }
 
 func (s *enrollmentAdminService) ApproveEnrollment(ctx context.Context, req *connect.Request[enrollmentv1.ApproveEnrollmentRequest]) (*connect.Response[enrollmentv1.ApproveEnrollmentResponse], error) {
-	meta := rpc.MetaFromContext(ctx)
-	if meta == nil || meta.Principal == nil || !meta.Principal.HasRole(rpc.RoleAdmin) {
-		return nil, connectError(connect.CodePermissionDenied, errors.New("administrator access is required"))
+	meta, err := requireEnrollmentAdmin(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if err := verifyBindTicket(req.Header(), true); err != nil {
-		return nil, connectError(connect.CodeUnauthenticated, err)
+	claims, err := verifyBindTicket(req.Header(), meta.Principal)
+	if err != nil {
+		return nil, bindTicketConnectError(err)
 	}
 	if strings.TrimSpace(req.Msg.GetUserCode()) == "" {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("a verification code is required"))
@@ -121,12 +178,6 @@ func (s *enrollmentAdminService) ApproveEnrollment(ctx context.Context, req *con
 
 	switch target := req.Msg.Target.(type) {
 	case *enrollmentv1.ApproveEnrollmentRequest_ExistingAgentId:
-		// Binding to an existing machine hands over everything it owns, so a
-		// fresh second factor is required even if the administrator already has
-		// a session.
-		if err := verifyConnectTwoFactor(meta, req.Msg.GetTwoFactor()); err != nil {
-			return nil, connectError(connect.CodeUnauthenticated, err)
-		}
 		uuid := strings.TrimSpace(target.ExistingAgentId)
 		if uuid == "" {
 			return nil, connectError(connect.CodeInvalidArgument, errors.New("an existing agent ID is required"))
@@ -174,7 +225,7 @@ func (s *enrollmentAdminService) ApproveEnrollment(ctx context.Context, req *con
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("either an existing agent ID or new agent details are required"))
 	}
 
-	approvedAttempt, err := enrollment.Approve(req.Msg.GetUserCode(), clientUUID, meta.Principal.UserUUID)
+	approvedAttempt, err := enrollment.Approve(req.Msg.GetUserCode(), clientUUID, claims.Sub)
 	if err != nil {
 		if created {
 			// A just-created machine that cannot be bound to the request is
@@ -188,7 +239,7 @@ func (s *enrollmentAdminService) ApproveEnrollment(ctx context.Context, req *con
 	if created {
 		action = "created as"
 	}
-	auditlog.Log(meta.RemoteIP, meta.Principal.UserUUID,
+	auditlog.Log(meta.RemoteIP, claims.Sub,
 		fmt.Sprintf("enrollment approved: code=%s %s agent=%s fingerprint=%s",
 			req.Msg.GetUserCode(), action, clientUUID, approvedAttempt.HostFingerprint), "warn")
 
@@ -198,17 +249,18 @@ func (s *enrollmentAdminService) ApproveEnrollment(ctx context.Context, req *con
 }
 
 func (s *enrollmentAdminService) DenyEnrollment(ctx context.Context, req *connect.Request[enrollmentv1.DenyEnrollmentRequest]) (*connect.Response[enrollmentv1.DenyEnrollmentResponse], error) {
-	meta := rpc.MetaFromContext(ctx)
-	if meta == nil || meta.Principal == nil || !meta.Principal.HasRole(rpc.RoleAdmin) {
-		return nil, connectError(connect.CodePermissionDenied, errors.New("administrator access is required"))
+	meta, err := requireEnrollmentAdmin(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if err := verifyBindTicket(req.Header(), true); err != nil {
-		return nil, connectError(connect.CodeUnauthenticated, err)
+	claims, err := verifyBindTicket(req.Header(), meta.Principal)
+	if err != nil {
+		return nil, bindTicketConnectError(err)
 	}
-	if err := enrollment.Deny(req.Msg.GetUserCode(), meta.Principal.UserUUID); err != nil {
+	if err := enrollment.Deny(req.Msg.GetUserCode(), claims.Sub); err != nil {
 		return nil, connectError(connect.CodeFailedPrecondition, err)
 	}
-	auditlog.Log(meta.RemoteIP, meta.Principal.UserUUID,
+	auditlog.Log(meta.RemoteIP, claims.Sub,
 		"enrollment denied: code="+req.Msg.GetUserCode(), "warn")
 	return connect.NewResponse(&enrollmentv1.DenyEnrollmentResponse{}), nil
 }

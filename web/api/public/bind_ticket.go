@@ -1,8 +1,6 @@
 package public
 
 import (
-	"encoding/json"
-	"io"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -12,57 +10,18 @@ import (
 	"github.com/komari-monitor/komari/web/api"
 )
 
-type BindTicketRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	TwoFa    string `json:"2fa_code"`
-}
-
-// RequestBindTicket issues a 2-minute single-use ticket specifically for /bind machine authorization.
-// Crucially, it does NOT alter, recreate, or invalidate regular console session tokens.
+// RequestBindTicket exchanges an existing console session for a reusable
+// two-minute ticket scoped to enrollment authorization.
 func RequestBindTicket(c *gin.Context) {
-	bodyBytes, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		api.RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+	session, err := c.Cookie("session_token")
+	if err != nil || session == "" {
+		api.RespondError(c, http.StatusUnauthorized, "A completed console login is required")
 		return
 	}
-	var data BindTicketRequest
-	if err := json.Unmarshal(bodyBytes, &data); err != nil {
-		api.RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+	uuid, err := accounts.GetSession(session)
+	if err != nil || uuid == "" {
+		api.RespondError(c, http.StatusUnauthorized, "Console session is invalid or expired")
 		return
-	}
-
-	username := data.Username
-	// If username was omitted but the user has an active session cookie, infer the username
-	if username == "" {
-		if session, err := c.Cookie("session_token"); err == nil && session != "" {
-			if user, err := accounts.GetUserBySession(session); err == nil && user.Username != "" {
-				username = user.Username
-			}
-		}
-	}
-
-	if username == "" || data.Password == "" {
-		api.RespondError(c, http.StatusBadRequest, "Username and password are required")
-		return
-	}
-
-	uuid, success := accounts.CheckPassword(username, data.Password)
-	if !success {
-		api.RespondError(c, http.StatusUnauthorized, "Invalid credentials")
-		return
-	}
-
-	user, err := accounts.GetUserByUUID(uuid)
-	if err == nil && user.TwoFactor != "" {
-		if data.TwoFa == "" {
-			api.RespondError(c, http.StatusUnauthorized, "2FA code is required")
-			return
-		}
-		if ok, err := accounts.Verify2Fa(uuid, data.TwoFa); err != nil || !ok {
-			api.RespondError(c, http.StatusUnauthorized, "Invalid 2FA code")
-			return
-		}
 	}
 
 	key := accounts.SessionDigestKey()
@@ -72,8 +31,9 @@ func RequestBindTicket(c *gin.Context) {
 		return
 	}
 
-	auditlog.Log(c.ClientIP(), uuid, "issued 2-minute bind ticket", "bind_ticket")
+	auditlog.Log(c.ClientIP(), uuid, "issued reusable 2-minute bind ticket", "bind_ticket")
 
+	c.Header("Cache-Control", "no-store")
 	api.RespondSuccess(c, gin.H{
 		"ticket":     ticket,
 		"expires_in": int(bindticket.TicketDuration.Seconds()),

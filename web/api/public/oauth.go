@@ -2,7 +2,9 @@ package public
 
 import (
 	"fmt"
+	"net/url"
 	"slices"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
@@ -12,6 +14,24 @@ import (
 	"github.com/komari-monitor/komari/web/oauth"
 	"github.com/komari-monitor/komari/web/security"
 )
+
+const oauthReturnToCookie = "oauth_return_to"
+
+func safeOAuthReturnTo(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.ContainsAny(value, "\r\n") {
+		return "/admin"
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/") {
+		return "/admin"
+	}
+	if parsed.Path == "/bind-login" || parsed.Path == "/login" ||
+		parsed.Path == "/admin" || strings.HasPrefix(parsed.Path, "/admin/") {
+		return value
+	}
+	return "/admin"
+}
 
 // /api/oauth
 func OAuth(c *gin.Context) {
@@ -24,6 +44,7 @@ func OAuth(c *gin.Context) {
 	authURL, state := oauth.CurrentProvider().GetAuthorizationURL(utils.GetCallbackURL(c))
 
 	security.SetSensitiveCookie(c, "oauth_state", state, 3600)
+	security.SetSensitiveCookie(c, oauthReturnToCookie, safeOAuthReturnTo(c.Query("returnTo")), 3600)
 
 	c.Redirect(302, authURL)
 }
@@ -37,6 +58,11 @@ func OAuthCallback(c *gin.Context) {
 
 	// 获取当前OAuth提供商名称
 	providerName := oauth.CurrentProvider().GetName()
+	returnTo := safeOAuthReturnTo("")
+	if destination, err := c.Cookie(oauthReturnToCookie); err == nil {
+		returnTo = safeOAuthReturnTo(destination)
+	}
+	security.SetSensitiveCookie(c, oauthReturnToCookie, "", -1)
 
 	providersSkipStateCheck := []string{"qq"}
 	if slices.Contains(providersSkipStateCheck, providerName) {
@@ -87,7 +113,7 @@ func OAuthCallback(c *gin.Context) {
 			return
 		}
 		auditlog.Log(c.ClientIP(), user.UUID, "bound external account (OAuth)"+fmt.Sprintf(",sso_id: %s", sso_id), "login")
-		c.Redirect(302, "/admin")
+		c.Redirect(302, returnTo)
 		return
 	}
 
@@ -111,5 +137,5 @@ func OAuthCallback(c *gin.Context) {
 	// 设置cookie并返回
 	setSessionCookie(c, session, sessionCookieMaxAge)
 	auditlog.Log(c.ClientIP(), user.UUID, "logged in (OAuth)", "login")
-	c.Redirect(302, "/admin")
+	c.Redirect(302, returnTo)
 }
