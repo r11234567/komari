@@ -51,8 +51,8 @@ const (
 const themeBundleMigrationKey = "theme_bundle_migration_v1"
 
 // Increment whenever the embedded official default theme must replace an
-// already-installed bundle. Version 10 ships /bind-login route guard and authorization panel updates.
-const currentThemeBundleMigration = 10
+// already-installed bundle. Version 11 refreshes Passkey navigation and same-tab settings.
+const currentThemeBundleMigration = 11
 
 const themeChangeReloadScript = `<script>(()=>{window.addEventListener("storage",(event)=>{if(event.key==="komari-active-theme-changed"){window.location.reload();}});})();</script>`
 
