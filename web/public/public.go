@@ -51,8 +51,8 @@ const (
 const themeBundleMigrationKey = "theme_bundle_migration_v1"
 
 // Increment whenever the embedded official default theme must replace an
-// already-installed bundle. Version 9 ships modernized node dialog, pruned nezha compatibility, and restructured agent deployment dialog.
-const currentThemeBundleMigration = 9
+// already-installed bundle. Version 10 ships /bind-login route guard and authorization panel updates.
+const currentThemeBundleMigration = 10
 
 const themeChangeReloadScript = `<script>(()=>{window.addEventListener("storage",(event)=>{if(event.key==="komari-active-theme-changed"){window.location.reload();}});})();</script>`
 
@@ -580,7 +580,7 @@ func setNoStoreHeaders(c *gin.Context) {
 }
 
 func isPrivateApplicationPath(requestPath string) bool {
-	for _, prefix := range []string{"/admin", "/login", "/terminal", "/install", "/manage", "/bind", "/enroll"} {
+	for _, prefix := range []string{"/admin", "/login", "/terminal", "/install", "/manage", "/bind", "/bind-login", "/enroll"} {
 		if requestPath == prefix || strings.HasPrefix(requestPath, prefix+"/") {
 			return true
 		}
