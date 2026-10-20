@@ -1,16 +1,19 @@
 name: Build Komari web bundles
-description: Build the isolated system UI and the official default public theme, then optionally upload both as an artifact.
+description: Build the isolated system UI and the official default public theme from third_party/komari-web, then optionally upload both as an artifact.
 
 inputs:
   node-version:
     description: Node.js version used to build komari-web.
     default: "24"
+  source-dir:
+    description: Submodule directory containing komari-web.
+    default: third_party/komari-web
   repository:
-    description: komari-web repository URL.
+    description: Optional override repository URL.
     default: https://github.com/r11234567/komari-web
   ref:
-    description: Komari Web ref to build. Use latest to resolve the latest published stable release.
-    default: latest
+    description: Optional Komari Web ref to checkout. If omitted or latest, uses the pinned submodule.
+    default: ""
   artifact-name:
     description: Optional artifact name for the packed system UI.
     default: ""
@@ -23,49 +26,58 @@ runs:
       with:
         node-version: ${{ inputs.node-version }}
 
-    - name: Clone and build Komari web bundles
+    - name: Build Komari web bundles
       shell: bash
       env:
+        WEB_SOURCE_DIR: ${{ inputs.source-dir }}
         KOMARI_WEB_REPOSITORY: ${{ inputs.repository }}
         KOMARI_WEB_REF: ${{ inputs.ref }}
       run: |
         set -euxo pipefail
-        rm -rf komari-web
-        repository="$KOMARI_WEB_REPOSITORY"
-        requested_ref="$KOMARI_WEB_REF"
-        resolved_ref="$requested_ref"
-        if [ -z "$requested_ref" ] || [ "$requested_ref" = "latest" ]; then
-          release_url="${repository%.git}/releases/latest"
-          latest_url="$(curl -fsSL --retry 3 -o /dev/null -w '%{url_effective}' "$release_url")"
-          resolved_ref="${latest_url##*/}"
-          if [ -z "$resolved_ref" ] || [ "$resolved_ref" = "latest" ]; then
-            echo "Unable to resolve the latest published Komari Web release from $release_url" >&2
-            exit 1
-          fi
-          echo "Resolved Komari Web latest release to $resolved_ref"
+        web_dir="$WEB_SOURCE_DIR"
+
+        if [ ! -f "$web_dir/package.json" ]; then
+          echo "Submodule not initialized at $web_dir, attempting git submodule update..."
+          git submodule update --init --recursive "$web_dir" || true
         fi
-        git clone --depth=1 --branch "$resolved_ref" "$repository" komari-web
-        cd komari-web
+
+        if [ ! -f "$web_dir/package.json" ]; then
+          echo "Submodule still not available at $web_dir; falling back to clone..."
+          rm -rf "$web_dir"
+          git clone --depth=1 "$KOMARI_WEB_REPOSITORY" "$web_dir"
+        fi
+
+        requested_ref="$KOMARI_WEB_REF"
+        if [ -n "$requested_ref" ] && [ "$requested_ref" != "latest" ]; then
+          echo "Switching $web_dir to requested ref $requested_ref"
+          cd "$web_dir"
+          git fetch --depth=1 origin "$requested_ref" || git fetch origin "$requested_ref"
+          git checkout "$requested_ref"
+          cd -
+        fi
+
+        echo "Building Komari Web bundles from $web_dir..."
+        cd "$web_dir"
         npm ci
         npm run lint
         npm test
         npm run build:system
-        cd ..
+        cd -
 
         rm -rf web/public/systemUI
         mkdir -p web/public/systemUI
-        cp -r komari-web/dist web/public/systemUI/
+        cp -r "$web_dir/dist" web/public/systemUI/
 
         grep -F '/system-assets/' web/public/systemUI/dist/index.html
 
-        cd komari-web
+        cd "$web_dir"
         npm run build
-        cd ..
+        cd -
 
         rm -rf web/public/bundledThemes/default
         mkdir -p web/public/bundledThemes/default
-        cp komari-web/komari-theme.json web/public/bundledThemes/default/
-        cp -r komari-web/dist web/public/bundledThemes/default/
+        cp "$web_dir/komari-theme.json" web/public/bundledThemes/default/
+        cp -r "$web_dir/dist" web/public/bundledThemes/default/
 
         grep -F '/assets/' web/public/bundledThemes/default/dist/index.html
         test -f web/public/bundledThemes/default/komari-theme.json

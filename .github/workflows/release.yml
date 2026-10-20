@@ -79,6 +79,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.source_ref }}
+          submodules: recursive
 
       - name: Build frontend artifact
         uses: ./.github/actions/build-frontend

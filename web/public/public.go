@@ -51,8 +51,8 @@ const (
 const themeBundleMigrationKey = "theme_bundle_migration_v1"
 
 // Increment whenever the embedded official default theme must replace an
-// already-installed bundle. Version 8 ships P0 web audit fixes, proto v0.1.37 compatibility, and modernized state lifecycle.
-const currentThemeBundleMigration = 8
+// already-installed bundle. Version 9 ships modernized node dialog, pruned nezha compatibility, and restructured agent deployment dialog.
+const currentThemeBundleMigration = 9
 
 const themeChangeReloadScript = `<script>(()=>{window.addEventListener("storage",(event)=>{if(event.key==="komari-active-theme-changed"){window.location.reload();}});})();</script>`
 

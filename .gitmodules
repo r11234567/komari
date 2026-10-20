@@ -1,0 +1,3 @@
+[submodule "third_party/komari-web"]
+	path = third_party/komari-web
+	url = https://github.com/r11234567/komari-web.git
