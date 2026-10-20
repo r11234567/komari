@@ -22,7 +22,6 @@ import (
 	_ "github.com/dop251/goja_nodejs/buffer"
 	"github.com/dop251/goja_nodejs/eventloop"
 	"github.com/dop251/goja_nodejs/require"
-	urlmodule "github.com/komari-monitor/komari/pkg/jsruntime/url"
 	_ "github.com/dop251/goja_nodejs/util"
 	childprocess "github.com/komari-monitor/komari/pkg/jsruntime/child_process"
 	"github.com/komari-monitor/komari/pkg/jsruntime/console"
@@ -35,6 +34,7 @@ import (
 	pathmodule "github.com/komari-monitor/komari/pkg/jsruntime/path"
 	processmodule "github.com/komari-monitor/komari/pkg/jsruntime/process"
 	"github.com/komari-monitor/komari/pkg/jsruntime/timers"
+	urlmodule "github.com/komari-monitor/komari/pkg/jsruntime/url"
 )
 
 const defaultTimeout = 30 * time.Second
