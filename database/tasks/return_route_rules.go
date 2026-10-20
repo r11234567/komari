@@ -26,7 +26,8 @@ const (
 	returnRouteRuleSchemaVersion  = 1
 	returnRouteRuleExternalPath   = "./data/return-route-signatures.json"
 	returnRouteBGPExternalPath    = "./data/return-route-bgp-prefixes.json"
-	returnRouteBGPDefaultURL      = "https://raw.githubusercontent.com/nuomiiiii/komari/main/database/tasks/return_route_bgp_prefixes.json"
+	returnRouteBGPDefaultURL      = "https://raw.githubusercontent.com/r11234567/komari/main/database/tasks/return_route_bgp_prefixes.json"
+	returnRouteBGPCDNURL          = "https://cdn.jsdelivr.net/gh/r11234567/komari@main/database/tasks/return_route_bgp_prefixes.json"
 	returnRouteRulePollInterval   = 2 * time.Second
 	returnRouteBGPRefreshInterval = 2 * time.Hour
 	returnRouteRuleMaxSize        = 2 << 20
@@ -330,51 +331,57 @@ func reloadReturnRouteRuleFilesIfChanged() {
 }
 
 func refreshReturnRouteBGPRules(ctx context.Context) error {
-	url := returnRouteBGPSourceURL()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		recordReturnRouteBGPError(err)
-		return err
+	urls := returnRouteBGPSourceURLs()
+	var lastErr error
+	for _, targetURL := range urls {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		request.Header.Set("User-Agent", "Komari-Return-Route (+https://github.com/r11234567/komari)")
+		response, err := returnRouteBGPHTTPClient.Do(request)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if response.StatusCode != http.StatusOK {
+			response.Body.Close()
+			lastErr = fmt.Errorf("BGP 规则源返回 HTTP %d", response.StatusCode)
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(response.Body, returnRouteBGPRuleMaxSize+1))
+		response.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(data) > returnRouteBGPRuleMaxSize {
+			lastErr = fmt.Errorf("BGP 规则文件不能超过 %d MiB", returnRouteBGPRuleMaxSize>>20)
+			continue
+		}
+		compiled, err := compileReturnRouteBGPRules(data)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		formatted, err := json.MarshalIndent(compiled.document, "", "  ")
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		formatted = append(formatted, '\n')
+		if err := writeReturnRouteRuleFileAtomically(returnRouteBGPExternalPath, ".return-route-bgp-prefixes-*.json", formatted); err != nil {
+			recordReturnRouteBGPError(err)
+			return err
+		}
+		activateReturnRouteBGPRules(compiled, time.Now().UTC())
+		return nil
 	}
-	request.Header.Set("User-Agent", "Komari-Return-Route (+https://github.com/nuomiiiii/komari)")
-	response, err := returnRouteBGPHTTPClient.Do(request)
-	if err != nil {
-		recordReturnRouteBGPError(err)
-		return err
+	if lastErr != nil {
+		recordReturnRouteBGPError(lastErr)
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		err = fmt.Errorf("BGP 规则源返回 HTTP %d", response.StatusCode)
-		recordReturnRouteBGPError(err)
-		return err
-	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, returnRouteBGPRuleMaxSize+1))
-	if err != nil {
-		recordReturnRouteBGPError(err)
-		return err
-	}
-	if len(data) > returnRouteBGPRuleMaxSize {
-		err = fmt.Errorf("BGP 规则文件不能超过 %d MiB", returnRouteBGPRuleMaxSize>>20)
-		recordReturnRouteBGPError(err)
-		return err
-	}
-	compiled, err := compileReturnRouteBGPRules(data)
-	if err != nil {
-		recordReturnRouteBGPError(err)
-		return err
-	}
-	formatted, err := json.MarshalIndent(compiled.document, "", "  ")
-	if err != nil {
-		recordReturnRouteBGPError(err)
-		return err
-	}
-	formatted = append(formatted, '\n')
-	if err := writeReturnRouteRuleFileAtomically(returnRouteBGPExternalPath, ".return-route-bgp-prefixes-*.json", formatted); err != nil {
-		recordReturnRouteBGPError(err)
-		return err
-	}
-	activateReturnRouteBGPRules(compiled, time.Now().UTC())
-	return nil
+	return lastErr
 }
 
 func reloadCachedReturnRouteBGPRules() error {
@@ -872,11 +879,15 @@ func returnRouteRuleFileDigest(path string) (string, error) {
 	return fmt.Sprintf("%x", sum), nil
 }
 
-func returnRouteBGPSourceURL() string {
+func returnRouteBGPSourceURLs() []string {
 	if value := strings.TrimSpace(os.Getenv("KOMARI_RETURN_ROUTE_BGP_RULE_URL")); value != "" {
-		return value
+		return []string{value}
 	}
-	return returnRouteBGPDefaultURL
+	return []string{returnRouteBGPDefaultURL, returnRouteBGPCDNURL}
+}
+
+func returnRouteBGPSourceURL() string {
+	return returnRouteBGPSourceURLs()[0]
 }
 
 func cloneReturnRouteRuleDocument(document ReturnRouteRuleDocument) ReturnRouteRuleDocument {

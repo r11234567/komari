@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	releaseBaseURL = "https://github.com/nuomiiiii/komari/releases/download"
+	releaseBaseURL = "https://github.com/r11234567/komari/releases/download"
 	manifestName   = "komari-update.json"
 	maxManifest    = 2 << 20
 	maxBinary      = 256 << 20
