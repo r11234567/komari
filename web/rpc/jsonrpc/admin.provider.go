@@ -2,6 +2,9 @@ package jsonrpc
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/models"
@@ -23,6 +26,120 @@ func init() {
 	reg("setOidcProvider", adminSetOidc, "Set OIDC provider config")
 }
 
+const MaskRune = '●' // \u25cf
+
+func isSecretFieldName(name string) bool {
+	lower := strings.ToLower(name)
+	return lower == "password" || lower == "bot_token" || lower == "device_key" ||
+		lower == "secret" || lower == "client_secret"
+}
+
+func isMaskedSecret(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r != MaskRune && r != '*' {
+			return false
+		}
+	}
+	return true
+}
+
+func maskSecretString(s string) string {
+	count := utf8.RuneCountInString(s)
+	if count == 0 {
+		return ""
+	}
+	return strings.Repeat(string(MaskRune), count)
+}
+
+func getSenderSecretFields(providerName string) map[string]bool {
+	fields := make(map[string]bool)
+	configs := msfactory.GetSenderConfigs()
+	if items, ok := configs[providerName]; ok {
+		for _, it := range items {
+			if it.Secret || it.Type == "password" || it.Type == "secret" || isSecretFieldName(it.Name) {
+				fields[it.Name] = true
+			}
+		}
+	}
+	return fields
+}
+
+func getOidcSecretFields(providerName string) map[string]bool {
+	fields := make(map[string]bool)
+	configs := oauthfactory.GetProviderConfigs()
+	if items, ok := configs[providerName]; ok {
+		for _, it := range items {
+			if it.Secret || it.Type == "password" || it.Type == "secret" || isSecretFieldName(it.Name) {
+				fields[it.Name] = true
+			}
+		}
+	}
+	return fields
+}
+
+func maskAdditionSecrets(_ string, additionJSON string, secretFields map[string]bool) string {
+	if additionJSON == "" || additionJSON == "{}" {
+		return additionJSON
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(additionJSON), &data); err != nil {
+		return additionJSON
+	}
+	changed := false
+	for k, v := range data {
+		if secretFields[k] || isSecretFieldName(k) {
+			if strVal, ok := v.(string); ok && strVal != "" && !isMaskedSecret(strVal) {
+				data[k] = maskSecretString(strVal)
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return additionJSON
+	}
+	out, err := json.Marshal(data)
+	if err != nil {
+		return additionJSON
+	}
+	return string(out)
+}
+
+func restoreAdditionSecrets(newAdditionJSON string, existingAdditionJSON string, secretFields map[string]bool) string {
+	if newAdditionJSON == "" || existingAdditionJSON == "" {
+		return newAdditionJSON
+	}
+	var newMap map[string]any
+	if err := json.Unmarshal([]byte(newAdditionJSON), &newMap); err != nil {
+		return newAdditionJSON
+	}
+	var oldMap map[string]any
+	if err := json.Unmarshal([]byte(existingAdditionJSON), &oldMap); err != nil {
+		return newAdditionJSON
+	}
+	changed := false
+	for k, v := range newMap {
+		if secretFields[k] || isSecretFieldName(k) {
+			if strVal, ok := v.(string); ok && isMaskedSecret(strVal) {
+				if oldVal, ok := oldMap[k].(string); ok && oldVal != "" && !isMaskedSecret(oldVal) {
+					newMap[k] = oldVal
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return newAdditionJSON
+	}
+	out, err := json.Marshal(newMap)
+	if err != nil {
+		return newAdditionJSON
+	}
+	return string(out)
+}
+
 func adminGetMessageSender(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
 		Provider string `json:"provider"`
@@ -33,7 +150,10 @@ func adminGetMessageSender(_ context.Context, req *rpc.JsonRpcRequest) (any, *rp
 		if err != nil {
 			return nil, rpc.MakeError(rpc.NotFound, "Provider not found: "+err.Error(), nil)
 		}
-		return cfg, nil
+		secretFields := getSenderSecretFields(params.Provider)
+		maskedCfg := *cfg
+		maskedCfg.Addition = maskAdditionSecrets(params.Provider, cfg.Addition, secretFields)
+		return &maskedCfg, nil
 	}
 	providers := msfactory.GetSenderConfigs()
 	if len(providers) == 0 {
@@ -52,6 +172,10 @@ func adminSetMessageSender(_ context.Context, req *rpc.JsonRpcRequest) (any, *rp
 	}
 	if _, exists := msfactory.GetConstructor(senderConfig.Name); !exists {
 		return nil, rpc.MakeError(rpc.NotFound, "Provider not found: "+senderConfig.Name, nil)
+	}
+	secretFields := getSenderSecretFields(senderConfig.Name)
+	if existing, err := database.GetMessageSenderConfigByName(senderConfig.Name); err == nil && existing != nil {
+		senderConfig.Addition = restoreAdditionSecrets(senderConfig.Addition, existing.Addition, secretFields)
 	}
 	if err := database.SaveMessageSenderConfig(&senderConfig); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to save message sender provider configuration: "+err.Error(), nil)
@@ -75,7 +199,10 @@ func adminGetOidc(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		if err != nil {
 			return nil, rpc.MakeError(rpc.NotFound, "Provider not found: "+err.Error(), nil)
 		}
-		return cfg, nil
+		secretFields := getOidcSecretFields(params.Provider)
+		maskedCfg := *cfg
+		maskedCfg.Addition = maskAdditionSecrets(params.Provider, cfg.Addition, secretFields)
+		return &maskedCfg, nil
 	}
 	providers := oauthfactory.GetProviderConfigs()
 	if len(providers) == 0 {
@@ -94,6 +221,10 @@ func adminSetOidc(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 	}
 	if _, exists := oauthfactory.GetConstructor(oidcConfig.Name); !exists {
 		return nil, rpc.MakeError(rpc.NotFound, "Provider not found: "+oidcConfig.Name, nil)
+	}
+	secretFields := getOidcSecretFields(oidcConfig.Name)
+	if existing, err := database.GetOidcConfigByName(oidcConfig.Name); err == nil && existing != nil {
+		oidcConfig.Addition = restoreAdditionSecrets(oidcConfig.Addition, existing.Addition, secretFields)
 	}
 	if err := database.SaveOidcConfig(&oidcConfig); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to save OIDC provider configuration: "+err.Error(), nil)

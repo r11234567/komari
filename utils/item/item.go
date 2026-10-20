@@ -1,6 +1,9 @@
 package item
 
-import "reflect"
+import (
+	"reflect"
+	"strings"
+)
 
 type Item struct {
 	Name     string `json:"name"`
@@ -9,6 +12,7 @@ type Item struct {
 	Options  string `json:"options"`
 	Default  string `json:"default"`
 	Help     string `json:"help"`
+	Secret   bool   `json:"secret,omitempty"`
 }
 
 func Parse(v any) []Item {
@@ -17,7 +21,7 @@ func Parse(v any) []Item {
 		val = val.Elem()
 	}
 
-	var allowTypes = []string{"option", "richtext"}
+	var allowTypes = []string{"option", "richtext", "password", "secret"}
 
 	var items []Item
 	for i := 0; i < val.NumField(); i++ {
@@ -26,16 +30,31 @@ func Parse(v any) []Item {
 		if !contains(allowTypes, typ) {
 			typ = field.Type.Name()
 		}
+		jsonName := field.Tag.Get("json")
+		isSecret := field.Tag.Get("secret") == "true" || typ == "password" || typ == "secret"
+		if !isSecret {
+			lower := strings.ToLower(jsonName)
+			if lower == "password" || lower == "bot_token" || lower == "device_key" || lower == "secret" || lower == "client_secret" {
+				isSecret = true
+			}
+		}
+
+		if itemType := typ; itemType == "" || itemType == "string" {
+			if isSecret {
+				typ = "password"
+			} else {
+				typ = "string"
+			}
+		}
+
 		item := Item{
-			Name:     field.Tag.Get("json"),
+			Name:     jsonName,
 			Required: field.Tag.Get("required") == "true",
 			Type:     typ,
 			Options:  field.Tag.Get("options"),
 			Default:  field.Tag.Get("default"),
 			Help:     field.Tag.Get("help"),
-		}
-		if item.Type == "" {
-			item.Type = "string"
+			Secret:   isSecret,
 		}
 		items = append(items, item)
 	}

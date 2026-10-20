@@ -64,6 +64,11 @@ var sessionDigestKeyOnce struct {
 // stop the server from booting. Losing it only invalidates outstanding cookies,
 // which costs everyone a re-login and nothing more - unlike encrypted TOTP
 // secrets, session tokens are disposable.
+// SessionDigestKey returns the instance's HMAC key for token and ticket signing.
+func SessionDigestKey() []byte {
+	return sessionDigestKey()
+}
+
 func sessionDigestKey() []byte {
 	sessionDigestKeyOnce.Lock()
 	defer sessionDigestKeyOnce.Unlock()

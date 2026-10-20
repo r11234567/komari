@@ -18,12 +18,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"connectrpc.com/connect"
+	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/enrollment"
+	"github.com/komari-monitor/komari/pkg/bindticket"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	deploymentapp "github.com/komari-monitor/komari/web/deployment"
 	enrollmentv1 "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1"
@@ -33,6 +36,24 @@ import (
 
 type enrollmentAdminService struct {
 	enrollmentv1connect.UnimplementedEnrollmentAdminServiceHandler
+}
+
+func verifyBindTicket(reqHeader http.Header, consume bool) error {
+	ticket := strings.TrimSpace(reqHeader.Get("X-Bind-Ticket"))
+	if ticket == "" {
+		return errors.New("bind ticket is required; please authenticate on /bind to obtain a 2-minute ticket")
+	}
+	key := accounts.SessionDigestKey()
+	if consume {
+		if _, err := bindticket.VerifyAndConsume(ticket, key); err != nil {
+			return fmt.Errorf("bind ticket verification failed: %w", err)
+		}
+	} else {
+		if _, err := bindticket.Verify(ticket, key); err != nil {
+			return fmt.Errorf("bind ticket verification failed: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *enrollmentAdminService) ListPendingEnrollments(ctx context.Context, req *connect.Request[enrollmentv1.ListPendingEnrollmentsRequest]) (*connect.Response[enrollmentv1.ListPendingEnrollmentsResponse], error) {
@@ -55,6 +76,9 @@ func (s *enrollmentAdminService) GetPendingEnrollment(ctx context.Context, req *
 	meta := rpc.MetaFromContext(ctx)
 	if meta == nil || meta.Principal == nil || !meta.Principal.HasRole(rpc.RoleAdmin) {
 		return nil, connectError(connect.CodePermissionDenied, errors.New("administrator access is required"))
+	}
+	if err := verifyBindTicket(req.Header(), false); err != nil {
+		return nil, connectError(connect.CodeUnauthenticated, err)
 	}
 	if strings.TrimSpace(req.Msg.GetUserCode()) == "" {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("a verification code is required"))
@@ -84,6 +108,9 @@ func (s *enrollmentAdminService) ApproveEnrollment(ctx context.Context, req *con
 	meta := rpc.MetaFromContext(ctx)
 	if meta == nil || meta.Principal == nil || !meta.Principal.HasRole(rpc.RoleAdmin) {
 		return nil, connectError(connect.CodePermissionDenied, errors.New("administrator access is required"))
+	}
+	if err := verifyBindTicket(req.Header(), true); err != nil {
+		return nil, connectError(connect.CodeUnauthenticated, err)
 	}
 	if strings.TrimSpace(req.Msg.GetUserCode()) == "" {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("a verification code is required"))
@@ -174,6 +201,9 @@ func (s *enrollmentAdminService) DenyEnrollment(ctx context.Context, req *connec
 	meta := rpc.MetaFromContext(ctx)
 	if meta == nil || meta.Principal == nil || !meta.Principal.HasRole(rpc.RoleAdmin) {
 		return nil, connectError(connect.CodePermissionDenied, errors.New("administrator access is required"))
+	}
+	if err := verifyBindTicket(req.Header(), true); err != nil {
+		return nil, connectError(connect.CodeUnauthenticated, err)
 	}
 	if err := enrollment.Deny(req.Msg.GetUserCode(), meta.Principal.UserUUID); err != nil {
 		return nil, connectError(connect.CodeFailedPrecondition, err)

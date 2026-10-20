@@ -114,6 +114,13 @@ func SaveWithDB(db *gorm.DB, clientUUID string, settings Settings, expectedRevis
 				expectedRevision, current)
 		}
 
+		if settings.RemoteControlEnabled && !isPrivilegedMode(settings.RequiredPrivilegeMode) {
+			return errors.New("remote control requires running as root/administrator")
+		}
+		if (settings.WebSSHEnabled || settings.ExecutionEnabled) && !settings.RemoteControlEnabled {
+			return errors.New("webssh and remote commands require remote control master switch to be enabled")
+		}
+
 		class, reasons, from, to := classify(tx, clientUUID, settings)
 		now := time.Now().UTC()
 		row := models.ClientPrivilegedRevision{
