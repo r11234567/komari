@@ -5,9 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
+	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/bindticket"
 	"github.com/stretchr/testify/assert"
 )
@@ -84,5 +87,26 @@ func TestRequestBindTicket(t *testing.T) {
 		router.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
+	})
+
+	t.Run("stale but otherwise valid session cannot mint another ticket", func(t *testing.T) {
+		router := gin.New()
+		router.POST("/api/bind/ticket", RequestBindTicket)
+
+		session, err := accounts.CreateSession(user.UUID, 3600, "test", "127.0.0.1", "password")
+		assert.NoError(t, err)
+		err = dbcore.GetDBInstance().
+			Model(&models.Session{}).
+			Where("uuid = ?", user.UUID).
+			Update("created_at", time.Now().UTC().Add(-bindticket.TicketDuration-time.Second)).Error
+		assert.NoError(t, err)
+
+		req, _ := http.NewRequest(http.MethodPost, "/api/bind/ticket", nil)
+		req.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+		assert.Equal(t, "fresh_login_required", w.Header().Get("Bind-Ticket-Reason"))
 	})
 }

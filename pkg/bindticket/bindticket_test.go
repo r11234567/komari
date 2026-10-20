@@ -60,7 +60,12 @@ func TestIssueAndVerify(t *testing.T) {
 
 func TestExpiredTicket(t *testing.T) {
 	key := []byte("01234567890123456789012345678901")
-	ticket, _, err := issueAt("expired-user", key, time.Now().UTC().Add(-TicketDuration-time.Second))
+	ticket, _, err := issueAt(
+		"expired-user",
+		key,
+		time.Now().UTC().Add(-TicketDuration-time.Second),
+		TicketDuration,
+	)
 	if err != nil {
 		t.Fatalf("Issue failed: %v", err)
 	}
@@ -76,5 +81,11 @@ func TestIssueRejectsMissingKeyAndSubject(t *testing.T) {
 	}
 	if _, _, err := Issue("", key); err != ErrInvalidToken {
 		t.Fatalf("Issue with empty subject error = %v, want ErrInvalidToken", err)
+	}
+	if _, _, err := IssueWithDuration("user", key, 0); err != ErrInvalidDuration {
+		t.Fatalf("Issue with zero duration error = %v, want ErrInvalidDuration", err)
+	}
+	if _, _, err := IssueWithDuration("user", key, TicketDuration+time.Second); err != ErrInvalidDuration {
+		t.Fatalf("Issue with excessive duration error = %v, want ErrInvalidDuration", err)
 	}
 }

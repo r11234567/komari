@@ -67,18 +67,26 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 
 // GetSession 根据会话 ID 获取 UUID
 func GetSession(session string) (uuid string, err error) {
+	uuid, _, err = GetSessionIdentity(session)
+	return uuid, err
+}
+
+// GetSessionIdentity returns the authenticated user and when the session was
+// created. Callers that perform step-up checks use the creation time to bound
+// how long a fresh login can authorize another short-lived capability.
+func GetSessionIdentity(session string) (uuid string, createdAt time.Time, err error) {
 	sessionRecord, err := findSessionRecord(session)
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 
 	if time.Now().UTC().After(sessionRecord.Expires) {
 		// 会话已过期，删除它
 		_ = DeleteSession(session)
-		return "", errors.New("session expired")
+		return "", time.Time{}, errors.New("session expired")
 	}
 
-	return sessionRecord.UUID, nil
+	return sessionRecord.UUID, sessionRecord.CreatedAt, nil
 }
 
 func GetUserBySession(session string) (models.User, error) {

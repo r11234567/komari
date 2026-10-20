@@ -34,6 +34,7 @@ var (
 	ErrInvalidTicketType = errors.New("invalid ticket type")
 	ErrInvalidAudience   = errors.New("invalid bind ticket audience")
 	ErrInvalidScope      = errors.New("invalid bind ticket scope")
+	ErrInvalidDuration   = errors.New("invalid bind ticket duration")
 	ErrMissingKey        = errors.New("secret key cannot be empty")
 )
 
@@ -49,17 +50,26 @@ type Claims struct {
 
 // Issue creates a reusable signed 2-minute ticket for the specified user.
 func Issue(userUUID string, key []byte) (string, int64, error) {
-	return issueAt(userUUID, key, time.Now().UTC())
+	return IssueWithDuration(userUUID, key, TicketDuration)
 }
 
-func issueAt(userUUID string, key []byte, now time.Time) (string, int64, error) {
+// IssueWithDuration creates a ticket whose lifetime cannot exceed the standard
+// two-minute authorization window.
+func IssueWithDuration(userUUID string, key []byte, duration time.Duration) (string, int64, error) {
+	if duration <= 0 || duration > TicketDuration {
+		return "", 0, ErrInvalidDuration
+	}
+	return issueAt(userUUID, key, time.Now().UTC(), duration)
+}
+
+func issueAt(userUUID string, key []byte, now time.Time, duration time.Duration) (string, int64, error) {
 	if len(key) == 0 {
 		return "", 0, ErrMissingKey
 	}
 	if strings.TrimSpace(userUUID) == "" {
 		return "", 0, ErrInvalidToken
 	}
-	exp := now.Add(TicketDuration).Unix()
+	exp := now.Add(duration).Unix()
 
 	nonceBytes := make([]byte, 16)
 	if _, err := rand.Read(nonceBytes); err != nil {
