@@ -1,0 +1,1 @@
+import{n as e,s as t,t as n}from"./chunk-jsx-runtime-CFxkZ0bB.js";import{t as r}from"./chunk-client-jbAHAS7-.js";var i=t(e(),1),a=n(),o=i.createContext(void 0),s=({children:e})=>(0,a.jsx)(o.Provider,{value:r,children:e}),c=()=>{let e=i.useContext(o);if(!e)throw Error(`useConnect must be used within ConnectProvider`);return e};export{c as n,s as t};
