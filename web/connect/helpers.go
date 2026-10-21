@@ -83,9 +83,6 @@ func applyRuntime(profile *clients.DeploymentProfile, runtime *configv1.RuntimeC
 	if runtime == nil {
 		return errors.New("runtime config is required")
 	}
-	if runtime.MemoryReportRawUsed != nil || runtime.CustomDns != nil || runtime.PreferIpVersion != nil || runtime.InfoReportInterval != nil || runtime.MaxRetries != nil || runtime.ReconnectInterval != nil || runtime.DisableCompression != nil || runtime.CustomIpv4 != nil || runtime.CustomIpv6 != nil || runtime.DisableAutoUpdate != nil || runtime.IgnoreUnsafeCert != nil || len(runtime.ProtoReflect().GetUnknown()) > 0 {
-		return errors.New("runtime config contains unsupported fields; no revision was saved")
-	}
 	if runtime.EnableGpu != nil || runtime.RemoteControlEnabled != nil {
 		return errors.New("GPU enablement and remote control are install-only settings and require reinstalling the Agent")
 	}

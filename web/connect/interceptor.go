@@ -26,7 +26,6 @@ func newPolicyInterceptor() *policyInterceptor {
 		browser     = "/komari.browser.v1.BrowserService/"
 		config      = "/komari.config.v1.ConfigService/"
 		privileged  = "/komari.config.v1.PrivilegedDeliveryService/"
-		host        = "/komari.host.v1.HostService/"
 		enroll      = "/komari.enrollment.v1.EnrollmentService/"
 		enrollAdmin = "/komari.enrollment.v1.EnrollmentAdminService/"
 		deploy      = "/komari.deployment.v1.DeploymentService/"
@@ -56,7 +55,7 @@ func newPolicyInterceptor() *policyInterceptor {
 	add(browser, rpc.RoleGuest, 30*time.Second, "GetPublicInfo", "ListAgents", "GetAgent", "GetSession", "GetThemeContract")
 	add(browser, rpc.RoleAdmin, 30*time.Second, "GetTrafficTrend")
 	add(browser, rpc.RoleGuest, 30*time.Minute, "WatchAgentStatus")
-	add(config, rpc.RoleClient, 30*time.Second, "InitializeNodeConfig", "GetDesiredConfig", "AcknowledgeConfig")
+	add(config, rpc.RoleClient, 30*time.Second, "GetDesiredConfig", "AcknowledgeConfig")
 	add(config, rpc.RoleClient, 30*time.Minute, "WatchDesiredConfig")
 	add(config, rpc.RoleAdmin, 30*time.Second, "UpdateDesiredConfig")
 	add(privileged, rpc.RoleClient, 30*time.Second, "GetPrivilegedDelivery", "ReportPrivilegedDelivery", "CompleteManualUpgrade")
@@ -94,8 +93,7 @@ func newPolicyInterceptor() *policyInterceptor {
 	add(rescue, rpc.RoleClient, 30*time.Minute, "LeaseRescueSessions")
 	add(rescue, rpc.RoleClient, 30*time.Second, "ReportRescueEvent", "ReportRescueStatus")
 	add(enrollAdmin, rpc.RoleAdmin, 30*time.Second, "ListPendingEnrollments", "GetPendingEnrollment", "ApproveEnrollment", "DenyEnrollment")
-	add(privileged, rpc.RoleAdmin, 30*time.Second, "ListPrivilegedRevisions", "GetNodeConfigState")
-	add(host, rpc.RoleClient, 30*time.Second, "NegotiateHostProtocol", "PrepareHostOperation", "ReportHostOperation", "GetHostOperation")
+	add(privileged, rpc.RoleAdmin, 30*time.Second, "ListPrivilegedRevisions")
 	return &policyInterceptor{policies: policies}
 }
 

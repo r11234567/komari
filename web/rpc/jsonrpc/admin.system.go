@@ -187,7 +187,7 @@ func adminExec(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcE
 		return nil, rpc.MakeError(rpc.InvalidParams, "clients is required", nil)
 	}
 	for _, uuid := range params.Clients {
-		allowed, err := clients.PrivilegedCapabilityAllowed(uuid, "execution")
+		allowed, err := clients.RemoteControlAllowed(uuid)
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to read remote-control policy", nil)
 		}

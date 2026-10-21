@@ -20,7 +20,7 @@ func TestGetClientBasicInfoUsesConfiguredOrder(t *testing.T) {
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&models.Client{}, &models.ClientDeploymentProfile{}, &models.ClientPrivilegedState{}))
+	require.NoError(t, db.AutoMigrate(&models.Client{}, &models.ClientDeploymentProfile{}))
 
 	createdAt := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
 	require.NoError(t, db.Create([]models.Client{

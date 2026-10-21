@@ -91,17 +91,3 @@ func TestRuntimeIdentityUsesDedicatedServiceAccount(t *testing.T) {
 		}
 	}
 }
-
-func TestDeploymentCommandDoesNotEmitOnlineConfigurationFlags(t *testing.T) {
-	for _, platform := range []string{"linux", "windows", "macos"} {
-		command, err := deploymentCommand(clients.DeploymentProfile{Platform: platform, RuntimeIdentity: clients.AgentRuntimeIdentityServiceAccount, EnableGPU: true, DetailedGPU: true, GetIPAddrFromNIC: true}, "https://panel.example", "one-time-token")
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, removed := range []string{"--enable-gpu", "--detailed-gpu", "--get-ip-addr-from-nic"} {
-			if strings.Contains(command, removed) {
-				t.Fatalf("%s command emits removed online option %s", platform, removed)
-			}
-		}
-	}
-}

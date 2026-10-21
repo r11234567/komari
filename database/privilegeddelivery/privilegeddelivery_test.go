@@ -28,9 +28,8 @@ func TestSaveWithSingleConnectionPoolDoesNotDeadlock(t *testing.T) {
 
 	require.NoError(t, db.AutoMigrate(
 		&models.Client{},
-		&models.ClientDeploymentProfile{}, &models.ClientPrivilegedState{},
+		&models.ClientDeploymentProfile{},
 		&models.ClientPrivilegedRevision{},
-		&models.ClientPrivilegedState{}, &models.ClientHostOperation{}, &models.ClientPrivilegedReceipt{},
 	))
 
 	clientUUID := "test-agent-deadlock-prevention"

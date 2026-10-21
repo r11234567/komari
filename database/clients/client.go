@@ -83,7 +83,6 @@ func deleteClient(db *gorm.DB, clientUuid string) (bool, error) {
 			"traffic calibration adjustments": &models.TrafficCalibrationAdjustment{},
 			"ping loss notifications":         &models.PingLossNotification{},
 			"task results":                    &models.TaskResult{},
-			"installation baseline":           &models.ClientConfigBaseline{},
 			"deployment profile":              &models.ClientDeploymentProfile{},
 		} {
 			if !tx.Migrator().HasTable(model) {
@@ -349,13 +348,12 @@ func CreateClientWithName(name string) (clientUUID, token string, err error) {
 
 func newClient(clientUUID, token, name string, now time.Time) models.Client {
 	return models.Client{
-		ConfigBaselineEligible: true,
-		UUID:                   clientUUID,
-		Token:                  token,
-		Name:                   name,
-		TrafficLimitType:       "sum",
-		CreatedAt:              now,
-		UpdatedAt:              now,
+		UUID:             clientUUID,
+		Token:            token,
+		Name:             name,
+		TrafficLimitType: "sum",
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 }
 

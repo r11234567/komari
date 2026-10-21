@@ -41,7 +41,7 @@ func (s *webSSHService) CreateSession(ctx context.Context, req *connect.Request[
 	if _, err := clients.GetClientByUUID(agentID); err != nil {
 		return nil, connectError(connect.CodeNotFound, errors.New("agent not found"))
 	}
-	allowed, err := clients.PrivilegedCapabilityAllowed(agentID, "webssh")
+	allowed, err := clients.RemoteControlAllowed(agentID)
 	if err != nil {
 		return nil, connectError(connect.CodeInternal, err)
 	}
@@ -166,13 +166,6 @@ func (s *webSSHService) LeaseSessions(ctx context.Context, req *connect.Request[
 		if err != nil {
 			return err
 		}
-		allowed, e := clients.PrivilegedCapabilityAllowed(agentID, "webssh")
-		if e != nil {
-			return connectError(connect.CodeInternal, e)
-		}
-		if !allowed {
-			return connectError(connect.CodePermissionDenied, errors.New("WebSSH authorization was revoked"))
-		}
 		if err := stream.Send(&websshv1.LeaseSessionsResponse{Assignment: assignment}); err != nil {
 			return err
 		}
@@ -191,13 +184,6 @@ func (s *webSSHService) AttachSession(ctx context.Context, stream *connect.BidiS
 	agentID, err := requireAgent(rpc.MetaFromContext(ctx), attach.AgentId)
 	if err != nil {
 		return err
-	}
-	allowed, e := clients.PrivilegedCapabilityAllowed(agentID, "webssh")
-	if e != nil {
-		return connectError(connect.CodeInternal, e)
-	}
-	if !allowed {
-		return connectError(connect.CodePermissionDenied, errors.New("WebSSH authorization was revoked"))
 	}
 	session, err := remotemanagement.Attach(agentID, attach.AssignmentId, attach.SessionId)
 	if err != nil {
@@ -266,7 +252,7 @@ func (s *webSSHService) OpenSession(ctx context.Context, stream *connect.BidiStr
 	if _, err := clients.GetClientByUUID(agentID); err != nil {
 		return connectError(connect.CodeNotFound, errors.New("agent not found"))
 	}
-	allowed, err := clients.PrivilegedCapabilityAllowed(agentID, "webssh")
+	allowed, err := clients.RemoteControlAllowed(agentID)
 	if err != nil {
 		return connectError(connect.CodeInternal, err)
 	}

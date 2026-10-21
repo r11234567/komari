@@ -37,5 +37,3 @@ go.work.sum
 # build
 komari
 .codex
-
-/ci-artifacts/
