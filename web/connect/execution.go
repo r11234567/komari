@@ -52,7 +52,7 @@ func (s *executionService) CreateExecution(ctx context.Context, req *connect.Req
 		if _, err := clients.GetClientByUUID(agentID); err != nil {
 			return nil, connectError(connect.CodeNotFound, errors.New("agent not found: "+agentID))
 		}
-		allowed, err := clients.RemoteControlAllowed(agentID)
+		allowed, err := clients.PrivilegedCapabilityAllowed(agentID, "execution")
 		if err != nil {
 			return nil, connectError(connect.CodeInternal, err)
 		}
@@ -144,6 +144,15 @@ func (s *executionService) LeaseExecution(ctx context.Context, req *connect.Requ
 		dispatch, err := executionapp.NextDispatch(ctx, agentID, req.Msg.AfterAssignmentId, delivered)
 		if err != nil {
 			return err
+		}
+		if dispatch.Assignment != nil {
+			allowed, e := clients.PrivilegedCapabilityAllowed(agentID, "execution")
+			if e != nil {
+				return connectError(connect.CodeInternal, e)
+			}
+			if !allowed {
+				return connectError(connect.CodePermissionDenied, errors.New("execution authorization was revoked"))
+			}
 		}
 		if err := stream.Send(&execv1.LeaseExecutionResponse{Assignment: dispatch.Assignment, Cancellation: dispatch.Cancellation}); err != nil {
 			return err

@@ -19,6 +19,10 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils"
+	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
+	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -38,6 +42,10 @@ const (
 	StateDelivered                int32 = 3
 	StateRolledBack               int32 = 4
 	StateFailed                   int32 = 5
+	StateAwaitingAgent            int32 = 6
+	StateApplying                 int32 = 7
+	StateSuperseded               int32 = 8
+	StateExpired                  int32 = 9
 
 	privilegeUnspecified  int32 = 0
 	privilegeLinuxRoot    int32 = 1
@@ -48,7 +56,7 @@ const (
 	// nonceLifetime bounds how long a manual upgrade task stays redeemable. A
 	// task that sat unused for days is more likely forgotten than pending, and
 	// a short window limits how long a leaked nonce is worth anything.
-	nonceLifetime = 24 * time.Hour
+	nonceLifetime = 30 * time.Minute
 )
 
 // Settings is the privileged configuration carried by one revision.
@@ -63,6 +71,13 @@ type Settings struct {
 
 // Revision is one stored revision with its decision state.
 type Revision struct {
+	Authorization       []byte
+	ProtocolVersion     uint32
+	ConfigHash          string
+	ApprovalGeneration  uint64
+	ConfirmedBy         string
+	ReceivedAt          *time.Time
+	UpdateSequence      uint64
 	Client              string
 	Revision            uint64
 	Settings            Settings
@@ -101,51 +116,36 @@ func Save(clientUUID string, settings Settings, expectedRevision uint64, reason 
 func SaveWithDB(db *gorm.DB, clientUUID string, settings Settings, expectedRevision uint64, reason string) (Revision, error) {
 	var result Revision
 	err := db.Transaction(func(tx *gorm.DB) error {
-		latest, found, err := latestLocked(tx, clientUUID)
+		state, err := lockState(tx, clientUUID)
 		if err != nil {
 			return err
 		}
-		current := uint64(0)
-		if found {
-			current = latest.Revision
-		}
-		if expectedRevision != 0 && expectedRevision != current {
-			return fmt.Errorf("privileged configuration changed since it was read (expected revision %d, current %d)",
-				expectedRevision, current)
-		}
-
-		if settings.RemoteControlEnabled && !isPrivilegedMode(settings.RequiredPrivilegeMode) {
-			return errors.New("remote control requires running as root/administrator")
+		if expectedRevision != state.DesiredRevision {
+			return fmt.Errorf("privileged configuration conflict: expected %d, current %d", expectedRevision, state.DesiredRevision)
 		}
 		if (settings.WebSSHEnabled || settings.ExecutionEnabled) && !settings.RemoteControlEnabled {
-			return errors.New("webssh and remote commands require remote control master switch to be enabled")
+			return errors.New("webssh and execution require remote control")
 		}
-
+		if settings.RescueHelperEnabled && settings.RemoteControlEnabled {
+			return errors.New("rescue helper and ordinary remote control are mutually exclusive")
+		}
+		if settings.RequiredPrivilegeMode < 0 || settings.RequiredPrivilegeMode > 5 {
+			return errors.New("unsupported privilege mode")
+		}
 		class, reasons, from, to := classify(tx, clientUUID, settings)
 		now := time.Now().UTC()
-		row := models.ClientPrivilegedRevision{
-			Client:            clientUUID,
-			Revision:          current + 1,
-			Config:            encodeSettings(settings),
-			UpgradeClass:      class,
-			Reasons:           encodeReasons(appendReason(reasons, reason)),
-			FromPrivilegeMode: from,
-			ToPrivilegeMode:   to,
-			State:             StateNeedsConfirmation,
-			PreviousRevision:  current,
-			SavedAt:           now,
-			CreatedAt:         now,
+		// A new desired revision invalidates old pending approvals atomically.
+		if err := tx.Model(&models.ClientPrivilegedRevision{}).Where("client = ? AND state IN ?", clientUUID, []int32{StateNeedsConfirmation, StateNeedsManualAuthorization, StateAwaitingAgent, StateApplying, StateExpired}).Updates(map[string]any{"state": StateSuperseded, "superseded_at": now, "nonce": "", "update_sequence": state.UpdateSequence + 1}).Error; err != nil {
+			return err
 		}
-		// A manual-privileged revision gets its nonce at save time rather than
-		// at confirmation, so the panel can show the operator the exact command
-		// before anyone commits to the change.
-		if class == ClassManualPrivileged {
-			expiry := now.Add(nonceLifetime)
-			row.TaskID = utils.GenerateRandomString(32)
-			row.Nonce = utils.GenerateRandomString(43)
-			row.NonceExpires = &expiry
-		}
+		row := models.ClientPrivilegedRevision{Client: clientUUID, Revision: state.DesiredRevision + 1, Config: encodeSettings(settings), ConfigHash: settingsHash(settings), ProtocolVersion: 2, UpgradeClass: class, Reasons: encodeReasons(appendReason(reasons, reason)), FromPrivilegeMode: from, ToPrivilegeMode: to, State: StateNeedsConfirmation, PreviousRevision: state.AppliedRevision, SavedAt: now, CreatedAt: now, UpdateSequence: state.UpdateSequence + 1}
 		if err := tx.Create(&row).Error; err != nil {
+			return err
+		}
+		state.DesiredRevision = row.Revision
+		state.UpdateSequence++
+		state.UpdatedAt = now
+		if err := tx.Save(&state).Error; err != nil {
 			return err
 		}
 		result = toRevision(row)
@@ -199,73 +199,111 @@ func History(clientUUID string, limit int) ([]Revision, error) {
 // upgrade: the state moves to awaiting manual authorization, and nothing here
 // can move it further.
 func Confirm(clientUUID string, revision uint64, userUUID string) (Revision, error) {
+	return ConfirmWithDB(dbcore.GetDBInstance(), clientUUID, revision, userUUID)
+}
+
+func ConfirmWithDB(db *gorm.DB, clientUUID string, revision uint64, userUUID string) (Revision, error) {
 	var result Revision
-	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
+		state, err := lockState(tx, clientUUID)
+		if err != nil {
+			return err
+		}
 		row, err := lockRevision(tx, clientUUID, revision)
 		if err != nil {
 			return err
 		}
-		if row.State != StateNeedsConfirmation {
-			return fmt.Errorf("revision %d is not awaiting confirmation", revision)
+		if state.DesiredRevision != revision || row.SupersededAt != nil {
+			return errors.New("revision has been superseded")
+		}
+		if row.ProtocolVersion != 2 {
+			return errors.New("legacy task must be superseded by a v2 revision")
+		}
+		if strings.TrimSpace(userUUID) == "" {
+			return errors.New("an approving user is required")
 		}
 		now := time.Now().UTC()
-		// Confirmation never completes a privileged change, whatever its class.
-		// Even within one privilege level the host still has to apply it and
-		// say so, because the panel cannot observe that the Agent restarted
-		// and adopted the settings; reporting is what closes the loop.
-		next := StateNeedsManualAuthorization
-		updates := map[string]any{
-			"state": next, "confirmed_at": now, "updated_at": now,
+		if row.State == StateDelivered {
+			result = toRevision(row)
+			return nil
 		}
-		if err := tx.Model(&row).Updates(updates).Error; err != nil {
+		if row.ConfirmedAt != nil && row.NonceExpires != nil && now.Before(*row.NonceExpires) && (row.State == StateNeedsManualAuthorization || row.State == StateAwaitingAgent || row.State == StateApplying || row.State == StateDelivered) {
+			result = toRevision(row)
+			return nil
+		}
+		if row.State != StateNeedsConfirmation && row.State != StateExpired && row.State != StateNeedsManualAuthorization && row.State != StateAwaitingAgent {
+			return errors.New("revision cannot be confirmed in its current state")
+		}
+		if state.ProtocolVersion != 2 || state.ServiceID == "" {
+			return errors.New("agent must negotiate privileged_delivery_v2 before approval")
+		}
+		actions, err := requiredActions(tx, state, row)
+		if err != nil {
 			return err
 		}
-		row.State = next
+		if !supportsActions(state, actions) {
+			return errors.New("host does not support a required administrative action")
+		}
+		row.State = StateAwaitingAgent
+		if len(actions) > 0 {
+			row.State = StateNeedsManualAuthorization
+			row.UpgradeClass = ClassManualPrivileged
+		} else {
+			row.UpgradeClass = ClassManualConfirm
+		}
 		row.ConfirmedAt = &now
+		row.ConfirmedBy = userUUID
+		row.ApprovalGeneration++
+		row.TaskID = utils.GenerateRandomString(32)
+		row.Nonce = utils.GenerateRandomString(43)
+		row.NonceUsedAt = nil
+		expiry := now.Add(nonceLifetime)
+		row.NonceExpires = &expiry
+		authorization := &hostv1.HostAuthorization{AgentId: clientUUID, Revision: revision, ConfigHash: row.ConfigHash, ApprovalGeneration: row.ApprovalGeneration, ServiceId: state.ServiceID, TargetPrivilegeMode: reportv1.PrivilegeMode(row.ToPrivilegeMode), Nonce: row.Nonce, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expiry), ApprovedBy: userUUID}
+		for _, action := range actions {
+			authorization.Actions = append(authorization.Actions, hostv1.HostAction(action))
+		}
+		row.Authorization, err = proto.MarshalOptions{Deterministic: true}.Marshal(authorization)
+		if err != nil {
+			return err
+		}
+		if err := advance(tx, &state, &row); err != nil {
+			return err
+		}
 		result = toRevision(row)
 		return nil
 	})
 	return result, err
 }
 
-// Report records an outcome reported by the host.
+// Report is a legacy transport receipt only. It cannot approve or complete a task.
 func Report(clientUUID string, revision uint64, state, activeMode int32, detail string) (Revision, error) {
+	return ReportWithDB(dbcore.GetDBInstance(), clientUUID, revision, state, activeMode, detail)
+}
+
+func ReportWithDB(db *gorm.DB, clientUUID string, revision uint64, event, activeMode int32, detail string) (Revision, error) {
 	var result Revision
-	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
+		state, err := lockState(tx, clientUUID)
+		if err != nil {
+			return err
+		}
 		row, err := lockRevision(tx, clientUUID, revision)
 		if err != nil {
 			return err
 		}
-		now := time.Now().UTC()
-		updates := map[string]any{
-			"state":                 state,
-			"active_privilege_mode": activeMode,
-			"error_detail":          truncate(detail, 512),
-			"updated_at":            now,
+		if event != StateNeedsConfirmation && event != StateNeedsManualAuthorization {
+			return errors.New("legacy terminal reports are disabled; upgrade to privileged_delivery_v2")
 		}
-		if state == StateDelivered || state == StateRolledBack || state == StateFailed {
-			updates["finished_at"] = now
+		if row.State == StateSuperseded {
+			return errors.New("revision has been superseded")
 		}
-		if err := tx.Model(&row).Updates(updates).Error; err != nil {
-			return err
-		}
-		if state == StateDelivered {
-			settings := decodeSettings(row.Config)
-			identity := clients.AgentRuntimeIdentityServiceAccount
-			if isPrivilegedMode(activeMode) {
-				identity = clients.AgentRuntimeIdentityPrivileged
-			}
-			if err := clients.UpdatePrivilegedStatusInDeploymentProfileWithDB(tx, clientUUID, settings.RemoteControlEnabled, identity); err != nil {
+		if row.ReceivedAt == nil {
+			now := time.Now().UTC()
+			row.ReceivedAt = &now
+			if err := advance(tx, &state, &row); err != nil {
 				return err
 			}
-		} else if state == StateRolledBack {
-			_ = clients.UpdatePrivilegedStatusInDeploymentProfileWithDB(tx, clientUUID, false, clients.AgentRuntimeIdentityServiceAccount)
-		}
-		row.State = state
-		row.ActivePrivilegeMode = activeMode
-		row.ErrorDetail = truncate(detail, 512)
-		if state == StateDelivered || state == StateRolledBack || state == StateFailed {
-			row.FinishedAt = &now
 		}
 		result = toRevision(row)
 		return nil
@@ -273,60 +311,10 @@ func Report(clientUUID string, revision uint64, state, activeMode int32, detail 
 	return result, err
 }
 
-// RedeemNonce marks a manual upgrade as completed on the host.
-//
-// The nonce is single-use, which is what makes this evidence rather than a
-// claim: it was delivered to one machine, and redeeming it proves the upgrade
-// ran there rather than being asserted from somewhere else.
+// RedeemNonce cannot establish OS authentication or daemon application. Legacy
+// callers must upgrade; v2 records host progress and daemon observation separately.
 func RedeemNonce(clientUUID, nonce, operator, localAuth string, resultingMode int32) (Revision, error) {
-	var result Revision
-	trimmed := strings.TrimSpace(nonce)
-	if trimmed == "" {
-		return result, errors.New("an upgrade task nonce is required")
-	}
-	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
-		var row models.ClientPrivilegedRevision
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("client = ? AND nonce = ?", clientUUID, trimmed).First(&row).Error; err != nil {
-			return errors.New("this upgrade task is not recognized for this machine")
-		}
-		if row.NonceUsedAt != nil {
-			return errors.New("this upgrade task was already completed")
-		}
-		now := time.Now().UTC()
-		if row.NonceExpires != nil && now.After(*row.NonceExpires) {
-			return errors.New("this upgrade task has expired; deliver the change again")
-		}
-		updates := map[string]any{
-			"nonce_used_at":         now,
-			"operator":              truncate(operator, 128),
-			"local_authentication":  truncate(localAuth, 64),
-			"active_privilege_mode": resultingMode,
-			"state":                 StateDelivered,
-			"finished_at":           now,
-			"updated_at":            now,
-		}
-		if err := tx.Model(&row).Updates(updates).Error; err != nil {
-			return err
-		}
-		settings := decodeSettings(row.Config)
-		identity := clients.AgentRuntimeIdentityServiceAccount
-		if isPrivilegedMode(resultingMode) {
-			identity = clients.AgentRuntimeIdentityPrivileged
-		}
-		if err := clients.UpdatePrivilegedStatusInDeploymentProfileWithDB(tx, clientUUID, settings.RemoteControlEnabled, identity); err != nil {
-			return err
-		}
-		row.NonceUsedAt = &now
-		row.Operator = truncate(operator, 128)
-		row.LocalAuthentication = truncate(localAuth, 64)
-		row.ActivePrivilegeMode = resultingMode
-		row.State = StateDelivered
-		row.FinishedAt = &now
-		result = toRevision(row)
-		return nil
-	})
-	return result, err
+	return Revision{}, errors.New("legacy completion is disabled; use privileged_delivery_v2 host operations and daemon acknowledgement")
 }
 
 // classify decides how a revision may be adopted.
@@ -338,35 +326,14 @@ func RedeemNonce(clientUUID, nonce, operator, localAuth string, resultingMode in
 // itself no matter how they are confirmed.
 func classify(db *gorm.DB, clientUUID string, settings Settings) (class int32, reasons []string, from, to int32) {
 	from = InstalledPrivilegeModeWithDB(db, clientUUID)
-	to = from
-
-	widening := settings.RemoteControlEnabled || settings.WebSSHEnabled ||
-		settings.ExecutionEnabled || settings.RescueHelperEnabled
-
-	if !widening {
-		// Narrowing or GPU-only changes still take a confirmation. They are
-		// delivered on the privileged track because they belong to the same
-		// settings group, and a confirmation is cheap compared to discovering
-		// that remote control was switched off by accident.
-		return ClassManualConfirm, []string{"privileged settings always require an explicit confirmation"}, from, to
+	to = settings.RequiredPrivilegeMode
+	if to == privilegeUnspecified {
+		to = from
 	}
-
-	required := settings.RequiredPrivilegeMode
-	if required == privilegeUnspecified {
-		required = privilegedEquivalent(from)
+	if to != from || settings.RescueHelperEnabled {
+		return ClassManualPrivileged, []string{"service identity changes and helper installation require local administrator authorization"}, from, to
 	}
-	to = required
-
-	if isPrivilegedMode(from) {
-		reasons = append(reasons, "the Agent already runs privileged, so this needs a confirmation in the panel")
-		return ClassManualConfirm, reasons, from, to
-	}
-
-	reasons = append(reasons,
-		"remote control, WebSSH, execution and the rescue helper run commands with the Agent's own identity",
-		"this Agent runs as an unprivileged service account, so it must be upgraded on the host",
-		"the operator authenticates on the machine; no credential is sent to the panel")
-	return ClassManualPrivileged, reasons, from, to
+	return ClassManualConfirm, []string{"same-identity capability changes require signed panel approval"}, from, to
 }
 
 // installedPrivilegeMode reads what the Agent was installed as.
@@ -382,6 +349,10 @@ func InstalledPrivilegeMode(clientUUID string) int32 {
 
 // InstalledPrivilegeModeWithDB reports what the Agent service is installed as using the provided DB/tx instance.
 func InstalledPrivilegeModeWithDB(db *gorm.DB, clientUUID string) int32 {
+	var state models.ClientPrivilegedState
+	if err := db.First(&state, "client = ?", clientUUID).Error; err == nil && state.ProtocolVersion == 2 && state.PrivilegeMode != 0 {
+		return state.PrivilegeMode
+	}
 	profile, saved, err := clients.GetDeploymentProfileWithDB(db, clientUUID)
 	if err != nil || !saved {
 		return privilegeUnspecified
@@ -437,6 +408,7 @@ func lockRevision(tx *gorm.DB, clientUUID string, revision uint64) (models.Clien
 
 func toRevision(row models.ClientPrivilegedRevision) Revision {
 	revision := Revision{
+		Authorization: row.Authorization, ProtocolVersion: row.ProtocolVersion, ConfigHash: row.ConfigHash, ApprovalGeneration: row.ApprovalGeneration, ConfirmedBy: row.ConfirmedBy, ReceivedAt: row.ReceivedAt, UpdateSequence: row.UpdateSequence,
 		Client:              row.Client,
 		Revision:            row.Revision,
 		Settings:            decodeSettings(row.Config),
@@ -459,7 +431,7 @@ func toRevision(row models.ClientPrivilegedRevision) Revision {
 		FinishedAt:          row.FinishedAt,
 	}
 	if row.UpgradeClass == ClassManualPrivileged {
-		revision.UpgradeCommand = "sudo komari-agent upgrade"
+		revision.UpgradeCommand = fmt.Sprintf("sudo komari-host apply --revision %d", row.Revision)
 	}
 	return revision
 }

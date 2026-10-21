@@ -52,7 +52,7 @@ func CreateSession(c *gin.Context) {
 		api.RespondError(c, http.StatusNotFound, "Client not found")
 		return
 	}
-	allowed, err := clients.RemoteControlAllowed(uuid)
+	allowed, err := clients.PrivilegedCapabilityAllowed(uuid, "execution")
 	if err != nil || !allowed {
 		api.RespondError(c, http.StatusForbidden, "Remote control is disabled for this client")
 		return

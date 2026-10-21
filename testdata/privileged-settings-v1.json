@@ -1,0 +1,46 @@
+[
+  {
+    "booleans": [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "required_privilege_mode": 0,
+    "sha256": "046fdd75d6dac73ab678765dab5ffaa2ffbdaf086d5d330d635b4f6ec49513e6"
+  },
+  {
+    "booleans": [
+      1,
+      1,
+      0,
+      0,
+      0
+    ],
+    "required_privilege_mode": 1,
+    "sha256": "0871ecde659efe44d160a0cd1ba21d3b854d381b3dec06a6d950d3a3fd5c5624"
+  },
+  {
+    "booleans": [
+      0,
+      0,
+      0,
+      0,
+      1
+    ],
+    "required_privilege_mode": 2,
+    "sha256": "11c44d4df2a356cc331228d0c7741d3b68b0ee12143d43df058460c93e52822d"
+  },
+  {
+    "booleans": [
+      1,
+      0,
+      1,
+      1,
+      0
+    ],
+    "required_privilege_mode": 3,
+    "sha256": "f49adf70ac905d501c03a3a7f6a72ba4dcfee3ff33ec165e0f43e7c23a406cf9"
+  }
+]

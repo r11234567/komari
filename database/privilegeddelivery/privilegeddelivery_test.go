@@ -30,6 +30,7 @@ func TestSaveWithSingleConnectionPoolDoesNotDeadlock(t *testing.T) {
 		&models.Client{},
 		&models.ClientDeploymentProfile{},
 		&models.ClientPrivilegedRevision{},
+		&models.ClientPrivilegedState{}, &models.ClientHostOperation{}, &models.ClientPrivilegedReceipt{},
 	))
 
 	clientUUID := "test-agent-deadlock-prevention"

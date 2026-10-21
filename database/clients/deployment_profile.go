@@ -148,14 +148,7 @@ func GetDeploymentProfileWithDelivery(clientUUID string) (DeploymentProfile, boo
 // agents, remote control is strictly forbidden until explicitly enabled by an
 // authorized deployment profile or privileged grant.
 func RemoteControlAllowed(clientUUID string) (bool, error) {
-	profile, saved, err := GetDeploymentProfile(clientUUID)
-	if err != nil {
-		return false, err
-	}
-	if !saved {
-		return false, nil
-	}
-	return profile.RemoteControlEnabled, nil
+	return PrivilegedCapabilityAllowed(clientUUID, "remote")
 }
 
 // UpdatePrivilegedStatusInDeploymentProfileWithDB syncs newly confirmed/redeemed privileged settings
@@ -863,4 +856,55 @@ func adoptDeploymentRuntimeConfig(db *gorm.DB, clientUUID, platform string, conf
 		return nil
 	})
 	return adopted, err
+}
+
+// PrivilegedCapabilityAllowed applies both the actual snapshot and pending
+// revocations. A desired grant never enables access before a daemon ACK.
+// Legacy nodes retain their existing deployment policy until v2 is negotiated.
+func PrivilegedCapabilityAllowed(clientUUID, feature string) (bool, error) {
+	return PrivilegedCapabilityAllowedWithDB(dbcore.GetDBInstance(), clientUUID, feature)
+}
+func PrivilegedCapabilityAllowedWithDB(db *gorm.DB, clientUUID, feature string) (bool, error) {
+	var state models.ClientPrivilegedState
+	err := db.First(&state, "client = ?", clientUUID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) || err == nil && state.ProtocolVersion != 2 {
+		profile, saved, e := getDeploymentProfile(db, clientUUID)
+		return saved && profile.RemoteControlEnabled, e
+	}
+	if err != nil {
+		return false, err
+	}
+	if state.AppliedRevision == 0 {
+		return false, nil
+	}
+	type settings struct {
+		Remote    bool `json:"remote_control_enabled"`
+		WebSSH    bool `json:"webssh_enabled"`
+		Execution bool `json:"execution_enabled"`
+	}
+	allows := func(revision uint64) (bool, error) {
+		var row models.ClientPrivilegedRevision
+		if err := db.First(&row, "client = ? AND revision = ?", clientUUID, revision).Error; err != nil {
+			return false, err
+		}
+		var s settings
+		if err := json.Unmarshal([]byte(row.Config), &s); err != nil {
+			return false, err
+		}
+		switch feature {
+		case "remote":
+			return s.Remote, nil
+		case "webssh":
+			return s.Remote && s.WebSSH, nil
+		case "execution":
+			return s.Remote && s.Execution, nil
+		default:
+			return false, errors.New("unknown privileged capability")
+		}
+	}
+	applied, e := allows(state.AppliedRevision)
+	if e != nil || !applied {
+		return false, e
+	}
+	return allows(state.DesiredRevision)
 }
