@@ -13,6 +13,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
+	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -903,6 +904,11 @@ func PrivilegedCapabilityAllowedWithDB(db *gorm.DB, clientUUID, feature string) 
 		var row models.ClientPrivilegedRevision
 		if err := db.First(&row, "client = ? AND revision = ?", clientUUID, revision).Error; err != nil {
 			return false, err
+		}
+		if row.State == int32(configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_FAILED) {
+			// A restored host may retain a historical applied pointer. That
+			// snapshot must not authorize new sessions after recovery failed it.
+			return false, nil
 		}
 		var s settings
 		if err := json.Unmarshal([]byte(row.Config), &s); err != nil {

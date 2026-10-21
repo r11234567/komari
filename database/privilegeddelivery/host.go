@@ -142,7 +142,7 @@ func ReportOperation(db *gorm.DB, r *hostv1.ReportHostOperationRequest) (*hostv1
 		if phase <= 3 && !current {
 			return errors.New("host operation approval has been replaced")
 		}
-		if op.Phase >= 4 || (op.Phase == 3 && phase < 4) || phase < 2 || phase > 5 || phase < op.Phase || row.State == StateDelivered || (row.State == StateFailed && phase <= 3) {
+		if op.Phase >= 4 || (op.Phase == 3 && phase < 4) || phase < 2 || phase > 5 || phase < op.Phase || (row.State == StateDelivered && phase != int32(hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED)) || (row.State == StateFailed && phase <= 3) {
 			return errors.New("illegal host operation transition")
 		}
 		// Failure/restoration can be reported after expiry; success must happen in the lease.
@@ -165,6 +165,9 @@ func ReportOperation(db *gorm.DB, r *hostv1.ReportHostOperationRequest) (*hostv1
 			return err
 		}
 		if phase >= 4 {
+			// The daemon ACK may have arrived before the administrator's local
+			// restoration. Record that restoration without fabricating another
+			// applied revision or accepting a delayed success for the old profile.
 			row.State = StateFailed
 			row.ErrorDetail = truncate(r.Error, 512)
 			now := time.Now().UTC()

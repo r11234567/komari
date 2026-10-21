@@ -1,5 +1,7 @@
 # 阶段 0–5 与前端交付状态
 
+阶段 6 正在复审和验收，尚未完成；连续 CI 失败的证据、根因与本轮修复见 [阶段 6 失败复盘](privileged-stage6-failure-review.md)。CLI 尚未开始清理。下面的阶段 0–5 结果是历史验收记录，不能代表阶段 6 通过。
+
 2026-10-21。开发分支已经实施阶段 0–5，并提前修复两处前端。所有 PR 仍为草稿；尚未合并、发布或部署，FRA 生产服务与历史任务未修改。
 
 | 仓库 | 草稿 PR | 本轮职责 |
@@ -9,7 +11,7 @@
 | komari-agent | https://github.com/r11234567/komari-agent/pull/36 | 可信安装/迁移/host 工具；基线及同身份批准应用；有效配置、分项入口、单写者、回执重试 |
 | komari-web | https://github.com/r11234567/komari-web/pull/10 | 部署对话框与特权配置页复用权威状态组件；2FA 前重查；真实 applied 与初始化提示 |
 
-三消费者固定同一新 proto：`cb1f5e8abec38b5983b22384e8e234e05de5c531`。Go 版本为 `v0.1.38-0.20261021121746-cb1f5e8abec3`，Web package/lock 均为 immutable git commit，无本地 replace。后端 web/public/systemUI/dist/source.json 记录 Web head、CI 实际 merge commit、proto、lock SHA 和构建运行链接。
+三消费者固定同一新 proto：`e575defe19425b8d79f08457c5262f3dd51e32ee`。Go 版本为 `v0.1.38-0.20261021140444-e575defe1942`，Web package/lock 均为 immutable git commit，无本地 replace。后端 web/public/systemUI/dist/source.json 记录 Web head、CI 实际 merge commit、proto、lock SHA 和构建运行链接。
 
 阶段 3 已建立 Linux systemd 的 root-owned daemon/host binaries、manifest/policy、独立 service-owned state 和 root journal。host diagnose、migrate、update 已实现；config show 和 status privileged 正式可用，默认与 daemon 共用服务定位。迁移保留 endpoint、账户、自定义服务名/状态路径、凭据和已有 revisions，不重注册或自动重启。fresh install 暂用标准 state 目录，自定义 state overrides 明确拒绝；非 Linux systemd 的新安装、身份转换和 helper 管理明确 unsupported。部分写入后的修复仍需检查 journal/备份；完整可恢复 host transaction 属阶段 6。
 
@@ -31,4 +33,4 @@
 
 本机只做格式、脚本语法和产物校验，没有运行完整构建/重测试。所有重测试放 GitHub CI，always 上传 JSONL、人类日志、编译 stderr、退出码和失败索引，保留 30 天。历史失败 artifacts 已下载到工作区 staging/komari-privilege-audit-20261021/ci/；阶段 5 原 6 项 agent 预期失败已全部提升为必须通过的正式测试，不再把失败算成功。
 
-接下来的阶段 6 才实现本机系统认证、服务身份/权限档案转换、按需救援 helper、独立管理员信任根及完整主机事务/恢复。当前协商 supported host actions 为空，komari-host apply 明确报未实现；前端不能显示一个能完成这些动作的旧 sudo upgrade 命令。Windows/macOS/FreeBSD 跨编译不等于平台特权安装验收。阶段 7 还需随 host 动作补最终操作 UI/实时身份 IPC；阶段 8 才做 FRA 灰度与生产任务迁移。
+阶段 6 候选实现已加入本机 PAM、独立管理员信任根、Linux systemd 身份转换、helper 发布签名/按需安装和恢复 journal。具备受保护 trust/PAM 条件的 Linux 节点才协商 host actions；两处前端使用新 proto 展示真实 host 操作命令、主机进度与 daemon 确认状态，内嵌构建来自 Web CI 39616080499。完整当前版本尚待真实 CI 验收，不得据此宣称阶段 6 已完成。Windows/macOS/FreeBSD 继续明确 unsupported，跨编译不等于平台特权安装验收。阶段 7 的 CLI 清理尚未开始；阶段 8 才做 FRA 灰度与生产任务迁移。

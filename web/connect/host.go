@@ -15,6 +15,7 @@ import (
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"gorm.io/gorm"
 )
 
 type hostService struct {
@@ -74,7 +75,11 @@ func (s *hostService) GetHostOperation(ctx context.Context, req *connect.Request
 	req.Msg.AgentId = id
 	op, err := privilegeddelivery.GetOperation(dbcore.GetDBInstance(), req.Msg.AgentId, req.Msg.OperationId)
 	if err != nil {
-		return nil, connectError(connect.CodeNotFound, err)
+		code := connect.CodeInternal
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			code = connect.CodeNotFound
+		}
+		return nil, connectError(code, err)
 	}
 	if err := signHostOperation(op); err != nil {
 		return nil, connectError(connect.CodeInternal, err)
