@@ -49,9 +49,11 @@ type DeploymentDeliveryState struct {
 // DeploymentProfile contains both runtime-manageable settings and values that
 // are retained solely to regenerate an installation command.
 type DeploymentProfile struct {
-	Platform        string `json:"platform"`
-	RuntimeIdentity string `json:"runtime_identity"`
-	RescueEnabled   bool   `json:"rescue_enabled"`
+	// Set by a matching v2 daemon observation, never by deployment save.
+	PrivilegedDeliveryVersion uint32 `json:"privileged_delivery_version,omitempty"`
+	Platform                  string `json:"platform"`
+	RuntimeIdentity           string `json:"runtime_identity"`
+	RescueEnabled             bool   `json:"rescue_enabled"`
 	// DisableWebSSH is retained only to decode historical profiles. WebSSH and
 	// command execution are one remote-control capability, so new profiles use
 	// RemoteControlEnabled exclusively.
@@ -275,6 +277,9 @@ func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile De
 			}
 			if err := normalizeDeploymentProfile(&previous); err != nil {
 				return fmt.Errorf("validate existing deployment profile: %w", err)
+			}
+			if profile.PrivilegedDeliveryVersion != previous.PrivilegedDeliveryVersion {
+				return errors.New("deployment save cannot change privileged protocol ownership")
 			}
 			if privilegedState.ProtocolVersion == 2 && (previous.RuntimeIdentity != profile.RuntimeIdentity || previous.RemoteControlEnabled != profile.RemoteControlEnabled || previous.RescueEnabled != profile.RescueEnabled || previous.EnableGPU != profile.EnableGPU || previous.Platform != profile.Platform) {
 				return errors.New("privileged installation fields are managed by privileged_delivery_v2; use its approved operation instead")
@@ -575,7 +580,7 @@ func normalizeDeploymentProfile(profile *DeploymentProfile) error {
 		profile.RemoteControlEnabled = false
 		profile.DisableWebSSH = false
 	}
-	if profile.RuntimeIdentity == AgentRuntimeIdentityServiceAccount {
+	if profile.RuntimeIdentity == AgentRuntimeIdentityServiceAccount && profile.PrivilegedDeliveryVersion < 2 {
 		profile.RemoteControlEnabled = false
 	}
 	if profile.RescueEnabled && profile.RemoteControlEnabled {
@@ -930,6 +935,7 @@ func UpdateAppliedPrivilegedProfileWithDB(db *gorm.DB, id string, remote, gpu, r
 	if err != nil {
 		return err
 	}
+	profile.PrivilegedDeliveryVersion = 2
 	profile.RemoteControlEnabled = remote
 	profile.EnableGPU = gpu
 	profile.RescueEnabled = rescue

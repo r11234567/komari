@@ -174,7 +174,7 @@ func Create(agentID string, action rescuev1.RescueAction, arguments []string, ti
 	}
 	allowed, err := clients.PrivilegedCapabilityAllowed(agentID, "rescue")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !saved || !allowed || profile.RemoteControlEnabled || !profile.RescueEnabled {
 		return nil, errors.New("rescue helper is unavailable unless normal remote control is disabled and rescue is enabled")

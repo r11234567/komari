@@ -348,3 +348,24 @@ func TestV2SuccessfulHostOperationAllowsDelayedDaemonReceipt(t *testing.T) {
 	_, err := Observe(db, id, "delayed-daemon", o)
 	require.NoError(t, err)
 }
+
+func TestV2SameIdentityRemoteGrantDoesNotRequireHostOperation(t *testing.T) {
+	db, id := fixtureV2(t)
+	_, r := saveConfirm(t, db, id, Settings{RemoteControlEnabled: true, WebSSHEnabled: true, RequiredPrivilegeMode: 2})
+	require.Equal(t, StateAwaitingAgent, r.State)
+	auth, err := Authorization(r)
+	require.NoError(t, err)
+	require.Empty(t, auth.Actions)
+	_, err = Observe(db, id, "same-identity", observation(r))
+	require.NoError(t, err)
+	profile, _, err := clients.GetDeploymentProfileWithDB(db, id)
+	require.NoError(t, err)
+	require.True(t, profile.RemoteControlEnabled)
+	require.Equal(t, clients.AgentRuntimeIdentityServiceAccount, profile.RuntimeIdentity)
+	allowed, err := clients.PrivilegedCapabilityAllowedWithDB(db, id, "webssh")
+	require.NoError(t, err)
+	require.True(t, allowed)
+	allowed, err = clients.PrivilegedCapabilityAllowedWithDB(db, id, "execution")
+	require.NoError(t, err)
+	require.False(t, allowed)
+}
