@@ -15,6 +15,7 @@ package connectapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -402,6 +403,13 @@ func (s *privilegedDeliveryService) GetNodeConfigState(ctx context.Context, req 
 		return nil, connectError(connect.CodeNotFound, err)
 	}
 	out := &configv1.GetNodeConfigStateResponse{AppliedRevision: snapshot.State.AppliedRevision, UpdateSequence: snapshot.State.UpdateSequence, ProtocolVersion: snapshot.State.ProtocolVersion}
+	out.HostOperation = snapshot.Operation
+	var actions []int32
+	if err = json.Unmarshal([]byte(snapshot.State.SupportedActions), &actions); err == nil {
+		for _, a := range actions {
+			out.SupportedHostActions = append(out.SupportedHostActions, hostv1.HostAction(a))
+		}
+	}
 	if snapshot.Desired != nil {
 		out.Desired = privilegedRevisionToProto(*snapshot.Desired)
 	}

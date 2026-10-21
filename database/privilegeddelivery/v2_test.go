@@ -253,6 +253,7 @@ func TestV2HelperInstallDoesNotPromoteOrdinaryAgent(t *testing.T) {
 	o.HelperInstalled = true
 	o.HelperRunning = true
 	o.HelperAuthorized = true
+	o.HelperLeaseReady = true
 	o.EffectiveCapabilities.RescueHelper = &reportv1.CapabilityState{Available: true}
 	_, err = Observe(db, id, "helper-ack", o)
 	require.NoError(t, err)

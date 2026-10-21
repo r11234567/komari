@@ -94,6 +94,12 @@ func signHostOperation(op *hostv1.HostOperation) error {
 	}
 	now := time.Now().UTC()
 	expiry := op.LeaseExpiresAt.AsTime()
+	// A completed record is a fresh read-only observation, not a renewed
+	// execution lease. Keep its original lease in the signed body so agents can
+	// acknowledge LOCAL_APPLIED after a long network outage without reopening it.
+	if op.Phase >= hostv1.HostOperationPhase_HOST_OPERATION_PHASE_LOCAL_APPLIED {
+		expiry = now.Add(10 * time.Minute)
+	}
 	payload, err := proto.MarshalOptions{Deterministic: true}.Marshal(&securityv1.SignedInstruction{AgentId: op.Authorization.AgentId, Nonce: op.OperationId, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expiry), InstructionType: "komari.host.v1.HostOperation", Body: body})
 	if err != nil {
 		return err

@@ -70,6 +70,7 @@ func advance(tx *gorm.DB, state *models.ClientPrivilegedState, row *models.Clien
 type Snapshot struct {
 	Desired, Applied *Revision
 	State            models.ClientPrivilegedState
+	Operation        *hostv1.HostOperation
 }
 
 func GetState(id string) (Snapshot, error) { return GetStateWithDB(dbcore.GetDBInstance(), id) }
@@ -101,6 +102,16 @@ func GetStateWithDB(db *gorm.DB, id string) (Snapshot, error) {
 			}
 			v := toRevision(r)
 			*entry.target = &v
+		}
+		var operation models.ClientHostOperation
+		err = tx.Where("client = ? AND revision = ?", id, state.DesiredRevision).Order("created_at DESC").First(&operation).Error
+		if err == nil {
+			out.Operation, err = operationMessage(operation)
+			if err != nil {
+				return err
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
 		}
 		return nil
 	})

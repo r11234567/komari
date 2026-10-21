@@ -99,6 +99,24 @@ func TestPrivilegedV2RejectsUnsupportedRuntimeFields(t *testing.T) {
 	}
 }
 
+func TestCompletedHostReadDoesNotRenewExecutionLease(t *testing.T) {
+	expired := time.Now().Add(-time.Hour)
+	op := &hostv1.HostOperation{OperationId: "old-completed", Authorization: &hostv1.HostAuthorization{AgentId: "node"}, Phase: 3, LeaseExpiresAt: timestamppb.New(expired)}
+	if err := signHostOperation(op); err != nil {
+		t.Fatal(err)
+	}
+	var payload securityv1.SignedInstruction
+	if err := proto.Unmarshal(op.Signature.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.ExpiresAt.AsTime().After(time.Now()) {
+		t.Fatal("completed snapshot cannot be read after a network outage")
+	}
+	if !op.LeaseExpiresAt.AsTime().Equal(expired) {
+		t.Fatal("reading completed operation extended execution lease")
+	}
+}
+
 func TestPrivilegedV2LegacyProfileSaveCannotOverwriteInstallation(t *testing.T) {
 	id, _, err := clients.CreateClient()
 	if err != nil {

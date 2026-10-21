@@ -135,13 +135,13 @@ func ReportOperation(db *gorm.DB, r *hostv1.ReportHostOperationRequest) (*hostv1
 		if err != nil {
 			return err
 		}
-		if err := validateCurrent(state, row); err != nil {
-			return err
-		}
-		if row.ApprovalGeneration != op.ApprovalGeneration {
-			return errors.New("operation approval has been replaced")
-		}
 		phase := int32(r.Phase)
+		current := validateCurrent(state, row) == nil && row.ApprovalGeneration == op.ApprovalGeneration
+		// A stale operation may report failure/restoration for its own audit
+		// record. It can never update the newer target or applied pointer.
+		if phase <= 3 && !current {
+			return errors.New("host operation approval has been replaced")
+		}
 		if op.Phase >= 4 || (op.Phase == 3 && phase < 4) || phase < 2 || phase > 5 || phase < op.Phase || row.State == StateDelivered || (row.State == StateFailed && phase <= 3) {
 			return errors.New("illegal host operation transition")
 		}
@@ -158,6 +158,10 @@ func ReportOperation(db *gorm.DB, r *hostv1.ReportHostOperationRequest) (*hostv1
 		op.Operator = r.Operator
 		op.UpdatedAt = time.Now().UTC()
 		if err := tx.Save(&op).Error; err != nil {
+			return err
+		}
+		if !current {
+			result, err = operationMessage(op)
 			return err
 		}
 		if phase >= 4 {
@@ -249,7 +253,7 @@ func Observe(db *gorm.DB, id, key string, o *hostv1.DaemonObservation) (Revision
 		if available(c.RescueHelper) != settings.RescueHelperEnabled {
 			return errors.New("effective helper capability does not match target")
 		}
-		if o.HelperAuthorized != settings.RescueHelperEnabled || o.HelperInstalled != settings.RescueHelperEnabled || (settings.RescueHelperEnabled && !o.HelperRunning) {
+		if o.HelperAuthorized != settings.RescueHelperEnabled || o.HelperInstalled != settings.RescueHelperEnabled || (settings.RescueHelperEnabled && (!o.HelperRunning || !o.HelperLeaseReady)) || (!settings.RescueHelperEnabled && (o.HelperRunning || o.HelperLeaseReady)) {
 			return errors.New("helper installation/authorization does not match target")
 		}
 		if state.Observation != "" {
