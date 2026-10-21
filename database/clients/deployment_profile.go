@@ -908,3 +908,24 @@ func PrivilegedCapabilityAllowedWithDB(db *gorm.DB, clientUUID, feature string) 
 	}
 	return allows(state.DesiredRevision)
 }
+
+// UpdateAppliedPrivilegedProfileWithDB maintains installation metadata only
+// after the daemon has confirmed the full privileged snapshot.
+func UpdateAppliedPrivilegedProfileWithDB(db *gorm.DB, id string, remote, gpu, rescue bool, mode int32) error {
+	profile, _, err := getDeploymentProfile(db, id)
+	if err != nil {
+		return err
+	}
+	profile.RemoteControlEnabled = remote
+	profile.EnableGPU = gpu
+	profile.RescueEnabled = rescue
+	profile.RuntimeIdentity = AgentRuntimeIdentityServiceAccount
+	if mode == 1 || mode == 3 {
+		profile.RuntimeIdentity = AgentRuntimeIdentityPrivileged
+	}
+	data, err := json.Marshal(profile)
+	if err != nil {
+		return err
+	}
+	return db.Model(&models.ClientDeploymentProfile{}).Where("client = ?", id).Updates(map[string]any{"config": string(data), "updated_at": time.Now().UTC()}).Error
+}

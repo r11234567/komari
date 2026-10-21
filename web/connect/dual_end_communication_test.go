@@ -581,6 +581,25 @@ func TestDualEnd_SingleUseDeviceCode(t *testing.T) {
 
 // TestDualEnd_Execution_SignedEnvelopeLease tests command leasing with Ed25519 SignedEnvelope over DPoP
 func TestDualEnd_Execution_SignedEnvelopeLease(t *testing.T) {
+	// This test exercises a previously authorized legacy node. Creating tasks
+	// directly in executionapp is not itself permission to lease them.
+	profile, _, err := clients.GetDeploymentProfile(testClientUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := profile
+	profile.RuntimeIdentity = clients.AgentRuntimeIdentityPrivileged
+	profile.RemoteControlEnabled = true
+	profile.RescueEnabled = false
+	if _, err := clients.SaveDeploymentProfile(testClientUUID, profile); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := clients.SaveDeploymentProfile(testClientUUID, original); err != nil {
+			t.Error(err)
+		}
+	})
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

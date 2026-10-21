@@ -15,6 +15,11 @@ import (
 func TestPolicyDeclaresEveryGeneratedProcedure(t *testing.T) {
 	interceptor := newPolicyInterceptor()
 	expected := []string{
+		"/komari.config.v1.PrivilegedDeliveryService/GetNodeConfigState",
+		"/komari.host.v1.HostService/NegotiateHostProtocol",
+		"/komari.host.v1.HostService/PrepareHostOperation",
+		"/komari.host.v1.HostService/ReportHostOperation",
+		"/komari.host.v1.HostService/GetHostOperation",
 		"/komari.admin.v1.DashboardService/GetDashboardSummary",
 		"/komari.admin.v1.DashboardService/GetDashboardCharts",
 		"/komari.admin.v1.DashboardService/ListDashboardAlertItems",

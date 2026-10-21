@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
 	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
@@ -76,6 +77,13 @@ func PrepareOperation(db *gorm.DB, r *hostv1.PrepareHostOperationRequest) (*host
 		a, err := Authorization(toRevision(row))
 		if err != nil || a == nil {
 			return errors.New("missing signed authorization")
+		}
+		required := make([]int32, 0, len(a.Actions))
+		for _, action := range a.Actions {
+			required = append(required, int32(action))
+		}
+		if !supportsActions(state, required) {
+			return errors.New("required host action support has been withdrawn")
 		}
 		if a.ServiceId != state.ServiceID {
 			return errors.New("service binding mismatch")
@@ -236,8 +244,20 @@ func Observe(db *gorm.DB, id, key string, o *hostv1.DaemonObservation) (Revision
 		if o.HelperAuthorized != settings.RescueHelperEnabled || o.HelperInstalled != settings.RescueHelperEnabled || (settings.RescueHelperEnabled && !o.HelperRunning) {
 			return errors.New("helper installation/authorization does not match target")
 		}
+		if state.Observation != "" {
+			var previous hostv1.DaemonObservation
+			if e := protojson.Unmarshal([]byte(state.Observation), &previous); e != nil {
+				return e
+			}
+			if previous.ObservedAt != nil && o.ObservedAt.AsTime().Before(previous.ObservedAt.AsTime()) {
+				return errors.New("stale daemon observation")
+			}
+		}
 		encoded, err := protojson.Marshal(o)
 		if err != nil {
+			return err
+		}
+		if err := clients.UpdateAppliedPrivilegedProfileWithDB(tx, id, settings.RemoteControlEnabled, settings.EnableGPU, settings.RescueHelperEnabled, int32(o.PrivilegeMode)); err != nil {
 			return err
 		}
 		state.AppliedRevision = row.Revision

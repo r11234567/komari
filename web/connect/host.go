@@ -40,9 +40,11 @@ func (s *hostService) NegotiateHostProtocol(ctx context.Context, req *connect.Re
 	return connect.NewResponse(&hostv1.NegotiateHostProtocolResponse{ProtocolVersion: 2, UpdateSequence: state.UpdateSequence}), nil
 }
 func (s *hostService) PrepareHostOperation(ctx context.Context, req *connect.Request[hostv1.PrepareHostOperationRequest]) (*connect.Response[hostv1.PrepareHostOperationResponse], error) {
-	if _, err := requireAgent(rpc.MetaFromContext(ctx), req.Msg.AgentId); err != nil {
+	id, err := requireAgent(rpc.MetaFromContext(ctx), req.Msg.AgentId)
+	if err != nil {
 		return nil, err
 	}
+	req.Msg.AgentId = id
 	op, err := privilegeddelivery.PrepareOperation(dbcore.GetDBInstance(), req.Msg)
 	if err != nil {
 		return nil, connectError(connect.CodeFailedPrecondition, err)
@@ -53,9 +55,11 @@ func (s *hostService) PrepareHostOperation(ctx context.Context, req *connect.Req
 	return connect.NewResponse(&hostv1.PrepareHostOperationResponse{Operation: op}), nil
 }
 func (s *hostService) ReportHostOperation(ctx context.Context, req *connect.Request[hostv1.ReportHostOperationRequest]) (*connect.Response[hostv1.ReportHostOperationResponse], error) {
-	if _, err := requireAgent(rpc.MetaFromContext(ctx), req.Msg.AgentId); err != nil {
+	id, err := requireAgent(rpc.MetaFromContext(ctx), req.Msg.AgentId)
+	if err != nil {
 		return nil, err
 	}
+	req.Msg.AgentId = id
 	op, err := privilegeddelivery.ReportOperation(dbcore.GetDBInstance(), req.Msg)
 	if err != nil {
 		return nil, connectError(connect.CodeFailedPrecondition, err)
@@ -63,9 +67,11 @@ func (s *hostService) ReportHostOperation(ctx context.Context, req *connect.Requ
 	return connect.NewResponse(&hostv1.ReportHostOperationResponse{Operation: op, Accepted: true}), nil
 }
 func (s *hostService) GetHostOperation(ctx context.Context, req *connect.Request[hostv1.GetHostOperationRequest]) (*connect.Response[hostv1.GetHostOperationResponse], error) {
-	if _, err := requireAgent(rpc.MetaFromContext(ctx), req.Msg.AgentId); err != nil {
+	id, err := requireAgent(rpc.MetaFromContext(ctx), req.Msg.AgentId)
+	if err != nil {
 		return nil, err
 	}
+	req.Msg.AgentId = id
 	op, err := privilegeddelivery.GetOperation(dbcore.GetDBInstance(), req.Msg.AgentId, req.Msg.OperationId)
 	if err != nil {
 		return nil, connectError(connect.CodeNotFound, err)

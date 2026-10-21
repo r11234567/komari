@@ -93,6 +93,13 @@ func GetStateWithDB(db *gorm.DB, id string) (Snapshot, error) {
 			if err != nil {
 				return err
 			}
+			if entry.n == state.DesiredRevision && r.ConfirmedAt != nil && r.NonceExpires != nil && !time.Now().Before(*r.NonceExpires) && (r.State == StateNeedsManualAuthorization || r.State == StateAwaitingAgent) {
+				r.State = StateExpired
+				if err := advance(tx, &state, &r); err != nil {
+					return err
+				}
+				out.State = state
+			}
 			v := toRevision(r)
 			*entry.target = &v
 		}
