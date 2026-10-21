@@ -28,7 +28,7 @@ func fixtureV2(t *testing.T) (*gorm.DB, string) {
 	require.NoError(t, err)
 	sql.SetMaxOpenConns(1)
 	t.Cleanup(func() { sql.Close() })
-	require.NoError(t, db.AutoMigrate(&models.Client{}, &models.ClientDeploymentProfile{}, &models.ClientPrivilegedRevision{}, &models.ClientPrivilegedState{}, &models.ClientHostOperation{}, &models.ClientPrivilegedReceipt{}))
+	require.NoError(t, db.AutoMigrate(&models.Client{}, &models.ClientDeploymentProfile{}, &models.ClientPrivilegedState{}, &models.ClientPrivilegedRevision{}, &models.ClientPrivilegedState{}, &models.ClientHostOperation{}, &models.ClientPrivilegedReceipt{}))
 	id := "node"
 	require.NoError(t, db.Create(&models.Client{UUID: id, Name: id}).Error)
 	require.NoError(t, db.Create(&models.ClientDeploymentProfile{Client: id, Config: `{"platform":"linux","runtime_identity":"service-account","remote_control_enabled":false}`}).Error)
@@ -237,4 +237,114 @@ func TestV2HashVectors(t *testing.T) {
 	for _, v := range vectors {
 		require.Equal(t, v.Hash, settingsHash(Settings{RemoteControlEnabled: v.Booleans[0] != 0, WebSSHEnabled: v.Booleans[1] != 0, ExecutionEnabled: v.Booleans[2] != 0, EnableGPU: v.Booleans[3] != 0, RescueHelperEnabled: v.Booleans[4] != 0, RequiredPrivilegeMode: v.Mode}))
 	}
+}
+
+func TestV2HelperInstallDoesNotPromoteOrdinaryAgent(t *testing.T) {
+	db, id := fixtureV2(t)
+	_, r := saveConfirm(t, db, id, Settings{RescueHelperEnabled: true, RequiredPrivilegeMode: 2})
+	auth, err := Authorization(r)
+	require.NoError(t, err)
+	require.Equal(t, []hostv1.HostAction{hostv1.HostAction_HOST_ACTION_INSTALL_RESCUE_HELPER}, auth.Actions)
+	require.Equal(t, int32(2), r.ToPrivilegeMode)
+	prepare(t, db, id, r)
+	localSuccess(t, db, id)
+	o := observation(r)
+	o.OperationId = "operation"
+	o.HelperInstalled = true
+	o.HelperRunning = true
+	o.HelperAuthorized = true
+	o.EffectiveCapabilities.RescueHelper = &reportv1.CapabilityState{Available: true}
+	_, err = Observe(db, id, "helper-ack", o)
+	require.NoError(t, err)
+	profile, _, err := clients.GetDeploymentProfileWithDB(db, id)
+	require.NoError(t, err)
+	require.True(t, profile.RescueEnabled)
+	require.Equal(t, clients.AgentRuntimeIdentityServiceAccount, profile.RuntimeIdentity)
+	allowed, err := clients.PrivilegedCapabilityAllowedWithDB(db, id, "rescue")
+	require.NoError(t, err)
+	require.True(t, allowed)
+	_, err = SaveWithDB(db, id, Settings{RequiredPrivilegeMode: 2}, 1, "")
+	require.NoError(t, err)
+	approved, err := ConfirmWithDB(db, id, 2, "admin")
+	require.NoError(t, err)
+	auth, err = Authorization(approved)
+	require.NoError(t, err)
+	require.Equal(t, []hostv1.HostAction{hostv1.HostAction_HOST_ACTION_REMOVE_RESCUE_HELPER}, auth.Actions)
+	allowed, err = clients.PrivilegedCapabilityAllowedWithDB(db, id, "rescue")
+	require.NoError(t, err)
+	require.False(t, allowed)
+}
+func TestV2ObservationRejectsTamperingAndDisabledCapabilities(t *testing.T) {
+	db, id := fixtureV2(t)
+	_, r := saveConfirm(t, db, id, Settings{RequiredPrivilegeMode: 2})
+	mutations := map[string]func(*hostv1.DaemonObservation){
+		"hash":       func(o *hostv1.DaemonObservation) { o.ConfigHash = "wrong" },
+		"generation": func(o *hostv1.DaemonObservation) { o.ApprovalGeneration++ },
+		"service":    func(o *hostv1.DaemonObservation) { o.ServiceId = "other.service" },
+		"mode":       func(o *hostv1.DaemonObservation) { o.PrivilegeMode = 1 },
+		"execution": func(o *hostv1.DaemonObservation) {
+			o.EffectiveCapabilities.Execution = &reportv1.CapabilityState{Available: true}
+		},
+		"GPU": func(o *hostv1.DaemonObservation) {
+			o.EffectiveCapabilities.Gpu = &reportv1.CapabilityState{Available: true}
+		},
+		"helper": func(o *hostv1.DaemonObservation) { o.HelperInstalled = true },
+		"future": func(o *hostv1.DaemonObservation) { o.ObservedAt = timestamppb.New(time.Now().Add(time.Hour)) },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			o := observation(r)
+			mutate(o)
+			_, err := Observe(db, id, "bad-"+name, o)
+			require.Error(t, err)
+			snap, err := GetStateWithDB(db, id)
+			require.NoError(t, err)
+			require.Zero(t, snap.State.AppliedRevision)
+		})
+	}
+	_, err := Observe(db, id, "", observation(r))
+	require.Error(t, err)
+}
+func TestV2MigrationRetainsLegacyHistoryWithoutInventingApproval(t *testing.T) {
+	db, id := fixtureV2(t)
+	require.NoError(t, db.Migrator().DropTable(&models.ClientPrivilegedRevision{}, &models.ClientPrivilegedState{}, &models.ClientHostOperation{}, &models.ClientPrivilegedReceipt{}))
+	// Old shape intentionally has no v2 columns. Upgrade the actual SQLite schema.
+	type legacyRevision struct {
+		Client      string `gorm:"primaryKey"`
+		Revision    uint64 `gorm:"primaryKey"`
+		Config      string
+		State       int32
+		Nonce       string
+		ConfirmedAt *time.Time
+	}
+	require.NoError(t, db.Table("client_privileged_revisions").AutoMigrate(&legacyRevision{}))
+	require.NoError(t, db.Table("client_privileged_revisions").Create(&legacyRevision{Client: id, Revision: 1, Config: `{"remote_control_enabled":false}`, State: 2, Nonce: "old-fixture"}).Error)
+	require.NoError(t, db.AutoMigrate(&models.ClientPrivilegedRevision{}, &models.ClientPrivilegedState{}, &models.ClientHostOperation{}, &models.ClientPrivilegedReceipt{}))
+	snap, err := GetStateWithDB(db, id)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), snap.State.DesiredRevision)
+	require.Zero(t, snap.State.AppliedRevision)
+	require.Nil(t, snap.Desired.ConfirmedAt)
+	require.Equal(t, uint32(1), snap.Desired.ProtocolVersion)
+	_, err = ConfirmWithDB(db, id, 1, "admin")
+	require.Error(t, err)
+	next, err := SaveWithDB(db, id, Settings{}, 1, "")
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), next.Revision)
+	var old models.ClientPrivilegedRevision
+	require.NoError(t, db.First(&old, "client = ? AND revision = ?", id, 1).Error)
+	require.Nil(t, old.ConfirmedAt)
+	require.Equal(t, StateSuperseded, old.State)
+	require.Equal(t, `{"remote_control_enabled":false}`, old.Config)
+}
+func TestV2SuccessfulHostOperationAllowsDelayedDaemonReceipt(t *testing.T) {
+	db, id := fixtureV2(t)
+	_, r := saveConfirm(t, db, id, Settings{RequiredPrivilegeMode: 1})
+	prepare(t, db, id, r)
+	localSuccess(t, db, id)
+	require.NoError(t, db.Model(&models.ClientPrivilegedRevision{}).Where("client = ?", id).Update("nonce_expires", time.Now().Add(-time.Minute)).Error)
+	o := observation(r)
+	o.OperationId = "operation"
+	_, err := Observe(db, id, "delayed-daemon", o)
+	require.NoError(t, err)
 }

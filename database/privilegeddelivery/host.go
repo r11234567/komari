@@ -241,6 +241,9 @@ func Observe(db *gorm.DB, id, key string, o *hostv1.DaemonObservation) (Revision
 		if !settings.EnableGPU && (available(c.Gpu) || available(c.DetailedGpu)) {
 			return errors.New("GPU collection exceeds approval")
 		}
+		if available(c.RescueHelper) != settings.RescueHelperEnabled {
+			return errors.New("effective helper capability does not match target")
+		}
 		if o.HelperAuthorized != settings.RescueHelperEnabled || o.HelperInstalled != settings.RescueHelperEnabled || (settings.RescueHelperEnabled && !o.HelperRunning) {
 			return errors.New("helper installation/authorization does not match target")
 		}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/database/privilegeddelivery"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
@@ -88,5 +89,31 @@ func TestPrivilegedV2RejectsUnsupportedRuntimeFields(t *testing.T) {
 	p := clients.DeploymentProfile{}
 	if err := applyRuntime(&p, &configv1.RuntimeConfig{CustomDns: &s}); err == nil {
 		t.Fatal("custom DNS silently discarded")
+	}
+}
+
+func TestPrivilegedV2LegacyProfileSaveCannotOverwriteInstallation(t *testing.T) {
+	id, _, err := clients.CreateClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, _, err := clients.GetDeploymentProfile(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = privilegeddelivery.Negotiate(dbcore.GetDBInstance(), id, "profile-fixture.service", "boot", 2, []int32{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := profile
+	changed.RuntimeIdentity = clients.AgentRuntimeIdentityPrivileged
+	changed.RemoteControlEnabled = true
+	if _, err := clients.SaveDeploymentProfile(id, changed); err == nil {
+		t.Fatal("legacy deployment save overwrote v2 installation fields")
+	}
+	profile.EnableInterval = true
+	profile.Interval = 7
+	if _, err := clients.SaveDeploymentProfile(id, profile); err != nil {
+		t.Fatalf("ordinary runtime save must remain available: %v", err)
 	}
 }

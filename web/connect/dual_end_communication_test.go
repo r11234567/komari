@@ -793,7 +793,7 @@ func TestDualEnd_RefreshCredentials_ValidProofRotatesTokens(t *testing.T) {
 
 	// Update testAccessToken to the newly issued one for any subsequent test runs
 	testAccessToken = creds.GetAccessToken()
-	t.Logf("RefreshCredentials succeeded with valid proof: new AccessToken=%s", creds.GetAccessToken())
+	t.Log("RefreshCredentials succeeded with valid proof; credentials rotated")
 }
 
 // TestDualEnd_RuntimeConfigNegotiation tests bidirectional version negotiation and configuration delivery.

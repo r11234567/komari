@@ -106,7 +106,7 @@ func TestDeploymentProfileAndBillingEditorShareTrafficResetDay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	if err := db.AutoMigrate(&models.Client{}, &models.ClientDeploymentProfile{}); err != nil {
+	if err := db.AutoMigrate(&models.Client{}, &models.ClientDeploymentProfile{}, &models.ClientPrivilegedState{}); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
 	if err := db.Create(&models.Client{UUID: "node-a", Token: "token-a"}).Error; err != nil {
@@ -152,7 +152,7 @@ func TestAdoptDeploymentRuntimeConfigInitializesAndReconcilesDelivery(t *testing
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	if err := db.AutoMigrate(&models.Client{}, &models.ClientDeploymentProfile{}); err != nil {
+	if err := db.AutoMigrate(&models.Client{}, &models.ClientDeploymentProfile{}, &models.ClientPrivilegedState{}); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
 	if err := db.Create(&models.Client{UUID: "node-state", Token: "token-state"}).Error; err != nil {
@@ -263,7 +263,7 @@ func TestDeploymentConfigDeliveryTracksOnlyRuntimeChangesAndRejectsStaleResults(
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	if err := db.AutoMigrate(&models.Client{}, &models.ClientDeploymentProfile{}); err != nil {
+	if err := db.AutoMigrate(&models.Client{}, &models.ClientDeploymentProfile{}, &models.ClientPrivilegedState{}); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
 	if err := db.Create(&models.Client{UUID: "node-delivery", Token: "token-delivery"}).Error; err != nil {
@@ -337,7 +337,7 @@ func TestPreviousRuntimeSurvivesRedispatchAndPreservesInstallSettings(t *testing
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	if err := db.AutoMigrate(&models.Client{}, &models.ClientDeploymentProfile{}); err != nil {
+	if err := db.AutoMigrate(&models.Client{}, &models.ClientDeploymentProfile{}, &models.ClientPrivilegedState{}); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
 	if err := db.Create(&models.Client{UUID: "node-rollback", Token: "token-rollback"}).Error; err != nil {
