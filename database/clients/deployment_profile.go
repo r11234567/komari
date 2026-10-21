@@ -13,6 +13,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
+	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -49,9 +50,11 @@ type DeploymentDeliveryState struct {
 // DeploymentProfile contains both runtime-manageable settings and values that
 // are retained solely to regenerate an installation command.
 type DeploymentProfile struct {
-	Platform        string `json:"platform"`
-	RuntimeIdentity string `json:"runtime_identity"`
-	RescueEnabled   bool   `json:"rescue_enabled"`
+	// Set by a matching v2 daemon observation, never by deployment save.
+	PrivilegedDeliveryVersion uint32 `json:"privileged_delivery_version,omitempty"`
+	Platform                  string `json:"platform"`
+	RuntimeIdentity           string `json:"runtime_identity"`
+	RescueEnabled             bool   `json:"rescue_enabled"`
 	// DisableWebSSH is retained only to decode historical profiles. WebSSH and
 	// command execution are one remote-control capability, so new profiles use
 	// RemoteControlEnabled exclusively.
@@ -148,14 +151,7 @@ func GetDeploymentProfileWithDelivery(clientUUID string) (DeploymentProfile, boo
 // agents, remote control is strictly forbidden until explicitly enabled by an
 // authorized deployment profile or privileged grant.
 func RemoteControlAllowed(clientUUID string) (bool, error) {
-	profile, saved, err := GetDeploymentProfile(clientUUID)
-	if err != nil {
-		return false, err
-	}
-	if !saved {
-		return false, nil
-	}
-	return profile.RemoteControlEnabled, nil
+	return PrivilegedCapabilityAllowed(clientUUID, "remote")
 }
 
 // UpdatePrivilegedStatusInDeploymentProfileWithDB syncs newly confirmed/redeemed privileged settings
@@ -260,6 +256,11 @@ func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile De
 			return err
 		}
 
+		var privilegedState models.ClientPrivilegedState
+		stateErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&privilegedState, "client = ?", clientUUID).Error
+		if stateErr != nil && !errors.Is(stateErr, gorm.ErrRecordNotFound) {
+			return stateErr
+		}
 		var existing models.ClientDeploymentProfile
 		var previous DeploymentProfile
 		existingFound := true
@@ -277,6 +278,12 @@ func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile De
 			}
 			if err := normalizeDeploymentProfile(&previous); err != nil {
 				return fmt.Errorf("validate existing deployment profile: %w", err)
+			}
+			if profile.PrivilegedDeliveryVersion != previous.PrivilegedDeliveryVersion {
+				return errors.New("deployment save cannot change privileged protocol ownership")
+			}
+			if privilegedState.ProtocolVersion == 2 && (previous.RuntimeIdentity != profile.RuntimeIdentity || previous.RemoteControlEnabled != profile.RemoteControlEnabled || previous.RescueEnabled != profile.RescueEnabled || previous.EnableGPU != profile.EnableGPU || previous.Platform != profile.Platform) {
+				return errors.New("privileged installation fields are managed by privileged_delivery_v2; use its approved operation instead")
 			}
 			previous.EnableMonthRotate = client.TrafficResetDay != nil && *client.TrafficResetDay > 0
 			if previous.EnableMonthRotate {
@@ -574,7 +581,7 @@ func normalizeDeploymentProfile(profile *DeploymentProfile) error {
 		profile.RemoteControlEnabled = false
 		profile.DisableWebSSH = false
 	}
-	if profile.RuntimeIdentity == AgentRuntimeIdentityServiceAccount {
+	if profile.RuntimeIdentity == AgentRuntimeIdentityServiceAccount && profile.PrivilegedDeliveryVersion < 2 {
 		profile.RemoteControlEnabled = false
 	}
 	if profile.RescueEnabled && profile.RemoteControlEnabled {
@@ -863,4 +870,88 @@ func adoptDeploymentRuntimeConfig(db *gorm.DB, clientUUID, platform string, conf
 		return nil
 	})
 	return adopted, err
+}
+
+// PrivilegedCapabilityAllowed applies both the actual snapshot and pending
+// revocations. A desired grant never enables access before a daemon ACK.
+// Legacy nodes retain their existing deployment policy until v2 is negotiated.
+func PrivilegedCapabilityAllowed(clientUUID, feature string) (bool, error) {
+	return PrivilegedCapabilityAllowedWithDB(dbcore.GetDBInstance(), clientUUID, feature)
+}
+func PrivilegedCapabilityAllowedWithDB(db *gorm.DB, clientUUID, feature string) (bool, error) {
+	var state models.ClientPrivilegedState
+	err := db.First(&state, "client = ?", clientUUID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) || err == nil && state.ProtocolVersion != 2 {
+		profile, saved, e := getDeploymentProfile(db, clientUUID)
+		if feature == "rescue" {
+			return saved && profile.RescueEnabled && !profile.RemoteControlEnabled, e
+		}
+		return saved && profile.RemoteControlEnabled, e
+	}
+	if err != nil {
+		return false, err
+	}
+	if state.AppliedRevision == 0 {
+		return false, nil
+	}
+	type settings struct {
+		Remote    bool `json:"remote_control_enabled"`
+		WebSSH    bool `json:"webssh_enabled"`
+		Execution bool `json:"execution_enabled"`
+		Rescue    bool `json:"rescue_helper_enabled"`
+	}
+	allows := func(revision uint64) (bool, error) {
+		var row models.ClientPrivilegedRevision
+		if err := db.First(&row, "client = ? AND revision = ?", clientUUID, revision).Error; err != nil {
+			return false, err
+		}
+		if row.State == int32(configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_FAILED) {
+			// A restored host may retain a historical applied pointer. That
+			// snapshot must not authorize new sessions after recovery failed it.
+			return false, nil
+		}
+		var s settings
+		if err := json.Unmarshal([]byte(row.Config), &s); err != nil {
+			return false, err
+		}
+		switch feature {
+		case "remote":
+			return s.Remote, nil
+		case "webssh":
+			return s.Remote && s.WebSSH, nil
+		case "execution":
+			return s.Remote && s.Execution, nil
+		case "rescue":
+			return s.Rescue, nil
+		default:
+			return false, errors.New("unknown privileged capability")
+		}
+	}
+	applied, e := allows(state.AppliedRevision)
+	if e != nil || !applied {
+		return false, e
+	}
+	return allows(state.DesiredRevision)
+}
+
+// UpdateAppliedPrivilegedProfileWithDB maintains installation metadata only
+// after the daemon has confirmed the full privileged snapshot.
+func UpdateAppliedPrivilegedProfileWithDB(db *gorm.DB, id string, remote, gpu, rescue bool, mode int32) error {
+	profile, _, err := getDeploymentProfile(db, id)
+	if err != nil {
+		return err
+	}
+	profile.PrivilegedDeliveryVersion = 2
+	profile.RemoteControlEnabled = remote
+	profile.EnableGPU = gpu
+	profile.RescueEnabled = rescue
+	profile.RuntimeIdentity = AgentRuntimeIdentityServiceAccount
+	if mode == 1 || mode == 3 {
+		profile.RuntimeIdentity = AgentRuntimeIdentityPrivileged
+	}
+	data, err := json.Marshal(profile)
+	if err != nil {
+		return err
+	}
+	return db.Model(&models.ClientDeploymentProfile{}).Where("client = ?", id).Updates(map[string]any{"config": string(data), "updated_at": time.Now().UTC()}).Error
 }

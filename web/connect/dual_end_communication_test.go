@@ -39,6 +39,8 @@ import (
 	enrollmentv1connect "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1/enrollmentv1connect"
 	execv1 "github.com/r11234567/komari-proto/gen/go/komari/exec/v1"
 	execv1connect "github.com/r11234567/komari-proto/gen/go/komari/exec/v1/execv1connect"
+	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
+	hostv1connect "github.com/r11234567/komari-proto/gen/go/komari/host/v1/hostv1connect"
 	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
 	metricsv1connect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
 	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
@@ -46,6 +48,7 @@ import (
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 var (
@@ -578,6 +581,25 @@ func TestDualEnd_SingleUseDeviceCode(t *testing.T) {
 
 // TestDualEnd_Execution_SignedEnvelopeLease tests command leasing with Ed25519 SignedEnvelope over DPoP
 func TestDualEnd_Execution_SignedEnvelopeLease(t *testing.T) {
+	// This test exercises a previously authorized legacy node. Creating tasks
+	// directly in executionapp is not itself permission to lease them.
+	profile, _, err := clients.GetDeploymentProfile(testClientUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := profile
+	profile.RuntimeIdentity = clients.AgentRuntimeIdentityPrivileged
+	profile.RemoteControlEnabled = true
+	profile.RescueEnabled = false
+	if _, err := clients.SaveDeploymentProfile(testClientUUID, profile); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := clients.SaveDeploymentProfile(testClientUUID, original); err != nil {
+			t.Error(err)
+		}
+	})
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -771,7 +793,7 @@ func TestDualEnd_RefreshCredentials_ValidProofRotatesTokens(t *testing.T) {
 
 	// Update testAccessToken to the newly issued one for any subsequent test runs
 	testAccessToken = creds.GetAccessToken()
-	t.Logf("RefreshCredentials succeeded with valid proof: new AccessToken=%s", creds.GetAccessToken())
+	t.Log("RefreshCredentials succeeded with valid proof; credentials rotated")
 }
 
 // TestDualEnd_RuntimeConfigNegotiation tests bidirectional version negotiation and configuration delivery.
@@ -872,101 +894,87 @@ func TestDualEnd_RuntimeConfigNegotiation(t *testing.T) {
 }
 
 // TestDualEnd_PrivilegedDeliveryAndElevation tests privileged delivery, human verification, and host elevation nonce redemption.
+// This is a protocol integration test. Real OS authentication and service
+// conversion are exercised by later host-tool platform tests, not simulated here.
 func TestDualEnd_PrivilegedDeliveryAndElevation(t *testing.T) {
 	dpopClient := newDPoPTestClient(testAccessToken, testAgentPrivKey)
-	privClient := configv1connect.NewPrivilegedDeliveryServiceClient(dpopClient, testServer.URL)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	priv := configv1connect.NewPrivilegedDeliveryServiceClient(dpopClient, testServer.URL)
+	host := hostv1connect.NewHostServiceClient(dpopClient, testServer.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
-	// 1. Initial State: Verify RemoteControl is disabled by default (Zero-Trust Default-Deny)
+	_, err := host.NegotiateHostProtocol(ctx, connect.NewRequest(&hostv1.NegotiateHostProtocolRequest{AgentId: testClientUUID, ProtocolVersion: 2, ServiceId: "integration.service", StartupId: "before", PrivilegeMode: reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_NON_ROOT, SupportedActions: []hostv1.HostAction{hostv1.HostAction_HOST_ACTION_SET_SERVICE_IDENTITY}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := privilegeddelivery.GetState(testClientUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev, err := privilegeddelivery.Save(testClientUUID, privilegeddelivery.Settings{RemoteControlEnabled: true, WebSSHEnabled: true, RequiredPrivilegeMode: 1}, snapshot.State.DesiredRevision, "integration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev.Nonce != "" {
+		t.Fatal("nonce issued before approval")
+	}
+	received, err := priv.ReportPrivilegedDelivery(ctx, connect.NewRequest(&configv1.ReportPrivilegedDeliveryRequest{AgentId: testClientUUID, Revision: rev.Revision, State: configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_NEEDS_MANUAL_AUTHORIZATION}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if received.Msg.Revision.State != configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_NEEDS_CONFIRMATION {
+		t.Fatal("receipt overwrote approval")
+	}
+	approved, err := privilegeddelivery.Confirm(testClientUUID, rev.Revision, "admin-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetched, err := priv.GetPrivilegedDelivery(ctx, connect.NewRequest(&configv1.GetPrivilegedDeliveryRequest{AgentId: testClientUUID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fetched.Msg.Revision.Signature == nil || fetched.Msg.Revision.Authorization == nil {
+		t.Fatal("missing signed authorization")
+	}
+	_, err = priv.CompleteManualUpgrade(ctx, connect.NewRequest(&configv1.CompleteManualUpgradeRequest{AgentId: testClientUUID, Nonce: approved.Nonce, ResultingPrivilegeMode: 1, Operator: "root", LocalAuthentication: "pam"}))
+	if err == nil {
+		t.Fatal("legacy completion accepted")
+	}
+	prepared, err := host.PrepareHostOperation(ctx, connect.NewRequest(&hostv1.PrepareHostOperationRequest{AgentId: testClientUUID, OperationId: "integration-operation", Revision: approved.Revision, ApprovalGeneration: approved.ApprovalGeneration, ConfigHash: approved.ConfigHash, Nonce: approved.Nonce}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Msg.Operation.Signature == nil {
+		t.Fatal("lease is not signed")
+	}
+	_, err = host.ReportHostOperation(ctx, connect.NewRequest(&hostv1.ReportHostOperationRequest{AgentId: testClientUUID, OperationId: "integration-operation", ReceiptId: "integration-local", Phase: 3, Operator: "test-operator", LocalAuthentication: "fixture"}))
+	if err != nil {
+		t.Fatal(err)
+	}
 	allowed, err := clients.RemoteControlAllowed(testClientUUID)
 	if err != nil {
-		t.Fatalf("RemoteControlAllowed check failed: %v", err)
+		t.Fatal(err)
 	}
 	if allowed {
-		t.Fatalf("zero-trust default-deny violation: RemoteControl is allowed before authorization")
+		t.Fatal("host receipt enabled access before daemon ACK")
 	}
-
-	// 2. Server administrator creates a PrivilegedDelivery task to enable Remote Control & WebSSH
-	rev, err := privilegeddelivery.Save(testClientUUID, privilegeddelivery.Settings{
-		RemoteControlEnabled:  true,
-		WebSSHEnabled:         true,
-		ExecutionEnabled:      true,
-		RequiredPrivilegeMode: int32(reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT),
-	}, 0, "Security joint elevation test")
+	yes := &reportv1.CapabilityState{Available: true}
+	_, err = priv.ReportPrivilegedDelivery(ctx, connect.NewRequest(&configv1.ReportPrivilegedDeliveryRequest{AgentId: testClientUUID, Revision: approved.Revision, State: 3, ProtocolVersion: 2, ReceiptId: "integration-daemon", Observation: &hostv1.DaemonObservation{Revision: approved.Revision, ConfigHash: approved.ConfigHash, ApprovalGeneration: approved.ApprovalGeneration, ServiceId: "integration.service", StartupId: "after", PrivilegeMode: 1, OperationId: "integration-operation", ObservedAt: timestamppb.Now(), EffectiveCapabilities: &reportv1.AgentCapabilities{PrivilegeMode: 1, RemoteControl: yes, Webssh: yes}}}))
 	if err != nil {
-		t.Fatalf("privilegeddelivery.Save failed: %v", err)
+		t.Fatal(err)
 	}
-	if rev.UpgradeClass != privilegeddelivery.ClassManualPrivileged {
-		t.Fatalf("expected ClassManualPrivileged, got %v", rev.UpgradeClass)
-	}
-	if rev.Nonce == "" {
-		t.Fatalf("expected non-empty single-use nonce for manual elevation")
-	}
-
-	// 3. Admin confirms in panel (2FA) -> state advances to StateNeedsManualAuthorization
-	confirmed, err := privilegeddelivery.Confirm(testClientUUID, rev.Revision, "admin-test-uuid")
+	allowed, err = clients.PrivilegedCapabilityAllowed(testClientUUID, "webssh")
 	if err != nil {
-		t.Fatalf("privilegeddelivery.Confirm failed: %v", err)
+		t.Fatal(err)
 	}
-	if confirmed.State != privilegeddelivery.StateNeedsManualAuthorization {
-		t.Fatalf("expected StateNeedsManualAuthorization, got %v", confirmed.State)
+	if !allowed {
+		t.Fatal("WebSSH unavailable after matching ACK")
 	}
-
-	// 4. Agent polls GetPrivilegedDelivery
-	getResp, err := privClient.GetPrivilegedDelivery(ctx, connect.NewRequest(&configv1.GetPrivilegedDeliveryRequest{
-		AgentId:         testClientUUID,
-		AppliedRevision: 0,
-	}))
+	allowed, err = clients.PrivilegedCapabilityAllowed(testClientUUID, "execution")
 	if err != nil {
-		t.Fatalf("GetPrivilegedDelivery failed: %v", err)
+		t.Fatal(err)
 	}
-	deliveredRev := getResp.Msg.GetRevision()
-	if deliveredRev == nil {
-		t.Fatalf("expected non-nil PrivilegedRevision delivered to agent")
+	if allowed {
+		t.Fatal("disabled execution is authorized")
 	}
-	if deliveredRev.GetRevision() != rev.Revision {
-		t.Fatalf("expected revision %d, got %d", rev.Revision, deliveredRev.GetRevision())
-	}
-	if deliveredRev.GetSignature() == nil {
-		t.Fatalf("expected Ed25519 SignedEnvelope on delivered privileged revision")
-	}
-
-	// 5. Host-side elevation: Operator runs on the host and calls CompleteManualUpgrade with the Nonce
-	redeemResp, err := privClient.CompleteManualUpgrade(ctx, connect.NewRequest(&configv1.CompleteManualUpgradeRequest{
-		AgentId:                testClientUUID,
-		Nonce:                  rev.Nonce,
-		LocalAuthentication:    "pam_unix",
-		Operator:               "root",
-		ResultingPrivilegeMode: reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT,
-	}))
-	if err != nil {
-		t.Fatalf("CompleteManualUpgrade failed: %v", err)
-	}
-	if !redeemResp.Msg.GetAccepted() {
-		t.Fatalf("expected CompleteManualUpgrade to be accepted")
-	}
-
-	// 6. Verify Server state: Nonce burned, StateDelivered, and RemoteControlAllowed is now TRUE!
-	allowedAfter, err := clients.RemoteControlAllowed(testClientUUID)
-	if err != nil {
-		t.Fatalf("RemoteControlAllowed check failed: %v", err)
-	}
-	if !allowedAfter {
-		t.Fatalf("expected RemoteControlAllowed=true after successful elevation, got false")
-	}
-
-	// 7. Replaying the nonce MUST fail!
-	_, replayErr := privClient.CompleteManualUpgrade(ctx, connect.NewRequest(&configv1.CompleteManualUpgradeRequest{
-		AgentId:                testClientUUID,
-		Nonce:                  rev.Nonce,
-		LocalAuthentication:    "pam_unix",
-		Operator:               "root",
-		ResultingPrivilegeMode: reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT,
-	}))
-	if replayErr == nil {
-		t.Fatalf("expected replaying burned nonce to fail, but it succeeded")
-	}
-	t.Logf("Dual-end PrivilegedDelivery & Elevation succeeded: Revision=%d, Nonce burned, RemoteControlAllowed=true", rev.Revision)
+	t.Log("v2 approval, host lease, local result, daemon ACK and separate capability authorization verified")
 }

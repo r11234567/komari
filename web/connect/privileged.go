@@ -15,6 +15,7 @@ package connectapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -22,6 +23,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/database/privilegeddelivery"
 	"github.com/komari-monitor/komari/pkg/rpc"
@@ -29,8 +31,10 @@ import (
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	configv1connect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
+	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
 	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -67,8 +71,18 @@ func (s *privilegedDeliveryService) WatchPrivilegedDelivery(ctx context.Context,
 		return err
 	}
 	after := req.Msg.GetAfterRevision()
+	sequence := req.Msg.GetAfterSequence()
 	for {
 		revision, found, err := privilegeddelivery.Latest(agentID, after)
+		if req.Msg.GetProtocolVersion() == 2 {
+			snapshot, e := privilegeddelivery.GetState(agentID)
+			err = e
+			found = e == nil && snapshot.Desired != nil && snapshot.State.UpdateSequence > sequence
+			if found {
+				revision = *snapshot.Desired
+				revision.UpdateSequence = snapshot.State.UpdateSequence
+			}
+		}
 		if err != nil {
 			return connectError(connect.CodeInternal, err)
 		}
@@ -77,10 +91,11 @@ func (s *privilegedDeliveryService) WatchPrivilegedDelivery(ctx context.Context,
 			if err != nil {
 				return connectError(connect.CodeInternal, err)
 			}
-			if err := stream.Send(&configv1.WatchPrivilegedDeliveryResponse{Revision: signed}); err != nil {
+			if err := stream.Send(&configv1.WatchPrivilegedDeliveryResponse{Revision: signed, UpdateSequence: revision.UpdateSequence}); err != nil {
 				return err
 			}
 			after = revision.Revision
+			sequence = revision.UpdateSequence
 		}
 		// Polling rather than signalling: a privileged revision is created by a
 		// human at human cadence, so the simplicity is worth more here than the
@@ -109,6 +124,16 @@ func (s *privilegedDeliveryService) UpdatePrivilegedDelivery(ctx context.Context
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("privileged settings are required"))
 	}
 
+	if req.Msg.GetProtocolVersion() != 2 {
+		return nil, connectError(connect.CodeFailedPrecondition, errors.New("privileged_delivery_v2 is required; upgrade the panel and agent"))
+	}
+	snapshot, err := privilegeddelivery.GetState(agentID)
+	if err != nil {
+		return nil, connectError(connect.CodeNotFound, err)
+	}
+	if snapshot.State.ProtocolVersion != 2 {
+		return nil, connectError(connect.CodeFailedPrecondition, errors.New("agent must negotiate privileged_delivery_v2"))
+	}
 	revision, err := privilegeddelivery.Save(agentID, privilegeddelivery.Settings{
 		RemoteControlEnabled:  settings.GetRemoteControlEnabled(),
 		WebSSHEnabled:         settings.GetWebsshEnabled(),
@@ -135,6 +160,18 @@ func (s *privilegedDeliveryService) ConfirmPrivilegedDelivery(ctx context.Contex
 	if err := requireRescueAdministrator(meta); err != nil {
 		return nil, err
 	}
+	// Reading an existing approval is an idempotent retry, not another grant.
+	// It must not consume a second single-use OTP or extend any deadline.
+	current, found, err := privilegeddelivery.Current(req.Msg.GetAgentId())
+	if err != nil {
+		return nil, connectError(connect.CodeInternal, err)
+	}
+	if found && current.Revision == req.Msg.GetRevision() && current.ProtocolVersion == 2 && current.ConfirmedAt != nil {
+		active := current.NonceExpires != nil && time.Now().Before(*current.NonceExpires) && (current.State == privilegeddelivery.StateNeedsManualAuthorization || current.State == privilegeddelivery.StateAwaitingAgent || current.State == privilegeddelivery.StateApplying)
+		if active || current.State == privilegeddelivery.StateDelivered {
+			return connect.NewResponse(&configv1.ConfirmPrivilegedDeliveryResponse{Revision: privilegedRevisionToProto(current)}), nil
+		}
+	}
 	// Confirming is what authorizes a privilege change on a host, so it always
 	// costs a fresh second factor regardless of what the change contains.
 	if err := verifyConnectTwoFactor(meta, req.Msg.GetTwoFactor()); err != nil {
@@ -142,7 +179,13 @@ func (s *privilegedDeliveryService) ConfirmPrivilegedDelivery(ctx context.Contex
 	}
 	revision, err := privilegeddelivery.Confirm(req.Msg.GetAgentId(), req.Msg.GetRevision(), meta.Principal.UserUUID)
 	if err != nil {
-		return nil, connectError(connect.CodeFailedPrecondition, err)
+		failure := connect.NewError(connect.CodeFailedPrecondition, err)
+		if snap, e := privilegeddelivery.GetState(req.Msg.GetAgentId()); e == nil && snap.Desired != nil {
+			if detail, e := connect.NewErrorDetail(&configv1.ConfirmPrivilegedDeliveryResponse{Revision: privilegedRevisionToProto(*snap.Desired)}); e == nil {
+				failure.AddDetail(detail)
+			}
+		}
+		return nil, failure
 	}
 	auditlog.Log(meta.RemoteIP, meta.Principal.UserUUID,
 		fmt.Sprintf("privileged configuration confirmed: client=%s revision=%d state=%s",
@@ -161,8 +204,17 @@ func (s *privilegedDeliveryService) ReportPrivilegedDelivery(ctx context.Context
 	if errs := req.Msg.GetErrors(); len(errs) > 0 {
 		detail = errs[0].GetMessage()
 	}
-	revision, err := privilegeddelivery.Report(agentID, req.Msg.GetRevision(), int32(req.Msg.GetState()),
-		int32(req.Msg.GetActivePrivilegeMode()), detail)
+	var revision privilegeddelivery.Revision
+	if req.Msg.GetProtocolVersion() == 2 && req.Msg.GetState() == configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_FAILED {
+		revision, err = privilegeddelivery.FailApply(dbcore.GetDBInstance(), agentID, req.Msg.GetRevision(), req.Msg.GetReceiptId(), req.Msg.GetConfigHash(), req.Msg.GetApprovalGeneration(), detail)
+	} else if req.Msg.GetProtocolVersion() == 2 && req.Msg.GetObservation() != nil {
+		if req.Msg.GetState() != configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED || req.Msg.GetRevision() != req.Msg.GetObservation().GetRevision() {
+			return nil, connectError(connect.CodeInvalidArgument, errors.New("observation must match delivered revision"))
+		}
+		revision, err = privilegeddelivery.Observe(dbcore.GetDBInstance(), agentID, req.Msg.GetReceiptId(), req.Msg.GetObservation())
+	} else {
+		revision, err = privilegeddelivery.Report(agentID, req.Msg.GetRevision(), int32(req.Msg.GetState()), int32(req.Msg.GetActivePrivilegeMode()), detail)
+	}
 	if err != nil {
 		return nil, connectError(connect.CodeFailedPrecondition, err)
 	}
@@ -215,15 +267,19 @@ func (s *privilegedDeliveryService) ListPrivilegedRevisions(ctx context.Context,
 	response := &configv1.ListPrivilegedRevisionsResponse{
 		InstalledPrivilegeMode: reportv1.PrivilegeMode(privilegeddelivery.InstalledPrivilegeMode(agentID)),
 	}
+	snapshot, err := privilegeddelivery.GetState(agentID)
+	if err != nil {
+		return nil, connectError(connect.CodeInternal, err)
+	}
+	response.AppliedRevision = snapshot.State.AppliedRevision
+	response.UpdateSequence = snapshot.State.UpdateSequence
+	if snapshot.Applied != nil {
+		response.Applied = privilegedRevisionToProto(*snapshot.Applied)
+	}
 	for _, revision := range history {
-		// The applied revision is the newest one the host reported delivered,
-		// which can be older than the newest saved: that gap is exactly what
-		// the panel needs to show.
-		if revision.State == privilegeddelivery.StateDelivered && revision.Revision > response.AppliedRevision {
-			response.AppliedRevision = revision.Revision
-		}
 		response.Revisions = append(response.Revisions, privilegedRevisionToProto(revision))
 	}
+
 	return connect.NewResponse(response), nil
 }
 
@@ -246,12 +302,7 @@ const privilegedSignatureLifetime = 10 * time.Minute
 // while a captured copy still cannot be replayed.
 func signedPrivilegedRevision(revision privilegeddelivery.Revision) (*configv1.PrivilegedRevision, error) {
 	message := privilegedRevisionToProto(revision)
-	body, err := proto.MarshalOptions{Deterministic: true}.Marshal(&configv1.PrivilegedRevision{
-		AgentId:    message.GetAgentId(),
-		Revision:   message.GetRevision(),
-		Privileged: message.GetPrivileged(),
-		Plan:       message.GetPlan(),
-	})
+	body, err := proto.MarshalOptions{Deterministic: true}.Marshal(message)
 	if err != nil {
 		return nil, fmt.Errorf("encode privileged revision for signing: %w", err)
 	}
@@ -261,7 +312,7 @@ func signedPrivilegedRevision(revision privilegeddelivery.Revision) (*configv1.P
 		Nonce:           utils.GenerateRandomString(32),
 		IssuedAt:        timestamppb.New(now),
 		ExpiresAt:       timestamppb.New(now.Add(privilegedSignatureLifetime)),
-		InstructionType: privilegedInstructionType,
+		InstructionType: "komari.config.v2.PrivilegedRevision",
 		Body:            body,
 	})
 	if err != nil {
@@ -284,7 +335,9 @@ func signedPrivilegedRevision(revision privilegeddelivery.Revision) (*configv1.P
 
 func privilegedRevisionToProto(revision privilegeddelivery.Revision) *configv1.PrivilegedRevision {
 	result := &configv1.PrivilegedRevision{
-		AgentId:  revision.Client,
+		InstallationBaseline: revision.InstallationBaseline,
+		AgentId:              revision.Client,
+		ConfigHash:           revision.ConfigHash, ApprovalGeneration: revision.ApprovalGeneration, UpdateSequence: revision.UpdateSequence, ConfirmedBy: revision.ConfirmedBy, ProtocolVersion: revision.ProtocolVersion,
 		Revision: revision.Revision,
 		Privileged: &configv1.PrivilegedConfig{
 			RemoteControlEnabled:  &revision.Settings.RemoteControlEnabled,
@@ -306,7 +359,7 @@ func privilegedRevisionToProto(revision privilegeddelivery.Revision) *configv1.P
 	// The manual task travels only while it can still be redeemed. Sending a
 	// spent or expired nonce would invite an Agent to attempt an upgrade that
 	// cannot succeed.
-	if revision.Nonce != "" && revision.NonceUsedAt == nil {
+	if revision.ConfirmedAt != nil && revision.State == privilegeddelivery.StateNeedsManualAuthorization && revision.Nonce != "" && revision.NonceUsedAt == nil && revision.NonceExpires != nil && time.Now().Before(*revision.NonceExpires) {
 		task := &configv1.ManualUpgradeTask{
 			TaskId:               revision.TaskID,
 			Nonce:                revision.Nonce,
@@ -332,5 +385,43 @@ func privilegedRevisionToProto(revision privilegeddelivery.Revision) *configv1.P
 	if revision.ErrorDetail != "" {
 		result.Errors = []*commonv1.ErrorDetail{{Code: "PRIVILEGED_DELIVERY", Message: revision.ErrorDetail}}
 	}
+	if revision.ReceivedAt != nil {
+		result.ReceivedAt = timestamppb.New(*revision.ReceivedAt)
+	}
+	if a, err := privilegeddelivery.Authorization(revision); err == nil {
+		result.Authorization = a
+	}
 	return result
+}
+
+func (s *privilegedDeliveryService) GetNodeConfigState(ctx context.Context, req *connect.Request[configv1.GetNodeConfigStateRequest]) (*connect.Response[configv1.GetNodeConfigStateResponse], error) {
+	if err := requireRescueAdministrator(rpc.MetaFromContext(ctx)); err != nil {
+		return nil, err
+	}
+	snapshot, err := privilegeddelivery.GetState(strings.TrimSpace(req.Msg.GetAgentId()))
+	if err != nil {
+		return nil, connectError(connect.CodeNotFound, err)
+	}
+	out := &configv1.GetNodeConfigStateResponse{AppliedRevision: snapshot.State.AppliedRevision, UpdateSequence: snapshot.State.UpdateSequence, ProtocolVersion: snapshot.State.ProtocolVersion}
+	out.HostOperation = snapshot.Operation
+	var actions []int32
+	if err = json.Unmarshal([]byte(snapshot.State.SupportedActions), &actions); err == nil {
+		for _, a := range actions {
+			out.SupportedHostActions = append(out.SupportedHostActions, hostv1.HostAction(a))
+		}
+	}
+	if snapshot.Desired != nil {
+		out.Desired = privilegedRevisionToProto(*snapshot.Desired)
+	}
+	if snapshot.Applied != nil {
+		out.Applied = privilegedRevisionToProto(*snapshot.Applied)
+	}
+	if snapshot.State.Observation != "" {
+		var observation hostv1.DaemonObservation
+		if err := protojson.Unmarshal([]byte(snapshot.State.Observation), &observation); err != nil {
+			return nil, connectError(connect.CodeInternal, err)
+		}
+		out.Observation = &observation
+	}
+	return connect.NewResponse(out), nil
 }

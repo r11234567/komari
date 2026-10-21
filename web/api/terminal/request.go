@@ -24,7 +24,7 @@ func RequestTerminal(c *gin.Context) {
 		})
 		return
 	}
-	allowed, err := clients.RemoteControlAllowed(uuid)
+	allowed, err := clients.PrivilegedCapabilityAllowed(uuid, "webssh")
 	if err != nil || !allowed {
 		api.RespondError(c, http.StatusForbidden, "Remote control is disabled for this client")
 		return

@@ -1,0 +1,30 @@
+name: Privileged delivery regression
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: privileged-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: State machine, migrations, authorization and Connect integration
+        run: scripts/ci/run-go-tests.sh ./database/privilegeddelivery ./database/clients ./web/connect ./web/executionapp ./web/remotemanagement ./web/rescueapp ./web/deployment ./web/api/remote ./web/api/terminal ./web/rpc/jsonrpc
+      - name: Preserve complete logs, including compiler failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: privileged-backend-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30

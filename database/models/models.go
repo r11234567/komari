@@ -9,6 +9,8 @@ import (
 
 // Client represents a registered client device
 type Client struct {
+	ConfigBaselineEligible bool `json:"-" gorm:"not null;default:false"`
+
 	UUID                   string     `json:"uuid,omitempty" gorm:"type:varchar(36);primaryKey"`
 	Token                  string     `json:"token,omitempty" gorm:"type:varchar(255);unique;not null"`
 	PreviousToken          string     `json:"-" gorm:"type:varchar(255);index"`
@@ -81,20 +83,30 @@ type ClientDeploymentProfile struct {
 // human approvals rather than a convergence loop, and mixing the two would
 // invite a code path that treats one like the other.
 type ClientPrivilegedRevision struct {
+	InstallationBaseline bool `json:"-" gorm:"not null;default:false"`
+
 	Client   string `json:"-" gorm:"type:varchar(36);primaryKey"`
 	Revision uint64 `json:"-" gorm:"primaryKey"`
 	// Config is the serialized PrivilegedConfig for this revision.
 	Config string `json:"-" gorm:"type:text;not null"`
 	// UpgradeClass and Reasons record how the panel classified this revision
 	// when it was saved, so the classification cannot drift after the fact.
-	UpgradeClass      int32  `json:"-" gorm:"not null;default:0"`
-	Reasons           string `json:"-" gorm:"type:text;not null;default:''"`
-	FromPrivilegeMode int32  `json:"-" gorm:"not null;default:0"`
-	ToPrivilegeMode   int32  `json:"-" gorm:"not null;default:0"`
-	State             int32  `json:"-" gorm:"not null;default:0"`
+	UpgradeClass       int32      `json:"-" gorm:"not null;default:0"`
+	Reasons            string     `json:"-" gorm:"type:text;not null;default:''"`
+	FromPrivilegeMode  int32      `json:"-" gorm:"not null;default:0"`
+	ToPrivilegeMode    int32      `json:"-" gorm:"not null;default:0"`
+	State              int32      `json:"-" gorm:"not null;default:0"`
+	ProtocolVersion    uint32     `json:"-" gorm:"not null;default:1"`
+	ConfigHash         string     `json:"-" gorm:"type:varchar(64)"`
+	Authorization      []byte     `json:"-"`
+	ApprovalGeneration uint64     `json:"-" gorm:"not null;default:0"`
+	ConfirmedBy        string     `json:"-" gorm:"type:varchar(128)"`
+	ReceivedAt         *time.Time `json:"-"`
+	UpdateSequence     uint64     `json:"-" gorm:"not null;default:0"`
+	SupersededAt       *time.Time `json:"-"`
+
 	// TaskID and Nonce belong to a manual upgrade. The nonce is single-use and
-	// is what proves an upgrade actually ran on the host rather than being
-	// claimed from somewhere else.
+	// binds a task to its approval; possession is not proof of OS authentication.
 	TaskID       string     `json:"-" gorm:"type:varchar(64);index"`
 	Nonce        string     `json:"-" gorm:"type:varchar(128);index"`
 	NonceExpires *time.Time `json:"-"`
@@ -112,6 +124,47 @@ type ClientPrivilegedRevision struct {
 	FinishedAt          *time.Time `json:"-"`
 	CreatedAt           time.Time  `json:"-"`
 	UpdatedAt           time.Time  `json:"-"`
+}
+
+// ClientPrivilegedState serializes updates per node and owns the applied pointer.
+// Legacy delivered rows remain history; migration does not invent v2 observations.
+type ClientPrivilegedState struct {
+	Client           string `gorm:"type:varchar(36);primaryKey"`
+	DesiredRevision  uint64 `gorm:"not null;default:0"`
+	AppliedRevision  uint64 `gorm:"not null;default:0"`
+	UpdateSequence   uint64 `gorm:"not null;default:0"`
+	ProtocolVersion  uint32 `gorm:"not null;default:1"`
+	ServiceID        string `gorm:"type:varchar(255)"`
+	SupportedActions string `gorm:"type:text"`
+	PrivilegeMode    int32  `gorm:"not null;default:0"`
+	StartupID        string `gorm:"type:varchar(128)"`
+	Observation      string `gorm:"type:text"`
+	UpdatedAt        time.Time
+}
+
+// ClientHostOperation records a bounded, single-use administrative transaction.
+type ClientHostOperation struct {
+	Client              string `gorm:"type:varchar(36);primaryKey"`
+	OperationID         string `gorm:"type:varchar(128);primaryKey"`
+	Revision            uint64 `gorm:"not null;index"`
+	ApprovalGeneration  uint64 `gorm:"not null"`
+	Authorization       []byte `gorm:"not null"`
+	Phase               int32  `gorm:"not null"`
+	LeaseExpiresAt      time.Time
+	PriorStartupID      string `gorm:"type:varchar(128)"`
+	Error               string `gorm:"type:text"`
+	LocalAuthentication string `gorm:"type:varchar(64)"`
+	Operator            string `gorm:"type:varchar(128)"`
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+// ClientPrivilegedReceipt makes retries durable and rejects ID/content conflicts.
+type ClientPrivilegedReceipt struct {
+	Client      string `gorm:"type:varchar(36);primaryKey"`
+	ReceiptID   string `gorm:"type:varchar(128);primaryKey"`
+	PayloadHash string `gorm:"type:varchar(64);not null"`
+	CreatedAt   time.Time
 }
 
 // AgentEnrollment is one device authorization attempt.
@@ -336,4 +389,13 @@ func (sa *StringArray) Scan(value interface{}) error {
 
 func (sa StringArray) Value() (driver.Value, error) {
 	return json.Marshal(sa)
+}
+
+// ClientConfigBaseline binds an immutable first-install request to its r1 pair.
+// It cannot be recreated by re-enrollment or a report from an old node.
+type ClientConfigBaseline struct {
+	Client      string `gorm:"type:varchar(36);primaryKey"`
+	RequestHash string `gorm:"type:varchar(64);not null"`
+	Runtime     []byte `gorm:"not null"`
+	CreatedAt   time.Time
 }
