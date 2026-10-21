@@ -106,15 +106,6 @@ func deploymentCommand(profile clients.DeploymentProfile, endpoint, token string
 	if profile.IgnoreUnsafeCert {
 		arguments = append(arguments, "--ignore-unsafe-cert")
 	}
-	if profile.EnableGPU {
-		arguments = append(arguments, "--enable-gpu")
-	}
-	if profile.DetailedGPU {
-		arguments = append(arguments, "--detailed-gpu")
-	}
-	if profile.GetIPAddrFromNIC {
-		arguments = append(arguments, "--get-ip-addr-from-nic")
-	}
 	if !profile.RemoteControlEnabled {
 		arguments = append(arguments, "--disable-remote-control")
 	}

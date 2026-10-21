@@ -1,6 +1,6 @@
 # 阶段 6 连续 CI 失败复盘
 
-2026-10-21。阶段 6 尚未验收，CLI 尚未开始清理。所有工作仍在草稿分支，没有合并、发布或修改 FRA 生产服务。
+2026-10-21。阶段 6 的 Linux/systemd 完整功能验收现已通过，阶段 6 通过后已进行 CLI 清理，另有针对性回归。所有工作仍在草稿分支，没有合并、发布或修改 FRA 生产服务。
 
 连续失败不能作为正常交付结果。此前的工作方式是看到首个失败就修补并推送，未先检查整个恢复状态机与测试服务契约；因此出现了“修到下一个失败”的过程，甚至把不存在的 proto 字段推到了 CI。这是推送前检查和实现审查不足。
 
@@ -39,3 +39,14 @@ journal 独立升级到 schema 3：加入文件 UID/GID、原服务 UID、恢复
 - 验收全部通过之前不称阶段 6 完成，不修改 CLI，不做 FRA 灰度。Windows/macOS/FreeBSD 仍明确 unsupported；跨编译不能代替平台特权事务验收。
 
 四库继续固定同一 proto `e575defe19425b8d79f08457c5262f3dd51e32ee`，不能根据猜测添加生成代码不存在的字段。
+
+## 最终验证结果
+
+- Agent 源码 `9fe5463d6de43b451ebae25106b56ad4bc807b7c`：完整审计 https://github.com/r11234567/komari-agent/actions/runs/39625269490 全部通过。真实 PAM/systemd 事务用例运行 71.54 秒，通过身份提升/降权、helper 生命周期、启动失败恢复、丢回执、真实进程 kill，以及最终 daemon ACK 响应丢失后的本机恢复。Windows 状态测试、跨编译及全部原审计回归也通过。
+- Backend 源码 `57295591c06dd60755e4a8bda8956396e6f0e801`：完整回归 https://github.com/r11234567/komari/actions/runs/39623198814 与 CodeQL 39623202093 通过。
+- Web 两套入口构建/测试：39616080499 通过；已校验 lock hash 并嵌入 backend。Proto：e575defe19425b8d79f08457c5262f3dd51e32ee，四库一致。
+- Agent CodeQL 39625269483 的 Go、Actions 两项 job 均成功；查询时 workflow 汇总仍显示 in_progress，未将其写成 workflow 已完成。
+
+复审后的 run 39623176477 又发现并确认了 systemd `start-limit-hit`：故障注入耗尽启动计数，修复 unit 后仍不能重新启动。现由经过本机认证的事务对目标服务执行一次 reset-failed，再重启并核验；不移除正常运行期间的系统限速。此项修复已包含在上述最终通过源码和完整验收中。该失败 journald/services 日志也已下载保存。
+
+完整通过日志位于 `ci/39625269490.log`，逐项本机预检与 CI 证据位于 `stage6-review-evidence.json`。阶段 6 文档已更新为验收结果；CLI 清理在上述完整验收之后单独进行，不混入根因修复提交。

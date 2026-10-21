@@ -1,6 +1,6 @@
 # 阶段 0–5 与前端交付状态
 
-阶段 6 正在复审和验收，尚未完成；连续 CI 失败的证据、根因与本轮修复见 [阶段 6 失败复盘](privileged-stage6-failure-review.md)。CLI 尚未开始清理。下面的阶段 0–5 结果是历史验收记录，不能代表阶段 6 通过。
+阶段 6 Linux/systemd 完整验收已通过（Agent 9fe5463，CI 39625269490；backend 57295591，CI 39623198814）。连续失败的根因和验收证据见 [阶段 6 失败复盘](privileged-stage6-failure-review.md)。随后清理 CLI：删除重复命令与可在线下发的公开参数，安装命令生成器同步更新；这批改动单独验证。未部署 FRA。
 
 2026-10-21。开发分支已经实施阶段 0–5，并提前修复两处前端。所有 PR 仍为草稿；尚未合并、发布或部署，FRA 生产服务与历史任务未修改。
 
@@ -17,7 +17,7 @@
 
 阶段 4 首次 daemon 连接先协商服务与真实身份，只有服务端新建且无历史的 eligible 节点才创建 runtime r1 / privileged r1。本机 immutable proposal 固定重试；签名基线必须精确匹配 root-owned installation policy。各快照落盘加载后再 ACK；期间 applied 0 表示等待确认。旧节点、已有 r4、旧 pending r1 不被自动清零或补写成功。
 
-阶段 5 同身份目标在新鲜 2FA 批准、完整 v2 签名及在线当前性检查后，由 daemon 应用。执行、WebSSH、文件操作、监控和 GPU 读取同一有效配置；普通账户只在现有 OS 身份内远控。bootstrap 不盖已应用快照，protected force-deny 优先；未知/未实现 runtime 字段拒绝。撤权阻止新任务，并在本机收到后约 500 ms 内取消受管理任务与会话；服务端 Watch 约 20 秒轮询，服务端先拦新调度。进程锁与 stale-disk 检查阻止旧快照覆盖；CLI、旧脚本、rescue 直接写 daemon state 的入口关闭。快照/回执原子持久化，重启重发原 ID/payload，拒绝证据保留。
+阶段 5 同身份目标在新鲜 2FA 批准、完整 v2 签名及在线当前性检查后，由 daemon 应用。执行、WebSSH、文件操作、监控和 GPU 读取同一有效配置；普通账户只在现有 OS 身份内远控。bootstrap 在线字段不盖已应用快照，本机显式 deny 与 protected force-deny 优先；未知/未实现 runtime 字段拒绝。撤权阻止新任务，并在本机收到后约 500 ms 内取消受管理任务与会话；服务端 Watch 约 20 秒轮询，服务端先拦新调度。进程锁与 stale-disk 检查阻止旧快照覆盖；CLI、旧脚本、rescue 直接写 daemon state 的入口关闭。快照/回执原子持久化，重启重发原 ID/payload，拒绝证据保留。
 
 保留阶段 0–2 的约束：Save CAS 包含 0；接收不批准；CompleteManualUpgrade/旧终态报告不能完成 v2；host LOCAL_APPLIED 也不等于 delivered；current applied 只由匹配的 daemon observation 推进。历史错误任务必须保留并 supersede，不能补造 confirmed_at 或成功。
 
@@ -33,4 +33,4 @@
 
 本机只做格式、脚本语法和产物校验，没有运行完整构建/重测试。所有重测试放 GitHub CI，always 上传 JSONL、人类日志、编译 stderr、退出码和失败索引，保留 30 天。历史失败 artifacts 已下载到工作区 staging/komari-privilege-audit-20261021/ci/；阶段 5 原 6 项 agent 预期失败已全部提升为必须通过的正式测试，不再把失败算成功。
 
-阶段 6 候选实现已加入本机 PAM、独立管理员信任根、Linux systemd 身份转换、helper 发布签名/按需安装和恢复 journal。具备受保护 trust/PAM 条件的 Linux 节点才协商 host actions；两处前端使用新 proto 展示真实 host 操作命令、主机进度与 daemon 确认状态，内嵌构建来自 Web CI 39616080499。完整当前版本尚待真实 CI 验收，不得据此宣称阶段 6 已完成。Windows/macOS/FreeBSD 继续明确 unsupported，跨编译不等于平台特权安装验收。阶段 7 的 CLI 清理尚未开始；阶段 8 才做 FRA 灰度与生产任务迁移。
+阶段 6 候选实现已加入本机 PAM、独立管理员信任根、Linux systemd 身份转换、helper 发布签名/按需安装和恢复 journal。具备受保护 trust/PAM 条件的 Linux 节点才协商 host actions；两处前端使用新 proto 展示真实 host 操作命令、主机进度与 daemon 确认状态，内嵌构建来自 Web CI 39616080499。阶段 6 已通过真实 PAM/systemd、helper 生命周期、身份提升/降权及多类中断/丢回执恢复验收。Windows/macOS/FreeBSD 继续明确 unsupported，跨编译不等于平台特权安装验收。阶段 7 的 CLI 清理在阶段 6 验收通过后进行；阶段 8 才做 FRA 灰度与生产任务迁移。
