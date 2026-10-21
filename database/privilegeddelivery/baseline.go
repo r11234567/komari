@@ -100,6 +100,13 @@ func InitializeBaseline(db *gorm.DB, r *configv1.InitializeNodeConfigRequest, pr
 			return err
 		}
 		profile.PrivilegedDeliveryVersion = 2
+		profile.ServiceName = r.ServiceId
+		profile.EnableGPU = s.EnableGPU
+		profile.RemoteControlEnabled = s.RemoteControlEnabled
+		if state.PrivilegeMode == 1 || state.PrivilegeMode == 3 {
+			profile.RuntimeIdentity = clients.AgentRuntimeIdentityPrivileged
+		}
+
 		encoded, err := json.Marshal(profile)
 		if err != nil {
 			return err
