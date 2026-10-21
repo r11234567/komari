@@ -130,6 +130,15 @@ func SaveWithDB(db *gorm.DB, clientUUID string, settings Settings, expectedRevis
 		if settings.RequiredPrivilegeMode < 0 || settings.RequiredPrivilegeMode > 5 {
 			return errors.New("unsupported privilege mode")
 		}
+		// Resolve "keep current identity" before hashing/signing. Every v2
+		// candidate must bind the exact daemon identity, including boolean-only
+		// API callers which leave required_privilege_mode unspecified.
+		if settings.RequiredPrivilegeMode == privilegeUnspecified {
+			settings.RequiredPrivilegeMode = InstalledPrivilegeModeWithDB(tx, clientUUID)
+			if settings.RequiredPrivilegeMode == privilegeUnspecified {
+				return errors.New("actual service identity must be negotiated before saving privileged configuration")
+			}
+		}
 		class, reasons, from, to := classify(tx, clientUUID, settings)
 		now := time.Now().UTC()
 		// A new desired revision invalidates old pending approvals atomically.

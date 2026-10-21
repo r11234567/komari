@@ -394,3 +394,15 @@ func TestV2FailureDoesNotInventAppliedAndCannotRegressSuccess(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, next.Revision, snap.State.AppliedRevision)
 }
+
+func TestV2UnspecifiedIdentityIsResolvedBeforeHashAndApproval(t *testing.T) {
+	db, id := fixtureV2(t)
+	saved, approved := saveConfirm(t, db, id, Settings{RemoteControlEnabled: true, WebSSHEnabled: true})
+	require.Equal(t, int32(2), saved.Settings.RequiredPrivilegeMode)
+	require.Equal(t, settingsHash(saved.Settings), saved.ConfigHash)
+	require.Equal(t, saved.ConfigHash, approved.ConfigHash)
+	require.Equal(t, reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_NON_ROOT, reportv1.PrivilegeMode(approved.ToPrivilegeMode))
+	require.Equal(t, StateAwaitingAgent, approved.State)
+	_, err := Observe(db, id, "explicit-same-identity", observation(approved))
+	require.NoError(t, err)
+}
