@@ -231,7 +231,7 @@ func Observe(db *gorm.DB, id, key string, o *hostv1.DaemonObservation) (Revision
 					return errors.New("identity conversion requires a restarted daemon")
 				}
 			}
-		} else if row.NonceExpires == nil || !time.Now().Before(*row.NonceExpires) {
+		} else if !row.InstallationBaseline && (row.NonceExpires == nil || !time.Now().Before(*row.NonceExpires)) {
 			return errors.New("approval has expired")
 		}
 		settings := decodeSettings(row.Config)

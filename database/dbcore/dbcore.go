@@ -538,6 +538,7 @@ func doInitialize() error {
 		&models.ClientPrivilegedState{},
 		&models.ClientHostOperation{},
 		&models.ClientPrivilegedReceipt{},
+		&models.ClientConfigBaseline{},
 		&models.AgentEnrollment{},
 		&models.AgentCredential{},
 		&models.ControlPlaneKey{},

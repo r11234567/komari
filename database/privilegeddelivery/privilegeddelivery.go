@@ -68,33 +68,34 @@ type Settings struct {
 
 // Revision is one stored revision with its decision state.
 type Revision struct {
-	Authorization       []byte
-	ProtocolVersion     uint32
-	ConfigHash          string
-	ApprovalGeneration  uint64
-	ConfirmedBy         string
-	ReceivedAt          *time.Time
-	UpdateSequence      uint64
-	Client              string
-	Revision            uint64
-	Settings            Settings
-	UpgradeClass        int32
-	Reasons             []string
-	FromPrivilegeMode   int32
-	ToPrivilegeMode     int32
-	State               int32
-	TaskID              string
-	Nonce               string
-	NonceExpires        *time.Time
-	NonceUsedAt         *time.Time
-	Operator            string
-	LocalAuthentication string
-	ActivePrivilegeMode int32
-	ErrorDetail         string
-	PreviousRevision    uint64
-	SavedAt             time.Time
-	ConfirmedAt         *time.Time
-	FinishedAt          *time.Time
+	InstallationBaseline bool
+	Authorization        []byte
+	ProtocolVersion      uint32
+	ConfigHash           string
+	ApprovalGeneration   uint64
+	ConfirmedBy          string
+	ReceivedAt           *time.Time
+	UpdateSequence       uint64
+	Client               string
+	Revision             uint64
+	Settings             Settings
+	UpgradeClass         int32
+	Reasons              []string
+	FromPrivilegeMode    int32
+	ToPrivilegeMode      int32
+	State                int32
+	TaskID               string
+	Nonce                string
+	NonceExpires         *time.Time
+	NonceUsedAt          *time.Time
+	Operator             string
+	LocalAuthentication  string
+	ActivePrivilegeMode  int32
+	ErrorDetail          string
+	PreviousRevision     uint64
+	SavedAt              time.Time
+	ConfirmedAt          *time.Time
+	FinishedAt           *time.Time
 	// UpgradeCommand is rendered rather than stored, so changing the install
 	// URL does not require rewriting historical rows.
 	UpgradeCommand string
@@ -369,7 +370,8 @@ func lockRevision(tx *gorm.DB, clientUUID string, revision uint64) (models.Clien
 
 func toRevision(row models.ClientPrivilegedRevision) Revision {
 	revision := Revision{
-		Authorization: row.Authorization, ProtocolVersion: row.ProtocolVersion, ConfigHash: row.ConfigHash, ApprovalGeneration: row.ApprovalGeneration, ConfirmedBy: row.ConfirmedBy, ReceivedAt: row.ReceivedAt, UpdateSequence: row.UpdateSequence,
+		InstallationBaseline: row.InstallationBaseline,
+		Authorization:        row.Authorization, ProtocolVersion: row.ProtocolVersion, ConfigHash: row.ConfigHash, ApprovalGeneration: row.ApprovalGeneration, ConfirmedBy: row.ConfirmedBy, ReceivedAt: row.ReceivedAt, UpdateSequence: row.UpdateSequence,
 		Client:              row.Client,
 		Revision:            row.Revision,
 		Settings:            decodeSettings(row.Config),

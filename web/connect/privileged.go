@@ -334,8 +334,9 @@ func signedPrivilegedRevision(revision privilegeddelivery.Revision) (*configv1.P
 
 func privilegedRevisionToProto(revision privilegeddelivery.Revision) *configv1.PrivilegedRevision {
 	result := &configv1.PrivilegedRevision{
-		AgentId:    revision.Client,
-		ConfigHash: revision.ConfigHash, ApprovalGeneration: revision.ApprovalGeneration, UpdateSequence: revision.UpdateSequence, ConfirmedBy: revision.ConfirmedBy, ProtocolVersion: revision.ProtocolVersion,
+		InstallationBaseline: revision.InstallationBaseline,
+		AgentId:              revision.Client,
+		ConfigHash:           revision.ConfigHash, ApprovalGeneration: revision.ApprovalGeneration, UpdateSequence: revision.UpdateSequence, ConfirmedBy: revision.ConfirmedBy, ProtocolVersion: revision.ProtocolVersion,
 		Revision: revision.Revision,
 		Privileged: &configv1.PrivilegedConfig{
 			RemoteControlEnabled:  &revision.Settings.RemoteControlEnabled,

@@ -9,6 +9,8 @@ import (
 
 // Client represents a registered client device
 type Client struct {
+	ConfigBaselineEligible bool `json:"-" gorm:"not null;default:false"`
+
 	UUID                   string     `json:"uuid,omitempty" gorm:"type:varchar(36);primaryKey"`
 	Token                  string     `json:"token,omitempty" gorm:"type:varchar(255);unique;not null"`
 	PreviousToken          string     `json:"-" gorm:"type:varchar(255);index"`
@@ -81,6 +83,8 @@ type ClientDeploymentProfile struct {
 // human approvals rather than a convergence loop, and mixing the two would
 // invite a code path that treats one like the other.
 type ClientPrivilegedRevision struct {
+	InstallationBaseline bool `json:"-" gorm:"not null;default:false"`
+
 	Client   string `json:"-" gorm:"type:varchar(36);primaryKey"`
 	Revision uint64 `json:"-" gorm:"primaryKey"`
 	// Config is the serialized PrivilegedConfig for this revision.
@@ -385,4 +389,13 @@ func (sa *StringArray) Scan(value interface{}) error {
 
 func (sa StringArray) Value() (driver.Value, error) {
 	return json.Marshal(sa)
+}
+
+// ClientConfigBaseline binds an immutable first-install request to its r1 pair.
+// It cannot be recreated by re-enrollment or a report from an old node.
+type ClientConfigBaseline struct {
+	Client      string `gorm:"type:varchar(36);primaryKey"`
+	RequestHash string `gorm:"type:varchar(64);not null"`
+	Runtime     []byte `gorm:"not null"`
+	CreatedAt   time.Time
 }
