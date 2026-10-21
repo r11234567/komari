@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -192,7 +191,7 @@ func receipt(tx *gorm.DB, id, key string, payload proto.Message) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	sum := sha256.Sum256(data)
+	sum := sha256.Sum256(append([]byte(string(payload.ProtoReflect().Descriptor().FullName())+"\x00"), data...))
 	hash := hex.EncodeToString(sum[:])
 	var old models.ClientPrivilegedReceipt
 	err = tx.First(&old, "client = ? AND receipt_id = ?", id, key).Error
@@ -219,9 +218,4 @@ func validateCurrent(state models.ClientPrivilegedState, row models.ClientPrivil
 		return errors.New("revision is awaiting panel confirmation")
 	}
 	return nil
-}
-
-// Conflict provides a structured revision hint without claiming a failed 2FA.
-func Conflict(id string, err error) error {
-	return fmt.Errorf("%w (refresh current state for agent %s)", err, id)
 }

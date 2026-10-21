@@ -26,8 +26,7 @@ import (
 )
 
 // Upgrade classes and delivery states mirror the proto enums. They are
-// duplicated as constants so the database layer does not depend on generated
-// protobuf code.
+// retained as constants for database predicates and compatibility with stored rows.
 const (
 	ClassUnspecified      int32 = 0
 	ClassAutomatic        int32 = 1
@@ -356,32 +355,6 @@ func InstalledPrivilegeModeWithDB(db *gorm.DB, clientUUID string) int32 {
 		return privilegeWindowsAdmin
 	}
 	return privilegeLinuxRoot
-}
-
-func privilegedEquivalent(mode int32) int32 {
-	switch mode {
-	case privilegeWindowsUser, privilegeWindowsAdmin:
-		return privilegeWindowsAdmin
-	default:
-		return privilegeLinuxRoot
-	}
-}
-
-func isPrivilegedMode(mode int32) bool {
-	return mode == privilegeLinuxRoot || mode == privilegeWindowsAdmin
-}
-
-func latestLocked(tx *gorm.DB, clientUUID string) (models.ClientPrivilegedRevision, bool, error) {
-	var row models.ClientPrivilegedRevision
-	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("client = ?", clientUUID).Order("revision DESC").First(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return row, false, nil
-	}
-	if err != nil {
-		return row, false, err
-	}
-	return row, true, nil
 }
 
 func lockRevision(tx *gorm.DB, clientUUID string, revision uint64) (models.ClientPrivilegedRevision, error) {

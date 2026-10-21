@@ -17,6 +17,7 @@ after later installation/local-policy/platform stages have been implemented.
   a transaction; startup AutoMigrate creates the three companion tables.
 - Same-identity grants require signed 2FA approval. Service identity changes and
   helper installation/removal additionally require bounded host operations.
+- Bound application failures retain the previous applied pointer and cannot regress a delivered revision.
 - Host LOCAL_APPLIED is not delivered. The daemon reports the matching revision,
   hash, generation, service, actual identity/capabilities and fresh startup ID.
 - Pending revocations block new server-side execution/WebSSH scheduling; grants

@@ -369,3 +369,28 @@ func TestV2SameIdentityRemoteGrantDoesNotRequireHostOperation(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, allowed)
 }
+
+func TestV2FailureDoesNotInventAppliedAndCannotRegressSuccess(t *testing.T) {
+	db, id := fixtureV2(t)
+	_, r := saveConfirm(t, db, id, Settings{RequiredPrivilegeMode: 2})
+	_, err := FailApply(db, id, r.Revision, "wrong-failure", "wrong", r.ApprovalGeneration, "local policy blocked")
+	require.Error(t, err)
+	failed, err := FailApply(db, id, r.Revision, "failure", r.ConfigHash, r.ApprovalGeneration, "local policy blocked")
+	require.NoError(t, err)
+	require.Equal(t, StateFailed, failed.State)
+	_, err = FailApply(db, id, r.Revision, "failure", r.ConfigHash, r.ApprovalGeneration, "local policy blocked")
+	require.NoError(t, err)
+	snap, err := GetStateWithDB(db, id)
+	require.NoError(t, err)
+	require.Zero(t, snap.State.AppliedRevision)
+	_, err = Observe(db, id, "late-success", observation(r))
+	require.Error(t, err)
+	_, next := saveConfirm(t, db, id, Settings{RequiredPrivilegeMode: 2})
+	_, err = Observe(db, id, "next-applied", observation(next))
+	require.NoError(t, err)
+	_, err = FailApply(db, id, next.Revision, "late-failure", next.ConfigHash, next.ApprovalGeneration, "stale error")
+	require.Error(t, err)
+	snap, err = GetStateWithDB(db, id)
+	require.NoError(t, err)
+	require.Equal(t, next.Revision, snap.State.AppliedRevision)
+}

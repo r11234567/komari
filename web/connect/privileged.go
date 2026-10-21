@@ -204,7 +204,9 @@ func (s *privilegedDeliveryService) ReportPrivilegedDelivery(ctx context.Context
 		detail = errs[0].GetMessage()
 	}
 	var revision privilegeddelivery.Revision
-	if req.Msg.GetProtocolVersion() == 2 && req.Msg.GetObservation() != nil {
+	if req.Msg.GetProtocolVersion() == 2 && req.Msg.GetState() == configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_FAILED {
+		revision, err = privilegeddelivery.FailApply(dbcore.GetDBInstance(), agentID, req.Msg.GetRevision(), req.Msg.GetReceiptId(), req.Msg.GetConfigHash(), req.Msg.GetApprovalGeneration(), detail)
+	} else if req.Msg.GetProtocolVersion() == 2 && req.Msg.GetObservation() != nil {
 		if req.Msg.GetState() != configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED || req.Msg.GetRevision() != req.Msg.GetObservation().GetRevision() {
 			return nil, connectError(connect.CodeInvalidArgument, errors.New("observation must match delivered revision"))
 		}

@@ -7,6 +7,8 @@ import (
 
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
+	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
+	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
 	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -140,7 +142,7 @@ func ReportOperation(db *gorm.DB, r *hostv1.ReportHostOperationRequest) (*hostv1
 			return errors.New("operation approval has been replaced")
 		}
 		phase := int32(r.Phase)
-		if op.Phase >= 3 || phase < 2 || phase > 5 || phase < op.Phase {
+		if op.Phase >= 4 || (op.Phase == 3 && phase < 4) || phase < 2 || phase > 5 || phase < op.Phase || row.State == StateDelivered || (row.State == StateFailed && phase <= 3) {
 			return errors.New("illegal host operation transition")
 		}
 		// Failure/restoration can be reported after expiry; success must happen in the lease.
@@ -199,6 +201,9 @@ func Observe(db *gorm.DB, id, key string, o *hostv1.DaemonObservation) (Revision
 		}
 		if err := validateCurrent(state, row); err != nil {
 			return err
+		}
+		if row.State != StateApplying && row.State != StateAwaitingAgent && row.State != StateDelivered {
+			return errors.New("revision is not awaiting a daemon apply acknowledgement")
 		}
 		if o.ConfigHash != row.ConfigHash || o.ApprovalGeneration != row.ApprovalGeneration || o.ServiceId != state.ServiceID {
 			return errors.New("observation does not match approval")
@@ -270,6 +275,53 @@ func Observe(db *gorm.DB, id, key string, o *hostv1.DaemonObservation) (Revision
 		row.State = StateDelivered
 		row.ActivePrivilegeMode = int32(o.PrivilegeMode)
 		row.ErrorDetail = ""
+		now := time.Now().UTC()
+		row.FinishedAt = &now
+		if err := advance(tx, &state, &row); err != nil {
+			return err
+		}
+		result = toRevision(row)
+		return nil
+	})
+	return result, err
+}
+
+// FailApply records a bound application failure without inventing an observation
+// or rolling the applied pointer back. Old and unapproved reports cannot use it.
+func FailApply(db *gorm.DB, id string, revision uint64, key, hash string, generation uint64, detail string) (Revision, error) {
+	var result Revision
+	payload := &configv1.ReportPrivilegedDeliveryRequest{AgentId: id, Revision: revision, State: configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_FAILED, ProtocolVersion: 2, ConfigHash: hash, ApprovalGeneration: generation, ReceiptId: key, Errors: []*commonv1.ErrorDetail{{Message: detail}}}
+	err := db.Transaction(func(tx *gorm.DB) error {
+		state, err := lockState(tx, id)
+		if err != nil {
+			return err
+		}
+		duplicate, err := receipt(tx, id, key, payload)
+		if err != nil {
+			return err
+		}
+		row, err := lockRevision(tx, id, revision)
+		if err != nil {
+			return err
+		}
+		if duplicate {
+			result = toRevision(row)
+			return nil
+		}
+		if err := validateCurrent(state, row); err != nil {
+			return err
+		}
+		if hash != row.ConfigHash || generation != row.ApprovalGeneration {
+			return errors.New("failure does not match approval")
+		}
+		if row.State != StateAwaitingAgent && row.State != StateApplying && row.State != StateNeedsManualAuthorization {
+			return errors.New("terminal revision cannot be changed by a failure report")
+		}
+		if strings.TrimSpace(detail) == "" {
+			return errors.New("application failure needs an error detail")
+		}
+		row.State = StateFailed
+		row.ErrorDetail = truncate(detail, 512)
 		now := time.Now().UTC()
 		row.FinishedAt = &now
 		if err := advance(tx, &state, &row); err != nil {
