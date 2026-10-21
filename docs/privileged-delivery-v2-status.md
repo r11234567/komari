@@ -25,9 +25,9 @@
 | --- | --- | --- |
 | Proto lint/breaking、Go/TS 生成与 hash | https://github.com/r11234567/komari-proto/actions/runs/39598492668 | 通过 |
 | Web npm/test/lint、普通主题及 system UI 两套构建 | https://github.com/r11234567/komari-web/actions/runs/39599525133 | 通过 |
-| 阶段 3–5 agent、真实 systemd 安装/迁移、受保护策略 + 签名批准、丢 ACK、所有原缺陷、跨平台 daemon/host 编译 | https://github.com/r11234567/komari-agent/actions/runs/39603156673 | 通过 |
-| Agent CodeQL | https://github.com/r11234567/komari-agent/actions/runs/39603156743 | 通过 |
-| Backend 新 proto/基线/状态机/分项判权及前端嵌入 | https://github.com/r11234567/komari/actions/runs/39602917710 | 通过 |
+| 阶段 3–5 agent、真实 systemd 安装/迁移、受保护策略 + 签名批准、丢 ACK、所有原缺陷、跨平台 daemon/host 编译、Windows 实际持久化/锁 | https://github.com/r11234567/komari-agent/actions/runs/39604002086 | 通过 |
+| Agent CodeQL | https://github.com/r11234567/komari-agent/actions/runs/39604002039 | 通过 |
+| Backend 新 proto/基线/状态机/分项判权及前端嵌入 | https://github.com/r11234567/komari/actions/runs/39603688754 | 通过 |
 
 本机只做格式、脚本语法和产物校验，没有运行完整构建/重测试。所有重测试放 GitHub CI，always 上传 JSONL、人类日志、编译 stderr、退出码和失败索引，保留 30 天。历史失败 artifacts 已下载到工作区 staging/komari-privilege-audit-20261021/ci/；阶段 5 原 6 项 agent 预期失败已全部提升为必须通过的正式测试，不再把失败算成功。
 
