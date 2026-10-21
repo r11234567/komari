@@ -2,7 +2,14 @@ package connectapi
 
 import (
 	"bytes"
+	"connectrpc.com/connect"
+	"context"
 	"crypto/ed25519"
+	"github.com/komari-monitor/komari/pkg/rpc"
+	configv1connect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
+	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -115,5 +122,107 @@ func TestPrivilegedV2LegacyProfileSaveCannotOverwriteInstallation(t *testing.T) 
 	profile.Interval = 7
 	if _, err := clients.SaveDeploymentProfile(id, profile); err != nil {
 		t.Fatalf("ordinary runtime save must remain available: %v", err)
+	}
+}
+
+func TestPrivilegedV2WatchDeliversApprovalOfAlreadyReceivedRevision(t *testing.T) {
+	id, _, err := clients.CreateClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = privilegeddelivery.Negotiate(dbcore.GetDBInstance(), id, "watch.service", "boot", 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := privilegeddelivery.Save(id, privilegeddelivery.Settings{RequiredPrivilegeMode: 2}, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := privilegeddelivery.Confirm(id, saved.Revision, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, handler := configv1connect.NewPrivilegedDeliveryServiceHandler(&privilegedDeliveryService{})
+	mux := http.NewServeMux()
+	mux.Handle(path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := rpc.NewContextWithMeta(r.Context(), &rpc.ContextMeta{Principal: rpc.NewAgentPrincipal(id)})
+		handler.ServeHTTP(w, r.WithContext(ctx))
+	}))
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	client := configv1connect.NewPrivilegedDeliveryServiceClient(server.Client(), server.URL)
+	stream, err := client.WatchPrivilegedDelivery(ctx, connect.NewRequest(&configv1.WatchPrivilegedDeliveryRequest{AgentId: id, AfterRevision: saved.Revision, AfterSequence: saved.UpdateSequence, ProtocolVersion: 2}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if !stream.Receive() {
+		t.Fatalf("approval of same revision was not delivered: %v", stream.Err())
+	}
+	if stream.Msg().Revision.Revision != saved.Revision || stream.Msg().UpdateSequence != approved.UpdateSequence {
+		t.Fatalf("wrong stream cursor: %v", stream.Msg())
+	}
+}
+func TestPrivilegedV2ListReturnsAppliedOutsideHistoryPage(t *testing.T) {
+	id, _, err := clients.CreateClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = privilegeddelivery.Negotiate(dbcore.GetDBInstance(), id, "history.service", "boot", 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := privilegeddelivery.Save(id, privilegeddelivery.Settings{RequiredPrivilegeMode: 2}, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := privilegeddelivery.Confirm(id, first.Revision, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = privilegeddelivery.Observe(dbcore.GetDBInstance(), id, "history-ack", &hostv1.DaemonObservation{Revision: 1, ConfigHash: approved.ConfigHash, ApprovalGeneration: approved.ApprovalGeneration, ServiceId: "history.service", StartupId: "boot", PrivilegeMode: 2, ObservedAt: timestamppb.Now(), EffectiveCapabilities: &reportv1.AgentCapabilities{PrivilegeMode: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n := uint64(1); n < 8; n++ {
+		if _, err := privilegeddelivery.Save(id, privilegeddelivery.Settings{RequiredPrivilegeMode: 2}, n, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: rpc.NewUserPrincipal("admin")})
+	result, err := (&privilegedDeliveryService{}).ListPrivilegedRevisions(ctx, connect.NewRequest(&configv1.ListPrivilegedRevisionsRequest{AgentId: id, Limit: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Msg.Revisions) != 1 || result.Msg.Revisions[0].Revision != 8 || result.Msg.AppliedRevision != 1 || result.Msg.Applied == nil || result.Msg.Applied.Revision != 1 {
+		t.Fatalf("applied snapshot lost to pagination: %v", result.Msg)
+	}
+}
+func TestPrivilegedV2ConfirmationRetryReadsExistingApproval(t *testing.T) {
+	id, _, err := clients.CreateClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = privilegeddelivery.Negotiate(dbcore.GetDBInstance(), id, "retry.service", "boot", 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := privilegeddelivery.Save(id, privilegeddelivery.Settings{RequiredPrivilegeMode: 2}, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := privilegeddelivery.Confirm(id, saved.Revision, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: rpc.NewUserPrincipal("admin")})
+	response, err := (&privilegedDeliveryService{}).ConfirmPrivilegedDelivery(ctx, connect.NewRequest(&configv1.ConfirmPrivilegedDeliveryRequest{AgentId: id, Revision: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Msg.Revision.ApprovalGeneration != approved.ApprovalGeneration || !response.Msg.Revision.Authorization.ExpiresAt.AsTime().Equal(*approved.NonceExpires) {
+		t.Fatal("retry renewed approval")
 	}
 }

@@ -1,11 +1,9 @@
 // Package privilegeddelivery stores privileged configuration revisions and
 // the human decisions attached to them.
 //
-// The classification is computed once, when a revision is saved, and then
-// frozen. That matters: the class decides whether a panel confirmation is
-// enough or an operator must authenticate on the host, and recomputing it
-// later would let a privilege boundary be crossed because an Agent's reported
-// mode happened to change in between.
+// Settings/hash and target identity are immutable per revision. The exact host
+// action list is frozen when panel approval is issued; receipt reports cannot
+// reclassify that approval or change its authority.
 package privilegeddelivery
 
 import (
@@ -317,13 +315,8 @@ func RedeemNonce(clientUUID, nonce, operator, localAuth string, resultingMode in
 	return Revision{}, errors.New("legacy completion is disabled; use privileged_delivery_v2 host operations and daemon acknowledgement")
 }
 
-// classify decides how a revision may be adopted.
-//
-// Anything that turns on a capability executing commands with the Agent's
-// identity is privileged. Whether it also needs an on-host upgrade depends on
-// what the Agent is installed as: a service account cannot gain those
-// capabilities without being reinstalled, so the panel cannot deliver them by
-// itself no matter how they are confirmed.
+// classify predicts whether the target requires a host operation. Confirmation
+// freezes the exact actions against the observed service and installed helper.
 func classify(db *gorm.DB, clientUUID string, settings Settings) (class int32, reasons []string, from, to int32) {
 	from = InstalledPrivilegeModeWithDB(db, clientUUID)
 	to = settings.RequiredPrivilegeMode
@@ -336,13 +329,8 @@ func classify(db *gorm.DB, clientUUID string, settings Settings) (class int32, r
 	return ClassManualConfirm, []string{"same-identity capability changes require signed panel approval"}, from, to
 }
 
-// installedPrivilegeMode reads what the Agent was installed as.
-//
-// The deployment profile is the authoritative answer rather than the Agent's
-// last report: a report describes a process that may already have been
-// restarted, while the profile describes what the service will be next time it
-// starts, which is what an upgrade has to change.
-// InstalledPrivilegeMode reports what the Agent service is installed as.
+// InstalledPrivilegeMode uses the v2 service observation when available, then
+// legacy installation metadata. Neither describes the invoking CLI's euid.
 func InstalledPrivilegeMode(clientUUID string) int32 {
 	return InstalledPrivilegeModeWithDB(dbcore.GetDBInstance(), clientUUID)
 }

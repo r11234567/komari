@@ -159,6 +159,18 @@ func (s *privilegedDeliveryService) ConfirmPrivilegedDelivery(ctx context.Contex
 	if err := requireRescueAdministrator(meta); err != nil {
 		return nil, err
 	}
+	// Reading an existing approval is an idempotent retry, not another grant.
+	// It must not consume a second single-use OTP or extend any deadline.
+	current, found, err := privilegeddelivery.Current(req.Msg.GetAgentId())
+	if err != nil {
+		return nil, connectError(connect.CodeInternal, err)
+	}
+	if found && current.Revision == req.Msg.GetRevision() && current.ProtocolVersion == 2 && current.ConfirmedAt != nil {
+		active := current.NonceExpires != nil && time.Now().Before(*current.NonceExpires) && (current.State == privilegeddelivery.StateNeedsManualAuthorization || current.State == privilegeddelivery.StateAwaitingAgent || current.State == privilegeddelivery.StateApplying)
+		if active || current.State == privilegeddelivery.StateDelivered {
+			return connect.NewResponse(&configv1.ConfirmPrivilegedDeliveryResponse{Revision: privilegedRevisionToProto(current)}), nil
+		}
+	}
 	// Confirming is what authorizes a privilege change on a host, so it always
 	// costs a fresh second factor regardless of what the change contains.
 	if err := verifyConnectTwoFactor(meta, req.Msg.GetTwoFactor()); err != nil {
