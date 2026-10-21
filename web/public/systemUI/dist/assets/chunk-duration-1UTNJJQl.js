@@ -1,0 +1,1 @@
+import{C as e,E as t,T as n}from"./chunk-client-PNGkIYR4.js";function r(r){let i=r<0?-1:1,a=Math.abs(r),o=Math.floor(a/1e3),s=(a-o*1e3)*1e6;return n(e,{seconds:t.parse(o*i),nanos:s===0?0:s*i})}export{r as t};
