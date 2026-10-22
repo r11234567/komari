@@ -101,6 +101,12 @@ func GetStateWithDB(db *gorm.DB, id string) (Snapshot, error) {
 				out.State = state
 			}
 			v := toRevision(r)
+			if entry.n == state.DesiredRevision {
+				// Negotiation changes the node cursor without rewriting the
+				// configuration row. Every current-delivery reader must expose
+				// the same cursor, including unary approval revalidation.
+				v.UpdateSequence = state.UpdateSequence
+			}
 			*entry.target = &v
 		}
 		var operation models.ClientHostOperation

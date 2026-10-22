@@ -50,13 +50,13 @@ func (s *privilegedDeliveryService) GetPrivilegedDelivery(ctx context.Context, r
 	if err != nil {
 		return nil, err
 	}
-	revision, found, err := privilegeddelivery.Latest(agentID, req.Msg.GetAppliedRevision())
+	snapshot, err := privilegeddelivery.GetState(agentID)
 	if err != nil {
 		return nil, connectError(connect.CodeInternal, err)
 	}
 	response := &configv1.GetPrivilegedDeliveryResponse{}
-	if found {
-		signed, err := signedPrivilegedRevision(revision)
+	if snapshot.Desired != nil && snapshot.Desired.Revision > req.Msg.GetAppliedRevision() {
+		signed, err := signedPrivilegedRevision(*snapshot.Desired)
 		if err != nil {
 			return nil, connectError(connect.CodeInternal, err)
 		}
@@ -73,15 +73,18 @@ func (s *privilegedDeliveryService) WatchPrivilegedDelivery(ctx context.Context,
 	after := req.Msg.GetAfterRevision()
 	sequence := req.Msg.GetAfterSequence()
 	for {
-		revision, found, err := privilegeddelivery.Latest(agentID, after)
+		var revision privilegeddelivery.Revision
+		var found bool
+		var err error
 		if req.Msg.GetProtocolVersion() == 2 {
 			snapshot, e := privilegeddelivery.GetState(agentID)
 			err = e
 			found = e == nil && snapshot.Desired != nil && snapshot.State.UpdateSequence > sequence
 			if found {
 				revision = *snapshot.Desired
-				revision.UpdateSequence = snapshot.State.UpdateSequence
 			}
+		} else {
+			revision, found, err = privilegeddelivery.Latest(agentID, after)
 		}
 		if err != nil {
 			return connectError(connect.CodeInternal, err)
