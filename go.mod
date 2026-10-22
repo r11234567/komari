@@ -15,7 +15,7 @@ require (
 	github.com/oschwald/maxminddb-golang v1.13.1
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/pquerna/otp v1.5.0
-	github.com/r11234567/komari-proto v0.1.38-0.20261022100337-b2ffe86ac2d6
+	github.com/r11234567/komari-proto v0.0.0
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/image v0.41.0
@@ -71,3 +71,6 @@ require (
 	golang.org/x/text v0.41.0
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+// The protocol revision is pinned by the third_party/komari-proto gitlink.
+replace github.com/r11234567/komari-proto => ./third_party/komari-proto

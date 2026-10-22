@@ -1,6 +1,8 @@
 name: CI
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
@@ -18,6 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          submodules: recursive
       - name: Check manual descriptions and concurrent edits
         shell: bash
         run: |
@@ -36,6 +40,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
+        with:
+          submodules: recursive
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -52,7 +58,15 @@ jobs:
           fi
 
       - name: Run backend tests
-        run: go test ./...
+        run: bash scripts/ci/run-go-tests.sh ./...
+
+      - name: Retain backend logs including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-ci-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
 
   external-databases:
     name: MySQL and PostgreSQL integration
@@ -85,6 +99,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
+        with:
+          submodules: recursive
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -118,6 +134,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
+        with:
+          submodules: recursive
 
       - name: Restore frontend artifact
         uses: ./.github/actions/restore-frontend

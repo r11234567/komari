@@ -29,6 +29,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Restore frontend artifact
         uses: ./.github/actions/restore-frontend
@@ -55,6 +57,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Restore frontend artifact
         uses: ./.github/actions/restore-frontend
