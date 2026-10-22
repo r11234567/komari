@@ -11,6 +11,11 @@ on:
         description: "Base ref or SHA for the release comparison. Snapshot builds pass the previous main SHA."
         required: false
         type: string
+      overwrite_existing:
+        description: "Explicitly replace existing notes. Protected manual notes are always retained."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -21,6 +26,9 @@ jobs:
     if: ${{ github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'Snapshot-') }}
 
     steps:
+      - uses: actions/checkout@v4
+      - name: Verify release description preservation
+        run: node --test .github/scripts/release-notes-body.test.cjs
       - name: Generate and apply release notes
         uses: actions/github-script@v9
         env:
@@ -31,6 +39,8 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
             const webRepo = { owner, repo: "komari-web" };
+            const { shouldPreserveReleaseBody } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/release-notes-body.cjs`);
+            const overwriteExisting = String(context.payload.inputs?.overwrite_existing) === "true";
 
             const AI_CONTEXT_CHAR_LIMIT = 120000;
             const AI_MAX_COMMITS = 160;
@@ -642,6 +652,11 @@ jobs:
               core.setFailed("No release tag was provided or found.");
               return;
             }
+            if (shouldPreserveReleaseBody(release.body, overwriteExisting)) {
+              core.info(`Preserving the existing release description for ${tag}.`);
+              await core.summary.addHeading("Release Notes").addRaw(`Preserved existing notes for ${tag}.`).write();
+              return;
+            }
 
             const comparisonBase = await resolveComparisonBase(tag, release);
             core.info(comparisonBase.ref
@@ -670,13 +685,21 @@ jobs:
               webReleaseSection,
             });
 
+            // Generation can take minutes. Re-read before writing so an edit
+            // saved by the maintainer in the meantime is preserved as well.
+            const latestRelease = (await github.rest.repos.getReleaseByTag({ owner, repo, tag })).data;
+            if (shouldPreserveReleaseBody(latestRelease.body, overwriteExisting)) {
+              core.info(`Preserving the updated release description for ${tag}.`);
+              await core.summary.addHeading("Release Notes").addRaw(`Preserved updated notes for ${tag}.`).write();
+              return;
+            }
             const body = [
-              clean(release.body).match(/<!--\s*komari-version-hash:\s*[A-Za-z0-9]{7}\s*-->/i)?.[0] || "",
+              clean(latestRelease.body).match(/<!--\s*komari-version-hash:\s*[A-Za-z0-9]{7}\s*-->/i)?.[0] || "",
               releaseSummarySection,
               whatsChangedSection,
             ].filter(Boolean).join("\n\n");
 
-            if (clean(release.body) === clean(body)) {
+            if (clean(latestRelease.body) === clean(body)) {
               core.info(`Release notes for ${tag} are already up to date.`);
             } else {
               await github.rest.repos.updateRelease({

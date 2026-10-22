@@ -13,6 +13,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-notes:
+    name: Preserve release descriptions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check manual descriptions and concurrent edits
+        shell: bash
+        run: |
+          mkdir -p ci-artifacts
+          node --test .github/scripts/release-notes-body.test.cjs 2>&1 | tee ci-artifacts/release-notes-tests.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-notes-tests-${{ github.run_id }}
+          path: ci-artifacts/release-notes-tests.log
+          retention-days: 30
+
   backend:
     name: Backend quality and tests
     runs-on: ubuntu-latest

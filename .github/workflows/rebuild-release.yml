@@ -14,7 +14,7 @@ on:
       server_ref:
         description: Server branch or tag to build.
         required: true
-        default: 1.4.5
+        default: main
         type: string
       frontend_ref:
         description: Komari Web release tag, branch, or latest published release.
