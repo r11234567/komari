@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	legacyv1 "github.com/komari-monitor/komari/protocol/v1"
 	agentRuntime "github.com/komari-monitor/komari/web/agent"
@@ -46,13 +45,11 @@ func (s *reportService) SubmitReport(ctx context.Context, req *connect.Request[r
 	// its resource snapshot as well would create duplicate metric points.
 	clientapi.TouchConnectPresence(agentID)
 	if metadata := req.Msg.Report.Metadata; metadata != nil {
+		agentRuntime.SetConnectInstallation(agentID, req.Msg.Report.Sequence, metadata.Installation)
 		capabilities := metadata.Capabilities
 		agentRuntime.SetConnectCapabilities(agentID, capabilities)
-		if metadata.AppliedConfigRevision > 0 {
-			if _, err := clients.RecordAppliedDeploymentRevision(agentID, metadata.AppliedConfigRevision); err != nil {
-				return nil, connectError(connect.CodeInternal, err)
-			}
-		}
+		// A disk revision is not an acknowledgement of the panel's content.
+		// Only AcknowledgeConfig may advance the confirmed applied revision.
 		if metadata.RescueHelper != nil {
 			if err := rescueapp.ReportStatus(agentID, metadata.RescueHelper); err != nil {
 				return nil, connectError(connect.CodeInvalidArgument, err)
@@ -60,6 +57,7 @@ func (s *reportService) SubmitReport(ctx context.Context, req *connect.Request[r
 		}
 	} else {
 		agentRuntime.SetConnectCapabilities(agentID, nil)
+		agentRuntime.SetConnectInstallation(agentID, req.Msg.Report.Sequence, nil)
 	}
 	return connect.NewResponse(&reportv1.SubmitReportResponse{
 		Accepted:           true,

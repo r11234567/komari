@@ -69,6 +69,7 @@ func SetClientProtocolVersion(uuid string, version int) {
 	}
 	if version < 3 {
 		delete(connectCapabilities, uuid)
+		clearConnectInstallation(uuid)
 	}
 }
 
@@ -229,6 +230,7 @@ func DeleteClientConditionally(uuid string, connToRemove *connection.SafeConn) {
 		delete(connectedClientProtocol, uuid)
 		delete(v2Capabilities, uuid)
 		delete(connectCapabilities, uuid)
+		clearConnectInstallation(uuid)
 	}
 }
 func DeleteConnectedClients(uuid string) {
@@ -238,6 +240,7 @@ func DeleteConnectedClients(uuid string) {
 	delete(connectedClientProtocol, uuid)
 	delete(v2Capabilities, uuid)
 	delete(connectCapabilities, uuid)
+	clearConnectInstallation(uuid)
 	delete(presenceOnly, uuid)
 	delete(latestReport, uuid)
 	delete(recentReports, uuid)
