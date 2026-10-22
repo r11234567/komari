@@ -25,7 +25,7 @@ func (s *configService) InitializeNodeConfig(ctx context.Context, req *connect.R
 	if err != nil {
 		return nil, connectError(connect.CodeFailedPrecondition, err)
 	}
-	response := &configv1.InitializeNodeConfigResponse{Initialized: result.Initialized, Runtime: result.Runtime}
+	response := &configv1.InitializeNodeConfigResponse{Initialized: result.Initialized, Runtime: result.Runtime, SkippedReason: result.SkippedReason}
 	if result.Initialized {
 		response.Privileged, err = signedPrivilegedRevision(result.Privileged)
 		if err != nil {

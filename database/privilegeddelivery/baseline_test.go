@@ -82,3 +82,71 @@ func TestBaselineCannotResetOldNodeOrGrantNewIdentity(t *testing.T) {
 		})
 	}
 }
+
+// Mirrors FRM: an old ordinary r4 and no privileged file/history. Adding the
+// safe missing baseline must leave every ordinary column byte-for-byte intact.
+func TestMigrationBaselinePreservesRuntimeHistoryAndRequiresDaemonACK(t *testing.T) {
+	db, id, r := baselineFixture(t)
+	require.NoError(t, db.Model(&models.Client{}).Where("uuid = ?", id).Update("config_baseline_eligible", false).Error)
+	now := time.Now().Add(-48 * time.Hour).UTC()
+	require.NoError(t, db.Model(&models.ClientDeploymentProfile{}).Where("client = ?", id).Updates(map[string]any{"revision": 4, "applied_revision": 4, "delivery_status": clients.DeploymentDeliveryApplied, "finished_at": now, "sent_at": now, "saved_at": now, "previous_runtime": "retained history"}).Error)
+	var before, after models.ClientDeploymentProfile
+	require.NoError(t, db.First(&before, "client = ?", id).Error)
+	r.PreserveRuntime = true
+	result, err := InitializeBaseline(db, r, clients.DefaultDeploymentProfile(models.Client{}))
+	require.NoError(t, err)
+	require.True(t, result.Initialized)
+	require.Nil(t, result.Runtime)
+	require.EqualValues(t, 1, result.Privileged.Revision)
+	require.NoError(t, db.First(&after, "client = ?", id).Error)
+	require.Equal(t, before, after)
+	state, err := GetStateWithDB(db, id)
+	require.NoError(t, err)
+	require.Zero(t, state.State.AppliedRevision)
+	again, err := InitializeBaseline(db, r, clients.DefaultDeploymentProfile(models.Client{}))
+	require.NoError(t, err)
+	require.True(t, again.Initialized)
+	require.Nil(t, again.Runtime)
+	require.Equal(t, result.Privileged.Revision, again.Privileged.Revision)
+	o := &hostv1.DaemonObservation{Revision: 1, ConfigHash: result.Privileged.ConfigHash, ApprovalGeneration: 1, ServiceId: r.ServiceId, StartupId: "boot-before", PrivilegeMode: r.Privileged.RequiredPrivilegeMode, ObservedAt: timestamppb.New(time.Now().Add(time.Second)), EffectiveCapabilities: &reportv1.AgentCapabilities{PrivilegeMode: r.Privileged.RequiredPrivilegeMode}}
+	_, err = Observe(db, id, "migration-ack", o)
+	require.NoError(t, err)
+	state, err = GetStateWithDB(db, id)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, state.State.AppliedRevision)
+}
+
+func TestMigrationBaselineCannotGrantCapabilitiesOrReplaceHistory(t *testing.T) {
+	for _, which := range []string{"remote", "webssh", "execution", "gpu", "rescue", "identity", "history"} {
+		t.Run(which, func(t *testing.T) {
+			db, id, r := baselineFixture(t)
+			r.PreserveRuntime = true
+			yes := true
+			switch which {
+			case "remote":
+				r.Privileged.RemoteControlEnabled = &yes
+			case "webssh":
+				r.Privileged.WebsshEnabled = &yes
+			case "execution":
+				r.Privileged.ExecutionEnabled = &yes
+			case "gpu":
+				r.Privileged.EnableGpu = &yes
+			case "rescue":
+				r.Privileged.RescueHelperEnabled = &yes
+			case "identity":
+				r.Privileged.RequiredPrivilegeMode = reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT
+			case "history":
+				_, err := SaveWithDB(db, id, Settings{RequiredPrivilegeMode: 2}, 0, "keep existing approval")
+				require.NoError(t, err)
+			}
+			result, err := InitializeBaseline(db, r, clients.DefaultDeploymentProfile(models.Client{}))
+			require.False(t, result.Initialized)
+			if which == "history" {
+				require.NoError(t, err)
+				require.NotEmpty(t, result.SkippedReason)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}

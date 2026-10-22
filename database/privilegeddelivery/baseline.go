@@ -17,13 +17,15 @@ import (
 )
 
 type BaselineResult struct {
-	Initialized bool
-	Runtime     *configv1.DesiredConfig
-	Privileged  Revision
+	Initialized   bool
+	Runtime       *configv1.DesiredConfig
+	Privileged    Revision
+	SkippedReason string
 }
 
-// InitializeBaseline is atomic across both tracks. Server eligibility defaults
-// false for migrated rows; absence of local/server state is never eligibility.
+// InitializeBaseline atomically initializes both tracks on eligible new nodes.
+// Existing nodes can only add a missing deny-only privileged baseline while
+// preserving ordinary history. Neither path replaces privileged history.
 func InitializeBaseline(db *gorm.DB, r *configv1.InitializeNodeConfigRequest, profile clients.DeploymentProfile) (BaselineResult, error) {
 	var out BaselineResult
 	if r.Runtime == nil || r.Privileged == nil || len(r.PolicyHash) != 64 {
@@ -45,9 +47,11 @@ func InitializeBaseline(db *gorm.DB, r *configv1.InitializeNodeConfigRequest, pr
 			if old.RequestHash != hash {
 				return errors.New("installation baseline retry changed its immutable request")
 			}
-			out.Runtime = &configv1.DesiredConfig{}
-			if e = proto.Unmarshal(old.Runtime, out.Runtime); e != nil {
-				return e
+			if len(old.Runtime) > 0 {
+				out.Runtime = &configv1.DesiredConfig{}
+				if e = proto.Unmarshal(old.Runtime, out.Runtime); e != nil {
+					return e
+				}
 			}
 			row, e := lockRevision(tx, r.AgentId, 1)
 			if e != nil {
@@ -63,7 +67,8 @@ func InitializeBaseline(db *gorm.DB, r *configv1.InitializeNodeConfigRequest, pr
 		if err = tx.First(&client, "uuid = ?", r.AgentId).Error; err != nil {
 			return err
 		}
-		if !client.ConfigBaselineEligible {
+		if !client.ConfigBaselineEligible && !r.PreserveRuntime {
+			out.SkippedReason = "existing node requires preserve_runtime for a deny-only privileged baseline"
 			return nil
 		}
 		var history int64
@@ -75,7 +80,12 @@ func InitializeBaseline(db *gorm.DB, r *configv1.InitializeNodeConfigRequest, pr
 		if e != nil && !errors.Is(e, gorm.ErrRecordNotFound) {
 			return e
 		}
-		if history != 0 || state.DesiredRevision != 0 || existing.Revision != 0 || existing.AppliedRevision != 0 {
+		if history != 0 || state.DesiredRevision != 0 || state.AppliedRevision != 0 {
+			out.SkippedReason = "privileged configuration history already exists"
+			return nil
+		}
+		if !r.PreserveRuntime && (existing.Revision != 0 || existing.AppliedRevision != 0) {
+			out.SkippedReason = "ordinary configuration history must be preserved"
 			return nil
 		}
 		if state.ProtocolVersion != 2 || state.ServiceID != r.ServiceId || state.PrivilegeMode != int32(r.Privileged.RequiredPrivilegeMode) {
@@ -85,6 +95,9 @@ func InitializeBaseline(db *gorm.DB, r *configv1.InitializeNodeConfigRequest, pr
 			return errors.New("first-install baseline cannot install a rescue helper")
 		}
 		s := Settings{RemoteControlEnabled: r.Privileged.GetRemoteControlEnabled(), WebSSHEnabled: r.Privileged.GetWebsshEnabled(), ExecutionEnabled: r.Privileged.GetExecutionEnabled(), EnableGPU: r.Privileged.GetEnableGpu(), RequiredPrivilegeMode: int32(r.Privileged.RequiredPrivilegeMode)}
+		if r.PreserveRuntime && (s.RemoteControlEnabled || s.WebSSHEnabled || s.ExecutionEnabled || s.EnableGPU) {
+			return errors.New("migration baseline must deny all optional privileged capabilities")
+		}
 		if !s.RemoteControlEnabled && (s.WebSSHEnabled || s.ExecutionEnabled) {
 			return errors.New("baseline child capability requires master authorization")
 		}
@@ -98,6 +111,17 @@ func InitializeBaseline(db *gorm.DB, r *configv1.InitializeNodeConfigRequest, pr
 		state.DesiredRevision = 1
 		if err = advance(tx, &state, &row); err != nil {
 			return err
+		}
+		if r.PreserveRuntime {
+			// Never rewrite the ordinary profile, its revisions, ACKs or timestamps.
+			if err = tx.Create(&models.ClientConfigBaseline{Client: r.AgentId, RequestHash: hash, Runtime: []byte{}, CreatedAt: now}).Error; err != nil {
+				return err
+			}
+			if err = tx.Model(&client).Update("config_baseline_eligible", false).Error; err != nil {
+				return err
+			}
+			out = BaselineResult{Initialized: true, Privileged: toRevision(row)}
+			return nil
 		}
 		profile.PrivilegedDeliveryVersion = 2
 		profile.ServiceName = r.ServiceId
@@ -128,6 +152,13 @@ func InitializeBaseline(db *gorm.DB, r *configv1.InitializeNodeConfigRequest, pr
 			return err
 		}
 		if err = tx.Model(&client).Update("config_baseline_eligible", false).Error; err != nil {
+			return err
+		}
+		resetDay := 0
+		if profile.EnableMonthRotate {
+			resetDay = profile.MonthRotate
+		}
+		if err = tx.Model(&client).Update("traffic_reset_day", resetDay).Error; err != nil {
 			return err
 		}
 		out = BaselineResult{Initialized: true, Runtime: desired, Privileged: toRevision(row)}

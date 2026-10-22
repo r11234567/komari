@@ -293,7 +293,7 @@ func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile De
 			}
 			runtimeValuesChanged = !reflect.DeepEqual(previous.RuntimeConfig(), profile.RuntimeConfig()) ||
 				previous.GetIPAddrFromNIC != profile.GetIPAddrFromNIC
-			runtimeChanged = forceDispatch || runtimeValuesChanged ||
+			runtimeChanged = existing.Revision == 0 || forceDispatch || runtimeValuesChanged ||
 				existing.DeliveryStatus == DeploymentDeliveryFailed
 		}
 

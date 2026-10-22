@@ -292,3 +292,19 @@ func TestExpiredPreviousClientTokenIsRejected(t *testing.T) {
 	_, err = getClientUUIDByToken(db, "old-token", time.Now().UTC())
 	require.Error(t, err)
 }
+
+func TestClientCreationLeavesBaselineRevisionAvailable(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "baseline.db")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&models.Client{}, &models.ClientDeploymentProfile{}, &models.ClientPrivilegedState{}))
+	client := newClient("fresh", "unused-test-token", "fresh", time.Now().UTC())
+	require.NoError(t, createClientRecord(db, &client))
+	var profile models.ClientDeploymentProfile
+	require.NoError(t, db.First(&profile, "client = ?", client.UUID).Error)
+	require.Zero(t, profile.Revision, "creating r1 here prevents the daemon's first baseline")
+	require.Zero(t, profile.AppliedRevision)
+	require.Nil(t, profile.FinishedAt)
+	_, delivery, _, err := saveDeploymentProfileForDispatch(db, client.UUID, DefaultDeploymentProfile(client), false)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, delivery.Revision, "explicit saves on draft profiles must still create r1")
+}
