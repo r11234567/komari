@@ -51,7 +51,11 @@ jobs:
       - name: Verify formatting
         shell: bash
         run: |
-          unformatted="$(gofmt -l .)"
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          exec > >(tee ci-artifacts/formatting.log) 2>&1
+          # Format this repository's files; dependencies own their formatting.
+          unformatted="$(git ls-files -z -- '*.go' | xargs -0 -r gofmt -l)"
           if [ -n "${unformatted}" ]; then
             printf 'Files requiring gofmt:\n%s\n' "${unformatted}" >&2
             exit 1
