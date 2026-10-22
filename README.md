@@ -111,3 +111,5 @@ layer reads.
 | Customizable Themes | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E4%B8%BB%E9%A2%98%E5%8F%AF%E8%87%AA%E5%AE%9A%E4%B9%89-en.webp" width="800" alt="Customizable Themes"> |
 | Theme Market        | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E4%B8%BB%E9%A2%98%E5%B8%82%E5%9C%BA-en.webp" width="800" alt="Theme Market">                          |
 
+
+协议源码使用 Git 子模块，构建前请执行 `git submodule update --init --recursive`；详见 [Proto 子模块依赖](docs/proto-dependency.md)。

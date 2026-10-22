@@ -8,9 +8,6 @@ inputs:
   source-dir:
     description: Submodule directory containing komari-web.
     default: third_party/komari-web
-  repository:
-    description: Optional override repository URL.
-    default: https://github.com/r11234567/komari-web
   ref:
     description: Optional Komari Web ref to checkout. If omitted or latest, uses the pinned submodule.
     default: ""
@@ -30,7 +27,6 @@ runs:
       shell: bash
       env:
         WEB_SOURCE_DIR: ${{ inputs.source-dir }}
-        KOMARI_WEB_REPOSITORY: ${{ inputs.repository }}
         KOMARI_WEB_REF: ${{ inputs.ref }}
       run: |
         set -euxo pipefail
@@ -38,13 +34,7 @@ runs:
 
         if [ ! -f "$web_dir/package.json" ]; then
           echo "Submodule not initialized at $web_dir, attempting git submodule update..."
-          git submodule update --init --recursive "$web_dir" || true
-        fi
-
-        if [ ! -f "$web_dir/package.json" ]; then
-          echo "Submodule still not available at $web_dir; falling back to clone..."
-          rm -rf "$web_dir"
-          git clone --depth=1 "$KOMARI_WEB_REPOSITORY" "$web_dir"
+          git submodule update --init --recursive "$web_dir"
         fi
 
         requested_ref="$KOMARI_WEB_REF"
@@ -54,6 +44,16 @@ runs:
           git fetch --depth=1 origin "$requested_ref" || git fetch origin "$requested_ref"
           git checkout "$requested_ref"
           cd -
+        fi
+
+        # Ref overrides may introduce a different nested protocol gitlink.
+        git -C "$web_dir" submodule update --init --recursive
+        node "$web_dir/scripts/ci/check-protocol.cjs"
+        backend_proto="$(git -C third_party/komari-proto rev-parse HEAD)"
+        web_proto="$(git -C "$web_dir/third_party/komari-proto" rev-parse HEAD)"
+        if [ "$backend_proto" != "$web_proto" ]; then
+          echo "Backend/Web protocol commits differ: $backend_proto / $web_proto" >&2
+          exit 1
         fi
 
         echo "Building Komari Web bundles from $web_dir..."

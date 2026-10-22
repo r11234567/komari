@@ -30,6 +30,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
+          submodules: recursive
           fetch-depth: 1
 
       - name: Ensure this is the current snapshot commit
@@ -94,6 +95,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
+        with:
+          submodules: recursive
 
       - name: Restore frontend artifact
         uses: ./.github/actions/restore-frontend
@@ -148,6 +151,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
+        with:
+          submodules: recursive
 
       - name: Restore frontend artifact
         uses: ./.github/actions/restore-frontend
@@ -205,6 +210,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          submodules: recursive
 
       - name: Ensure commit is still current
         shell: bash
@@ -276,6 +283,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
+          submodules: recursive
           # 发布说明由提交记录生成，需要历史与标签。
           fetch-depth: 0
 
