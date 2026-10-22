@@ -197,21 +197,92 @@ func getDeploymentProfile(db *gorm.DB, clientUUID string) (DeploymentProfile, bo
 		}
 		return DeploymentProfile{}, false, err
 	}
+	// Older billing edits changed the client column without assigning a new
+	// runtime revision. Repair that drift before returning any desired content.
+	changed, err := reconcileDeploymentResetDay(db, &stored, client.TrafficResetDay)
+	if err != nil {
+		return DeploymentProfile{}, false, err
+	}
+	if changed {
+		if err := db.First(&stored, "client = ?", clientUUID).Error; err != nil {
+			return DeploymentProfile{}, false, err
+		}
+	}
 	if err := json.Unmarshal([]byte(stored.Config), &profile); err != nil {
 		return DeploymentProfile{}, false, fmt.Errorf("decode deployment profile: %w", err)
 	}
 	if err := normalizeDeploymentProfile(&profile); err != nil {
 		return DeploymentProfile{}, false, fmt.Errorf("validate stored deployment profile: %w", err)
 	}
-	// The billing editor can also change this value, so the client column is
-	// authoritative for monthly rotation.
-	profile.EnableMonthRotate = client.TrafficResetDay != nil && *client.TrafficResetDay > 0
-	if profile.EnableMonthRotate {
-		profile.MonthRotate = *client.TrafficResetDay
-	} else {
-		profile.MonthRotate = 0
-	}
 	return profile, true, nil
+}
+
+// reconcileDeploymentResetDay keeps billing and desired runtime content in
+// agreement without ever changing the meaning of an existing revision. It is
+// used inside the billing transaction, and on reads to repair pre-fix drift.
+func reconcileDeploymentResetDay(db *gorm.DB, stored *models.ClientDeploymentProfile, resetDay *int) (bool, error) {
+	var previous DeploymentProfile
+	if err := json.Unmarshal([]byte(stored.Config), &previous); err != nil {
+		return false, fmt.Errorf("decode deployment profile: %w", err)
+	}
+	if err := normalizeDeploymentProfile(&previous); err != nil {
+		return false, err
+	}
+	day := 0
+	if resetDay != nil {
+		day = *resetDay
+	}
+	if day < 0 || day > 31 {
+		return false, errors.New("traffic reset day must be between 0 and 31")
+	}
+	if previous.MonthRotate == day {
+		return false, nil
+	}
+	// Patch only the two billing fields. Re-encoding a normalized struct could
+	// invent an installation identity for old profiles or drop newer fields.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stored.Config), &raw); err != nil {
+		return false, err
+	}
+	if raw == nil {
+		return false, errors.New("deployment profile is not an object")
+	}
+	dayJSON, err := json.Marshal(day)
+	if err != nil {
+		return false, err
+	}
+	raw["month_rotate"] = dayJSON
+	raw["enable_month_rotate"] = json.RawMessage("false")
+	if day > 0 {
+		raw["enable_month_rotate"] = json.RawMessage("true")
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return false, err
+	}
+	previousRuntime, err := json.Marshal(previous.RuntimeConfig())
+	if err != nil {
+		return false, err
+	}
+	if stored.Revision == ^uint64(0) {
+		return false, errors.New("runtime revision exhausted")
+	}
+	now := time.Now().UTC()
+	result := db.Model(&models.ClientDeploymentProfile{}).
+		Where("client = ? AND revision = ? AND config = ?", stored.Client, stored.Revision, stored.Config).
+		Where("EXISTS (SELECT 1 FROM clients WHERE uuid = ? AND COALESCE(traffic_reset_day, 0) = ?)", stored.Client, day).
+		Updates(map[string]any{
+			"config": string(encoded), "previous_runtime": string(previousRuntime), "revision": stored.Revision + 1,
+			"delivery_status": DeploymentDeliverySaved, "delivery_error": "", "saved_at": now,
+			"delivery_updated_at": now, "sent_at": nil, "finished_at": nil, "updated_at": now,
+		})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return false, errors.New("deployment revision changed while synchronizing billing; retry the request")
+	}
+	return true, nil
 }
 
 func SaveDeploymentProfile(clientUUID string, profile DeploymentProfile) (DeploymentProfile, error) {
@@ -285,12 +356,7 @@ func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile De
 			if privilegedState.ProtocolVersion == 2 && (previous.RuntimeIdentity != profile.RuntimeIdentity || previous.RemoteControlEnabled != profile.RemoteControlEnabled || previous.RescueEnabled != profile.RescueEnabled || previous.EnableGPU != profile.EnableGPU || previous.Platform != profile.Platform) {
 				return errors.New("privileged installation fields are managed by privileged_delivery_v2; use its approved operation instead")
 			}
-			previous.EnableMonthRotate = client.TrafficResetDay != nil && *client.TrafficResetDay > 0
-			if previous.EnableMonthRotate {
-				previous.MonthRotate = *client.TrafficResetDay
-			} else {
-				previous.MonthRotate = 0
-			}
+
 			runtimeValuesChanged = !reflect.DeepEqual(previous.RuntimeConfig(), profile.RuntimeConfig()) ||
 				previous.GetIPAddrFromNIC != profile.GetIPAddrFromNIC
 			runtimeChanged = existing.Revision == 0 || forceDispatch || runtimeValuesChanged ||

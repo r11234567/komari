@@ -80,6 +80,21 @@ func Save(agentID string, profile clients.DeploymentProfile, forceDispatch bool)
 	if !changed {
 		return result, nil
 	}
+	return dispatch(agentID, result)
+}
+
+// DispatchCurrent wakes consumers after a transaction outside the deployment
+// editor (for example billing) has already created the desired revision.
+func DispatchCurrent(agentID string) (SaveResult, error) {
+	profile, saved, delivery, err := clients.GetDeploymentProfileWithDelivery(agentID)
+	if err != nil || !saved {
+		return SaveResult{}, err
+	}
+	return dispatch(agentID, SaveResult{Profile: profile, Delivery: delivery, RuntimeChanged: true})
+}
+
+func dispatch(agentID string, result SaveResult) (SaveResult, error) {
+	stored, delivery := result.Profile, result.Delivery
 
 	connectOnline := hasWatch(agentID)
 	signal(agentID)
@@ -95,14 +110,14 @@ func Save(agentID string, profile clients.DeploymentProfile, forceDispatch bool)
 	legacyConfig.Revision = delivery.Revision
 	_, sent, supported := agent_runtime.DispatchV2Config(agentID, legacyConfig)
 	if sent {
-		_, err = clients.MarkDeploymentConfigSent(agentID, delivery.Revision)
+		_, err := clients.MarkDeploymentConfigSent(agentID, delivery.Revision)
 		if err == nil {
 			result.Delivery.Status = clients.DeploymentDeliverySent
 		}
 		return result, err
 	}
 	if !supported && !connectOnline {
-		_, err = clients.MarkDeploymentConfigUnavailable(agentID, delivery.Revision, agent_runtime.IsAgentOnline(agentID))
+		_, err := clients.MarkDeploymentConfigUnavailable(agentID, delivery.Revision, agent_runtime.IsAgentOnline(agentID))
 		if err == nil {
 			if agent_runtime.IsAgentOnline(agentID) {
 				result.Delivery.Status = clients.DeploymentDeliveryUpgradeRequired
@@ -110,8 +125,9 @@ func Save(agentID string, profile clients.DeploymentProfile, forceDispatch bool)
 				result.Delivery.Status = clients.DeploymentDeliveryOffline
 			}
 		}
+		return result, err
 	}
-	return result, err
+	return result, nil
 }
 
 func RollbackOnlineConfig(agentID string) (SaveResult, error) {

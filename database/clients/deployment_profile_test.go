@@ -121,6 +121,10 @@ func TestDeploymentProfileAndBillingEditorShareTrafficResetDay(t *testing.T) {
 	if _, err := saveDeploymentProfile(db, "node-a", profile); err != nil {
 		t.Fatalf("save deployment profile: %v", err)
 	}
+	var before models.ClientDeploymentProfile
+	if err := db.First(&before, "client = ?", "node-a").Error; err != nil {
+		t.Fatal(err)
+	}
 	var client models.Client
 	if err := db.Select("uuid", "traffic_reset_day").First(&client, "uuid = ?", "node-a").Error; err != nil {
 		t.Fatalf("read client: %v", err)
@@ -141,6 +145,83 @@ func TestDeploymentProfileAndBillingEditorShareTrafficResetDay(t *testing.T) {
 	}
 	if !saved || !loaded.EnableMonthRotate || loaded.MonthRotate != 9 {
 		t.Fatalf("deployment reset day = enabled:%v day:%d, want enabled:true day:9", loaded.EnableMonthRotate, loaded.MonthRotate)
+	}
+	var after models.ClientDeploymentProfile
+	if err := db.First(&after, "client = ?", "node-a").Error; err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != before.Revision+1 || after.DeliveryStatus != DeploymentDeliverySaved || after.AppliedRevision != before.AppliedRevision {
+		t.Fatalf("billing changed runtime content without a fresh unacknowledged revision: %+v", after)
+	}
+	// An unchanged edit is idempotent; disabling rotation is an explicit zero
+	// configuration that needs its own revision and must survive another read.
+	for _, day := range []float64{9, 0, 0} {
+		if err := saveClient(db, map[string]interface{}{"uuid": "node-a", "traffic_reset_day": day}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loaded, _, err = getDeploymentProfile(db, "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.EnableMonthRotate || loaded.MonthRotate != 0 {
+		t.Fatal("explicit billing zero was not propagated to runtime")
+	}
+	if err := db.First(&after, "client = ?", "node-a").Error; err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != before.Revision+2 {
+		t.Fatalf("idempotent edits created extra revisions: %d", after.Revision)
+	}
+	// Emulate a pre-fix billing edit that only changed the client column.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(after.Config), &raw); err != nil {
+		t.Fatal(err)
+	}
+	delete(raw, "runtime_identity")
+	raw["newer_install_field"] = json.RawMessage(`"preserve-me"`)
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.ClientDeploymentProfile{}).Where("client = ?", "node-a").Update("config", string(encoded)).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.Client{}).Where("uuid = ?", "node-a").Update("traffic_reset_day", 23).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		loaded, _, err = getDeploymentProfile(db, "node-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.MonthRotate != 23 {
+			t.Fatal("historical billing drift was not repaired")
+		}
+	}
+	if err := db.First(&after, "client = ?", "node-a").Error; err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != before.Revision+3 || after.AppliedRevision != before.AppliedRevision {
+		t.Fatal("historical repair did not create exactly one fresh unacknowledged revision")
+	}
+	if err := json.Unmarshal([]byte(after.Config), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, invented := raw["runtime_identity"]; invented || string(raw["newer_install_field"]) != `"preserve-me"` {
+		t.Fatal("billing repair rewrote unrelated installation fields")
+	}
+	if err := db.Exec(`CREATE TRIGGER reject_runtime_revision BEFORE UPDATE ON client_deployment_profiles BEGIN SELECT RAISE(ABORT, 'simulated disk failure'); END`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := saveClient(db, map[string]interface{}{"uuid": "node-a", "traffic_reset_day": float64(24)}); err == nil {
+		t.Fatal("failed runtime revision write did not abort billing transaction")
+	}
+	if err := db.First(&client, "uuid = ?", "node-a").Error; err != nil {
+		t.Fatal(err)
+	}
+	if client.TrafficResetDay == nil || *client.TrafficResetDay != 23 {
+		t.Fatal("billing changed despite runtime revision rollback")
 	}
 }
 
