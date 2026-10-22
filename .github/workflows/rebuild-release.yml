@@ -12,7 +12,7 @@ on:
         required: false
         type: string
       server_ref:
-        description: Server branch or tag to build.
+        description: Server branch, tag or commit SHA to build.
         required: true
         default: main
         type: string
@@ -99,12 +99,26 @@ jobs:
           VERSION: ${{ steps.metadata.outputs.version }}
           VERSION_HASH: ${{ steps.metadata.outputs.version_hash }}
           FRONTEND_REF: ${{ steps.metadata.outputs.frontend_ref }}
-          SERVER_REF: ${{ inputs.server_ref }}
         shell: bash
         run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          exec > >(tee ci-artifacts/release-dispatch.log) 2>&1
+          trap 'echo "$?" > ci-artifacts/release-dispatch-exit.txt' EXIT
+          # workflow_dispatch accepts branch/tag names, not the source SHA.
+          # The version tag was already moved to the reviewed source above.
           gh workflow run release.yml \
             --repo "$GITHUB_REPOSITORY" \
-            --ref "$SERVER_REF" \
+            --ref "$VERSION" \
             -f tag="$VERSION" \
             -f version_hash="$VERSION_HASH" \
             -f web_ref="$FRONTEND_REF"
+
+      - name: Retain release dispatch diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-rebuild-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          if-no-files-found: ignore
+          retention-days: 30

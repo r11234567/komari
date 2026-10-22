@@ -22,7 +22,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p ci-artifacts
-          node --test .github/scripts/release-notes-body.test.cjs 2>&1 | tee ci-artifacts/release-notes-tests.log
+          node --test .github/scripts/release-*.test.cjs 2>&1 | tee ci-artifacts/release-notes-tests.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
