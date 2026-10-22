@@ -627,9 +627,6 @@ func normalizeDeploymentProfile(profile *DeploymentProfile) error {
 	if profile.RuntimeIdentity == AgentRuntimeIdentityServiceAccount && profile.PrivilegedDeliveryVersion < 2 {
 		profile.RemoteControlEnabled = false
 	}
-	if profile.RescueEnabled && profile.RemoteControlEnabled {
-		return fmt.Errorf("rescue helper requires remote control to be disabled")
-	}
 
 	var err error
 	if profile.GHProxy, err = normalizeProfileText("ghproxy", profile.GHProxy, 2048); err != nil {
@@ -927,7 +924,7 @@ func PrivilegedCapabilityAllowedWithDB(db *gorm.DB, clientUUID, feature string) 
 	if errors.Is(err, gorm.ErrRecordNotFound) || err == nil && state.ProtocolVersion != 2 {
 		profile, saved, e := getDeploymentProfile(db, clientUUID)
 		if feature == "rescue" {
-			return saved && profile.RescueEnabled && !profile.RemoteControlEnabled, e
+			return saved && profile.RescueEnabled, e
 		}
 		return saved && profile.RemoteControlEnabled, e
 	}

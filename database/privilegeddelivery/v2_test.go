@@ -214,14 +214,12 @@ func TestV2LeaseExpiryFailureAndReceiptConflict(t *testing.T) {
 	require.Zero(t, snap.State.AppliedRevision)
 	require.Equal(t, StateFailed, snap.Desired.State)
 }
-func TestV2UnnegotiatedAndMutuallyExclusiveSettings(t *testing.T) {
+func TestV2UnnegotiatedSettingsCannotBeConfirmed(t *testing.T) {
 	db, id := fixtureV2(t)
 	require.NoError(t, db.Model(&models.ClientPrivilegedState{}).Where("client = ?", id).Update("protocol_version", 1).Error)
 	r, err := SaveWithDB(db, id, Settings{}, 0, "")
 	require.NoError(t, err)
 	_, err = ConfirmWithDB(db, id, r.Revision, "admin")
-	require.Error(t, err)
-	_, err = SaveWithDB(db, id, Settings{RemoteControlEnabled: true, RescueHelperEnabled: true}, 1, "")
 	require.Error(t, err)
 }
 func TestV2HashVectors(t *testing.T) {
