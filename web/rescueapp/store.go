@@ -139,7 +139,7 @@ func ValidateHelper(agentID, helperInstanceID string) error {
 	if err != nil {
 		return err
 	}
-	if !saved || !allowed || profile.RemoteControlEnabled || !profile.RescueEnabled {
+	if !saved || !allowed || !profile.RescueEnabled {
 		return errors.New("rescue helper is not enabled in the installed deployment profile")
 	}
 	var stored models.ClientRescueHelper
@@ -176,8 +176,8 @@ func Create(agentID string, action rescuev1.RescueAction, arguments []string, ti
 	if err != nil {
 		return nil, err
 	}
-	if !saved || !allowed || profile.RemoteControlEnabled || !profile.RescueEnabled {
-		return nil, errors.New("rescue helper is unavailable unless normal remote control is disabled and rescue is enabled")
+	if !saved || !allowed || !profile.RescueEnabled {
+		return nil, errors.New("rescue helper requires an applied rescue authorization")
 	}
 	if !allowedAction(action) {
 		return nil, errors.New("unsupported rescue action")

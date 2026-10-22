@@ -124,9 +124,6 @@ func SaveWithDB(db *gorm.DB, clientUUID string, settings Settings, expectedRevis
 		if (settings.WebSSHEnabled || settings.ExecutionEnabled) && !settings.RemoteControlEnabled {
 			return errors.New("webssh and execution require remote control")
 		}
-		if settings.RescueHelperEnabled && settings.RemoteControlEnabled {
-			return errors.New("rescue helper and ordinary remote control are mutually exclusive")
-		}
 		if settings.RequiredPrivilegeMode < 0 || settings.RequiredPrivilegeMode > 5 {
 			return errors.New("unsupported privilege mode")
 		}
