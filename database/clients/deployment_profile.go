@@ -238,9 +238,25 @@ func reconcileDeploymentResetDay(db *gorm.DB, stored *models.ClientDeploymentPro
 	if previous.MonthRotate == day {
 		return false, nil
 	}
-	next := previous
-	next.EnableMonthRotate, next.MonthRotate = day > 0, day
-	encoded, err := json.Marshal(next)
+	// Patch only the two billing fields. Re-encoding a normalized struct could
+	// invent an installation identity for old profiles or drop newer fields.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stored.Config), &raw); err != nil {
+		return false, err
+	}
+	if raw == nil {
+		return false, errors.New("deployment profile is not an object")
+	}
+	dayJSON, err := json.Marshal(day)
+	if err != nil {
+		return false, err
+	}
+	raw["month_rotate"] = dayJSON
+	raw["enable_month_rotate"] = json.RawMessage("false")
+	if day > 0 {
+		raw["enable_month_rotate"] = json.RawMessage("true")
+	}
+	encoded, err := json.Marshal(raw)
 	if err != nil {
 		return false, err
 	}

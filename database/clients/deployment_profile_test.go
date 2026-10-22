@@ -174,6 +174,19 @@ func TestDeploymentProfileAndBillingEditorShareTrafficResetDay(t *testing.T) {
 		t.Fatalf("idempotent edits created extra revisions: %d", after.Revision)
 	}
 	// Emulate a pre-fix billing edit that only changed the client column.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(after.Config), &raw); err != nil {
+		t.Fatal(err)
+	}
+	delete(raw, "runtime_identity")
+	raw["newer_install_field"] = json.RawMessage(`"preserve-me"`)
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.ClientDeploymentProfile{}).Where("client = ?", "node-a").Update("config", string(encoded)).Error; err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Model(&models.Client{}).Where("uuid = ?", "node-a").Update("traffic_reset_day", 23).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -191,6 +204,12 @@ func TestDeploymentProfileAndBillingEditorShareTrafficResetDay(t *testing.T) {
 	}
 	if after.Revision != before.Revision+3 || after.AppliedRevision != before.AppliedRevision {
 		t.Fatal("historical repair did not create exactly one fresh unacknowledged revision")
+	}
+	if err := json.Unmarshal([]byte(after.Config), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, invented := raw["runtime_identity"]; invented || string(raw["newer_install_field"]) != `"preserve-me"` {
+		t.Fatal("billing repair rewrote unrelated installation fields")
 	}
 	if err := db.Exec(`CREATE TRIGGER reject_runtime_revision BEFORE UPDATE ON client_deployment_profiles BEGIN SELECT RAISE(ABORT, 'simulated disk failure'); END`).Error; err != nil {
 		t.Fatal(err)
