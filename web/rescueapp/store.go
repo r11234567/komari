@@ -303,14 +303,12 @@ func resolveSSHPort(action rescuev1.RescueAction, requested uint32) (uint32, err
 // failure mode of forgetting to update this function is an inconvenient
 // prompt rather than an unauthenticated privileged operation.
 //
-// Only the read-only performance diagnostics are exempt. They read kernel
-// counters, change nothing, and need no privilege, so requiring a second
-// factor to look at a CPU breakdown would discourage exactly the routine
-// inspection the panel exists to make easy. Administrator authentication is
-// still enforced for them by the transport.
+// Read-only machine diagnostics and performance counters are exempt.
+// Administrator authentication and rescue authorization still apply.
 func RequiresTwoFactor(action rescuev1.RescueAction) bool {
 	switch action {
-	case rescuev1.RescueAction_RESCUE_ACTION_DETAILED_CPU_METRICS,
+	case rescuev1.RescueAction_RESCUE_ACTION_DIAGNOSTICS,
+		rescuev1.RescueAction_RESCUE_ACTION_DETAILED_CPU_METRICS,
 		rescuev1.RescueAction_RESCUE_ACTION_DETAILED_MEMORY_METRICS:
 		return false
 	default:
