@@ -3,6 +3,7 @@ package clients
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	logger "github.com/komari-monitor/komari/utils/log"
 	"math"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func DeleteClient(clientUuid string) error {
@@ -653,9 +655,22 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 			return err
 		}
 	}
+
 	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error
 	if err != nil {
 		return err
+	}
+	if _, changesResetDay := updates["traffic_reset_day"]; changesResetDay && db.Migrator().HasTable(&models.ClientDeploymentProfile{}) {
+		var stored models.ClientDeploymentProfile
+		err := db.Clauses(clause.Locking{Strength: "UPDATE"}).First(&stored, "client = ?", clientUUID).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err == nil {
+			if _, err := reconcileDeploymentResetDay(db, &stored, resetDay); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
