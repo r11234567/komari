@@ -18,6 +18,7 @@ import (
 	"github.com/komari-monitor/komari/web/rescueapp"
 	deploymentv1 "github.com/r11234567/komari-proto/gen/go/komari/deployment/v1"
 	deploymentv1connect "github.com/r11234567/komari-proto/gen/go/komari/deployment/v1/deploymentv1connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type deploymentService struct {
@@ -165,11 +166,17 @@ func (s *deploymentService) GetDeployment(_ context.Context, req *connect.Reques
 		state.Status = clients.DeploymentDeliveryUpgradeRequired
 		state.Error = "this Agent does not declare agent.config support; reinstall a Connect-compatible Agent"
 	}
-	return connect.NewResponse(&deploymentv1.GetDeploymentResponse{
+	observation, receivedAt := agent_runtime.GetConnectInstallation(req.Msg.AgentId)
+	response := &deploymentv1.GetDeploymentResponse{
 		Profile:      deploymentToProto(req.Msg.AgentId, profile),
 		Delivery:     deliveryToProto(state),
 		RescueHelper: rescueStatus,
-	}), nil
+		Installation: observation,
+	}
+	if !receivedAt.IsZero() {
+		response.InstallationReceivedAt = timestamppb.New(receivedAt)
+	}
+	return connect.NewResponse(response), nil
 }
 
 func (s *deploymentService) SaveDeploymentProfile(_ context.Context, req *connect.Request[deploymentv1.SaveDeploymentProfileRequest]) (*connect.Response[deploymentv1.SaveDeploymentProfileResponse], error) {

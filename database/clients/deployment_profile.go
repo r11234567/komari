@@ -471,29 +471,6 @@ func CompleteDeploymentConfigDelivery(clientUUID string, revision uint64, status
 	return result.RowsAffected > 0, result.Error
 }
 
-// RecordAppliedDeploymentRevision accepts an Agent's observed applied revision
-// even when a newer desired revision already exists. It advances monotonically
-// and only closes delivery when the observed revision is the current desired one.
-func RecordAppliedDeploymentRevision(clientUUID string, revision uint64) (bool, error) {
-	if revision == 0 {
-		return false, fmt.Errorf("revision is required")
-	}
-	now := time.Now().UTC()
-	result := dbcore.GetDBInstance().Model(&models.ClientDeploymentProfile{}).
-		Where("client = ? AND revision >= ? AND applied_revision < ?", clientUUID, revision, revision).
-		Updates(map[string]any{"applied_revision": revision, "updated_at": now})
-	if result.Error != nil || result.RowsAffected == 0 {
-		return result.RowsAffected > 0, result.Error
-	}
-	closed := dbcore.GetDBInstance().Model(&models.ClientDeploymentProfile{}).
-		Where("client = ? AND revision = ? AND applied_revision = ?", clientUUID, revision, revision).
-		Updates(map[string]any{
-			"delivery_status": DeploymentDeliveryApplied, "delivery_error": "",
-			"delivery_updated_at": now, "finished_at": now,
-		})
-	return true, closed.Error
-}
-
 func completeDeploymentConfig(db *gorm.DB, clientUUID string, result v2.ConfigResultParams) (bool, error) {
 	if result.Revision == 0 || (result.Status != DeploymentDeliveryApplied && result.Status != DeploymentDeliveryFailed) {
 		return false, fmt.Errorf("invalid deployment config result")
