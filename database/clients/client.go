@@ -308,17 +308,12 @@ func CreateClient() (clientUUID, token string, err error) {
 
 	client := newClient(clientUUID, token, "client_"+clientUUID[0:8], time.Now().UTC())
 
-	err = db.Create(&client).Error
+	err = createClientRecord(db, &client)
 	if err != nil {
 		return "", "", err
 	}
 	if err := tasks.AddDefaultOnClientUUID(clientUUID); err != nil {
 		logger.ErrorArgs("clients", "Failed to apply default-on ping tasks to new client:", err)
-	}
-	// Initialize default safe deployment profile (Revision 1, remote_control=false)
-	defaultProfile := DefaultDeploymentProfile(client)
-	if _, _, _, err := saveDeploymentProfileForDispatch(db, clientUUID, defaultProfile, true); err != nil {
-		logger.ErrorArgs("clients", "Failed to initialize default deployment profile for new client:", err)
 	}
 	return clientUUID, token, nil
 }
@@ -332,19 +327,29 @@ func CreateClientWithName(name string) (clientUUID, token string, err error) {
 	clientUUID = uuid.New().String()
 	client := newClient(clientUUID, token, name, time.Now().UTC())
 
-	err = db.Create(&client).Error
+	err = createClientRecord(db, &client)
 	if err != nil {
 		return "", "", err
 	}
 	if err := tasks.AddDefaultOnClientUUID(clientUUID); err != nil {
 		logger.ErrorArgs("clients", "Failed to apply default-on ping tasks to new client:", err)
 	}
-	// Initialize default safe deployment profile (Revision 1, remote_control=false)
-	defaultProfile := DefaultDeploymentProfile(client)
-	if _, _, _, err := saveDeploymentProfileForDispatch(db, clientUUID, defaultProfile, true); err != nil {
-		logger.ErrorArgs("clients", "Failed to initialize default deployment profile for new client:", err)
-	}
 	return clientUUID, token, nil
+}
+
+// createClientRecord keeps the initial profile unversioned until the installed
+// daemon supplies its baseline. Creating r1 here blocks InitializeNodeConfig.
+func createClientRecord(db *gorm.DB, client *models.Client) error {
+	profile, err := json.Marshal(DefaultDeploymentProfile(*client))
+	if err != nil {
+		return err
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(client).Error; err != nil {
+			return err
+		}
+		return tx.Create(&models.ClientDeploymentProfile{Client: client.UUID, Config: string(profile)}).Error
+	})
 }
 
 func newClient(clientUUID, token, name string, now time.Time) models.Client {
