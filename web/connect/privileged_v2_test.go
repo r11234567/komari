@@ -19,6 +19,7 @@ import (
 	"github.com/komari-monitor/komari/database/privilegeddelivery"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
+	hostv1connect "github.com/r11234567/komari-proto/gen/go/komari/host/v1/hostv1connect"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -183,6 +184,112 @@ func TestPrivilegedV2WatchDeliversApprovalOfAlreadyReceivedRevision(t *testing.T
 		t.Fatalf("wrong stream cursor: %v", stream.Msg())
 	}
 }
+
+// A restarted daemon negotiates a new node cursor without changing the
+// approved configuration row. Watch and the mandatory unary recheck must
+// agree, or the daemon can neither apply nor acknowledge the host result.
+func TestPrivilegedV2RestartKeepsWatchAndRevalidationConsistent(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		from   int32
+		to     int32
+		helper bool
+	}{
+		{name: "same identity", from: 2, to: 2},
+		{name: "promote", from: 2, to: 1},
+		{name: "demote", from: 1, to: 2},
+		{name: "separate rescue", from: 2, to: 2, helper: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, _, err := clients.CreateClient()
+			if err != nil {
+				t.Fatal(err)
+			}
+			db := dbcore.GetDBInstance()
+			_, err = privilegeddelivery.Negotiate(db, id, "restart.service", "before", tc.from, []int32{1, 2, 3})
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved, err := privilegeddelivery.Save(id, privilegeddelivery.Settings{RequiredPrivilegeMode: tc.to, RescueHelperEnabled: tc.helper}, 0, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			approved, err := privilegeddelivery.Confirm(id, saved.Revision, "admin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			authorization, err := privilegeddelivery.Authorization(approved)
+			if err != nil {
+				t.Fatal(err)
+			}
+			operationID := ""
+			if len(authorization.Actions) > 0 {
+				operationID = "restart-operation"
+				_, err = privilegeddelivery.PrepareOperation(db, &hostv1.PrepareHostOperationRequest{AgentId: id, OperationId: operationID, Revision: approved.Revision, ConfigHash: approved.ConfigHash, ApprovalGeneration: approved.ApprovalGeneration, Nonce: approved.Nonce})
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = privilegeddelivery.ReportOperation(db, &hostv1.ReportHostOperationRequest{AgentId: id, OperationId: operationID, ReceiptId: "host-local-result", Phase: hostv1.HostOperationPhase_HOST_OPERATION_PHASE_LOCAL_APPLIED, Operator: "admin", LocalAuthentication: "pam"})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			mux := http.NewServeMux()
+			register := func(path string, handler http.Handler) {
+				mux.Handle(path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					ctx := rpc.NewContextWithMeta(r.Context(), &rpc.ContextMeta{Principal: rpc.NewAgentPrincipal(id)})
+					handler.ServeHTTP(w, r.WithContext(ctx))
+				}))
+			}
+			register(configv1connect.NewPrivilegedDeliveryServiceHandler(&privilegedDeliveryService{}))
+			register(hostv1connect.NewHostServiceHandler(&hostService{}))
+			server := httptest.NewServer(mux)
+			defer server.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			host := hostv1connect.NewHostServiceClient(server.Client(), server.URL)
+			negotiated, err := host.NegotiateHostProtocol(ctx, connect.NewRequest(&hostv1.NegotiateHostProtocolRequest{AgentId: id, ProtocolVersion: 2, ServiceId: "restart.service", StartupId: "after", PrivilegeMode: reportv1.PrivilegeMode(tc.to), SupportedActions: []hostv1.HostAction{1, 2, 3}}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := configv1connect.NewPrivilegedDeliveryServiceClient(server.Client(), server.URL)
+			stream, err := client.WatchPrivilegedDelivery(ctx, connect.NewRequest(&configv1.WatchPrivilegedDeliveryRequest{AgentId: id, ProtocolVersion: 2, AfterSequence: approved.UpdateSequence}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stream.Close()
+			if !stream.Receive() {
+				t.Fatalf("missing restarted snapshot: %v", stream.Err())
+			}
+			watched := proto.Clone(stream.Msg().Revision).(*configv1.PrivilegedRevision)
+			fetched, err := client.GetPrivilegedDelivery(ctx, connect.NewRequest(&configv1.GetPrivilegedDeliveryRequest{AgentId: id}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			current := fetched.Msg.Revision
+			if watched.GetSignature() == nil || current.GetSignature() == nil || watched.GetUpdateSequence() != negotiated.Msg.UpdateSequence || current.GetUpdateSequence() != watched.GetUpdateSequence() {
+				t.Fatalf("restart cursor disagrees: negotiation=%v watch=%v current=%v", negotiated.Msg, watched, current)
+			}
+			watched.Signature, current.Signature = nil, nil
+			if !proto.Equal(watched, current) {
+				t.Fatalf("unary approval revalidation disagrees with watch: watch=%v current=%v", watched, current)
+			}
+			snapshot, err := privilegeddelivery.GetState(id)
+			if err != nil || snapshot.State.AppliedRevision != 0 {
+				t.Fatalf("host result fabricated daemon completion: %v %+v", err, snapshot.State)
+			}
+			ack, err := client.ReportPrivilegedDelivery(ctx, connect.NewRequest(&configv1.ReportPrivilegedDeliveryRequest{AgentId: id, Revision: current.Revision, ProtocolVersion: 2, State: configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED, ReceiptId: "daemon-ack", ConfigHash: current.ConfigHash, ApprovalGeneration: current.ApprovalGeneration, Observation: &hostv1.DaemonObservation{Revision: current.Revision, ConfigHash: current.ConfigHash, ApprovalGeneration: current.ApprovalGeneration, OperationId: operationID, ServiceId: "restart.service", StartupId: "after", PrivilegeMode: reportv1.PrivilegeMode(tc.to), ObservedAt: timestamppb.Now(), EffectiveCapabilities: &reportv1.AgentCapabilities{PrivilegeMode: reportv1.PrivilegeMode(tc.to), RescueHelper: &reportv1.CapabilityState{Available: tc.helper}}, HelperInstalled: tc.helper, HelperRunning: tc.helper, HelperAuthorized: tc.helper, HelperLeaseReady: tc.helper}}))
+			if err != nil || !ack.Msg.GetAccepted() {
+				t.Fatalf("daemon ACK failed after revalidation: %v", err)
+			}
+			filtered, err := client.GetPrivilegedDelivery(ctx, connect.NewRequest(&configv1.GetPrivilegedDeliveryRequest{AgentId: id, AppliedRevision: current.Revision}))
+			if err != nil || filtered.Msg.Revision != nil {
+				t.Fatalf("applied revision filter failed: %v", err)
+			}
+		})
+	}
+}
+
 func TestPrivilegedV2ListReturnsAppliedOutsideHistoryPage(t *testing.T) {
 	id, _, err := clients.CreateClient()
 	if err != nil {
