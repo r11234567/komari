@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -129,17 +130,33 @@ type persistedUploadSession struct {
 	ExpiresAt  time.Time `json:"expires_at"`
 }
 
+var uploadSessionIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+func uploadSessionDirectory() (string, error) {
+	absDir, err := filepath.Abs(filepath.Join("data", ".uploading"))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(absDir), nil
+}
+
 func uploadSessionPath(id string) (string, error) {
 	id = strings.TrimSpace(id)
-	if id == "" {
-		return "", errors.New("empty upload session id")
+	if id == "" || strings.Contains(id, "..") || !uploadSessionIDPattern.MatchString(id) {
+		return "", errors.New("invalid upload session id")
 	}
-	for _, r := range id {
-		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-') {
-			return "", errors.New("invalid upload session id character")
-		}
+	baseDir, err := uploadSessionDirectory()
+	if err != nil {
+		return "", err
 	}
-	return safepath.JoinUnder(filepath.Join("data", ".uploading"), ".komari-upload-"+id+".json")
+	cleanRel := filepath.Clean("/" + ".komari-upload-" + id + ".json")
+	filename := filepath.Base(cleanRel)
+	target := filepath.Clean(filepath.Join(baseDir, filename))
+	cleanBase := baseDir + string(filepath.Separator)
+	if !strings.HasPrefix(target, cleanBase) {
+		return "", errors.New("upload session path escapes base directory")
+	}
+	return safepath.JoinUnder(baseDir, filename)
 }
 
 func Upload(c *gin.Context) {
@@ -851,11 +868,20 @@ func acquireUploadSession(id, clientUUID, path string, size, offset int64) (*upl
 }
 
 func loadUploadSession(id string) (*persistedUploadSession, error) {
-	if id == "" {
+	id = strings.TrimSpace(id)
+	if id == "" || strings.Contains(id, "..") || !uploadSessionIDPattern.MatchString(id) {
 		return nil, ErrUnknownToken
 	}
 	sessionPath, err := uploadSessionPath(id)
 	if err != nil {
+		return nil, ErrUnknownToken
+	}
+	baseDir, err := uploadSessionDirectory()
+	if err != nil {
+		return nil, ErrUnknownToken
+	}
+	cleanBase := baseDir + string(filepath.Separator)
+	if !strings.HasPrefix(sessionPath, cleanBase) {
 		return nil, ErrUnknownToken
 	}
 	data, err := os.ReadFile(sessionPath)
@@ -928,6 +954,9 @@ func releaseUploadSlotLocked(session *uploadSession) {
 }
 
 func saveUploadSession(session *uploadSession) {
+	if session == nil || session.ID == "" || strings.Contains(session.ID, "..") || !uploadSessionIDPattern.MatchString(session.ID) {
+		return
+	}
 	data, err := json.Marshal(persistedUploadSession{
 		ID:         session.ID,
 		UUID:       session.UUID,
@@ -944,6 +973,14 @@ func saveUploadSession(session *uploadSession) {
 	if err != nil {
 		return
 	}
+	baseDir, err := uploadSessionDirectory()
+	if err != nil {
+		return
+	}
+	cleanBase := baseDir + string(filepath.Separator)
+	if !strings.HasPrefix(path, cleanBase) {
+		return
+	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return
 	}
@@ -951,12 +988,23 @@ func saveUploadSession(session *uploadSession) {
 }
 
 func removeUploadSessionState(id string) {
-	if id == "" {
+	id = strings.TrimSpace(id)
+	if id == "" || strings.Contains(id, "..") || !uploadSessionIDPattern.MatchString(id) {
 		return
 	}
-	if path, err := uploadSessionPath(id); err == nil {
-		_ = os.Remove(path)
+	path, err := uploadSessionPath(id)
+	if err != nil {
+		return
 	}
+	baseDir, err := uploadSessionDirectory()
+	if err != nil {
+		return
+	}
+	cleanBase := baseDir + string(filepath.Separator)
+	if !strings.HasPrefix(path, cleanBase) {
+		return
+	}
+	_ = os.Remove(path)
 }
 
 func startUploadCleanup() {
@@ -980,7 +1028,9 @@ func startUploadCleanup() {
 }
 
 func ensureUploadSessionDirectory() {
-	_ = os.MkdirAll(filepath.Join("data", ".uploading"), 0o755)
+	if dir, err := uploadSessionDirectory(); err == nil {
+		_ = os.MkdirAll(dir, 0o755)
+	}
 }
 
 func restoreUploadSession(id string) *uploadSession {

@@ -17,12 +17,17 @@ func JoinUnder(base, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	cleanBase := filepath.Clean(absBase) + string(filepath.Separator)
 	target, err := filepath.Abs(filepath.Join(absBase, filepath.Clean(filepath.FromSlash(name))))
 	if err != nil {
 		return "", err
 	}
+	target = filepath.Clean(target)
 	relative, err := filepath.Rel(absBase, target)
 	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q escapes its base directory", name)
+	}
+	if !strings.HasPrefix(target, cleanBase) {
 		return "", fmt.Errorf("path %q escapes its base directory", name)
 	}
 	return target, nil
