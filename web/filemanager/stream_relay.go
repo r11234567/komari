@@ -279,6 +279,8 @@ func serveUploadTransfer(c *gin.Context, transfer *streamTransfer) {
 			return
 		}
 		c.Header("Content-Type", "application/octet-stream")
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("Content-Security-Policy", "default-src 'none'; sandbox")
 		c.Header("Content-Length", strconv.FormatInt(transfer.size, 10))
 		c.Header("Content-Encoding", "identity")
 		c.Header("Cache-Control", "no-store, no-transform")

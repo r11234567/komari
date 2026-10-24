@@ -19,12 +19,22 @@ type injectEntry struct {
 	body  string
 }
 
+func isBypassPluginRoute(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	p := r.URL.Path
+	return strings.Contains(p, "/file/") ||
+		strings.HasPrefix(p, "/api/clients/v2/file/") ||
+		strings.HasPrefix(p, "/komari.")
+}
+
 // htmlInjectHandler installs the HTML injection wrapper around the
-// application handler. WebSocket upgrades pass through untouched because the
-// response cannot be buffered.
+// application handler. WebSocket upgrades and raw file streams pass through
+// untouched because the response cannot be buffered.
 func (m *Manager) htmlInjectHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isUpgradeRequest(r) {
+		if isUpgradeRequest(r) || isBypassPluginRoute(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -207,6 +217,9 @@ func (w *htmlInjectWriter) flushTo(fragments []*injectEntry) {
 }
 
 func (w *htmlInjectWriter) writeThrough(status int, header http.Header) {
+	if header.Get("X-Content-Type-Options") == "" {
+		header.Set("X-Content-Type-Options", "nosniff")
+	}
 	for name, values := range header {
 		for _, value := range values {
 			w.underlying.Header().Add(name, value)

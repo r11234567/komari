@@ -14,6 +14,7 @@ bin/
 komari.db
 /data
 web/connect/data/
+web/filemanager/data/
 /utils/geoip/data/
 .vscode/
 /backup

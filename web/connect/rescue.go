@@ -221,13 +221,16 @@ func (s *rescueService) ReportRescueStatus(ctx context.Context, req *connect.Req
 
 func verifyConnectTwoFactor(meta *rpc.ContextMeta, proof *commonv1.TwoFactorProof) error {
 	if meta == nil || meta.Principal == nil {
-		return errors.New("administrator authentication is required")
+		return connect.NewError(connect.CodeUnauthenticated, errors.New("administrator authentication is required"))
 	}
 	code := ""
 	if proof != nil {
 		code = proof.Code
 	}
-	return api.VerifySensitive2FACore(meta.Principal.UserUUID, code, meta.Principal.IsAPIKey)
+	if err := api.VerifySensitive2FACore(meta.Principal.UserUUID, code, meta.Principal.IsAPIKey); err != nil {
+		return connect.NewError(connect.CodeUnauthenticated, err)
+	}
+	return nil
 }
 
 func rescueTerminal(state commonv1.OperationState) bool {

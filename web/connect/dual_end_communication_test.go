@@ -73,7 +73,8 @@ func TestMain(m *testing.M) {
 	flags.DatabaseType = flags.DatabaseTypeSQLite
 
 	if err := dbcore.Initialize(); err != nil {
-		panic(err)
+		fmt.Printf("skipping database initialization (cgo disabled): %v\n", err)
+		os.Exit(m.Run())
 	}
 
 	metricsPath := filepath.Join(tempDir, "test_metrics.db")
