@@ -15,6 +15,41 @@ import (
 	"github.com/komari-monitor/komari/web/api"
 )
 
+// rpc2CompatibilityMethods is the complete compatibility surface for
+// third-party dashboards. Admin and client methods are reached over Connect;
+// exposing them here would create a second, less constrained management API.
+var rpc2CompatibilityMethods = map[string]struct{}{
+	"public:getMe":                  {},
+	"public:getNodesInformation":    {},
+	"public:getPublicSettings":      {},
+	"public:getVersion":             {},
+	"public:getClientRecentRecords": {},
+	"public:getRecordsByUUID":       {},
+	"public:getPingRecords":         {},
+	"public:getPublicPingTasks":     {},
+	"public:listMetricDefinitions":  {},
+	"public:queryMetrics":           {},
+	"public:getPingMetricStats":     {},
+	"public:recordVisitorEvent":     {},
+	"common:getNodes":               {},
+	"common:getNodesLatestStatus":   {},
+}
+
+// rpc2TransportAllowed reports whether method may be reached through /api/rpc2.
+// Plugin-owned methods are admitted only after the plugin runtime registered
+// them; an admin namespace never becomes reachable by naming a plugin method.
+func rpc2TransportAllowed(method string) bool {
+	if _, ok := rpc2CompatibilityMethods[method]; ok {
+		return true
+	}
+	return rpc.IsPluginMethod(method)
+}
+
+func rpc2DeniedResponse(req *rpc.JsonRpcRequest) *rpc.JsonRpcResponse {
+	return rpc.ErrorResponse(req.ID, rpc.PermissionDenied,
+		"method is not available on the compatibility transport", map[string]string{"method": req.Method})
+}
+
 // OnRpcRequest 是 /api/rpc2 的统一入口：GET 升级为 WebSocket，POST 处理单条/批量 JSON-RPC。
 func OnRpcRequest(c *gin.Context) {
 	// GET -> WebSocket
@@ -113,6 +148,10 @@ func serveWebSocket(c *gin.Context) {
 			conn.WriteJSON(jerr.ResponseWithID(req.ID))
 			continue
 		}
+		if !rpc2TransportAllowed(req.Method) {
+			conn.WriteJSON(rpc2DeniedResponse(&req))
+			continue
+		}
 		// 同步写：SafeConn 内部有锁，串行写避免响应乱序与并发竞态。
 		conn.WriteJSON(dispatchWithSensitive(context.Background(), c, meta, &req))
 	}
@@ -133,6 +172,10 @@ func servePost(c *gin.Context) {
 
 	responses := make([]*rpc.JsonRpcResponse, 0, len(requests))
 	for _, rreq := range requests {
+		if !rpc2TransportAllowed(rreq.Method) {
+			responses = append(responses, rpc2DeniedResponse(rreq))
+			continue
+		}
 		responses = append(responses, dispatchWithSensitive(c.Request.Context(), c, meta, rreq))
 	}
 	// 单条直接对象，批量数组（符合 JSON-RPC 2.0）。
