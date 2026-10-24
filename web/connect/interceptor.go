@@ -24,6 +24,7 @@ func newPolicyInterceptor() *policyInterceptor {
 		maintenance      = "/komari.admin.v1.MaintenanceService/"
 		pingTask         = "/komari.admin.v1.PingTaskService/"
 		terminalSettings = "/komari.admin.v1.TerminalSettingsService/"
+		fileService      = "/komari.file.v1.FileService/"
 		browser          = "/komari.browser.v1.BrowserService/"
 		config           = "/komari.config.v1.ConfigService/"
 		privileged       = "/komari.config.v1.PrivilegedDeliveryService/"
@@ -55,6 +56,10 @@ func newPolicyInterceptor() *policyInterceptor {
 	add(maintenance, rpc.RoleAdmin, 30*time.Minute, "VacuumDatabase")
 	add(pingTask, rpc.RoleAdmin, 30*time.Second, "ListPingTasks", "CreatePingTask", "UpdatePingTasks", "DeletePingTasks", "ReorderPingTasks")
 	add(terminalSettings, rpc.RoleAdmin, 30*time.Second, "GetTerminalSettings", "SetTerminalSettings")
+	add(fileService, rpc.RoleAdmin, 30*time.Second,
+		"ListDirectory", "ListRoots", "StatFile", "CreateEntry", "DeleteEntry",
+		"MoveEntry", "CopyEntry", "ChmodEntry", "ChownEntry", "SearchFiles")
+	add(fileService, rpc.RoleClient, 30*time.Minute, "LeaseFileOperations", "AttachFileOperations")
 	add(browser, rpc.RoleGuest, 30*time.Second, "GetPublicInfo", "ListAgents", "GetAgent", "GetSession", "GetThemeContract")
 	add(browser, rpc.RoleAdmin, 30*time.Second, "GetTrafficTrend")
 	add(browser, rpc.RoleGuest, 30*time.Minute, "WatchAgentStatus")
