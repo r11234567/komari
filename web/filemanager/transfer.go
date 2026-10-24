@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/database/auditlog"
 	logger "github.com/komari-monitor/komari/utils/log"
+	"github.com/komari-monitor/komari/utils/safepath"
 	"github.com/komari-monitor/komari/web/api"
 )
 
@@ -128,8 +129,17 @@ type persistedUploadSession struct {
 	ExpiresAt  time.Time `json:"expires_at"`
 }
 
-func uploadSessionPath(id string) string {
-	return filepath.Join("data", ".uploading", ".komari-upload-"+id+".json")
+func uploadSessionPath(id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", errors.New("empty upload session id")
+	}
+	for _, r := range id {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-') {
+			return "", errors.New("invalid upload session id character")
+		}
+	}
+	return safepath.JoinUnder(filepath.Join("data", ".uploading"), ".komari-upload-"+id+".json")
 }
 
 func Upload(c *gin.Context) {
@@ -552,6 +562,15 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
+	ext := strings.ToLower(filepath.Ext(actualName))
+	ctLower := strings.ToLower(contentType)
+	if disposition == "inline" {
+		if ext == ".html" || ext == ".htm" || ext == ".xhtml" || ext == ".svg" || ext == ".xml" ||
+			strings.Contains(ctLower, "html") || strings.Contains(ctLower, "svg") || strings.Contains(ctLower, "xml") ||
+			strings.Contains(ctLower, "javascript") {
+			disposition = "attachment"
+		}
+	}
 	transferChunkSize := downloadChunkSizeForRequest(c, clientUUID)
 	setHeaders := func() {
 		headerChunkSize := transferChunkSize
@@ -563,6 +582,8 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 		c.Header("Content-Type", contentType)
 		c.Header("Content-Disposition", formatDownloadContentDisposition(disposition, name, options.OfficeCompatible))
 		c.Header("Accept-Ranges", "bytes")
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("Content-Security-Policy", "default-src 'none'; sandbox")
 		c.Header("Content-Length", strconv.FormatInt(contentLength, 10))
 		c.Header("Content-Encoding", "identity")
 		c.Header("Cache-Control", "no-store, no-transform")
@@ -833,7 +854,11 @@ func loadUploadSession(id string) (*persistedUploadSession, error) {
 	if id == "" {
 		return nil, ErrUnknownToken
 	}
-	data, err := os.ReadFile(uploadSessionPath(id))
+	sessionPath, err := uploadSessionPath(id)
+	if err != nil {
+		return nil, ErrUnknownToken
+	}
+	data, err := os.ReadFile(sessionPath)
 	if err != nil {
 		return nil, ErrUnknownToken
 	}
@@ -915,8 +940,11 @@ func saveUploadSession(session *uploadSession) {
 	if err != nil {
 		return
 	}
-	path := uploadSessionPath(session.ID)
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	path, err := uploadSessionPath(session.ID)
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return
 	}
 	_ = os.Chtimes(path, session.ExpiresAt, session.ExpiresAt)
@@ -926,7 +954,9 @@ func removeUploadSessionState(id string) {
 	if id == "" {
 		return
 	}
-	_ = os.Remove(uploadSessionPath(id))
+	if path, err := uploadSessionPath(id); err == nil {
+		_ = os.Remove(path)
+	}
 }
 
 func startUploadCleanup() {
@@ -950,7 +980,7 @@ func startUploadCleanup() {
 }
 
 func ensureUploadSessionDirectory() {
-	_ = os.MkdirAll(filepath.Dir(uploadSessionPath("x")), 0755)
+	_ = os.MkdirAll(filepath.Join("data", ".uploading"), 0o755)
 }
 
 func restoreUploadSession(id string) *uploadSession {

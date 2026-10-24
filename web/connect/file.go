@@ -138,10 +138,26 @@ func lookupFileError(err error) error {
 	switch {
 	case strings.Contains(message, "permission denied"), strings.Contains(message, "operation not permitted"):
 		return connect.NewError(connect.CodePermissionDenied, err)
-	case strings.Contains(message, "no such file"), strings.Contains(message, "not found"):
+	case strings.Contains(message, "no such file"),
+		strings.Contains(message, "not found"),
+		strings.Contains(message, "the system cannot find the file specified"),
+		strings.Contains(message, "the system cannot find the path specified"),
+		strings.Contains(message, "cannot find the file"),
+		strings.Contains(message, "cannot find the path"):
 		return connect.NewError(connect.CodeNotFound, err)
-	case strings.Contains(message, "unsupported"):
+	case strings.Contains(message, "unsupported"),
+		strings.Contains(message, "not supported"),
+		strings.Contains(message, "only supported"),
+		strings.Contains(message, "unimplemented"):
 		return connect.NewError(connect.CodeUnimplemented, err)
+	case strings.Contains(message, "is required"),
+		strings.Contains(message, "cannot move a path into itself"),
+		strings.Contains(message, "cannot copy a directory into itself"),
+		strings.Contains(message, "source and destination are the same"),
+		strings.Contains(message, "refusing to delete a filesystem root"),
+		strings.Contains(message, "cannot replace a directory with a file"),
+		strings.Contains(message, "invalid mode"):
+		return connect.NewError(connect.CodeInvalidArgument, err)
 	default:
 		return connect.NewError(connect.CodeInternal, err)
 	}

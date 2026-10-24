@@ -161,7 +161,7 @@ func maxHookBodyLimit(hooks []*hookEntry) int64 {
 // requests skip both the hook chain and its body buffering.
 func (m *Manager) wrapHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isUpgradeRequest(r) {
+		if isUpgradeRequest(r) || isBypassPluginRoute(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -565,6 +565,9 @@ func (b *bufferedResponseWriter) Flush() {
 
 // writeThrough forwards status and headers to the underlying writer once.
 func (b *bufferedResponseWriter) writeThrough(status int, header http.Header) {
+	if header.Get("X-Content-Type-Options") == "" {
+		header.Set("X-Content-Type-Options", "nosniff")
+	}
 	for name, values := range header {
 		for _, value := range values {
 			b.underlying.Header().Add(name, value)

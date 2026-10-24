@@ -2,6 +2,7 @@ package filemanager
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -186,6 +187,108 @@ func TestDownloadChunkSizeRequestUsesSaferCachedValue(t *testing.T) {
 	context.Request = request
 	if got, want := downloadChunkSizeForRequest(context, "client"), int64(4*1024*1024); got != want {
 		t.Fatalf("download chunk size = %d, want %d", got, want)
+	}
+}
+
+func TestPreviewTokenLifecycle(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 1. Missing path returns 400
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "uuid", Value: "client-1"}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/preview-token", nil)
+	CreatePreviewToken(c)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("CreatePreviewToken without path code = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	// 2. Successful creation
+	rec = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "uuid", Value: "client-1"}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/preview-token?path=%2Fetc%2Fhosts", nil)
+	CreatePreviewToken(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("CreatePreviewToken code = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	previewTokenMu.Lock()
+	var createdToken string
+	for token, item := range previewTokens {
+		if item.ClientUUID == "client-1" && item.Path == "/etc/hosts" {
+			createdToken = token
+			break
+		}
+	}
+	previewTokenMu.Unlock()
+	if createdToken == "" {
+		t.Fatal("expected preview token to be recorded in memory")
+	}
+
+	// 3. Different client attempting to consume preview token is rejected with 401
+	rec = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "uuid", Value: "client-different"}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/preview?preview_token="+createdToken, nil)
+	PreviewDownload(c)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("PreviewDownload with wrong client code = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	// 4. Expired token rejected
+	previewTokenMu.Lock()
+	previewTokens["expired-token"] = previewToken{
+		ClientUUID: "client-1",
+		Path:       "/etc/hosts",
+		ExpiresAt:  time.Now().Add(-time.Hour),
+	}
+	previewTokenMu.Unlock()
+
+	rec = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "uuid", Value: "client-1"}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/preview?preview_token=expired-token", nil)
+	PreviewDownload(c)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("PreviewDownload with expired token code = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestCancelUploadReleasesSlot(t *testing.T) {
+	resetUploadSessionsForTest()
+	t.Cleanup(resetUploadSessionsForTest)
+
+	session, created, err := acquireUploadSession("", "client-cancel", "/tmp/file.bin", 1024, 0)
+	if err != nil || !created {
+		t.Fatalf("acquire upload session: created=%v err=%v", created, err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "uuid", Value: "client-cancel"}}
+	c.Request = httptest.NewRequest(http.MethodPost, "/upload?operation=cancel&upload_id="+session.ID, nil)
+
+	cancelUpload(c, "client-cancel")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancelUpload status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	// Verify session slot was released
+	uploadMu.Lock()
+	_, exists := uploadSessions[session.ID]
+	uploadMu.Unlock()
+	if exists {
+		t.Fatal("upload session still exists after cancel")
+	}
+
+	// Can acquire maxConcurrentUploads sessions again without slot exhaustion
+	for i := 0; i < maxConcurrentUploads; i++ {
+		_, _, err := acquireUploadSession("", "client-cancel", fmt.Sprintf("/tmp/f%d", i), 100, 0)
+		if err != nil {
+			t.Fatalf("slot %d failed after cancel: %v", i, err)
+		}
 	}
 }
 

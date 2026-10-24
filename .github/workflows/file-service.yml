@@ -1,0 +1,39 @@
+name: File service regression
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: fileservice-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Check local protocol dependency and bump regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          node --test scripts/ci/protocol-submodule.test.cjs 2>&1 | tee ci-artifacts/protocol-tests.log
+          node scripts/ci/check-protocol.cjs --resolve-go 2>&1 | tee ci-artifacts/protocol-source.log
+      - name: FileService Connect, lease, store and HTTP transfer regression
+        run: scripts/ci/run-go-tests.sh ./web/filemanager ./web/connect
+      - name: Preserve complete logs, including compiler failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: file-service-backend-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
