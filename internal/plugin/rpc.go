@@ -42,6 +42,7 @@ func (m *Manager) registerRPC(short, method string, handler goja.Callable) error
 		inst.mu.Unlock()
 		return err
 	}
+	rpc.MarkPluginMethod(method)
 	return nil
 }
 

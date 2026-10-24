@@ -76,13 +76,7 @@ func init() {
 }
 
 func adminGetXtermjs(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	defaultSettings := defaultXtermJSSettings()
-	settings, err := config.GetAs[XtermJSSettings](config.XtermjsSettingsKey, defaultSettings)
-	if err != nil {
-		_ = config.Set(config.XtermjsSettingsKey, defaultSettings)
-		settings = defaultSettings
-	}
-	normalized, err := normalizeXtermJSSettings(settings)
+	normalized, err := GetXtermjsSettings()
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to get xtermjs settings: "+err.Error(), nil)
 	}
@@ -98,12 +92,34 @@ func adminSetXtermjs(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Js
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid xtermjs settings: "+err.Error(), nil)
 	}
-	if err := config.Set(config.XtermjsSettingsKey, normalized); err != nil {
+	if err := SaveXtermjsSettings(normalized); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to save settings: "+err.Error(), nil)
 	}
 	actor, ip := auditActor(ctx)
 	auditlog.Log(ip, actor, "update xtermjs settings", "info")
 	return normalized, nil
+}
+
+// GetXtermjsSettings returns normalized deployment-wide terminal settings.
+// The legacy RPC2 handler and the Connect TerminalSettingsService share it.
+func GetXtermjsSettings() (XtermJSSettings, error) {
+	defaultSettings := defaultXtermJSSettings()
+	settings, err := config.GetAs[XtermJSSettings](config.XtermjsSettingsKey, defaultSettings)
+	if err != nil {
+		_ = config.Set(config.XtermjsSettingsKey, defaultSettings)
+		settings = defaultSettings
+	}
+	return normalizeXtermJSSettings(settings)
+}
+
+// SaveXtermjsSettings persists already-normalized terminal settings.
+func SaveXtermjsSettings(settings XtermJSSettings) error {
+	return config.Set(config.XtermjsSettingsKey, settings)
+}
+
+// NormalizeXtermjsSettings applies defaults, bounds and the theme whitelist.
+func NormalizeXtermjsSettings(input XtermJSSettings) (XtermJSSettings, error) {
+	return normalizeXtermJSSettings(input)
 }
 
 func defaultXtermJSSettings() XtermJSSettings {

@@ -20,24 +20,25 @@ type policyInterceptor struct {
 
 func newPolicyInterceptor() *policyInterceptor {
 	const (
-		dashboard   = "/komari.admin.v1.DashboardService/"
-		maintenance = "/komari.admin.v1.MaintenanceService/"
-		pingTask    = "/komari.admin.v1.PingTaskService/"
-		browser     = "/komari.browser.v1.BrowserService/"
-		config      = "/komari.config.v1.ConfigService/"
-		privileged  = "/komari.config.v1.PrivilegedDeliveryService/"
-		host        = "/komari.host.v1.HostService/"
-		enroll      = "/komari.enrollment.v1.EnrollmentService/"
-		enrollAdmin = "/komari.enrollment.v1.EnrollmentAdminService/"
-		deploy      = "/komari.deployment.v1.DeploymentService/"
-		report      = "/komari.report.v1.AgentReportService/"
-		metrics     = "/komari.metrics.v1.MetricsService/"
-		plugin      = "/komari.plugin.v1.PluginService/"
-		network     = "/komari.network.v1.NetworkProbeService/"
-		exec        = "/komari.exec.v1.ExecutionService/"
-		webssh      = "/komari.webssh.v1.WebSSHService/"
-		events      = "/komari.agent.v1.AgentEventService/"
-		rescue      = "/komari.rescue.v1.RescueService/"
+		dashboard        = "/komari.admin.v1.DashboardService/"
+		maintenance      = "/komari.admin.v1.MaintenanceService/"
+		pingTask         = "/komari.admin.v1.PingTaskService/"
+		terminalSettings = "/komari.admin.v1.TerminalSettingsService/"
+		browser          = "/komari.browser.v1.BrowserService/"
+		config           = "/komari.config.v1.ConfigService/"
+		privileged       = "/komari.config.v1.PrivilegedDeliveryService/"
+		host             = "/komari.host.v1.HostService/"
+		enroll           = "/komari.enrollment.v1.EnrollmentService/"
+		enrollAdmin      = "/komari.enrollment.v1.EnrollmentAdminService/"
+		deploy           = "/komari.deployment.v1.DeploymentService/"
+		report           = "/komari.report.v1.AgentReportService/"
+		metrics          = "/komari.metrics.v1.MetricsService/"
+		plugin           = "/komari.plugin.v1.PluginService/"
+		network          = "/komari.network.v1.NetworkProbeService/"
+		exec             = "/komari.exec.v1.ExecutionService/"
+		webssh           = "/komari.webssh.v1.WebSSHService/"
+		events           = "/komari.agent.v1.AgentEventService/"
+		rescue           = "/komari.rescue.v1.RescueService/"
 	)
 	policies := map[string]procedurePolicy{}
 	add := func(prefix, role string, timeout time.Duration, methods ...string) {
@@ -53,6 +54,7 @@ func newPolicyInterceptor() *policyInterceptor {
 	// admin request on large SQLite deployments.
 	add(maintenance, rpc.RoleAdmin, 30*time.Minute, "VacuumDatabase")
 	add(pingTask, rpc.RoleAdmin, 30*time.Second, "ListPingTasks", "CreatePingTask", "UpdatePingTasks", "DeletePingTasks", "ReorderPingTasks")
+	add(terminalSettings, rpc.RoleAdmin, 30*time.Second, "GetTerminalSettings", "SetTerminalSettings")
 	add(browser, rpc.RoleGuest, 30*time.Second, "GetPublicInfo", "ListAgents", "GetAgent", "GetSession", "GetThemeContract")
 	add(browser, rpc.RoleAdmin, 30*time.Second, "GetTrafficTrend")
 	add(browser, rpc.RoleGuest, 30*time.Minute, "WatchAgentStatus")

@@ -14,6 +14,10 @@ type Handler func(ctx context.Context, req *JsonRpcRequest) (any, *JsonRpcError)
 var (
 	muHandlers sync.RWMutex
 	handlers   = map[string]Handler{}
+	// pluginMethods records methods registered by the plugin runtime. The
+	// compatibility transport uses it to let plugin-owned methods through
+	// without opening an admin namespace to browsers.
+	pluginMethods sync.Map
 )
 
 // Register 注册方法。重复注册返回错误。保留前缀 "rpc." 禁止外部注册。
@@ -54,6 +58,7 @@ func Unregister(method string) bool {
 	if exists {
 		delete(handlers, method)
 	}
+	pluginMethods.Delete(method)
 	muHandlers.Unlock()
 	if exists {
 		muMetas.Lock()
@@ -72,4 +77,20 @@ func ListMethods() []string {
 		res = append(res, k)
 	}
 	return res
+}
+
+// MarkPluginMethod records that method belongs to the plugin runtime. It is
+// called only after rpc.Register succeeds.
+func MarkPluginMethod(method string) {
+	method = strings.TrimSpace(method)
+	if method == "" {
+		return
+	}
+	pluginMethods.Store(method, struct{}{})
+}
+
+// IsPluginMethod reports whether method was registered by a plugin.
+func IsPluginMethod(method string) bool {
+	_, ok := pluginMethods.Load(method)
+	return ok
 }

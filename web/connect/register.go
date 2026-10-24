@@ -40,6 +40,7 @@ func Register(r *gin.Engine) {
 		newHandler(browserv1connect.NewBrowserServiceHandler(&browserService{}, opts...)),
 		newHandler(adminv1connect.NewDashboardServiceHandler(&dashboardService{}, opts...)),
 		newHandler(adminv1connect.NewMaintenanceServiceHandler(&maintenanceService{}, opts...)),
+		newHandler(adminv1connect.NewTerminalSettingsServiceHandler(&terminalSettingsService{}, opts...)),
 		newHandler(adminv1connect.NewPingTaskServiceHandler(&pingTaskService{}, opts...)),
 		newHandler(hostv1connect.NewHostServiceHandler(&hostService{}, opts...)),
 		newHandler(configv1connect.NewConfigServiceHandler(&configService{}, opts...)),
