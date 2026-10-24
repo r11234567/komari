@@ -40,6 +40,8 @@ func TestPolicyDeclaresEveryGeneratedProcedure(t *testing.T) {
 		"/komari.admin.v1.PingTaskService/UpdatePingTasks",
 		"/komari.admin.v1.PingTaskService/DeletePingTasks",
 		"/komari.admin.v1.PingTaskService/ReorderPingTasks",
+		"/komari.admin.v1.TerminalSettingsService/GetTerminalSettings",
+		"/komari.admin.v1.TerminalSettingsService/SetTerminalSettings",
 		"/komari.browser.v1.BrowserService/GetPublicInfo",
 		"/komari.browser.v1.BrowserService/ListAgents",
 		"/komari.browser.v1.BrowserService/GetAgent",
