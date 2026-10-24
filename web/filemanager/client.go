@@ -84,7 +84,14 @@ func Call(ctx context.Context, uuid string, operation string, args map[string]an
 	if err != nil {
 		return nil, err
 	}
-	arguments, err := structpb.NewStruct(args)
+	argumentsMap := make(map[string]any, len(args)+1)
+	for key, value := range args {
+		argumentsMap[key] = value
+	}
+	// The wire enum has no commit/cancel members; carry the upstream operation
+	// name so the agent can dispatch the finalize/cancel handlers.
+	argumentsMap["_op"] = operation
+	arguments, err := structpb.NewStruct(argumentsMap)
 	if err != nil {
 		return nil, fmt.Errorf("encode file arguments: %w", err)
 	}
@@ -187,7 +194,7 @@ func operationFromString(value string) (filev1.FileOperation, bool) {
 		return filev1.FileOperation_FILE_OPERATION_SEARCH, true
 	case "download_stream":
 		return filev1.FileOperation_FILE_OPERATION_DOWNLOAD_STREAM, true
-	case "upload_stream":
+	case "upload_stream", "upload_commit", "upload_cancel":
 		return filev1.FileOperation_FILE_OPERATION_UPLOAD_STREAM, true
 	default:
 		return filev1.FileOperation_FILE_OPERATION_UNSPECIFIED, false
