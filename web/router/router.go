@@ -159,6 +159,7 @@ func registerAdminRoutes(r *gin.Engine) {
 		twoFactor.GET("/generate", admin.Generate2FA)
 		twoFactor.POST("/enable", admin.Enable2FA)
 		twoFactor.POST("/disable", api.RequireSensitive2FA(), admin.Disable2FA)
+		twoFactor.POST("/verify", api.RequireSensitive2FA(), admin.Verify2FA)
 	}
 
 	// oauth2 绑定走重定向，保留 REST handler。
