@@ -343,9 +343,9 @@ func (s *fileService) SearchFiles(ctx context.Context, req *connect.Request[file
 }
 
 func (s *fileService) LeaseFileOperations(ctx context.Context, req *connect.Request[filev1.LeaseFileOperationsRequest], stream *connect.ServerStream[filev1.LeaseFileOperationsResponse]) error {
-	agentID := strings.TrimSpace(req.Msg.GetAgentId())
-	if agentID == "" {
-		return connect.NewError(connect.CodeInvalidArgument, errors.New("agent_id is required"))
+	agentID, err := requireAgent(rpc.MetaFromContext(ctx), strings.TrimSpace(req.Msg.GetAgentId()))
+	if err != nil {
+		return err
 	}
 	channel := make(chan *filev1.FileAssignment, 32)
 	s.store.registerAgent(agentID, channel)
@@ -371,7 +371,11 @@ func (s *fileService) AttachFileOperations(ctx context.Context, stream *connect.
 	if attach == nil || strings.TrimSpace(attach.GetAgentId()) == "" || strings.TrimSpace(attach.GetAssignmentId()) == "" {
 		return connect.NewError(connect.CodeInvalidArgument, errors.New("agent and assignment are required"))
 	}
-	assignment := s.store.takeAssignment(attach.GetAgentId(), attach.GetAssignmentId())
+	authenticated, err := requireAgent(rpc.MetaFromContext(ctx), attach.GetAgentId())
+	if err != nil {
+		return err
+	}
+	assignment := s.store.takeAssignment(authenticated, attach.GetAssignmentId())
 	if assignment == nil {
 		return connect.NewError(connect.CodeNotFound, errors.New("file assignment is unknown or expired"))
 	}
@@ -389,7 +393,7 @@ func (s *fileService) AttachFileOperations(ctx context.Context, stream *connect.
 		return connect.NewError(connect.CodeInvalidArgument, errors.New("an agent file event is required"))
 	}
 	s.store.finishAssignment(assignment.GetAssignmentId())
-	filemanager.Resolve(attach.GetAgentId(), result)
+	filemanager.Resolve(authenticated, result)
 	return nil
 }
 
