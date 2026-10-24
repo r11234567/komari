@@ -234,7 +234,7 @@ func legacyReportMetricPoints(report *legacyv1.Report) []*metricsv1.MetricsPoint
 	if report.GPU != nil {
 		points = append(points, point(metricstore.MetricGPU, report.GPU.AverageUsage, nil))
 		for index, gpu := range report.GPU.DetailedInfo {
-			labels := map[string]string{"device": strconv.Itoa(index), "name": gpu.Name}
+			labels := map[string]string{"device_index": strconv.Itoa(index), "device_name": gpu.Name}
 			points = append(points,
 				point(metricstore.MetricGPUDeviceUsage, gpu.Utilization, labels),
 				point(metricstore.MetricGPUMem, float64(gpu.MemoryUsed), labels),
@@ -305,26 +305,26 @@ func metricPointsToReport(points []*metricsv1.MetricsPoint) (legacyv1.Report, er
 			report.Uptime = int64(value)
 		case "system.process_count":
 			report.Process = int(value)
-		case "gpu.utilization_percent", "gpu.memory_used_bytes", "gpu.memory_total_bytes", "gpu.temperature_celsius":
-			id := point.Labels["id"]
-			if id == "" || point.Labels["name"] == "" {
-				return report, fmt.Errorf("metric %q requires GPU id and name labels", point.Metric)
+		case metricstore.MetricGPUDeviceUsage, metricstore.MetricGPUMem, metricstore.MetricGPUMemTotal, metricstore.MetricGPUTemp:
+			id := point.Labels["device_index"]
+			if id == "" || point.Labels["device_name"] == "" {
+				return report, fmt.Errorf("metric %q requires GPU device_index and device_name labels", point.Metric)
 			}
 			gpu := gpus[id]
 			if gpu == nil {
-				gpu = &legacyv1.GPUDeviceInfo{Name: point.Labels["name"]}
+				gpu = &legacyv1.GPUDeviceInfo{Name: point.Labels["device_name"]}
 				gpus[id] = gpu
-			} else if gpu.Name != point.Labels["name"] {
+			} else if gpu.Name != point.Labels["device_name"] {
 				return report, fmt.Errorf("GPU %q has inconsistent name labels", id)
 			}
 			switch point.Metric {
-			case "gpu.utilization_percent":
+			case metricstore.MetricGPUDeviceUsage:
 				gpu.Utilization = value
-			case "gpu.memory_used_bytes":
+			case metricstore.MetricGPUMem:
 				gpu.MemoryUsed = int64(value)
-			case "gpu.memory_total_bytes":
+			case metricstore.MetricGPUMemTotal:
 				gpu.MemoryTotal = int64(value)
-			case "gpu.temperature_celsius":
+			case metricstore.MetricGPUTemp:
 				gpu.Temperature = int(value)
 			}
 		default:
