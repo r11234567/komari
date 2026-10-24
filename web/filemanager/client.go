@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,7 +65,11 @@ func SetDispatcher(next Dispatcher) {
 
 // Call dispatches a metadata-only filesystem control operation and waits for
 // the matching FileEvent. Binary data must use the HTTP transfer endpoints.
-func Call(ctx context.Context, uuid string, operation filev1.FileOperation, args map[string]any, options ...CallOptions) (*filev1.AgentFileEvent, error) {
+func Call(ctx context.Context, uuid string, operation string, args map[string]any, options ...CallOptions) (*filev1.AgentFileEvent, error) {
+	kind, ok := operationFromString(operation)
+	if !ok {
+		return nil, fmt.Errorf("unsupported file operation %q", operation)
+	}
 	dispatchMu.RLock()
 	send := dispatch
 	dispatchMu.RUnlock()
@@ -86,7 +91,7 @@ func Call(ctx context.Context, uuid string, operation filev1.FileOperation, args
 	assignment := &filev1.FileAssignment{
 		AssignmentId:   requestID,
 		RequestId:      requestID,
-		Operation:      operation,
+		Operation:      kind,
 		Arguments:      arguments,
 		TimeoutSeconds: uint32(max(timeout/time.Second, 1)),
 		LeaseExpiresAt: timestamppb.New(time.Now().Add(timeout).UTC()),
@@ -153,4 +158,38 @@ func newRequestID() (string, error) {
 		return "", fmt.Errorf("generate file request id: %w", err)
 	}
 	return hex.EncodeToString(id[:]), nil
+}
+
+// operationFromString maps the upstream wire names to the typed contract.
+func operationFromString(value string) (filev1.FileOperation, bool) {
+	switch strings.TrimSpace(value) {
+	case "list":
+		return filev1.FileOperation_FILE_OPERATION_LIST, true
+	case "list_roots":
+		return filev1.FileOperation_FILE_OPERATION_LIST_ROOTS, true
+	case "stat":
+		return filev1.FileOperation_FILE_OPERATION_STAT, true
+	case "create":
+		return filev1.FileOperation_FILE_OPERATION_CREATE, true
+	case "mkdir":
+		return filev1.FileOperation_FILE_OPERATION_MKDIR, true
+	case "delete":
+		return filev1.FileOperation_FILE_OPERATION_DELETE, true
+	case "move":
+		return filev1.FileOperation_FILE_OPERATION_MOVE, true
+	case "copy":
+		return filev1.FileOperation_FILE_OPERATION_COPY, true
+	case "chmod":
+		return filev1.FileOperation_FILE_OPERATION_CHMOD, true
+	case "chown":
+		return filev1.FileOperation_FILE_OPERATION_CHOWN, true
+	case "search":
+		return filev1.FileOperation_FILE_OPERATION_SEARCH, true
+	case "download_stream":
+		return filev1.FileOperation_FILE_OPERATION_DOWNLOAD_STREAM, true
+	case "upload_stream":
+		return filev1.FileOperation_FILE_OPERATION_UPLOAD_STREAM, true
+	default:
+		return filev1.FileOperation_FILE_OPERATION_UNSPECIFIED, false
+	}
 }

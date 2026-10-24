@@ -15,6 +15,7 @@ import (
 	deploymentv1connect "github.com/r11234567/komari-proto/gen/go/komari/deployment/v1/deploymentv1connect"
 	enrollmentv1connect "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1/enrollmentv1connect"
 	execv1connect "github.com/r11234567/komari-proto/gen/go/komari/exec/v1/execv1connect"
+	filev1connect "github.com/r11234567/komari-proto/gen/go/komari/file/v1/filev1connect"
 	hostv1connect "github.com/r11234567/komari-proto/gen/go/komari/host/v1/hostv1connect"
 	metricsv1connect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
 	networkv1connect "github.com/r11234567/komari-proto/gen/go/komari/network/v1/networkv1connect"
@@ -41,6 +42,7 @@ func Register(r *gin.Engine) {
 		newHandler(adminv1connect.NewDashboardServiceHandler(&dashboardService{}, opts...)),
 		newHandler(adminv1connect.NewMaintenanceServiceHandler(&maintenanceService{}, opts...)),
 		newHandler(adminv1connect.NewTerminalSettingsServiceHandler(&terminalSettingsService{}, opts...)),
+		newHandler(filev1connect.NewFileServiceHandler(newFileService(), opts...)),
 		newHandler(adminv1connect.NewPingTaskServiceHandler(&pingTaskService{}, opts...)),
 		newHandler(hostv1connect.NewHostServiceHandler(&hostService{}, opts...)),
 		newHandler(configv1connect.NewConfigServiceHandler(&configService{}, opts...)),

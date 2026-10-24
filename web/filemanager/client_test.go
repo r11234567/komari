@@ -30,7 +30,7 @@ func TestCallResolvesMatchingEvent(t *testing.T) {
 		return true
 	})
 
-	event, err := Call(context.Background(), "agent-1", filev1.FileOperation_FILE_OPERATION_LIST, map[string]any{"path": "/"}, CallOptions{Timeout: time.Second})
+	event, err := Call(context.Background(), "agent-1", "list", map[string]any{"path": "/"}, CallOptions{Timeout: time.Second})
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestCallReturnsAgentError(t *testing.T) {
 		return true
 	})
 
-	_, err := Call(context.Background(), "agent-1", filev1.FileOperation_FILE_OPERATION_STAT, map[string]any{"path": "/root"}, CallOptions{Timeout: time.Second})
+	_, err := Call(context.Background(), "agent-1", "stat", map[string]any{"path": "/root"}, CallOptions{Timeout: time.Second})
 	if err == nil || err.Error() != "permission denied" {
 		t.Fatalf("error = %v", err)
 	}
@@ -57,12 +57,12 @@ func TestCallReturnsAgentError(t *testing.T) {
 
 func TestCallOfflineAndTimeout(t *testing.T) {
 	withDispatcher(t, nil)
-	if _, err := Call(context.Background(), "agent-1", filev1.FileOperation_FILE_OPERATION_LIST, nil); !errors.Is(err, ErrOffline) {
+	if _, err := Call(context.Background(), "agent-1", "list", nil); !errors.Is(err, ErrOffline) {
 		t.Fatalf("offline error = %v", err)
 	}
 
 	withDispatcher(t, func(string, *filev1.FileAssignment) bool { return true })
-	if _, err := Call(context.Background(), "agent-2", filev1.FileOperation_FILE_OPERATION_LIST, nil, CallOptions{Timeout: 20 * time.Millisecond}); !errors.Is(err, ErrTimeout) {
+	if _, err := Call(context.Background(), "agent-2", "list", nil, CallOptions{Timeout: 20 * time.Millisecond}); !errors.Is(err, ErrTimeout) {
 		t.Fatalf("timeout error = %v", err)
 	}
 }
@@ -74,7 +74,7 @@ func TestResolveRejectsWrongAgent(t *testing.T) {
 		Resolve(agentID, &filev1.AgentFileEvent{RequestId: assignment.GetRequestId(), Success: true})
 		return true
 	})
-	if _, err := Call(context.Background(), "agent-1", filev1.FileOperation_FILE_OPERATION_LIST, nil, CallOptions{Timeout: time.Second}); err != nil {
+	if _, err := Call(context.Background(), "agent-1", "list", nil, CallOptions{Timeout: time.Second}); err != nil {
 		t.Fatalf("call: %v", err)
 	}
 	if <-delivered {

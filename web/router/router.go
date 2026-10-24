@@ -12,6 +12,7 @@ import (
 	"github.com/komari-monitor/komari/web/api/remote"
 	"github.com/komari-monitor/komari/web/api/terminal"
 	connectapi "github.com/komari-monitor/komari/web/connect"
+	"github.com/komari-monitor/komari/web/filemanager"
 	installweb "github.com/komari-monitor/komari/web/install"
 	"github.com/komari-monitor/komari/web/public"
 	jsonRpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
@@ -74,6 +75,10 @@ func registerPublicRoutes(r *gin.Engine) {
 	r.GET("/api/records/load", jsonRpc.Bind("public:getRecordsByUUID", jsonRpc.WithQuery("uuid", "load_type", "hours")))
 	r.GET("/api/records/ping", jsonRpc.Bind("public:getPingRecords", jsonRpc.WithQuery("uuid", "task_id", "hours")))
 	r.GET("/api/task/ping", jsonRpc.Bind("public:getPublicPingTasks"))
+	// Office Online and image/video previews fetch this URL directly. Access is
+	// gated by the one-shot preview token created below.
+	r.GET("/api/preview/client/:uuid/file/download", filemanager.PreviewDownload)
+	r.HEAD("/api/preview/client/:uuid/file/download", filemanager.PreviewDownload)
 
 	// JSON-RPC 直连入口。
 	r.GET("/api/rpc2", jsonRpc.OnRpcRequest)
@@ -102,6 +107,10 @@ func registerAgentRoutes(r *gin.Engine) {
 		tokenAuthorized.POST("/task/result", jsonRpc.Bind("client:taskResult", jsonRpc.WithRaw()))
 		tokenAuthorized.GET("/ping/tasks", jsonRpc.Bind("client:getPingTasks", jsonRpc.WithRaw()))
 		tokenAuthorized.POST("/ping/result", jsonRpc.Bind("client:uploadPingResult", jsonRpc.WithRaw()))
+		// Agent-initiated one-shot file transfer endpoint. Image/video previews
+		// and large uploads/chunks use this rather than the control RPC.
+		tokenAuthorized.GET("/transfer/:id", filemanager.AgentTransfer)
+		tokenAuthorized.POST("/transfer/:id", filemanager.AgentTransfer)
 	}
 }
 
@@ -210,6 +219,12 @@ func registerAdminRoutes(r *gin.Engine) {
 		clientGroup.POST("/order", jsonRpc.Bind("admin:orderClients"))
 		if legacyRemoteCompatEnabled() {
 			clientGroup.GET("/:uuid/terminal", api.RequireSensitive2FA(), terminal.RequestTerminal)
+			// File control data plane. Control operations use Connect FileService;
+			// these endpoints carry bytes only.
+			clientGroup.POST("/:uuid/file/upload", filemanager.Upload)
+			clientGroup.GET("/:uuid/file/download", filemanager.Download)
+			clientGroup.HEAD("/:uuid/file/download", filemanager.Download)
+			clientGroup.GET("/:uuid/file/preview-token", filemanager.CreatePreviewToken)
 		}
 	}
 
