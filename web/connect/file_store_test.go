@@ -53,15 +53,18 @@ func TestFileStoreRejectsWrongAgent(t *testing.T) {
 }
 
 func TestPathParent(t *testing.T) {
-	cases := map[string]string{
-		"/var/log":   "/var",
-		"/":          "",
-		"C:\\Users": "C:",
-		"/tmp/":      "",
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"/var/log", "/var"},
+		{"/", ""},
+		{`C:\Users`, "C:"},
+		{"/tmp/", ""},
 	}
-	for input, want := range cases {
-		if got := pathParent(input); got != want {
-			t.Errorf("pathParent(%q) = %q, want %q", input, got, want)
+	for _, testCase := range cases {
+		if got := pathParent(testCase.input); got != testCase.want {
+			t.Errorf("pathParent(%q) = %q, want %q", testCase.input, got, testCase.want)
 		}
 	}
 }
