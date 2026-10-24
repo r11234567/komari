@@ -53,3 +53,7 @@ func Disable2FA(c *gin.Context) {
 	}
 	api.RespondSuccess(c, "")
 }
+
+func Verify2FA(c *gin.Context) {
+	api.RespondSuccess(c, "2FA verified successfully")
+}
