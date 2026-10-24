@@ -219,13 +219,13 @@ func registerAdminRoutes(r *gin.Engine) {
 		clientGroup.POST("/order", jsonRpc.Bind("admin:orderClients"))
 		if legacyRemoteCompatEnabled() {
 			clientGroup.GET("/:uuid/terminal", api.RequireSensitive2FA(), terminal.RequestTerminal)
-			// File control data plane. Control operations use Connect FileService;
-			// these endpoints carry bytes only.
-			clientGroup.POST("/:uuid/file/upload", filemanager.Upload)
-			clientGroup.GET("/:uuid/file/download", filemanager.Download)
-			clientGroup.HEAD("/:uuid/file/download", filemanager.Download)
-			clientGroup.GET("/:uuid/file/preview-token", filemanager.CreatePreviewToken)
 		}
+		// File control data plane. Control operations use Connect FileService;
+		// these endpoints carry bytes only and must be mounted on every build.
+		clientGroup.POST("/:uuid/file/upload", filemanager.Upload)
+		clientGroup.GET("/:uuid/file/download", filemanager.Download)
+		clientGroup.HEAD("/:uuid/file/download", filemanager.Download)
+		clientGroup.GET("/:uuid/file/preview-token", filemanager.CreatePreviewToken)
 	}
 
 	billingGroup := g.Group("/billing")
