@@ -1,0 +1,88 @@
+name: Feature audit - real end-to-end
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, 'ci/feature-audit-*']
+    paths:
+      - '.github/workflows/feature-e2e.yml'
+      - 'scripts/ci/e2e/**'
+      - 'web/**'
+      - 'third_party/**'
+      - 'go.mod'
+      - 'go.sum'
+  pull_request:
+    paths:
+      - '.github/workflows/feature-e2e.yml'
+      - 'scripts/ci/e2e/**'
+      - 'web/**'
+      - 'third_party/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: feature-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    name: Built Web + server + installed nonroot Agent / HTTPS
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 3GiB
+      NODE_OPTIONS: --max-old-space-size=4096
+      CGO_ENABLED: '1'
+      E2E_ROOT: ${{ runner.temp }}/komari-e2e
+      E2E_TOOLS: ${{ runner.temp }}/komari-e2e-tools
+      E2E_ARTIFACTS: ${{ github.workspace }}/ci-artifacts/e2e
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Checkout the repaired Agent at an immutable revision
+        uses: actions/checkout@v4
+        with:
+          repository: r11234567/komari-agent
+          ref: 251812fce69d3194cfa7c26dcad48d77a5372b9b
+          path: e2e-agent
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify all protocol pins and record the four source revisions
+        run: bash scripts/ci/run-audit-check.sh e2e-provenance bash scripts/ci/e2e/provenance.sh
+      - name: Build the exact embedded Web using the release action
+        uses: ./.github/actions/build-frontend
+      - name: Build the real server, Agent and installation tool
+        run: bash scripts/ci/run-audit-check.sh e2e-build bash scripts/ci/e2e/build.sh
+      - name: Install runner-only browser and reverse proxy dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nginx libnss3-tools
+          npm install --prefix "$E2E_TOOLS" --no-audit --no-fund --no-package-lock @playwright/test@1.56.1
+          "$E2E_TOOLS/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Start an isolated HTTPS panel and install a nonroot Agent
+        run: bash scripts/ci/run-audit-check.sh e2e-setup bash scripts/ci/e2e/setup.sh
+      - name: Real enrollment, fresh 2FA, terminal, clipboard and file round trips
+        env:
+          NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
+        run: |
+          bash scripts/ci/run-audit-check.sh e2e-browser \
+            "$E2E_TOOLS/node_modules/.bin/playwright" test --config scripts/ci/e2e/playwright.config.cjs
+      - name: Collect service logs and destroy temporary services and secrets
+        if: always()
+        run: bash scripts/ci/e2e/cleanup.sh
+      - name: Upload diagnostics, browser traces, screenshots and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 7
