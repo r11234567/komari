@@ -1,0 +1,32 @@
+name: Plugin subsystem regression
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: plugin-subsystem-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  plugin-subsystem:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Plugin subsystem, JS runtime, notifications and RPC gateway regression
+        run: scripts/ci/run-go-tests.sh ./internal/plugin ./pkg/jsruntime ./utils/messageSender ./web/rpc/jsonrpc
+      - name: Preserve complete logs, including compiler failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-subsystem-ci-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30

@@ -33,6 +33,8 @@ func TestRPC2CompatibilitySurface(t *testing.T) {
 		"admin:getSettings",
 		"admin:setXtermjsSettings",
 		"admin:fileList",
+		"admin:getClipboard",
+		"admin:listClipboard",
 		"client:taskResult",
 		"common:getVersion",
 		"rpc.ping",
