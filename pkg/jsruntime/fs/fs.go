@@ -725,6 +725,9 @@ func fsMode(vm *moejs.Runtime, value moejs.Value, fallback os.FileMode) os.FileM
 		if err == nil {
 			return os.FileMode(mode)
 		}
+		// Node accepts an encoding string in the same options position. It
+		// must not become mode 000 through numeric coercion (e.g. "utf8").
+		return fallback
 	}
 	return os.FileMode(native.Int(vm, value))
 }

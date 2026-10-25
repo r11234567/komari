@@ -51,6 +51,36 @@ func TestNodeCoreModulesAndECMAScriptBuiltins(t *testing.T) {
 	}
 }
 
+func TestNodeWriteFileEncodingKeepsDefaultModeAndExplicitZero(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file mode semantics")
+	}
+	baseDir := t.TempDir()
+	vm, err := New(`
+		const fs = require("fs");
+		fs.writeFileSync("encoded.txt", "text", "utf8");
+		fs.writeFileSync("options.txt", "text", {encoding: "utf8"});
+		fs.writeFileSync("zero.txt", "text", {mode: 0});
+	`, Options{NodeJS: true, BaseDir: baseDir, Console: io.Discard, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vm.Close()
+	for _, name := range []string{"encoded.txt", "options.txt", "zero.txt"} {
+		info, err := os.Stat(filepath.Join(baseDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name == "zero.txt" {
+			if info.Mode().Perm() != 0 {
+				t.Fatalf("explicit zero mode changed: %v", info.Mode())
+			}
+		} else if info.Mode().Perm()&0o600 != 0o600 {
+			t.Fatalf("encoding option removed owner access for %s: %v", name, info.Mode())
+		}
+	}
+}
+
 func TestNodeFileAccessConfinementAndAllowAll(t *testing.T) {
 	root := t.TempDir()
 	baseDir := filepath.Join(root, "base")

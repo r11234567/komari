@@ -76,9 +76,14 @@ func TestMoeJSOwnedWebSocketEchoAndUnload(t *testing.T) {
 	defer SetEnabled("moews", false, false)
 	server := httptest.NewServer(WrapHandler(engine))
 	defer server.Close()
-	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/moe-ws", nil)
+	conn, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/moe-ws", http.Header{"Origin": []string{server.URL}})
 	if err != nil {
-		t.Fatal(err)
+		if response != nil {
+			defer response.Body.Close()
+			body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+			t.Fatalf("WebSocket handshake: %v; status=%s body=%s plugin=%s", err, response.Status, body, GetLogs("moews"))
+		}
+		t.Fatalf("WebSocket handshake: %v; plugin=%s", err, GetLogs("moews"))
 	}
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))

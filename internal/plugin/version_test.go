@@ -1,8 +1,16 @@
 package plugin
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/komari-monitor/komari/utils"
+)
 
 func TestCheckKomariVersion(t *testing.T) {
+	previousVersion := utils.CurrentVersion
+	utils.CurrentVersion = "0.0.1"
+	t.Cleanup(func() { utils.CurrentVersion = previousVersion })
+
 	tests := []struct {
 		constraint string
 		wantErr    bool
