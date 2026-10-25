@@ -264,10 +264,11 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await active().click({ button: 'right' });
       await page.getByRole('menuitem', { name: 'Change tab color', exact: true }).hover();
       await page.getByRole('button', { name: '#dc143c', exact: true }).click();
-      await expect(active().locator('div').first()).toHaveCSS('background-color', 'rgb(220, 20, 60)');
       // Color swatches keep their submenu open so users can try more colors.
+      // Radix hides the background accessibility tree while the menu is open.
       await page.keyboard.press('Escape');
       await page.keyboard.press('Escape');
+      await expect(active().locator('div').first()).toHaveCSS('background-color', 'rgb(220, 20, 60)');
       await tabMenu('Duplicate tab');
       await confirmTerminal();
       await expect(page.getByRole('tab')).toHaveCount(2);
@@ -339,10 +340,12 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       const replay = await fileDenied('CreateEntry', { path: replayPath, kind: 'ENTRY_KIND_FILE', twoFactor: { code } });
       expect(replay.code).toBe('unauthenticated');
       expect(fs.existsSync(replayPath)).toBe(false);
-      await fileDenied('CopyEntry', { source: fixture('roundtrip.bin'), destination: fixture('existing.txt'),
+      const overwrite = await fileDenied('CopyEntry', { source: fixture('roundtrip.bin'), destination: fixture('existing.txt'),
         overwrite: false, twoFactor: { code: await freshCode() } });
+      expect(overwrite.message).toMatch(/already exists|file exists/i);
       expect(fs.readFileSync(fixture('existing.txt'), 'utf8')).toBe('destination must survive\n');
-      await fileDenied('DeleteEntry', { path: fixture('nonempty'), recursive: false, twoFactor: { code: await freshCode() } });
+      const recursive = await fileDenied('DeleteEntry', { path: fixture('nonempty'), recursive: false, twoFactor: { code: await freshCode() } });
+      expect(recursive.message).toMatch(/directory not empty/i);
       expect(fs.readFileSync(fixture('nonempty/keep.txt'), 'utf8')).toBe('keep\n');
     });
 
