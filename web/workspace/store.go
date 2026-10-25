@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/database/accounts"
+	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
@@ -52,7 +53,11 @@ func NewStore(now func() time.Time, valid func(Binding) bool) *Store {
 
 var Default = NewStore(time.Now, func(b Binding) bool {
 	id, _, err := accounts.GetSessionIdentity(b.Session)
-	return err == nil && id == b.UserID
+	if err != nil || id != b.UserID {
+		return false
+	}
+	allowed, err := clients.PrivilegedCapabilityAllowed(b.AgentID, "webssh")
+	return err == nil && allowed
 })
 
 func init() {

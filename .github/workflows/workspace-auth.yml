@@ -20,6 +20,9 @@ jobs:
       - name: RPC2 compatibility allowlist and 2FA boundaries
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh gateway bash scripts/ci/run-go-tests.sh ./web/rpc/jsonrpc ./web/api ./web/router
+      - name: Grant cancellation and terminal closure races
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh workspace-race bash scripts/ci/run-go-tests.sh -race ./web/workspace ./web/remotemanagement
       - uses: actions/upload-artifact@v4
         if: always()
         with:

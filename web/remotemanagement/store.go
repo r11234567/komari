@@ -55,6 +55,7 @@ type Session struct {
 	bufferedOutput uint64
 	commandNotify  chan struct{}
 	eventNotify    chan struct{}
+	grantStop      func() bool
 }
 
 var sessions = struct {
@@ -79,9 +80,13 @@ func Create(agentID, ownerID, shell, workingDirectory string, size *websshv1.Ter
 		CreatedAt: now, Shell: shell, WorkingDirectory: workingDirectory, Size: cloneSize(size),
 		commandNotify: make(chan struct{}), eventNotify: make(chan struct{}),
 	}
-	if len(grants) > 0 {
+	if len(grants) > 0 && grants[0] != nil {
 		session.Grant = grants[0]
-		context.AfterFunc(session.Grant.Context(), func() { session.Close(websshv1.CloseReason_CLOSE_REASON_DEADLINE_EXCEEDED) })
+		// An already cancelled grant may run the callback immediately. Hold
+		// mu until the stop function is installed so Close can always release it.
+		session.mu.Lock()
+		session.grantStop = context.AfterFunc(session.Grant.Context(), func() { session.Close(websshv1.CloseReason_CLOSE_REASON_DEADLINE_EXCEEDED) })
+		session.mu.Unlock()
 	}
 	sessions.values[session.ID] = session
 	if signal := sessions.notify[agentID]; signal != nil {
@@ -348,6 +353,10 @@ func (s *Session) Close(reason websshv1.CloseReason) *websshv1.SessionClosed {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed == nil {
+		if s.grantStop != nil {
+			s.grantStop()
+			s.grantStop = nil
+		}
 		s.closed = &websshv1.SessionClosed{SessionId: s.ID, Reason: reason, ClosedAt: timestamppb.Now()}
 		s.commands = nil
 		s.signalCommands()

@@ -25,7 +25,9 @@ original login session and the same grant. Upload sessions bind to the grant;
 resuming them under another account or after server restart is refused. Office
 preview tokens retain their exact-file scope and become invalid as soon as the
 underlying workspace locks. Ongoing file calls/streams are cancelled on lock;
-logout/session expiry is rechecked by the server sweeper (at most one second).
+logout/session expiry and remote-control capability revocation are rechecked
+by the server sweeper (at most one second). Normal terminal closure removes its
+grant callback so closed output buffers are not retained until grant expiry.
 
 Account changes revoke the previous grant for this session and machine. No
 workspace token is an authorization for account settings, general execution,
