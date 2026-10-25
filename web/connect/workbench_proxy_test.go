@@ -133,6 +133,9 @@ func TestWorkbenchNginxFileLeaseAndDuplexAttach(t *testing.T) {
 	if command.GetAssignment().GetSystemUser() != "fixture-user" || command.GetAssignment().GetWorkspaceId() != snapshot.Grant.ID {
 		t.Fatal("proxy lost selected-account workspace binding")
 	}
+	// Inherit a deliberately short 1s global body timeout from the fixture.
+	// The workbench location must override it during an idle duplex request.
+	time.Sleep(1200 * time.Millisecond)
 	if err := stream.Send(&filev1.AttachFileOperationsRequest{Message: &filev1.AttachFileOperationsRequest_Event{Event: &filev1.AgentFileEvent{
 		RequestId: assignment.RequestId, Operation: assignment.Operation, Success: true, Path: "/home/fixture-user",
 	}}}); err != nil {
@@ -170,6 +173,7 @@ func startWorkbenchNginx(t *testing.T, nginx, upstream string) string {
 error_log stderr info;
 events { worker_connections 64; }
 http {
+  client_body_timeout 1s;
   access_log %s/access.log;
   upstream komari_backend { server %s; }
   server { listen %s http2; include %s; }
