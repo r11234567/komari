@@ -11,6 +11,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 	agentRuntime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/remotemanagement"
+	"github.com/komari-monitor/komari/web/workspace"
 	websshv1 "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1"
 	websshv1connect "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1/websshv1connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -34,9 +35,11 @@ func (s *webSSHService) CreateSession(ctx context.Context, req *connect.Request[
 	if err != nil {
 		return nil, err
 	}
-	if err := verifyConnectTwoFactor(meta, req.Msg.Start.TwoFactor); err != nil {
-		return nil, err
+	_, cancel, grant, err := workspace.Authorize(ctx, req.Msg.Start.AgentId)
+	if err != nil {
+		return nil, connectError(connect.CodeUnauthenticated, err)
 	}
+	defer cancel()
 	agentID := strings.TrimSpace(req.Msg.Start.AgentId)
 	if _, err := clients.GetClientByUUID(agentID); err != nil {
 		return nil, connectError(connect.CodeNotFound, errors.New("agent not found"))
@@ -54,7 +57,7 @@ func (s *webSSHService) CreateSession(ctx context.Context, req *connect.Request[
 	if err := validateTerminalSize(req.Msg.Start.Size); err != nil {
 		return nil, err
 	}
-	session, err := remotemanagement.Create(agentID, ownerID, req.Msg.Start.Shell, req.Msg.Start.WorkingDirectory, req.Msg.Start.Size)
+	session, err := remotemanagement.Create(agentID, ownerID, req.Msg.Start.Shell, req.Msg.Start.WorkingDirectory, req.Msg.Start.Size, grant)
 	if err != nil {
 		return nil, connectError(connect.CodeResourceExhausted, err)
 	}
@@ -68,7 +71,7 @@ func (s *webSSHService) SendSessionCommand(ctx context.Context, req *connect.Req
 	if err != nil {
 		return nil, err
 	}
-	session, err := remotemanagement.GetOwned(req.Msg.SessionId, ownerID)
+	session, err := getWorkspaceSession(ctx, req.Msg.SessionId, ownerID)
 	if err != nil {
 		return nil, remoteSessionError(err)
 	}
@@ -85,10 +88,7 @@ func (s *webSSHService) SendSessionCommand(ctx context.Context, req *connect.Req
 		}
 		command = remotemanagement.Resize{Size: value.Resize}
 	case *websshv1.SendSessionCommandRequest_File:
-		if err := validateFileCommand(value.File); err != nil {
-			return nil, err
-		}
-		command = remotemanagement.File{Command: value.File}
+		return nil, connectError(connect.CodePermissionDenied, errors.New("use the account-isolated FileService"))
 	default:
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("session command is required"))
 	}
@@ -104,7 +104,7 @@ func (s *webSSHService) WatchSession(ctx context.Context, req *connect.Request[w
 	if err != nil {
 		return err
 	}
-	session, err := remotemanagement.GetOwned(req.Msg.SessionId, ownerID)
+	session, err := getWorkspaceSession(ctx, req.Msg.SessionId, ownerID)
 	if err != nil {
 		return remoteSessionError(err)
 	}
@@ -113,6 +113,9 @@ func (s *webSSHService) WatchSession(ctx context.Context, req *connect.Request[w
 	}
 	sequence := req.Msg.AfterSequence
 	for {
+		if session.Grant == nil || !session.Grant.Alive() {
+			return connectError(connect.CodeUnauthenticated, workspace.ErrLocked)
+		}
 		event, err := session.NextEvent(ctx, sequence)
 		if errors.Is(err, remotemanagement.ErrClosed) {
 			return nil
@@ -132,7 +135,7 @@ func (s *webSSHService) AcknowledgeSessionEvents(ctx context.Context, req *conne
 	if err != nil {
 		return nil, err
 	}
-	session, err := remotemanagement.GetOwned(req.Msg.SessionId, ownerID)
+	session, err := getWorkspaceSession(ctx, req.Msg.SessionId, ownerID)
 	if err != nil {
 		return nil, remoteSessionError(err)
 	}
@@ -148,7 +151,7 @@ func (s *webSSHService) CloseSession(ctx context.Context, req *connect.Request[w
 	if err != nil {
 		return nil, err
 	}
-	session, err := remotemanagement.GetOwned(req.Msg.SessionId, ownerID)
+	session, err := getWorkspaceSession(ctx, req.Msg.SessionId, ownerID)
 	if err != nil {
 		return nil, remoteSessionError(err)
 	}
@@ -156,6 +159,9 @@ func (s *webSSHService) CloseSession(ctx context.Context, req *connect.Request[w
 }
 
 func (s *webSSHService) LeaseSessions(ctx context.Context, req *connect.Request[websshv1.LeaseSessionsRequest], stream *connect.ServerStream[websshv1.LeaseSessionsResponse]) error {
+	if req.Header().Get(workspace.IdentityHeader) != "v1" {
+		return connectError(connect.CodeFailedPrecondition, errors.New("upgrade Agent: workspace OS account support is required"))
+	}
 	agentID, err := requireAgent(rpc.MetaFromContext(ctx), req.Msg.AgentId)
 	if err != nil {
 		return err
@@ -180,6 +186,9 @@ func (s *webSSHService) LeaseSessions(ctx context.Context, req *connect.Request[
 }
 
 func (s *webSSHService) AttachSession(ctx context.Context, stream *connect.BidiStream[websshv1.AttachSessionRequest, websshv1.AttachSessionResponse]) error {
+	if stream.RequestHeader().Get(workspace.IdentityHeader) != "v1" {
+		return connectError(connect.CodeFailedPrecondition, errors.New("workspace OS account support is required"))
+	}
 	first, err := stream.Receive()
 	if err != nil {
 		return err
@@ -204,6 +213,9 @@ func (s *webSSHService) AttachSession(ctx context.Context, stream *connect.BidiS
 		return remoteSessionError(err)
 	}
 	defer session.Detach()
+	if session.Grant == nil || !session.Grant.Alive() {
+		return connectError(connect.CodeUnauthenticated, workspace.ErrLocked)
+	}
 	receiveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	receiveErr := make(chan error, 1)
@@ -259,9 +271,11 @@ func (s *webSSHService) OpenSession(ctx context.Context, stream *connect.BidiStr
 	if err != nil {
 		return err
 	}
-	if err := verifyConnectTwoFactor(meta, start.TwoFactor); err != nil {
+	ctx, cancelGrant, grant, err := workspace.Authorize(ctx, start.AgentId)
+	if err != nil {
 		return connectError(connect.CodeUnauthenticated, err)
 	}
+	defer cancelGrant()
 	agentID := strings.TrimSpace(start.AgentId)
 	if _, err := clients.GetClientByUUID(agentID); err != nil {
 		return connectError(connect.CodeNotFound, errors.New("agent not found"))
@@ -279,7 +293,7 @@ func (s *webSSHService) OpenSession(ctx context.Context, stream *connect.BidiStr
 	if err := validateTerminalSize(start.Size); err != nil {
 		return err
 	}
-	session, err := remotemanagement.Create(agentID, ownerID, start.Shell, start.WorkingDirectory, start.Size)
+	session, err := remotemanagement.Create(agentID, ownerID, start.Shell, start.WorkingDirectory, start.Size, grant)
 	if err != nil {
 		return remoteSessionError(err)
 	}
@@ -395,6 +409,10 @@ func validateFileCommand(command *websshv1.FileCommand) error {
 }
 
 func remoteSessionError(err error) error {
+	var existing *connect.Error
+	if errors.As(err, &existing) {
+		return err
+	}
 	switch {
 	case errors.Is(err, remotemanagement.ErrNotFound):
 		return connectError(connect.CodeNotFound, err)
@@ -407,4 +425,20 @@ func remoteSessionError(err error) error {
 	default:
 		return connectError(connect.CodeInternal, err)
 	}
+}
+
+func getWorkspaceSession(ctx context.Context, id, owner string) (*remotemanagement.Session, error) {
+	session, err := remotemanagement.GetOwned(id, owner)
+	if err != nil {
+		return nil, err
+	}
+	_, cancel, grant, err := workspace.Authorize(ctx, session.AgentID)
+	defer cancel()
+	if err != nil {
+		return nil, connectError(connect.CodeUnauthenticated, err)
+	}
+	if session.Grant != grant {
+		return nil, connectError(connect.CodePermissionDenied, workspace.ErrLocked)
+	}
+	return session, nil
 }

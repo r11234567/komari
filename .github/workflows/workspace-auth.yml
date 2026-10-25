@@ -1,0 +1,31 @@
+name: Workspace authorization checkpoint
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  authorization:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Absolute and idle deadlines, scope, logout and stream cancellation
+        run: bash scripts/ci/run-audit-check.sh workspace bash scripts/ci/run-go-tests.sh ./web/workspace ./web/connect ./web/filemanager ./web/remotemanagement
+      - name: RPC2 compatibility allowlist and 2FA boundaries
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh gateway bash scripts/ci/run-go-tests.sh ./web/rpc/jsonrpc ./web/api ./web/router
+      - name: Grant cancellation and terminal closure races
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh workspace-race bash scripts/ci/run-go-tests.sh -race ./web/workspace ./web/remotemanagement
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workspace-auth-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30

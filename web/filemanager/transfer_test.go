@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/web/workspace"
 )
 
 func TestUploadSessionLimitAndRelease(t *testing.T) {
@@ -198,7 +199,8 @@ func TestPreviewTokenLifecycle(t *testing.T) {
 	c, _ := gin.CreateTestContext(rec)
 	c.Params = gin.Params{{Key: "uuid", Value: "client-1"}}
 	c.Request = httptest.NewRequest(http.MethodGet, "/preview-token", nil)
-	CreatePreviewToken(c)
+	c.Request = c.Request.WithContext(testWorkspaceContext(t, "client-1"))
+	createPreviewToken(c)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("CreatePreviewToken without path code = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
@@ -208,7 +210,8 @@ func TestPreviewTokenLifecycle(t *testing.T) {
 	c, _ = gin.CreateTestContext(rec)
 	c.Params = gin.Params{{Key: "uuid", Value: "client-1"}}
 	c.Request = httptest.NewRequest(http.MethodGet, "/preview-token?path=%2Fetc%2Fhosts", nil)
-	CreatePreviewToken(c)
+	c.Request = c.Request.WithContext(testWorkspaceContext(t, "client-1"))
+	createPreviewToken(c)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("CreatePreviewToken code = %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -270,6 +273,8 @@ func TestCancelUploadReleasesSlot(t *testing.T) {
 	c.Params = gin.Params{{Key: "uuid", Value: "client-cancel"}}
 	c.Request = httptest.NewRequest(http.MethodPost, "/upload?operation=cancel&upload_id="+session.ID, nil)
 
+	c.Request = c.Request.WithContext(testWorkspaceContext(t, "client-cancel"))
+	session.WorkspaceID = workspace.FromContext(c.Request.Context()).ID
 	cancelUpload(c, "client-cancel")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("cancelUpload status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())

@@ -47,6 +47,7 @@ func newPolicyInterceptor() *policyInterceptor {
 			policies[prefix+method] = procedurePolicy{role: role, maxDuration: timeout}
 		}
 	}
+	add("/komari.workspace.v1.WorkspaceService/", rpc.RoleAdmin, 30*time.Second, "UnlockWorkspace", "GetWorkspace", "TouchWorkspace", "LockWorkspace")
 	add(dashboard, rpc.RoleAdmin, 30*time.Second, "GetDashboardSummary", "GetDashboardCharts", "ListDashboardAlertItems")
 	add(maintenance, rpc.RoleAdmin, 30*time.Second, "ListSessions", "DeleteSession", "DeleteAllSessions", "ListAuditLogs",
 		"ListClipboardEntries", "GetClipboardEntry", "CreateClipboardEntry", "UpdateClipboardEntry", "DeleteClipboardEntries",

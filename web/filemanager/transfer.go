@@ -22,6 +22,7 @@ import (
 	logger "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/safepath"
 	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/workspace"
 )
 
 const (
@@ -38,18 +39,20 @@ const (
 var ErrTooManyUploads = errors.New("too many concurrent uploads")
 
 type uploadSession struct {
-	mu         sync.Mutex
-	ID         string
-	UUID       string
-	Path       string
-	Size       int64
-	ChunkSize  int64
-	NextOffset int64
-	ExpiresAt  time.Time
-	slotHeld   bool
+	WorkspaceID string
+	mu          sync.Mutex
+	ID          string
+	UUID        string
+	Path        string
+	Size        int64
+	ChunkSize   int64
+	NextOffset  int64
+	ExpiresAt   time.Time
+	slotHeld    bool
 }
 
 type previewToken struct {
+	Grant      *workspace.Grant
 	ClientUUID string
 	Path       string
 	ExpiresAt  time.Time
@@ -121,13 +124,14 @@ func rememberDownloadChunkSize(clientUUID string, size int64) {
 }
 
 type persistedUploadSession struct {
-	ID         string    `json:"id"`
-	UUID       string    `json:"uuid"`
-	Path       string    `json:"path"`
-	Size       int64     `json:"size"`
-	ChunkSize  int64     `json:"chunk_size"`
-	NextOffset int64     `json:"next_offset"`
-	ExpiresAt  time.Time `json:"expires_at"`
+	WorkspaceID string
+	ID          string    `json:"id"`
+	UUID        string    `json:"uuid"`
+	Path        string    `json:"path"`
+	Size        int64     `json:"size"`
+	ChunkSize   int64     `json:"chunk_size"`
+	NextOffset  int64     `json:"next_offset"`
+	ExpiresAt   time.Time `json:"expires_at"`
 }
 
 var uploadSessionIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -160,6 +164,11 @@ func uploadSessionPath(id string) (string, error) {
 }
 
 func Upload(c *gin.Context) {
+	cancel, ok := authorizeFileRequest(c)
+	defer cancel()
+	if !ok {
+		return
+	}
 	cleanupOnce.Do(startUploadCleanup)
 
 	clientUUID := c.Param("uuid")
@@ -182,13 +191,6 @@ func Upload(c *gin.Context) {
 }
 
 func initRemoteUpload(c *gin.Context, clientUUID string) {
-	// Authorize the upload once, before issuing its opaque, path-bound session.
-	// Chunks and merge use that session; replaying the OTP for each chunk would
-	// be rejected and make multi-chunk transfers impossible.
-	if err := api.VerifySensitive2FA(c); err != nil {
-		api.RespondError(c, http.StatusUnauthorized, err.Error())
-		return
-	}
 	var request struct {
 		Path      string `json:"path" binding:"required"`
 		Size      int64  `json:"size"`
@@ -228,7 +230,7 @@ func initRemoteUpload(c *gin.Context, clientUUID string) {
 		return
 	}
 
-	session, _, err := acquireUploadSession("", clientUUID, request.Path, request.Size, 0)
+	session, _, err := acquireUploadSession("", clientUUID, request.Path, request.Size, 0, requestWorkspaceID(c))
 	if err != nil {
 		respondTransferError(c, err)
 		return
@@ -272,7 +274,7 @@ func uploadRemoteChunkStream(c *gin.Context, clientUUID string) {
 		return
 	}
 
-	session, _, err := acquireUploadSession(uploadID, clientUUID, "", 0, 0)
+	session, _, err := acquireUploadSession(uploadID, clientUUID, "", 0, 0, requestWorkspaceID(c))
 	if err != nil {
 		logger.Errorf("file-transfer", "upload chunk session lookup failed client=%s upload_id=%q: %v", clientUUID, uploadID, err)
 		respondTransferError(c, err)
@@ -423,7 +425,7 @@ func mergeRemoteUpload(c *gin.Context, clientUUID string) {
 		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
-	session, _, err := acquireUploadSession(request.UploadID, clientUUID, "", 0, 0)
+	session, _, err := acquireUploadSession(request.UploadID, clientUUID, "", 0, 0, requestWorkspaceID(c))
 	if err != nil {
 		respondTransferError(c, err)
 		return
@@ -489,7 +491,7 @@ func cancelUpload(c *gin.Context, clientUUID string) {
 		api.RespondError(c, http.StatusBadRequest, "uuid and upload_id are required")
 		return
 	}
-	session, _, err := acquireUploadSession(id, clientUUID, "", 0, 0)
+	session, _, err := acquireUploadSession(id, clientUUID, "", 0, 0, requestWorkspaceID(c))
 	if err != nil {
 		respondTransferError(c, err)
 		return
@@ -505,6 +507,11 @@ func cancelUpload(c *gin.Context, clientUUID string) {
 }
 
 func Download(c *gin.Context) {
+	cancel, ok := authorizeFileRequest(c)
+	defer cancel()
+	if !ok {
+		return
+	}
 	clientUUID := c.Param("uuid")
 	path := strings.TrimSpace(c.Query("path"))
 	if clientUUID == "" || path == "" {
@@ -707,6 +714,15 @@ func parseSingleByteRange(value string, size int64) (int64, int64, bool) {
 }
 
 func CreatePreviewToken(c *gin.Context) {
+	cancel, ok := authorizeFileRequest(c)
+	defer cancel()
+	if !ok {
+		return
+	}
+	createPreviewToken(c)
+}
+
+func createPreviewToken(c *gin.Context) {
 	clientUUID := c.Param("uuid")
 	path := strings.TrimSpace(c.Query("path"))
 	if clientUUID == "" || path == "" {
@@ -723,6 +739,7 @@ func CreatePreviewToken(c *gin.Context) {
 		}
 	}
 	previewTokens[token] = previewToken{
+		Grant:      workspace.FromContext(c.Request.Context()),
 		ClientUUID: clientUUID,
 		Path:       path,
 		ExpiresAt:  now.Add(previewTokenTTL),
@@ -751,10 +768,13 @@ func PreviewDownload(c *gin.Context) {
 	}
 	previewTokenMu.Unlock()
 
-	if !ok {
+	if !ok || item.Grant == nil || !item.Grant.Alive() {
 		api.RespondError(c, http.StatusUnauthorized, "Invalid or expired preview token")
 		return
 	}
+	bounded, cancel := workspace.Bind(c.Request.Context(), item.Grant)
+	defer cancel()
+	c.Request = c.Request.WithContext(bounded)
 	// The token is bound to the exact path. Keeping the path out of the public
 	// URL avoids nested URL encoding issues for non-ASCII filenames.
 	// Keep the public URL and response filename ASCII-only. This avoids a
@@ -808,7 +828,7 @@ func isSafeASCIIFilename(name string) bool {
 	return true
 }
 
-func acquireUploadSession(id, clientUUID, path string, size, offset int64) (*uploadSession, bool, error) {
+func acquireUploadSession(id, clientUUID, path string, size, offset int64, workspaceIDs ...string) (*uploadSession, bool, error) {
 	if id == "" {
 		if offset != 0 {
 			return nil, false, errors.New("upload_id is required after the first chunk")
@@ -825,7 +845,13 @@ func acquireUploadSession(id, clientUUID, path string, size, offset int64) (*upl
 			Size:      size,
 			ChunkSize: DefaultTransferChunkSize,
 			ExpiresAt: time.Now().Add(uploadSessionTTL),
-			slotHeld:  true,
+			WorkspaceID: func() string {
+				if len(workspaceIDs) > 0 {
+					return workspaceIDs[0]
+				}
+				return ""
+			}(),
+			slotHeld: true,
 		}
 		uploadMu.Lock()
 		uploadSessions[session.ID] = session
@@ -865,7 +891,7 @@ func acquireUploadSession(id, clientUUID, path string, size, offset int64) (*upl
 	// Continuation requests identify the session by upload_id and client UUID;
 	// path and size are only supplied when creating (or explicitly validating)
 	// a session. Treat omitted values as wildcards so chunk/merge can resume.
-	if session.UUID != clientUUID ||
+	if (len(workspaceIDs) > 0 && (workspaceIDs[0] == "" || session.WorkspaceID != workspaceIDs[0])) || session.UUID != clientUUID ||
 		(path != "" && session.Path != path) ||
 		(size != 0 && session.Size != size) {
 		return nil, false, errors.New("upload session does not match request")
@@ -964,13 +990,14 @@ func saveUploadSession(session *uploadSession) {
 		return
 	}
 	data, err := json.Marshal(persistedUploadSession{
-		ID:         session.ID,
-		UUID:       session.UUID,
-		Path:       session.Path,
-		Size:       session.Size,
-		ChunkSize:  session.ChunkSize,
-		NextOffset: session.NextOffset,
-		ExpiresAt:  session.ExpiresAt,
+		ID:          session.ID,
+		WorkspaceID: session.WorkspaceID,
+		UUID:        session.UUID,
+		Path:        session.Path,
+		Size:        session.Size,
+		ChunkSize:   session.ChunkSize,
+		NextOffset:  session.NextOffset,
+		ExpiresAt:   session.ExpiresAt,
 	})
 	if err != nil {
 		return
@@ -1045,13 +1072,14 @@ func restoreUploadSession(id string) *uploadSession {
 		return nil
 	}
 	return &uploadSession{
-		ID:         restored.ID,
-		UUID:       restored.UUID,
-		Path:       restored.Path,
-		Size:       restored.Size,
-		ChunkSize:  restored.ChunkSize,
-		NextOffset: restored.NextOffset,
-		ExpiresAt:  restored.ExpiresAt,
+		ID:          restored.ID,
+		WorkspaceID: restored.WorkspaceID,
+		UUID:        restored.UUID,
+		Path:        restored.Path,
+		Size:        restored.Size,
+		ChunkSize:   restored.ChunkSize,
+		NextOffset:  restored.NextOffset,
+		ExpiresAt:   restored.ExpiresAt,
 	}
 }
 

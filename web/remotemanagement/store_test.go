@@ -3,6 +3,9 @@ package remotemanagement
 import (
 	"context"
 	"testing"
+	"time"
+
+	"github.com/komari-monitor/komari/web/workspace"
 
 	websshv1 "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -73,5 +76,43 @@ func TestSessionRejectsCrossOwnerAndCrossAgent(t *testing.T) {
 	}
 	if _, err := Attach("node-b", assignment.AssignmentId, assignment.SessionId); err != ErrInvalidLease {
 		t.Fatalf("cross-agent attach error = %v", err)
+	}
+}
+
+func TestSessionGrantCancellationAndNormalCloseCleanup(t *testing.T) {
+	resetSessions()
+	t.Cleanup(resetSessions)
+	for _, closeFirst := range []bool{false, true} {
+		store := workspace.NewStore(time.Now, func(workspace.Binding) bool { return true })
+		token, grant, err := store.Create(workspace.Binding{UserID: "owner", Session: "login", AgentID: "node", SystemUser: "alice"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		session, err := Create("node", "owner", "", "", nil, grant.Grant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if closeFirst {
+			session.Close(websshv1.CloseReason_CLOSE_REASON_CANCELLED)
+		}
+		if err := store.Lock(token, "owner", "login"); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, err = session.NextEvent(ctx, 0)
+		cancel()
+		if err != ErrClosed {
+			t.Fatalf("revoked grant did not close terminal: %v", err)
+		}
+		session.mu.Lock()
+		retained := session.grantStop != nil
+		reason := session.closed.Reason
+		session.mu.Unlock()
+		if retained {
+			t.Fatal("closed terminal retains grant callback")
+		}
+		if closeFirst && reason != websshv1.CloseReason_CLOSE_REASON_CANCELLED {
+			t.Fatalf("grant callback changed a normal close: %v", reason)
+		}
 	}
 }
