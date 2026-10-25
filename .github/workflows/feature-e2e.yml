@@ -35,9 +35,6 @@ jobs:
       GOMEMLIMIT: 3GiB
       NODE_OPTIONS: --max-old-space-size=4096
       CGO_ENABLED: '1'
-      E2E_ROOT: ${{ runner.temp }}/komari-e2e
-      E2E_TOOLS: ${{ runner.temp }}/komari-e2e-tools
-      E2E_ARTIFACTS: ${{ github.workspace }}/ci-artifacts/e2e
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,6 +51,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Resolve runner paths after the job has acquired a runner
+        run: |
+          printf 'E2E_ROOT=%s/komari-e2e\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'E2E_TOOLS=%s/komari-e2e-tools\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'E2E_ARTIFACTS=%s/ci-artifacts/e2e\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
       - name: Verify all protocol pins and record the four source revisions
         run: bash scripts/ci/run-audit-check.sh e2e-provenance bash scripts/ci/e2e/provenance.sh
       - name: Build the exact embedded Web using the release action
