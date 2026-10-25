@@ -840,3 +840,56 @@ func TestHookBodyLimit(t *testing.T) {
 		t.Fatalf("large body = %d %q, want 413", rec2.Code, rec2.Body.String())
 	}
 }
+
+// TestHTMLInjectAndResponseHookDoNotBreakCSP ensures that when plugins inject HTML
+// or attach response hooks, they do not inject a restrictive "default-src 'none'; sandbox"
+// Content-Security-Policy that disables scripts and breaks the frontend UI.
+func TestHTMLInjectAndResponseHookDoNotBreakCSP(t *testing.T) {
+	withTempDataDir(t)
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.GET("/", func(c *gin.Context) {
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, "<!DOCTYPE html><html><head><title>Test</title></head><body><div id=\"root\"></div></body></html>")
+	})
+	Init(engine)
+
+	zipPath := writePluginZip(t, map[string]string{
+		"komari-plugin.json": `{"name":"InjectCSP","short":"injectcsp","version":"1.0.0","permissions":{"allowHTMLInject":true,"allowHooks":true,"timeout":5}}`,
+		"script.js": `
+			const server = require("server");
+			function load() {
+				server.injectHTML("<script src=\"/injected.js\"></script>", "");
+				server.hook("response", (req, res) => {
+					res.headers["x-custom-hook"] = "active";
+				});
+			}
+		`,
+	})
+	if _, err := InstallZip(zipPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled("injectcsp", true, true); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = SetEnabled("injectcsp", false, false) }()
+
+	wrapped := HTMLInjectHandler(WrapHandler(engine))
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `<script src="/injected.js"></script>`) {
+		t.Fatalf("body missing injected script: %q", body)
+	}
+	csp := rec.Header().Get("Content-Security-Policy")
+	if strings.Contains(csp, "default-src 'none'") || strings.Contains(csp, "sandbox") {
+		t.Fatalf("unexpected restrictive Content-Security-Policy header added to HTML: %q", csp)
+	}
+	if rec.Header().Get("X-Custom-Hook") != "active" {
+		t.Fatalf("expected x-custom-hook header from response hook, got %v", rec.Header())
+	}
+}
