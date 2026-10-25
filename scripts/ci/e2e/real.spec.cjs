@@ -96,8 +96,12 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
     return response.json();
   }
   async function tabMenu(label, tab = page.getByRole('tab', { selected: true })) {
+    // A closed Radix menu remains mounted during its exit animation. Wait for
+    // that owner to unmount before reopening a context menu on the same tab.
+    await expect(page.getByRole('menu', { includeHidden: true })).toHaveCount(0);
     await tab.click({ button: 'right' });
     await page.getByRole('menuitem', { name: label, exact: true }).click();
+    await expect(page.getByRole('menu', { includeHidden: true })).toHaveCount(0);
   }
   async function exportText() {
     const download = page.waitForEvent('download');
@@ -289,6 +293,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await expect(page.getByRole('tab')).toHaveCount(1);
       await expect.poll(() => metrics.closedSessions).toBeGreaterThanOrEqual(1);
       expect(metrics.createdSessions).toBe(2);
+      await expect(page.getByRole('menu', { includeHidden: true })).toHaveCount(0);
     });
 
     await test.step('real file browsing and multi-chunk browser upload/download with SHA256 equality', async () => {
