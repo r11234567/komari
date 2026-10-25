@@ -182,6 +182,13 @@ func Upload(c *gin.Context) {
 }
 
 func initRemoteUpload(c *gin.Context, clientUUID string) {
+	// Authorize the upload once, before issuing its opaque, path-bound session.
+	// Chunks and merge use that session; replaying the OTP for each chunk would
+	// be rejected and make multi-chunk transfers impossible.
+	if err := api.VerifySensitive2FA(c); err != nil {
+		api.RespondError(c, http.StatusUnauthorized, err.Error())
+		return
+	}
 	var request struct {
 		Path      string `json:"path" binding:"required"`
 		Size      int64  `json:"size"`
