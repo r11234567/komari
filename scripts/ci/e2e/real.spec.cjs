@@ -265,6 +265,9 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await page.getByRole('menuitem', { name: 'Change tab color', exact: true }).hover();
       await page.getByRole('button', { name: '#dc143c', exact: true }).click();
       await expect(active().locator('div').first()).toHaveCSS('background-color', 'rgb(220, 20, 60)');
+      // Color swatches keep their submenu open so users can try more colors.
+      await page.keyboard.press('Escape');
+      await page.keyboard.press('Escape');
       await tabMenu('Duplicate tab');
       await confirmTerminal();
       await expect(page.getByRole('tab')).toHaveCount(2);
