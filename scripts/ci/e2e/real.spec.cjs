@@ -240,9 +240,14 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await page.keyboard.press('Control+Shift+C');
       await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(marker);
       // A real paste appends exactly one line to a runner-owned disposable file.
-      const command = `printf '%s%s\\n' 'PASTE-' '${suffix}' >> ${shellQuote(fixture('paste.txt'))}\n`;
+      const command = `printf '%s%s\\n' 'PASTE-' '${suffix}' >> ${shellQuote(fixture('paste.txt'))}`;
       await page.evaluate(text => navigator.clipboard.writeText(text), command);
+      const pasted = page.waitForResponse(r => r.url().endsWith('.WebSSHService/SendSessionCommand'));
       await page.keyboard.press('Control+Shift+V');
+      expect((await pasted).ok()).toBe(true);
+      // Bash bracketed paste deliberately does not execute pasted input.
+      // Confirm it with the same Enter keystroke a real user sends.
+      await page.keyboard.press('Enter');
       await expect.poll(() => fs.existsSync(fixture('paste.txt')) ? fs.readFileSync(fixture('paste.txt'), 'utf8') : '')
         .toBe(`PASTE-${suffix}\n`);
       await delay(1000);

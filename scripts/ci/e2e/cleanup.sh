@@ -19,6 +19,7 @@ sudo update-ca-certificates
 sudo systemctl daemon-reload
 sudo rm -rf /usr/lib/komari/komari-e2e /var/lib/komari/komari-e2e
 sudo rm -f /etc/komari/services/komari-e2e.json /etc/komari/services/komari-e2e.policy.json /etc/komari/services/komari-e2e.trust.json
+sudo rm -f /etc/komari/services/komari-e2e.applied.json
 # No databases, credentials, state files, TLS private keys or signing keys are
 # included in artifacts. Browser evidence contains disposable CI session data.
 sudo rm -rf "$E2E_ROOT"
