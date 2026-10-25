@@ -8,10 +8,30 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// The event loop may report errors after Call has resolved. Test assertions
+// must synchronize with console writes rather than race on bytes.Buffer.
+type synchronizedConsole struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (output *synchronizedConsole) Write(data []byte) (int, error) {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	return output.buffer.Write(data)
+}
+
+func (output *synchronizedConsole) String() string {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	return output.buffer.String()
+}
 
 func TestNodeCoreModulesAndECMAScriptBuiltins(t *testing.T) {
 	baseDir := t.TempDir()
@@ -218,7 +238,7 @@ func TestProcessExitZeroIsNormalTermination(t *testing.T) {
 }
 
 func TestAsyncProcessExitZeroIsNotReportedAsFailure(t *testing.T) {
-	var output bytes.Buffer
+	var output synchronizedConsole
 	runtime, err := New(`
 		function sendMessage() {
 			setTimeout(() => process.exit(0), 0);
@@ -243,7 +263,7 @@ func TestHTTPClientRequestErrorWithoutListenerStillCloses(t *testing.T) {
 	url := server.URL
 	server.Close()
 
-	var output bytes.Buffer
+	var output synchronizedConsole
 	runtime, err := New(`
 		function sendMessage(url) {
 			return new Promise((resolve) => {

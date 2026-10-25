@@ -1,0 +1,87 @@
+name: Feature audit - backend
+on:
+  pull_request:
+  push:
+    branches: [main, 'ci/feature-audit-*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: feature-audit-backend-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  audit:
+    name: Backend / ${{ matrix.area }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - area: files-and-2fa
+            packages: ./web/filemanager ./web/connect ./web/api ./web/api/admin ./web/router
+          - area: terminal-and-settings
+            packages: ./web/agent ./web/api/terminal ./web/remotemanagement
+          - area: plugins-js-and-notifications
+            packages: ./internal/plugin ./internal/notifications ./internal/managedconfig ./pkg/jsruntime/... ./utils/messageSender/... ./web/rpc/jsonrpc ./pkg/rpc
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 3GiB
+      CGO_ENABLED: '1'
+      AUDIT_PACKAGES: ${{ matrix.packages }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Protocol pin and tool versions
+        id: protocol
+        run: bash scripts/ci/run-audit-check.sh protocol bash -c 'go version; node --version; node scripts/ci/check-protocol.cjs --resolve-go'
+      - name: Run complete area tests with race detection
+        if: ${{ !cancelled() }}
+        run: |
+          # Word splitting is intentional for the trusted matrix package list.
+          bash scripts/ci/run-audit-check.sh tests bash scripts/ci/run-go-tests.sh -race $AUDIT_PACKAGES
+      - name: Upload raw JSON events, compiler errors and readable logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature-audit-backend-${{ matrix.area }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+  integrated-build:
+    name: Backend / pinned Web bundle and complete binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 3GiB
+      NODE_OPTIONS: --max-old-space-size=4096
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build the pinned UI using the existing release action
+        uses: ./.github/actions/build-frontend
+      - name: Compile the complete server with the newly generated embedded UI
+        run: bash scripts/ci/run-audit-check.sh integrated-build go build -trimpath -o "${RUNNER_TEMP}/komari-audit"
+      - name: Retain integration context and generated UI provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature-audit-integrated-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ci-artifacts/
+            web/public/systemUI/dist/source.json
+          if-no-files-found: warn
+          retention-days: 30
