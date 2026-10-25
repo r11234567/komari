@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/web/workspace"
 	filev1 "github.com/r11234567/komari-proto/gen/go/komari/file/v1"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -66,6 +67,10 @@ func SetDispatcher(next Dispatcher) {
 // Call dispatches a metadata-only filesystem control operation and waits for
 // the matching FileEvent. Binary data must use the HTTP transfer endpoints.
 func Call(ctx context.Context, uuid string, operation string, args map[string]any, options ...CallOptions) (*filev1.AgentFileEvent, error) {
+	grant := workspace.FromContext(ctx)
+	if grant == nil || grant.Binding.AgentID != uuid || !grant.Alive() {
+		return nil, workspace.ErrLocked
+	}
 	kind, ok := operationFromString(operation)
 	if !ok {
 		return nil, fmt.Errorf("unsupported file operation %q", operation)
@@ -96,7 +101,8 @@ func Call(ctx context.Context, uuid string, operation string, args map[string]an
 		return nil, fmt.Errorf("encode file arguments: %w", err)
 	}
 	assignment := &filev1.FileAssignment{
-		AssignmentId:   requestID,
+		AssignmentId: requestID,
+		SystemUser:   grant.Binding.SystemUser, WorkspaceId: grant.ID,
 		RequestId:      requestID,
 		Operation:      kind,
 		Arguments:      arguments,

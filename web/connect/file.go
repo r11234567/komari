@@ -13,6 +13,7 @@ import (
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/filemanager"
+	"github.com/komari-monitor/komari/web/workspace"
 	filev1 "github.com/r11234567/komari-proto/gen/go/komari/file/v1"
 	filev1connect "github.com/r11234567/komari-proto/gen/go/komari/file/v1/filev1connect"
 )
@@ -114,6 +115,11 @@ func (s *fileService) call(ctx context.Context, agentID, operation string, args 
 	if strings.TrimSpace(agentID) == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("agent_id is required"))
 	}
+	ctx, cancel, _, err := workspace.Authorize(ctx, agentID)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnauthenticated, err)
+	}
+	defer cancel()
 	event, err := filemanager.Call(ctx, agentID, operation, args, filemanager.CallOptions{Timeout: timeout})
 	if err != nil {
 		return nil, lookupFileError(err)
@@ -230,10 +236,6 @@ func (s *fileService) StatFile(ctx context.Context, req *connect.Request[filev1.
 }
 
 func (s *fileService) CreateEntry(ctx context.Context, req *connect.Request[filev1.CreateEntryRequest]) (*connect.Response[filev1.CreateEntryResponse], error) {
-	meta := rpc.MetaFromContext(ctx)
-	if err := verifyConnectTwoFactor(meta, req.Msg.GetTwoFactor()); err != nil {
-		return nil, err
-	}
 	operation := "create"
 	if req.Msg.GetKind() == filev1.EntryKind_ENTRY_KIND_DIRECTORY {
 		operation = "mkdir"
@@ -255,10 +257,6 @@ func (s *fileService) CreateEntry(ctx context.Context, req *connect.Request[file
 }
 
 func (s *fileService) DeleteEntry(ctx context.Context, req *connect.Request[filev1.DeleteEntryRequest]) (*connect.Response[filev1.DeleteEntryResponse], error) {
-	meta := rpc.MetaFromContext(ctx)
-	if err := verifyConnectTwoFactor(meta, req.Msg.GetTwoFactor()); err != nil {
-		return nil, err
-	}
 	event, err := s.call(ctx, req.Msg.GetAgentId(), "delete", map[string]any{
 		"path":      req.Msg.GetPath(),
 		"recursive": req.Msg.GetRecursive(),
@@ -271,10 +269,6 @@ func (s *fileService) DeleteEntry(ctx context.Context, req *connect.Request[file
 }
 
 func (s *fileService) MoveEntry(ctx context.Context, req *connect.Request[filev1.MoveEntryRequest]) (*connect.Response[filev1.MoveEntryResponse], error) {
-	meta := rpc.MetaFromContext(ctx)
-	if err := verifyConnectTwoFactor(meta, req.Msg.GetTwoFactor()); err != nil {
-		return nil, err
-	}
 	event, err := s.call(ctx, req.Msg.GetAgentId(), "move", map[string]any{
 		"source":      req.Msg.GetSource(),
 		"destination": req.Msg.GetDestination(),
@@ -288,10 +282,6 @@ func (s *fileService) MoveEntry(ctx context.Context, req *connect.Request[filev1
 }
 
 func (s *fileService) CopyEntry(ctx context.Context, req *connect.Request[filev1.CopyEntryRequest]) (*connect.Response[filev1.CopyEntryResponse], error) {
-	meta := rpc.MetaFromContext(ctx)
-	if err := verifyConnectTwoFactor(meta, req.Msg.GetTwoFactor()); err != nil {
-		return nil, err
-	}
 	event, err := s.call(ctx, req.Msg.GetAgentId(), "copy", map[string]any{
 		"source":      req.Msg.GetSource(),
 		"destination": req.Msg.GetDestination(),
@@ -306,10 +296,6 @@ func (s *fileService) CopyEntry(ctx context.Context, req *connect.Request[filev1
 }
 
 func (s *fileService) ChmodEntry(ctx context.Context, req *connect.Request[filev1.ChmodEntryRequest]) (*connect.Response[filev1.ChmodEntryResponse], error) {
-	meta := rpc.MetaFromContext(ctx)
-	if err := verifyConnectTwoFactor(meta, req.Msg.GetTwoFactor()); err != nil {
-		return nil, err
-	}
 	event, err := s.call(ctx, req.Msg.GetAgentId(), "chmod", map[string]any{
 		"path": req.Msg.GetPath(),
 		"mode": req.Msg.GetMode(),
@@ -322,10 +308,6 @@ func (s *fileService) ChmodEntry(ctx context.Context, req *connect.Request[filev
 }
 
 func (s *fileService) ChownEntry(ctx context.Context, req *connect.Request[filev1.ChownEntryRequest]) (*connect.Response[filev1.ChownEntryResponse], error) {
-	meta := rpc.MetaFromContext(ctx)
-	if err := verifyConnectTwoFactor(meta, req.Msg.GetTwoFactor()); err != nil {
-		return nil, err
-	}
 	args := map[string]any{"path": req.Msg.GetPath(), "owner": req.Msg.GetOwner(), "group": req.Msg.GetGroup()}
 	if req.Msg.Uid != nil {
 		args["uid"] = float64(req.Msg.GetUid())
@@ -359,6 +341,9 @@ func (s *fileService) SearchFiles(ctx context.Context, req *connect.Request[file
 }
 
 func (s *fileService) LeaseFileOperations(ctx context.Context, req *connect.Request[filev1.LeaseFileOperationsRequest], stream *connect.ServerStream[filev1.LeaseFileOperationsResponse]) error {
+	if req.Header().Get(workspace.IdentityHeader) != "v1" {
+		return connectError(connect.CodeFailedPrecondition, errors.New("upgrade Agent: workspace OS account support is required"))
+	}
 	agentID, err := requireAgent(rpc.MetaFromContext(ctx), strings.TrimSpace(req.Msg.GetAgentId()))
 	if err != nil {
 		return err
@@ -371,6 +356,9 @@ func (s *fileService) LeaseFileOperations(ctx context.Context, req *connect.Requ
 		case <-ctx.Done():
 			return nil
 		case assignment := <-channel:
+			if _, err := workspace.Default.ByID(assignment.WorkspaceId, agentID, assignment.SystemUser); err != nil {
+				continue
+			}
 			if err := stream.Send(&filev1.LeaseFileOperationsResponse{Assignment: assignment}); err != nil {
 				return err
 			}
@@ -379,6 +367,9 @@ func (s *fileService) LeaseFileOperations(ctx context.Context, req *connect.Requ
 }
 
 func (s *fileService) AttachFileOperations(ctx context.Context, stream *connect.BidiStream[filev1.AttachFileOperationsRequest, filev1.AttachFileOperationsResponse]) error {
+	if stream.RequestHeader().Get(workspace.IdentityHeader) != "v1" {
+		return connectError(connect.CodeFailedPrecondition, errors.New("workspace OS account support is required"))
+	}
 	first, err := stream.Receive()
 	if err != nil {
 		return err
@@ -395,14 +386,32 @@ func (s *fileService) AttachFileOperations(ctx context.Context, stream *connect.
 	if assignment == nil {
 		return connect.NewError(connect.CodeNotFound, errors.New("file assignment is unknown or expired"))
 	}
+	grant, err := workspace.Default.ByID(assignment.WorkspaceId, authenticated, assignment.SystemUser)
+	if err != nil {
+		return connectError(connect.CodeUnauthenticated, err)
+	}
+	bounded, cancel := workspace.Bind(ctx, grant)
+	defer cancel()
 	if err := stream.Send(&filev1.AttachFileOperationsResponse{
 		Command: &filev1.AttachFileOperationsResponse_Assignment{Assignment: assignment},
 	}); err != nil {
 		return err
 	}
-	event, err := stream.Receive()
-	if err != nil {
-		return err
+	type received struct {
+		msg *filev1.AttachFileOperationsRequest
+		err error
+	}
+	resultCh := make(chan received, 1)
+	go func() { msg, err := stream.Receive(); resultCh <- received{msg, err} }()
+	var event *filev1.AttachFileOperationsRequest
+	select {
+	case <-bounded.Done():
+		return connectError(connect.CodeUnauthenticated, workspace.ErrLocked)
+	case value := <-resultCh:
+		if value.err != nil {
+			return value.err
+		}
+		event = value.msg
 	}
 	result := event.GetEvent()
 	if result == nil {

@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/workspace"
 	adminv1connect "github.com/r11234567/komari-proto/gen/go/komari/admin/v1/adminv1connect"
 	agentv1connect "github.com/r11234567/komari-proto/gen/go/komari/agent/v1/agentv1connect"
 	browserv1connect "github.com/r11234567/komari-proto/gen/go/komari/browser/v1/browserv1connect"
@@ -23,6 +24,7 @@ import (
 	reportv1connect "github.com/r11234567/komari-proto/gen/go/komari/report/v1/reportv1connect"
 	rescuev1connect "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1/rescuev1connect"
 	websshv1connect "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1/websshv1connect"
+	workspacev1connect "github.com/r11234567/komari-proto/gen/go/komari/workspace/v1/workspacev1connect"
 )
 
 const maxConnectRequestBytes = 4 << 20
@@ -56,6 +58,7 @@ func Register(r *gin.Engine) {
 		newHandler(networkv1connect.NewNetworkProbeServiceHandler(&networkProbeService{}, opts...)),
 		newHandler(rescuev1connect.NewRescueServiceHandler(&rescueService{}, opts...)),
 		newHandler(execv1connect.NewExecutionServiceHandler(&executionService{}, opts...)),
+		newHandler(workspacev1connect.NewWorkspaceServiceHandler(&workspaceService{}, opts...)),
 		newHandler(websshv1connect.NewWebSSHServiceHandler(&webSSHService{}, opts...)),
 		newHandler(agentv1connect.NewAgentEventServiceHandler(&agentEventService{}, opts...)),
 	}
@@ -104,7 +107,7 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 				meta.SessionToken = session
 			}
 		}
-		c.Request = c.Request.WithContext(rpc.NewContextWithMeta(c.Request.Context(), meta))
+		c.Request = c.Request.WithContext(workspace.WithSecure(workspace.WithToken(rpc.NewContextWithMeta(c.Request.Context(), meta), c.GetHeader(workspace.Header)), c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"))
 		handler.ServeHTTP(c.Writer, c.Request)
 	}
 }

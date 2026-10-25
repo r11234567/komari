@@ -14,6 +14,10 @@ import (
 )
 
 func RequestTerminal(c *gin.Context) {
+	c.JSON(410, gin.H{"error": "legacy terminal is disabled; use the account-isolated Connect workspace"})
+}
+
+func requestTerminalLegacy(c *gin.Context) {
 	uuid := c.Param("uuid")
 	user_uuid, _ := c.Get("uuid")
 	_, err := clients.GetClientByUUID(uuid)

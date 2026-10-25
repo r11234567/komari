@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/komari-monitor/komari/web/workspace"
 	websshv1 "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -32,7 +33,8 @@ var (
 )
 
 type Session struct {
-	mu sync.Mutex
+	Grant *workspace.Grant
+	mu    sync.Mutex
 
 	ID               string
 	AgentID          string
@@ -61,7 +63,7 @@ var sessions = struct {
 	notify map[string]chan struct{}
 }{values: make(map[string]*Session), notify: make(map[string]chan struct{})}
 
-func Create(agentID, ownerID, shell, workingDirectory string, size *websshv1.TerminalSize) (*Session, error) {
+func Create(agentID, ownerID, shell, workingDirectory string, size *websshv1.TerminalSize, grants ...*workspace.Grant) (*Session, error) {
 	if agentID == "" || ownerID == "" {
 		return nil, errors.New("agent and owner are required")
 	}
@@ -76,6 +78,10 @@ func Create(agentID, ownerID, shell, workingDirectory string, size *websshv1.Ter
 		ID: uuid.NewString(), AgentID: agentID, OwnerID: ownerID, AssignmentID: uuid.NewString(),
 		CreatedAt: now, Shell: shell, WorkingDirectory: workingDirectory, Size: cloneSize(size),
 		commandNotify: make(chan struct{}), eventNotify: make(chan struct{}),
+	}
+	if len(grants) > 0 {
+		session.Grant = grants[0]
+		context.AfterFunc(session.Grant.Context(), func() { session.Close(websshv1.CloseReason_CLOSE_REASON_DEADLINE_EXCEEDED) })
 	}
 	sessions.values[session.ID] = session
 	if signal := sessions.notify[agentID]; signal != nil {
@@ -343,6 +349,7 @@ func (s *Session) Close(reason websshv1.CloseReason) *websshv1.SessionClosed {
 	defer s.mu.Unlock()
 	if s.closed == nil {
 		s.closed = &websshv1.SessionClosed{SessionId: s.ID, Reason: reason, ClosedAt: timestamppb.Now()}
+		s.commands = nil
 		s.signalCommands()
 		s.signalEvents()
 	}
@@ -372,7 +379,11 @@ func (file File) Response(sequence uint64) *websshv1.AttachSessionResponse {
 }
 
 func (s *Session) assignment() *websshv1.SessionAssignment {
-	return &websshv1.SessionAssignment{AssignmentId: s.AssignmentID, SessionId: s.ID, AgentId: s.AgentID, Shell: s.Shell,
+	username := ""
+	if s.Grant != nil {
+		username = s.Grant.Binding.SystemUser
+	}
+	return &websshv1.SessionAssignment{AssignmentId: s.AssignmentID, SystemUser: username, SessionId: s.ID, AgentId: s.AgentID, Shell: s.Shell,
 		Size: cloneSize(s.Size), WorkingDirectory: s.WorkingDirectory, LeaseExpiresAt: timestamppb.New(s.LeaseExpiresAt)}
 }
 
