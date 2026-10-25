@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -41,6 +42,11 @@ var rpc2CompatibilityMethods = map[string]struct{}{
 func rpc2TransportAllowed(method string) bool {
 	if _, ok := rpc2CompatibilityMethods[method]; ok {
 		return true
+	}
+	namespace, _, _ := strings.Cut(strings.ToLower(method), ":")
+	switch namespace {
+	case "admin", "client", "public", "common", "rpc":
+		return false
 	}
 	return rpc.IsPluginMethod(method)
 }

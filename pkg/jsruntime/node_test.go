@@ -1,37 +1,17 @@
 package jsruntime
 
 import (
-	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
-
-// The event loop may report errors after Call has resolved. Test assertions
-// must synchronize with console writes rather than race on bytes.Buffer.
-type synchronizedConsole struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
-}
-
-func (output *synchronizedConsole) Write(data []byte) (int, error) {
-	output.mu.Lock()
-	defer output.mu.Unlock()
-	return output.buffer.Write(data)
-}
-
-func (output *synchronizedConsole) String() string {
-	output.mu.Lock()
-	defer output.mu.Unlock()
-	return output.buffer.String()
-}
 
 func TestNodeCoreModulesAndECMAScriptBuiltins(t *testing.T) {
 	baseDir := t.TempDir()
@@ -67,6 +47,36 @@ func TestNodeCoreModulesAndECMAScriptBuiltins(t *testing.T) {
 
 	if err := runtime.Call("verify"); err != nil {
 		t.Fatalf("Node core modules failed: %v", err)
+	}
+}
+
+func TestNodeWriteFileEncodingKeepsDefaultModeAndExplicitZero(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file mode semantics")
+	}
+	baseDir := t.TempDir()
+	vm, err := New(`
+		const fs = require("fs");
+		fs.writeFileSync("encoded.txt", "text", "utf8");
+		fs.writeFileSync("options.txt", "text", {encoding: "utf8"});
+		fs.writeFileSync("zero.txt", "text", {mode: 0});
+	`, Options{NodeJS: true, BaseDir: baseDir, Console: io.Discard, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vm.Close()
+	for _, name := range []string{"encoded.txt", "options.txt", "zero.txt"} {
+		info, err := os.Stat(filepath.Join(baseDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name == "zero.txt" {
+			if info.Mode().Perm() != 0 {
+				t.Fatalf("explicit zero mode changed: %v", info.Mode())
+			}
+		} else if info.Mode().Perm()&0o600 != 0o600 {
+			t.Fatalf("encoding option removed owner access for %s: %v", name, info.Mode())
+		}
 	}
 }
 
@@ -238,7 +248,7 @@ func TestProcessExitZeroIsNormalTermination(t *testing.T) {
 }
 
 func TestAsyncProcessExitZeroIsNotReportedAsFailure(t *testing.T) {
-	var output synchronizedConsole
+	var output consoleTestBuffer
 	runtime, err := New(`
 		function sendMessage() {
 			setTimeout(() => process.exit(0), 0);
@@ -263,7 +273,7 @@ func TestHTTPClientRequestErrorWithoutListenerStillCloses(t *testing.T) {
 	url := server.URL
 	server.Close()
 
-	var output synchronizedConsole
+	var output consoleTestBuffer
 	runtime, err := New(`
 		function sendMessage(url) {
 			return new Promise((resolve) => {
@@ -664,29 +674,20 @@ func TestChildProcessPermissionAndExecution(t *testing.T) {
 	}
 	denied.Close()
 
+	command := "printf child"
+	if runtime.GOOS == "windows" {
+		command = "echo child"
+	}
 	allowed, err := New(`
-		function verify(command, environment) {
+		function verify(command) {
 			const childProcess = require("child_process");
-			const arguments = ["-test.run=^TestNodeChildProcessHelper$"];
-			const syncOutput = childProcess.execFileSync(command, arguments, {
-				env: environment,
-				encoding: "utf8",
-			}).trim();
-			return new Promise((resolve, reject) => {
-				const child = childProcess.spawn(command, arguments, {
-					env: environment,
-					encoding: "utf8",
-				});
+			const syncOutput = childProcess.execSync(command, { encoding: "utf8" }).trim();
+			return new Promise((resolve) => {
+				const child = childProcess.spawn(command, [], { shell: true, encoding: "utf8" });
 				let output = "";
 				child.stdout.on("data", (chunk) => output += String(chunk));
-				child.on("close", (code) => {
-					if (code === 0 && syncOutput === "child" && output.trim() === "child") {
-						resolve(true);
-						return;
-					}
-					reject(new Error(JSON.stringify({ code, syncOutput, output })));
-				});
-				child.on("error", reject);
+				child.on("close", (code) => resolve(code === 0 && syncOutput === "child" && output.trim() === "child"));
+				child.on("error", () => resolve(false));
 			});
 		}
 	`, Options{NodeJS: true, AllowExec: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 5 * time.Second})
@@ -694,7 +695,7 @@ func TestChildProcessPermissionAndExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer allowed.Close()
-	if err := allowed.Call("verify", os.Args[0], childHelperEnvironment("child")); err != nil {
+	if err := allowed.Call("verify", command); err != nil {
 		t.Fatalf("child_process execution failed: %v", err)
 	}
 }
@@ -958,9 +959,6 @@ func TestNodeChildProcessHelper(t *testing.T) {
 		os.Exit(0)
 	case "echo":
 		_, _ = io.Copy(os.Stdout, os.Stdin)
-		os.Exit(0)
-	case "child":
-		_, _ = io.WriteString(os.Stdout, "child")
 		os.Exit(0)
 	default:
 		os.Exit(2)

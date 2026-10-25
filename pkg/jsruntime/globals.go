@@ -3,7 +3,9 @@ package jsruntime
 import (
 	_ "embed"
 	"fmt"
+	"github.com/komari-monitor/komari/pkg/jsruntime/native"
 
+	nodeurl "github.com/komari-monitor/komari/pkg/jsruntime/url"
 	"github.com/komari-monitor/komari/pkg/jsruntime/xhr"
 )
 
@@ -13,11 +15,9 @@ func (r *Runtime) injectGlobals() error {
 	if err := r.consoleMod.Inject(r.vm); err != nil {
 		return fmt.Errorf("inject console: %w", err)
 	}
+	nodeurl.Enable(r.vm)
 	if err := r.timersMod.Inject(r.vm); err != nil {
 		return fmt.Errorf("inject timers: %w", err)
-	}
-	if err := r.urlModule.Inject(r.vm); err != nil {
-		return fmt.Errorf("inject URL globals: %w", err)
 	}
 	if r.nodeJS {
 		if err := r.injectNodeGlobals(); err != nil {
@@ -30,7 +30,7 @@ func (r *Runtime) injectGlobals() error {
 	if err := xhr.Inject(r.vm); err != nil {
 		return fmt.Errorf("inject XMLHttpRequest: %w", err)
 	}
-	if _, err := r.vm.RunString(queueMicrotaskSource); err != nil {
+	if _, err := native.Run(r.vm, queueMicrotaskSource); err != nil {
 		return fmt.Errorf("inject queueMicrotask: %w", err)
 	}
 	return nil

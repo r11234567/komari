@@ -44,6 +44,13 @@ func TestRPC2CompatibilitySurface(t *testing.T) {
 			t.Errorf("%s must not be reachable through /api/rpc2", method)
 		}
 	}
+	for _, method := range []string{"admin:plugin-disguise", "client:plugin-disguise", "public:plugin-disguise", "common:plugin-disguise"} {
+		rpc.MarkPluginMethod(method)
+		if rpc2TransportAllowed(method) {
+			t.Errorf("plugin marker opened a system namespace: %s", method)
+		}
+		rpc.Unregister(method)
+	}
 
 	const pluginMethod = "plugin:compat-test"
 	rpc.MarkPluginMethod(pluginMethod)
