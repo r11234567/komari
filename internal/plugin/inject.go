@@ -25,6 +25,7 @@ func isBypassPluginRoute(r *http.Request) bool {
 	}
 	p := r.URL.Path
 	return strings.Contains(p, "/file/") ||
+		strings.Contains(p, "/transfer/") ||
 		strings.HasPrefix(p, "/api/clients/v2/file/") ||
 		strings.HasPrefix(p, "/komari.")
 }
@@ -110,10 +111,11 @@ type htmlInjectWriter struct {
 	hijacked    bool
 	limit       int
 	underlying  http.ResponseWriter
+	out         io.Writer
 }
 
 func newHTMLInjectWriter(w http.ResponseWriter) *htmlInjectWriter {
-	return &htmlInjectWriter{header: make(http.Header), limit: maxHTMLInjectBufferBytes, underlying: w}
+	return &htmlInjectWriter{header: make(http.Header), limit: maxHTMLInjectBufferBytes, underlying: w, out: w}
 }
 
 func (w *htmlInjectWriter) Header() http.Header { return w.header }
@@ -139,7 +141,7 @@ func (w *htmlInjectWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	if w.streaming {
 		w.mu.Unlock()
-		return w.underlying.Write(p)
+		return w.out.Write(p)
 	}
 	if !w.wroteHeader {
 		w.statusCode = http.StatusOK
@@ -157,7 +159,7 @@ func (w *htmlInjectWriter) Write(p []byte) (int, error) {
 			if !isHTMLContentType(ct) {
 				w.mu.Unlock()
 				w.passthrough()
-				return w.underlying.Write(p)
+				return w.out.Write(p)
 			}
 			w.html = true
 		}
@@ -165,7 +167,7 @@ func (w *htmlInjectWriter) Write(p []byte) (int, error) {
 	if w.body.Len()+len(p) > w.limit {
 		w.mu.Unlock()
 		w.passthrough()
-		return w.underlying.Write(p)
+		return w.out.Write(p)
 	}
 	n, err := w.body.Write(p)
 	w.mu.Unlock()
@@ -185,7 +187,7 @@ func (w *htmlInjectWriter) passthrough() {
 	status, header, body := w.statusCode, w.header.Clone(), append([]byte(nil), w.body.Bytes()...)
 	w.mu.Unlock()
 	w.writeThrough(status, header)
-	_, _ = w.underlying.Write(body)
+	_, _ = w.out.Write(body)
 }
 
 // flushTo finalizes a fully buffered response. HTML responses get the
@@ -213,12 +215,17 @@ func (w *htmlInjectWriter) flushTo(fragments []*injectEntry) {
 		header.Del("Content-Length")
 	}
 	w.writeThrough(status, header)
-	_, _ = w.underlying.Write(body)
+	_, _ = w.out.Write(body)
 }
 
 func (w *htmlInjectWriter) writeThrough(status int, header http.Header) {
 	if header.Get("X-Content-Type-Options") == "" {
 		header.Set("X-Content-Type-Options", "nosniff")
+	}
+	if w.html || isHTMLContentType(header.Get("Content-Type")) {
+		if header.Get("Content-Security-Policy") == "" {
+			header.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+		}
 	}
 	for name, values := range header {
 		for _, value := range values {

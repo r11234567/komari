@@ -274,6 +274,9 @@ func serveUploadTransfer(c *gin.Context, transfer *streamTransfer) {
 		return
 	}
 	committed := false
+	c.Header("Content-Type", "application/octet-stream")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Content-Security-Policy", "default-src 'none'; sandbox")
 	commitHeaders := func() {
 		if committed {
 			return

@@ -581,12 +581,11 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 	}
 	ext := strings.ToLower(filepath.Ext(actualName))
 	ctLower := strings.ToLower(contentType)
-	if disposition == "inline" {
-		if ext == ".html" || ext == ".htm" || ext == ".xhtml" || ext == ".svg" || ext == ".xml" ||
-			strings.Contains(ctLower, "html") || strings.Contains(ctLower, "svg") || strings.Contains(ctLower, "xml") ||
-			strings.Contains(ctLower, "javascript") {
-			disposition = "attachment"
-		}
+	if ext == ".html" || ext == ".htm" || ext == ".xhtml" || ext == ".svg" || ext == ".xml" ||
+		strings.Contains(ctLower, "html") || strings.Contains(ctLower, "svg") || strings.Contains(ctLower, "xml") ||
+		strings.Contains(ctLower, "javascript") {
+		disposition = "attachment"
+		contentType = "application/octet-stream"
 	}
 	transferChunkSize := downloadChunkSizeForRequest(c, clientUUID)
 	setHeaders := func() {

@@ -418,10 +418,11 @@ type bufferedResponseWriter struct {
 	limit       int  // maximum buffered body bytes before passthrough
 	passthrough bool // buffering abandoned because the body exceeded limit
 	underlying  http.ResponseWriter
+	out         io.Writer
 }
 
 func newBufferedResponseWriter(w http.ResponseWriter) *bufferedResponseWriter {
-	return &bufferedResponseWriter{header: make(http.Header), limit: maxHookBufferBytes, underlying: w}
+	return &bufferedResponseWriter{header: make(http.Header), limit: maxHookBufferBytes, underlying: w, out: w}
 }
 
 func (b *bufferedResponseWriter) passedThrough() bool {
@@ -456,7 +457,7 @@ func (b *bufferedResponseWriter) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	if b.streaming {
 		b.mu.Unlock()
-		return b.underlying.Write(p)
+		return b.out.Write(p)
 	}
 	if !b.wroteHeader {
 		b.statusCode = http.StatusOK
@@ -472,8 +473,8 @@ func (b *bufferedResponseWriter) Write(p []byte) (int, error) {
 		b.passthrough = true
 		b.mu.Unlock()
 		b.writeThrough(status, header)
-		_, _ = b.underlying.Write(buffered)
-		_, _ = b.underlying.Write(p)
+		_, _ = b.out.Write(buffered)
+		_, _ = b.out.Write(p)
 		return len(p), nil
 	}
 	_, err := b.body.Write(p)
@@ -554,7 +555,7 @@ func (b *bufferedResponseWriter) Flush() {
 		status, body, header := b.statusCode, append([]byte(nil), b.body.Bytes()...), b.header.Clone()
 		b.mu.Unlock()
 		b.writeThrough(status, header)
-		_, _ = b.underlying.Write(body)
+		_, _ = b.out.Write(body)
 	} else {
 		b.mu.Unlock()
 	}
@@ -567,6 +568,11 @@ func (b *bufferedResponseWriter) Flush() {
 func (b *bufferedResponseWriter) writeThrough(status int, header http.Header) {
 	if header.Get("X-Content-Type-Options") == "" {
 		header.Set("X-Content-Type-Options", "nosniff")
+	}
+	if isHTMLContentType(header.Get("Content-Type")) {
+		if header.Get("Content-Security-Policy") == "" {
+			header.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+		}
 	}
 	for name, values := range header {
 		for _, value := range values {
