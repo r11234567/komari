@@ -147,6 +147,10 @@ func (i *policyInterceptor) WrapStreamingClient(next connect.StreamingClientFunc
 
 func (i *policyInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
 	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
+		// Small terminal output and file leases must not wait for a proxy buffer
+		// to fill before reaching the other end of an interactive stream.
+		conn.ResponseHeader().Set("X-Accel-Buffering", "no")
+		conn.ResponseHeader().Set("Cache-Control", "no-store, no-transform")
 		bounded, cancel, err := i.authorize(ctx, conn.Spec().Procedure)
 		if err != nil {
 			return err
