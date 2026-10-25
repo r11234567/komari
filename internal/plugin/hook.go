@@ -569,11 +569,6 @@ func (b *bufferedResponseWriter) writeThrough(status int, header http.Header) {
 	if header.Get("X-Content-Type-Options") == "" {
 		header.Set("X-Content-Type-Options", "nosniff")
 	}
-	if isHTMLContentType(header.Get("Content-Type")) {
-		if header.Get("Content-Security-Policy") == "" {
-			header.Set("Content-Security-Policy", "default-src 'none'; sandbox")
-		}
-	}
 	for name, values := range header {
 		for _, value := range values {
 			b.underlying.Header().Add(name, value)
