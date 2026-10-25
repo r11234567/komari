@@ -55,3 +55,33 @@ jobs:
           path: ci-artifacts/
           if-no-files-found: warn
           retention-days: 30
+  integrated-build:
+    name: Backend / pinned Web bundle and complete binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 3GiB
+      NODE_OPTIONS: --max-old-space-size=4096
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build the pinned UI using the existing release action
+        uses: ./.github/actions/build-frontend
+      - name: Compile the complete server with the newly generated embedded UI
+        run: bash scripts/ci/run-audit-check.sh integrated-build go build -trimpath -o "${RUNNER_TEMP}/komari-audit"
+      - name: Retain integration context and generated UI provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature-audit-integrated-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ci-artifacts/
+            web/public/systemUI/dist/source.json
+          if-no-files-found: warn
+          retention-days: 30

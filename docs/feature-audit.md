@@ -30,3 +30,9 @@ Backend areas cover file leases/transfers and 2FA, terminal/settings, plugins,
 all JS runtime subpackages, built-in notification channels, RPC ACL and GPU
 mapping. Tests run with the Go race detector. JS compatibility tests exercise
 legacy `sendMessage(message, title)`, async Promises and event JSON field names.
+
+The integrated build reuses `.github/actions/build-frontend` to build the pinned
+Web submodule through the release pipeline, then compiles the complete server
+with those freshly generated embedded assets. It neither publishes nor deploys.
+Composite-action stages retain their full output in Actions logs; the compile
+wrapper and generated source provenance are also retained as audit artifacts.
