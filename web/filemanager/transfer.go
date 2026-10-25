@@ -719,6 +719,10 @@ func CreatePreviewToken(c *gin.Context) {
 	if !ok {
 		return
 	}
+	createPreviewToken(c)
+}
+
+func createPreviewToken(c *gin.Context) {
 	clientUUID := c.Param("uuid")
 	path := strings.TrimSpace(c.Query("path"))
 	if clientUUID == "" || path == "" {

@@ -214,7 +214,7 @@ func TestFileServiceMutatingOperationsGatedBy2FA(t *testing.T) {
 	}
 }
 
-func TestFileServiceReadOperationsReturnUnavailableWhenOffline(t *testing.T) {
+func TestFileServiceReadsRequireWorkspaceBeforeAgentLookup(t *testing.T) {
 	service := newFileService()
 	ctx := context.Background()
 
@@ -223,8 +223,8 @@ func TestFileServiceReadOperationsReturnUnavailableWhenOffline(t *testing.T) {
 		AgentId: "offline-agent",
 		Path:    "/tmp",
 	}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Errorf("ListDirectory on offline agent code = %v, want CodeUnavailable", connect.CodeOf(err))
+	if connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Errorf("ListDirectory on offline agent code = %v, want CodeUnauthenticated", connect.CodeOf(err))
 	}
 
 	// StatFile on offline agent
@@ -232,8 +232,8 @@ func TestFileServiceReadOperationsReturnUnavailableWhenOffline(t *testing.T) {
 		AgentId: "offline-agent",
 		Path:    "/tmp/foo",
 	}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Errorf("StatFile on offline agent code = %v, want CodeUnavailable", connect.CodeOf(err))
+	if connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Errorf("StatFile on offline agent code = %v, want CodeUnauthenticated", connect.CodeOf(err))
 	}
 
 	// SearchFiles on offline agent
@@ -242,7 +242,7 @@ func TestFileServiceReadOperationsReturnUnavailableWhenOffline(t *testing.T) {
 		Path:    "/tmp",
 		Query:   "foo",
 	}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Errorf("SearchFiles on offline agent code = %v, want CodeUnavailable", connect.CodeOf(err))
+	if connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Errorf("SearchFiles on offline agent code = %v, want CodeUnauthenticated", connect.CodeOf(err))
 	}
 }

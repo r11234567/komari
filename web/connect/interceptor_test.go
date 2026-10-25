@@ -15,6 +15,10 @@ import (
 func TestPolicyDeclaresEveryGeneratedProcedure(t *testing.T) {
 	interceptor := newPolicyInterceptor()
 	expected := []string{
+		"/komari.workspace.v1.WorkspaceService/UnlockWorkspace",
+		"/komari.workspace.v1.WorkspaceService/GetWorkspace",
+		"/komari.workspace.v1.WorkspaceService/TouchWorkspace",
+		"/komari.workspace.v1.WorkspaceService/LockWorkspace",
 		"/komari.config.v1.PrivilegedDeliveryService/GetNodeConfigState",
 		"/komari.host.v1.HostService/NegotiateHostProtocol",
 		"/komari.host.v1.HostService/PrepareHostOperation",
