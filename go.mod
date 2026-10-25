@@ -3,9 +3,8 @@ module github.com/komari-monitor/komari
 go 1.25.0
 
 require (
+	github.com/Calcium-Ion/moejs v0.1.0-alpha.9
 	connectrpc.com/connect v1.19.1
-	github.com/dop251/goja v0.0.0-20251008123653-cf18d89f3cf6
-	github.com/dop251/goja_nodejs v0.0.0-20251015164255-5e94316bedaf
 	github.com/gin-gonic/gin v1.10.0
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/google/uuid v1.6.0

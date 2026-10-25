@@ -1,7 +1,7 @@
 # jsruntime 接口与兼容性说明
 
-`jsruntime` 是基于 [goja](https://github.com/dop251/goja) 和
-`goja_nodejs` 构建的服务端 JavaScript 运行时。它提供 CommonJS、事件循环、
+`jsruntime` 是基于 [MoeJS](https://github.com/Calcium-Ion/moejs)
+构建的服务端 JavaScript 运行时。它提供 CommonJS、事件循环、
 常用 Web API，以及一组受权限控制的 Node.js 兼容模块。
 
 这不是浏览器，也不是完整的 Node.js。本文只描述当前源码实际提供的接口，
@@ -185,8 +185,7 @@ registry.RegisterNativeModule("node:path", loader)
 | timers | `部分实现` | timeout、interval、immediate 及 clear。 |
 | Fetch API | `部分实现` | `fetch` 及常用请求、响应、body、表单和取消对象。全部 body 都在内存中缓冲。 |
 | XHR | `部分实现` | 异步与同步请求、状态、响应头、超时、取消和常用响应类型。 |
-| WHATWG URL 全局对象 | `可用` | `URL` 与 `URLSearchParams` 已作为全局构造函数注入（亦支持 `require("url")` / `require("node:url")`），且 `URL.origin` 正确保留非默认端口，遵循 WHATWG 标准。 |
-| `buffer`、`url`、`util` 模块 | `部分实现` | 来自 `goja_nodejs` 并对 `url` 模块的 `origin` 计算与 `canParse` 进行了 WHATWG 标准补丁。 |
+| `buffer`、`url`、`util` 模块 | `部分实现` | 来自固定版本的 `goja_nodejs`。 |
 
 ### `NodeJS: true` 时额外注入
 
@@ -361,20 +360,16 @@ const value = Buffer.from("komari").toString("hex");
 
 | 接口 | 状态 |
 | --- | --- |
-| `URL` | `部分实现`：`host/hash/hostname/href/pathname/origin/password/username/port/protocol/search/searchParams`、`toString/toJSON`、`canParse`（`origin` 已修复丢端口问题，遵循 WHATWG 标准正确保留非默认端口） |
+| `URL` | `部分实现`：`host/hash/hostname/href/pathname/origin/password/username/port/protocol/search/searchParams`、`toString/toJSON` |
 | `URLSearchParams` | `可用`：`append/delete/entries/forEach/get/getAll/has/keys/set/sort/size/toString/values` 和 iterator |
 | `domainToASCII/domainToUnicode` | `可用` |
 | 旧式 `parse/format/resolve/resolveObject/urlToHttpOptions` | `未实现` |
 
-`URL` 和 `URLSearchParams` 已自动注入为全局变量（遵循 WHATWG 及 Node.js 10+ 规范），亦可通过 CommonJS 模块引入：
+`URL` 和 `URLSearchParams` 会作为全局变量注入，也可以从模块取得：
 
 ```js
-// 直接使用全局构造函数：
-const url = new URL("/api", "https://example.com:8080");
-console.log(url.origin); // "https://example.com:8080"
-
-// 或按需从模块引入：
 const { URL, URLSearchParams } = require("node:url");
+const url = new URL("/api", "https://example.com");
 url.search = new URLSearchParams({ page: "1" }).toString();
 ```
 
@@ -710,7 +705,8 @@ function runtimeInfo() {
 | ChildProcess `kill/ref/unref/disconnect/send` | `部分实现` 或调用抛错，见下文 |
 
 支持的 options：`cwd`、`env`、`shell`、`timeout`、`encoding`、`maxBuffer`。
-`cwd` 受 `BaseDir` 限制；请求的 timeout 和 maxBuffer 只能收紧 Go 侧全局上限，不能放大。
+`cwd` 受 `BaseDir` 限制；子进程默认不继承 runtime 的 `Timeout`，只有显式传入 `timeout` 时才会自动结束。
+请求的 `maxBuffer` 只能收紧 Go 侧全局上限，不能放大。
 `stdio/input/detached/uid/gid/windowsHide/windowsVerbatimArguments/serialization` 等未实现。
 
 - `spawn()` 的 `stdin` 是 `stream.Writable`（写入经后台写队列串行执行，`end()` 后关闭管道），
