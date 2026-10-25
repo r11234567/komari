@@ -266,6 +266,10 @@ func registerAdminRoutes(r *gin.Engine) {
 	// notifications
 	notificationGroup := g.Group("/notification")
 	{
+		notificationGroup.GET("/channels", jsonRpc.Bind("admin:listNotificationChannels"))
+		notificationGroup.GET("/channel/configuration", jsonRpc.Bind("admin:getNotificationChannelConfiguration", jsonRpc.WithQuery("id")))
+		notificationGroup.POST("/channel/configuration", jsonRpc.Bind("admin:setNotificationChannelConfiguration"))
+		notificationGroup.POST("/send", jsonRpc.Bind("admin:sendNotification"))
 		notificationGroup.GET("/offline", jsonRpc.Bind("admin:listOfflineNotifications"))
 		notificationGroup.POST("/offline/edit", jsonRpc.Bind("admin:editOfflineNotification"))
 		notificationGroup.POST("/offline/enable", jsonRpc.Bind("admin:enableOfflineNotification"))

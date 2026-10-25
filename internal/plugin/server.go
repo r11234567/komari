@@ -3,6 +3,7 @@ package plugin
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/dop251/goja_nodejs/buffer"
 	"github.com/dop251/goja_nodejs/require"
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/jsruntime"
 	"github.com/komari-monitor/komari/pkg/jsruntime/httpbody"
 	"github.com/komari-monitor/komari/pkg/rpc"
@@ -52,6 +54,8 @@ import (
 //	                                      result or rejects with an Error
 //	                                      carrying code/message/data
 //	server.registerRPC(method, handler)   register a plugin-owned RPC method
+//	server.registerNotificationChannel(id, configuration, handler)
+//	                                      register a notification channel
 //	server.getConfig()                    resolve the saved plugin configuration
 //	server.cron(expr, fn)                 run fn on the plugin event loop each
 //	                                      time the cron expression fires
@@ -135,15 +139,26 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 					})
 					return
 				}
+				ctx, cancel := context.WithTimeout(context.Background(), host.Timeout())
+				defer cancel()
 				meta := &rpc.ContextMeta{Permission: rpc.RoleAdmin, Principal: rpc.PrincipalFromRole(rpc.RoleAdmin)}
-				ctx := rpc.NewContextWithMeta(context.Background(), meta)
+				ctx = rpc.NewContextWithMeta(ctx, meta)
 				resp := rpc.CallWithContext(ctx, nil, method, params)
 				host.RunOnLoop(func(vm *goja.Runtime) {
+					if resp == nil {
+						_ = reject(vm.NewGoError(errors.New("RPC returned nil response")))
+						return
+					}
 					if resp.Error != nil {
 						_ = reject(jsRPCError(vm, resp.Error))
 						return
 					}
-					_ = resolve(resp.Result)
+					result, err := normalizeRPCValue(resp.Result)
+					if err != nil {
+						_ = reject(vm.NewGoError(err))
+						return
+					}
+					_ = resolve(result)
 				})
 			}()
 			return vm.ToValue(promise)
@@ -216,6 +231,32 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 			}
 			return goja.Undefined()
 		})
+		_ = exports.Set("registerNotificationChannel", func(call goja.FunctionCall) goja.Value {
+			id := strings.TrimSpace(call.Argument(0).String())
+			handler, ok := goja.AssertFunction(call.Argument(2))
+			if id == "" {
+				panic(vm.NewTypeError("server.registerNotificationChannel requires a channel id"))
+			}
+			if !ok {
+				panic(vm.NewTypeError("server.registerNotificationChannel requires a function handler"))
+			}
+			rawConfiguration, err := exportJSValue(call.Argument(1))
+			if err != nil {
+				panic(vm.NewTypeError("server.registerNotificationChannel requires a managed configuration object"))
+			}
+			configurationJSON, err := json.Marshal(rawConfiguration)
+			if err != nil {
+				panic(vm.NewTypeError("server.registerNotificationChannel requires a managed configuration object"))
+			}
+			var configuration models.Configuration
+			if err := json.Unmarshal(configurationJSON, &configuration); err != nil {
+				panic(vm.NewTypeError("server.registerNotificationChannel requires a managed configuration object"))
+			}
+			if err := m.registerNotificationChannel(inst.info.Short, id, configuration, handler, host); err != nil {
+				panic(vm.NewGoError(err))
+			}
+			return goja.Undefined()
+		})
 		_ = exports.Set("getConfig", func(call goja.FunctionCall) goja.Value {
 			promise, resolve, reject := vm.NewPromise()
 			go func() {
@@ -264,6 +305,19 @@ func jsRPCError(vm *goja.Runtime, e *rpc.JsonRpcError) *goja.Object {
 		_ = obj.Set("data", e.Data)
 	}
 	return obj
+}
+
+func normalizeRPCValue(value any) (any, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("serialize RPC result: %w", err)
+	}
+
+	var normalized any
+	if err := json.Unmarshal(data, &normalized); err != nil {
+		return nil, fmt.Errorf("decode RPC result: %w", err)
+	}
+	return normalized, nil
 }
 
 // registerRoute registers (or reuses) a gin route slot for one plugin. It is

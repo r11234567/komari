@@ -393,8 +393,15 @@ func headerToMap(header http.Header) map[string]any {
 }
 
 func isUpgradeRequest(r *http.Request) bool {
-	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Connection")), "upgrade") ||
-		strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+	if r.Header.Get("Upgrade") == "" {
+		return false
+	}
+	for _, token := range strings.Split(r.Header.Get("Connection"), ",") {
+		if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+			return true
+		}
+	}
+	return false
 }
 
 // bufferedResponseWriter captures status/headers/body so response hooks can

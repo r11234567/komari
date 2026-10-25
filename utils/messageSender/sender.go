@@ -1,17 +1,19 @@
 package messageSender
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	logger "github.com/komari-monitor/komari/utils/log"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/config"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/messageSender/factory"
 )
 
@@ -82,6 +84,14 @@ func Initialize() {
 }
 
 func SendTextMessage(message string, title string) error {
+	method, _ := config.GetAs[string](config.NotificationMethodKey, "none")
+	if NotificationChannelRegistered(method) {
+		return CallNotificationChannel(context.Background(), method, Notification{
+			Title:   title,
+			Message: message,
+		})
+	}
+
 	if CurrentProvider() == nil {
 		return fmt.Errorf("message sender provider is not initialized")
 	}
@@ -103,10 +113,31 @@ func SendTextMessage(message string, title string) error {
 	auditlog.Log("", "", "Failed to send message after 3 attempts: "+err.Error()+","+title, "error")
 	return err
 }
-func SendEvent(event models.EventMessage) error {
-	if CurrentProvider() == nil {
-		return fmt.Errorf("message sender provider is not initialized")
+
+// SendNotification 是通知发送的统一实现：解析事件中的客户端 UUID（外部传入可只含
+// UUID 字段）后委托 SendEvent。内部调用与 admin:sendNotification RPC 共用此实现。
+func SendNotification(event models.EventMessage) error {
+	if len(event.Clients) > 0 {
+		db := dbcore.GetDBInstance()
+		eventClients := make([]models.Client, 0, len(event.Clients))
+		for _, c := range event.Clients {
+			if c.UUID == "" {
+				continue
+			}
+			var full models.Client
+			if err := db.Where("uuid = ?", c.UUID).First(&full).Error; err == nil {
+				eventClients = append(eventClients, full)
+			}
+		}
+		if len(eventClients) == 0 {
+			return fmt.Errorf("none of the specified clients exist")
+		}
+		event.Clients = eventClients
 	}
+	return SendEvent(event)
+}
+
+func SendEvent(event models.EventMessage) error {
 	if event.Time.IsZero() {
 		event.Time = time.Now().UTC()
 	} else {
@@ -124,6 +155,32 @@ func SendEvent(event models.EventMessage) error {
 		return nil
 	}
 
+	method, _ := config.GetAs[string](config.NotificationMethodKey, "none")
+	if method == "" || method == "none" {
+		return nil
+	}
+
+	messageTemplate := cfg[config.NotificationTemplateKey].(string)
+	messageTemplate = parseTemplate(messageTemplate, event)
+
+	if NotificationChannelRegistered(method) {
+		err = CallNotificationChannel(context.Background(), method, Notification{
+			Event:   event,
+			Title:   fmt.Sprint(event.Event),
+			Message: messageTemplate,
+		})
+		if err == nil {
+			auditlog.Log("", "", "Event message sent: "+fmt.Sprint(event.Event), "info")
+			return nil
+		}
+		auditlog.Log("", "", "Failed to send event message: "+err.Error()+","+fmt.Sprint(event.Event), "error")
+		return err
+	}
+
+	if CurrentProvider() == nil {
+		return fmt.Errorf("message sender provider is not initialized")
+	}
+
 	// 检查提供者是否实现了 IEventMessageSender 接口
 	if eventSender, ok := CurrentProvider().(factory.IEventMessageSender); ok {
 		// 如果实现了,直接调用 SendEvent
@@ -139,10 +196,6 @@ func SendEvent(event models.EventMessage) error {
 	}
 
 	// 如果没有实现,使用模板格式化为文本消息
-	messageTemplate := cfg[config.NotificationTemplateKey].(string)
-
-	messageTemplate = parseTemplate(messageTemplate, event)
-
 	for i := 0; i < 3; i++ {
 		err = CurrentProvider().SendTextMessage(messageTemplate, event.Event)
 		if err == nil || err.Error() == "short response: \x00\x00\x00\x1a\x00\x00\x00" { // QQ 会返回这个错误，但实际上消息是发送成功的
@@ -170,6 +223,7 @@ func parseTemplate(messageTemplate string, event models.EventMessage) string {
 	replaceMap := map[string]string{
 		"{{event}}":   event.Event,
 		"{{client}}":  joinedClients,
+		"{{clients}}": joinedClients,
 		"{{time}}":    event.Time.UTC().Format(time.RFC3339Nano),
 		"{{message}}": event.Message,
 		"{{emoji}}":   event.Emoji,
