@@ -113,6 +113,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
     await dialog.getByPlaceholder('000000').fill(await freshCode());
     await dialog.getByRole('button', { name: 'Confirm', exact: true }).click();
     await expect(dialog).toBeHidden();
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.body).pointerEvents)).not.toBe('none');
     await expect(page.locator('.km-terminal-session:visible textarea.xterm-helper-textarea')).toBeAttached();
   }
   async function promptCode(action) {
