@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,25 @@ import (
 	"github.com/komari-monitor/komari/pkg/jsruntime/native"
 	"github.com/komari-monitor/komari/pkg/jsruntime/require"
 )
+
+// Runtime console callbacks may still be writing after a Promise resolves.
+// Readers must synchronize with the event loop instead of relying on sleeps.
+type consoleTestBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *consoleTestBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *consoleTestBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
+}
 
 func TestNewReturnsRuntimeWithInjectedGlobals(t *testing.T) {
 	runtime, err := New(`
@@ -73,7 +93,7 @@ func TestURLSearchParamsGlobal(t *testing.T) {
 }
 
 func TestConsoleMethodsWriteMessagesAndStacks(t *testing.T) {
-	var output bytes.Buffer
+	var output consoleTestBuffer
 	runtime, err := New(`
         function sendMessage() {
             console.debug("debug");
@@ -397,7 +417,7 @@ func TestEventLoopRunsMicrotasksBeforeTimers(t *testing.T) {
 }
 
 func TestTimerCallbackTimeoutDoesNotBlockEventLoop(t *testing.T) {
-	var output bytes.Buffer
+	var output consoleTestBuffer
 	runtime, err := New(`
 		function startTimer() {
 			setTimeout(() => {

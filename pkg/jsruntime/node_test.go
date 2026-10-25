@@ -1,7 +1,6 @@
 package jsruntime
 
 import (
-	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -249,7 +248,7 @@ func TestProcessExitZeroIsNormalTermination(t *testing.T) {
 }
 
 func TestAsyncProcessExitZeroIsNotReportedAsFailure(t *testing.T) {
-	var output bytes.Buffer
+	var output consoleTestBuffer
 	runtime, err := New(`
 		function sendMessage() {
 			setTimeout(() => process.exit(0), 0);
@@ -274,7 +273,7 @@ func TestHTTPClientRequestErrorWithoutListenerStillCloses(t *testing.T) {
 	url := server.URL
 	server.Close()
 
-	var output bytes.Buffer
+	var output consoleTestBuffer
 	runtime, err := New(`
 		function sendMessage(url) {
 			return new Promise((resolve) => {
