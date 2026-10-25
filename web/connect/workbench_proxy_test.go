@@ -3,6 +3,7 @@ package connectapi
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -146,7 +147,7 @@ func TestWorkbenchNginxFileLeaseAndDuplexAttach(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("file metadata response did not reach the caller")
 	}
-	if _, err := stream.Receive(); err != io.EOF {
+	if _, err := stream.Receive(); !errors.Is(err, io.EOF) {
 		t.Fatalf("attach completion: %v", err)
 	}
 	t.Log("small file lease and account-bound duplex result completed through checked-in Nginx routes")
