@@ -1,6 +1,12 @@
 # Real feature integration on GitHub-hosted runners
 
-Run **Feature audit - real end-to-end** (`feature-e2e.yml`) on the audit branch.
+**Paused by default:** this workflow has only a manual `workflow_dispatch`
+trigger, with a second job-level event guard. Pull requests and pushes never
+start it. Do not run it while the workspace/MoeJS changes are under review;
+use their focused hosted-runner CI checkpoints instead.
+
+When explicitly requested again, run **Feature audit - real end-to-end**
+(`feature-e2e.yml`) on the audit branch.
 Never execute these scripts on the panel VPS. Both shell and browser entry
 points require a GitHub-hosted Linux runner. There is no production deployment,
 repository write permission, production secret or external test target.

@@ -2,21 +2,6 @@ name: Feature audit - real end-to-end
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main, 'ci/feature-audit-*']
-    paths:
-      - '.github/workflows/feature-e2e.yml'
-      - 'scripts/ci/e2e/**'
-      - 'web/**'
-      - 'third_party/**'
-      - 'go.mod'
-      - 'go.sum'
-  pull_request:
-    paths:
-      - '.github/workflows/feature-e2e.yml'
-      - 'scripts/ci/e2e/**'
-      - 'web/**'
-      - 'third_party/**'
 
 permissions:
   contents: read
@@ -27,6 +12,7 @@ concurrency:
 
 jobs:
   integration:
+    if: github.event_name == 'workflow_dispatch'
     name: Built Web + server + installed nonroot Agent / HTTPS
     runs-on: ubuntu-24.04
     timeout-minutes: 45
