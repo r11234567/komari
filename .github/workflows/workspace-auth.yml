@@ -23,6 +23,16 @@ jobs:
       - name: Grant cancellation and terminal closure races
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh workspace-race bash scripts/ci/run-go-tests.sh -race ./web/workspace ./web/remotemanagement
+      - name: Install Nginx for the isolated transport component checkpoint
+        if: ${{ !cancelled() }}
+        run: |
+          bash scripts/ci/run-audit-check.sh nginx-install bash -c 'sudo apt-get update && sudo apt-get install -y nginx'
+          bash scripts/ci/run-audit-check.sh nginx-version nginx -V
+      - name: File lease and duplex handshake through actual Nginx (no browser E2E)
+        if: ${{ !cancelled() }}
+        env:
+          KOMARI_NGINX_COMPONENT_TEST: '1'
+        run: bash scripts/ci/run-audit-check.sh workbench-proxy bash scripts/ci/run-go-tests.sh -run '^TestWorkbenchNginxFileLeaseAndDuplexAttach$' ./web/connect
       - uses: actions/upload-artifact@v4
         if: always()
         with:
