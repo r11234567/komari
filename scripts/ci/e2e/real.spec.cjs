@@ -336,6 +336,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       expect(fs.existsSync(created)).toBe(false);
       const code = await freshCode();
       await rpc('file', 'CreateEntry', { agentId, path: created, kind: 'ENTRY_KIND_FILE', mode: '0600', twoFactor: { code } });
+      expect(fs.statSync(created).mode & 0o777).toBe(0o600);
       const replayPath = fixture('replay-must-not-exist.txt');
       const replay = await fileDenied('CreateEntry', { path: replayPath, kind: 'ENTRY_KIND_FILE', twoFactor: { code } });
       expect(replay.code).toBe('unauthenticated');

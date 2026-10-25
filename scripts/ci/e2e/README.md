@@ -35,7 +35,8 @@ The single sequential Playwright scenario tests:
   downloading through the Agent.
 - Missing/replayed file proofs, overwrite=false and recursive=false failures
   with assertions that existing files survive.
-- Create, copy, move, chmod, name search and delete, followed by an Agent
+- Create (including the requested Unix permission bits), copy, move, chmod,
+  name search and delete, followed by an Agent
   restart with the same identity, applied revision and working file channel.
 
 Each sensitive action waits for a genuinely new 30-second TOTP window. No
