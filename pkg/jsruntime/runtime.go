@@ -34,6 +34,7 @@ import (
 	pathmodule "github.com/komari-monitor/komari/pkg/jsruntime/path"
 	processmodule "github.com/komari-monitor/komari/pkg/jsruntime/process"
 	"github.com/komari-monitor/komari/pkg/jsruntime/timers"
+	tlsmodule "github.com/komari-monitor/komari/pkg/jsruntime/tls"
 	urlmodule "github.com/komari-monitor/komari/pkg/jsruntime/url"
 )
 
@@ -123,6 +124,7 @@ type Runtime struct {
 	processModule       *processmodule.Module
 	childProcessModule  *childprocess.Module
 	netModule           *netmodule.Module
+	tlsModule           *tlsmodule.Module
 	httpModule          *httpmodule.Module
 	cryptoModule        *cryptomodule.Module
 	urlModule           *urlmodule.Module
@@ -241,6 +243,7 @@ func New(script string, options Options) (*Runtime, error) {
 		})
 		runtime.childProcessModule = childprocess.New(host, filesystem, options.AllowExec, maxChildOutputBytes)
 		runtime.netModule = netmodule.New(host, options.AllowListen)
+		runtime.tlsModule = tlsmodule.New(host, runtime.netModule)
 		runtime.httpModule = httpmodule.New(host, options.AllowListen, maxHTTPBodyBytes)
 		runtime.cryptoModule = cryptomodule.New(host)
 		runtime.registerNodeModules(registry)

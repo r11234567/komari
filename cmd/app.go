@@ -28,6 +28,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/notifications"
 	"github.com/komari-monitor/komari/internal/plugin"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/corn"
@@ -238,7 +239,13 @@ func (a *App) InitProviders() error {
 		return geoip.Shutdown()
 	})
 
-	// 消息发送 provider。
+	// 消息发送 provider 与 notification channels。
+	if err := notifications.Initialize(); err != nil {
+		logger.Errorf("notifications", "Failed to initialize notification channels: %v", err)
+	}
+	a.addCleanup("notifications", func(context.Context) error {
+		return notifications.Shutdown()
+	})
 	messageSender.Initialize()
 	a.addCleanup("message-sender", func(context.Context) error {
 		return messageSender.Shutdown()

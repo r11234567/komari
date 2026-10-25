@@ -113,15 +113,16 @@ type Manager struct {
 
 // Instance is one loaded plugin runtime plus its host bindings.
 type Instance struct {
-	mu         sync.RWMutex
-	info       models.Plugin
-	dir        string
-	runtime    *jsruntime.Runtime
-	host       *jsruntime.Host
-	handlers   map[string]goja.Callable // "METHOD path" -> current route handler
-	statics    map[string]*staticConfig // mount path -> static folder config
-	rpcMethods map[string]goja.Callable // registered RPC method -> JS handler
-	cronJobs   []string                 // scheduler job names, removed on unload
+	mu                   sync.RWMutex
+	info                 models.Plugin
+	dir                  string
+	runtime              *jsruntime.Runtime
+	host                 *jsruntime.Host
+	handlers             map[string]goja.Callable // "METHOD path" -> current route handler
+	statics              map[string]*staticConfig // mount path -> static folder config
+	rpcMethods           map[string]goja.Callable // registered RPC method -> JS handler
+	cronJobs             []string                 // scheduler job names, removed on unload
+	notificationChannels map[string]struct{}
 }
 
 // global is the process-wide plugin manager.
@@ -151,6 +152,13 @@ func LoadAll() error {
 // declared permissions differ from the approved hash requires approved=true.
 func SetEnabled(short string, enabled, approved bool) error {
 	return global.setEnabled(short, enabled, approved)
+}
+
+// Reload unloads and loads an enabled plugin. The load hook completes before
+// this function returns; a failed load is persisted as the plugin's last
+// error and disables the plugin, matching the normal enable/startup path.
+func Reload(short string) error {
+	return global.reload(short)
 }
 
 // CloseAll unloads every loaded plugin. Used during server shutdown.
@@ -321,11 +329,15 @@ func (m *Manager) load(short string) error {
 // unload behavior. The caller must not hold any Manager lock.
 func (m *Manager) dropInstance(short string, inst *Instance) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.instances[short] != inst {
+		m.mu.Unlock()
 		return // replaced by a newer load or already unloaded
 	}
 	delete(m.instances, short)
+	m.mu.Unlock()
+	_ = m.unregisterNotificationChannels(inst)
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	inst.mu.Lock()
 	for method := range inst.rpcMethods {
 		rpc.Unregister(method)
@@ -377,6 +389,9 @@ func (m *Manager) unload(short string) error {
 				unloadErr = fmt.Errorf("plugin %q unload() failed: %w", short, err)
 			}
 		}
+	}
+	if err := m.unregisterNotificationChannels(inst); err != nil && unloadErr == nil {
+		unloadErr = err
 	}
 	m.mu.Lock()
 	inst.mu.Lock()
@@ -518,6 +533,16 @@ func (m *Manager) restartPlugin(short string) error {
 	st.LastError = ""
 	m.stateStore().set(short, st)
 	return nil
+}
+
+func (m *Manager) reload(short string) error {
+	if !m.stateStore().get(short).Enabled {
+		return nil
+	}
+	if err := m.unload(short); err != nil && !errors.Is(err, errNotLoaded) {
+		return err
+	}
+	return m.restartPlugin(short)
 }
 
 // disableWithError persists the auto-disable state for one plugin and wraps

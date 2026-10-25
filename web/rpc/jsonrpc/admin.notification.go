@@ -2,11 +2,14 @@ package jsonrpc
 
 import (
 	"context"
+	"encoding/json"
 
+	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"gorm.io/gorm/clause"
 )
@@ -15,6 +18,11 @@ import (
 // 通知相关 RPC2 方法（admin 命名空间）：负载告警、离线通知、流量报告、丢包告警。
 
 func init() {
+	// notification channels & send
+	reg("listNotificationChannels", adminListNotificationChannels, "List notification channels")
+	reg("getNotificationChannelConfiguration", adminGetNotificationChannelConfiguration, "Get notification channel configuration")
+	reg("setNotificationChannelConfiguration", adminSetNotificationChannelConfiguration, "Set notification channel configuration")
+	reg("sendNotification", adminSendNotification, "Send a notification")
 	// load notifications
 	reg("addLoadNotification", adminAddLoadNotification, "Create a load notification")
 	reg("deleteLoadNotification", adminDeleteLoadNotification, "Delete load notifications by ids")
@@ -42,6 +50,72 @@ func init() {
 // reg 是 admin 命名空间方法的注册便捷封装。
 func reg(name string, h rpc.Handler, summary string) {
 	RegisterWithGroupAndMeta(name, rpc.RoleAdmin, h, &rpc.MethodMeta{Name: "admin:" + name, Summary: summary})
+}
+
+func adminListNotificationChannels(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	return messageSender.ListNotificationChannels(), nil
+}
+
+func adminGetNotificationChannelConfiguration(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var params struct {
+		ID string `json:"id"`
+	}
+	req.BindParams(&params)
+	if params.ID == "" {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Channel ID is required", nil)
+	}
+	configuration, values, exists, err := messageSender.GetNotificationChannelConfiguration(params.ID)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to load notification channel configuration: "+err.Error(), nil)
+	}
+	if !exists {
+		return nil, rpc.MakeError(rpc.NotFound, "Notification channel not found: "+params.ID, nil)
+	}
+	return map[string]any{
+		"configuration": configuration,
+		"values":        values,
+	}, nil
+}
+
+func adminSetNotificationChannelConfiguration(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var params struct {
+		ID   string         `json:"id"`
+		Data map[string]any `json:"data"`
+	}
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request data: "+err.Error(), nil)
+	}
+	if params.ID == "" {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Channel ID is required", nil)
+	}
+	if !messageSender.NotificationChannelRegistered(params.ID) {
+		return nil, rpc.MakeError(rpc.NotFound, "Notification channel not found: "+params.ID, nil)
+	}
+	if params.Data == nil {
+		params.Data = map[string]any{}
+	}
+	addition, err := json.Marshal(params.Data)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid notification channel configuration: "+err.Error(), nil)
+	}
+	if err := database.SaveMessageSenderConfig(&models.MessageSenderProvider{
+		Name:     params.ID,
+		Addition: string(addition),
+	}); err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to save notification channel configuration: "+err.Error(), nil)
+	}
+	return nil, nil
+}
+
+func adminSendNotification(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var params models.EventMessage
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
+	}
+	if err := messageSender.SendNotification(params); err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to send notification: "+err.Error(), nil)
+	}
+	return nil, nil
 }
 
 func adminAddLoadNotification(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
