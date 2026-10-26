@@ -63,7 +63,13 @@ func Verify2FA(c *gin.Context) {
 // UnlockSignOn is separate from account-page verification and workspace unlocks.
 func UnlockSignOn(c *gin.Context) {
 	session, _ := c.Cookie("session_token")
-	token, err := signonauth.Create(api.GetPrincipal(c), session)
+	var token string
+	var err error
+	if c.GetBool("trusted_credential_verified") {
+		token, err = signonauth.CreateVerified(api.GetPrincipal(c), session, c.GetString("trusted_credential_state"))
+	} else {
+		token, err = signonauth.Create(api.GetPrincipal(c), session)
+	}
 	if err != nil {
 		api.RespondError(c, http.StatusUnauthorized, err.Error())
 		return

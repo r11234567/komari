@@ -12,6 +12,7 @@ import (
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/database/trafficledger"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/pkg/selfupdate"
 	"github.com/komari-monitor/komari/utils"
@@ -98,6 +99,7 @@ func publicGetMe(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcE
 		return guest, nil
 	}
 	u := meta.User
+	hasFactor, factorErr := credentialaction.HasSecondFactor(ctx, u.UUID)
 	return map[string]any{
 		"username":    u.Username,
 		"logged_in":   true,
@@ -105,8 +107,10 @@ func publicGetMe(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcE
 		"sso_type":    u.SSOType,
 		"sso_id":      u.SSOID,
 		"2fa_enabled": u.TwoFactor != "",
-		"language":    u.Language,
-		"color":       u.Color,
+		// Unknown provider state must keep the browser gate closed.
+		"trusted_2fa_enabled": hasFactor || factorErr != nil,
+		"language":            u.Language,
+		"color":               u.Color,
 	}, nil
 }
 
