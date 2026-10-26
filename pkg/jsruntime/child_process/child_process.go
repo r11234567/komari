@@ -259,9 +259,14 @@ func (m *Module) spawnChild(vm *moejs.Runtime, command string, arguments []strin
 		return child
 	}
 	_ = native.Set(vm, child, "pid", cmd.Process.Pid)
+	outputCtx, stopOutput := context.WithCancel(context.Background())
 	resourceID := m.runtime.AddResource(func() {
+		stopOutput()
 		_ = cmd.Process.Kill()
 		cancel()
+		_ = stdin.Close()
+		_ = stdoutReader.Close()
+		_ = stderrReader.Close()
 	})
 	if resourceID == 0 {
 		_ = stdin.Close()
@@ -304,10 +309,15 @@ func (m *Module) spawnChild(vm *moejs.Runtime, command string, arguments []strin
 		}
 		return native.From(vm, false), nil
 	}))
-	m.pipeChildOutput(vm, stdoutReader, stdout, options.encoding)
-	m.pipeChildOutput(vm, stderrReader, stderr, options.encoding)
+	stdoutDone := m.pipeChildOutput(outputCtx, vm, stdoutReader, stdout, options.encoding)
+	stderrDone := m.pipeChildOutput(outputCtx, vm, stderrReader, stderr, options.encoding)
 	go func() {
+		// Wait closes StdoutPipe/StderrPipe. Drain both first and deliver their queued
+		// JS events before publishing close; otherwise fast children can lose output.
+		<-stdoutDone
+		<-stderrDone
 		err := cmd.Wait()
+		stopOutput()
 		cancel()
 		m.runtime.RemoveResource(resourceID)
 		exitCode := 0
@@ -422,13 +432,15 @@ func childCallback(args []moejs.Value) moejs.Value {
 	}
 	return moejs.Undefined()
 }
-func (m *Module) pipeChildOutput(vm *moejs.Runtime, reader io.Reader, stream *engine.Object, encoding string) {
+func (m *Module) pipeChildOutput(ctx context.Context, vm *moejs.Runtime, reader io.Reader, stream *engine.Object, encoding string) <-chan struct{} {
+	done := make(chan struct{})
 	push, _ := checkedFunction(native.Get(vm, stream, "push"))
 	setEncoding, _ := checkedFunction(native.Get(vm, stream, "setEncoding"))
 	if encoding != "" && !native.IsNil(setEncoding) {
 		_, _ = native.Call(vm, setEncoding, engine.ObjectValue(stream), native.From(vm, encoding))
 	}
 	go func() {
+		defer close(done)
 		data := make([]byte, 32*1024)
 		for {
 			count, err := reader.Read(data)
@@ -445,7 +457,11 @@ func (m *Module) pipeChildOutput(vm *moejs.Runtime, reader io.Reader, stream *en
 				}) {
 					return
 				}
-				<-delivered
+				select {
+				case <-delivered:
+				case <-ctx.Done():
+					return
+				}
 			}
 			if err != nil {
 				m.runtime.RunOnLoop(func(vm *moejs.Runtime) {
@@ -458,6 +474,7 @@ func (m *Module) pipeChildOutput(vm *moejs.Runtime, reader io.Reader, stream *en
 			}
 		}
 	}()
+	return done
 }
 func (m *Module) execChild(vm *moejs.Runtime, command string, arguments []string, options childCommandOptions, callback moejs.Value) *engine.Object {
 	child := events.NewEmitter(vm)
