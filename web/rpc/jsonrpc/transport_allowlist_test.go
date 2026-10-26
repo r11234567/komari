@@ -30,6 +30,8 @@ func TestRPC2CompatibilitySurface(t *testing.T) {
 	}
 
 	denied := []string{
+		"admin:listTrustedCredentialProviders", "admin:beginTrustedCredentialVerification",
+		"admin:completeTrustedCredentialVerification", "admin:cancelTrustedCredentialVerification",
 		"admin:getSettings",
 		"admin:listPlugins", "admin:setPluginEnabled", "admin:getPluginLogs",
 		"admin:deletePlugin", "admin:getPluginConfiguration", "admin:setPluginConfiguration",

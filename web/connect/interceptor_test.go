@@ -8,6 +8,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	credentialv1connect "github.com/r11234567/komari-proto/gen/go/komari/credential/v1/credentialv1connect"
 	metricsv1connect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
 	networkv1connect "github.com/r11234567/komari-proto/gen/go/komari/network/v1/networkv1connect"
 )
@@ -15,6 +16,10 @@ import (
 func TestPolicyDeclaresEveryGeneratedProcedure(t *testing.T) {
 	interceptor := newPolicyInterceptor()
 	expected := []string{
+		credentialv1connect.TrustedCredentialServiceListTrustedCredentialProvidersProcedure,
+		credentialv1connect.TrustedCredentialServiceBeginVerificationProcedure,
+		credentialv1connect.TrustedCredentialServiceCompleteVerificationProcedure,
+		credentialv1connect.TrustedCredentialServiceCancelVerificationProcedure,
 		"/komari.workspace.v1.WorkspaceService/UnlockWorkspace",
 		"/komari.workspace.v1.WorkspaceService/GetWorkspace",
 		"/komari.workspace.v1.WorkspaceService/TouchWorkspace",
