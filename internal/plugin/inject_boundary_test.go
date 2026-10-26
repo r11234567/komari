@@ -8,8 +8,7 @@ import (
 )
 
 func TestHTMLInjectorLeavesFileDataPlaneUnwrapped(t *testing.T) {
-	manager := &Manager{}
-	manager.registerInject("fixture", `<meta name="fixture" content="enabled">`, "")
+	manager := &Manager{injects: []*injectEntry{{short: "fixture", head: `<meta name="fixture" content="enabled">`}}}
 	handler := manager.htmlInjectHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, wrapped := w.(*htmlInjectWriter); wrapped {
 			t.Error("file data plane must receive the original writer")
@@ -32,8 +31,7 @@ func TestHTMLInjectorLeavesFileDataPlaneUnwrapped(t *testing.T) {
 }
 
 func TestHTMLInjectorStillAddsOrdinaryPageMetadata(t *testing.T) {
-	manager := &Manager{}
-	manager.registerInject("fixture", `<meta name="fixture" content="enabled">`, "")
+	manager := &Manager{injects: []*injectEntry{{short: "fixture", head: `<meta name="fixture" content="enabled">`}}}
 	handler := manager.htmlInjectHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte("<html><head></head><body>Application</body></html>"))
