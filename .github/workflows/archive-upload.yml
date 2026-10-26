@@ -1,0 +1,25 @@
+name: Archive upload and plugin management checkpoint
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  archives:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Ownership, limits, retries, merge cancellation and archive validation
+        run: bash scripts/ci/run-audit-check.sh archives bash scripts/ci/run-go-tests.sh -race ./web/upload ./web/api/admin ./internal/plugingateway
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: archive-upload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
