@@ -46,3 +46,11 @@ func TestManagementValidatesNamesAndCancellation(t *testing.T) {
 		t.Fatalf("canceled delete: %v", err)
 	}
 }
+
+func TestManifestLookupPreservesErrorClassification(t *testing.T) {
+	ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: rpc.NewUserPrincipal("user")})
+	_, _, err := Configuration(ctx, "../invalid-name")
+	if !errors.Is(err, ErrManifestLookup) {
+		t.Fatalf("manifest error lost classification: %v", err)
+	}
+}

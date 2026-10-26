@@ -103,3 +103,11 @@ func TestPluginRPCGatewayAccess(t *testing.T) {
 		t.Fatalf("unregistered method must be blocked by gateway allowlist, got: %#v", unregisteredResp)
 	}
 }
+
+func TestPluginConfigurationPreservesNotFound(t *testing.T) {
+	ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: rpc.NewUserPrincipal("user")})
+	_, err := adminGetPluginConfiguration(ctx, &rpc.JsonRpcRequest{Params: map[string]any{"short": "../invalid-name"}})
+	if err == nil || err.Code != rpc.NotFound {
+		t.Fatalf("manifest lookup mapping changed: %v", err)
+	}
+}
