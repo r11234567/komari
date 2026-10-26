@@ -94,10 +94,21 @@ func deriveBinding(ctx context.Context, user models.User, token string, created 
 		return credential.Binding{}, credential.ErrProviderUnavailable
 	}
 	version, _ := json.Marshal([]string{user.Passwd, user.TwoFactor, user.CredentialVersion, created.UTC().Format(time.RFC3339Nano), passkey.Revision})
-	sessionHash := sha256.Sum256([]byte(token))
+	sessionHash := opaqueDigest("session", token)
 	mac := hmac.New(sha256.New, securityVersionKey)
 	_, _ = mac.Write(version)
 	return credential.Binding{UserID: user.UUID, SessionDigest: hex.EncodeToString(sessionHash[:]), SecurityVersion: hex.EncodeToString(mac.Sum(nil))}, nil
+}
+
+// opaqueDigest indexes random capabilities and rate-limit identities. This is
+// not password verification/storage; actual passwords are checked with bcrypt.
+func opaqueDigest(namespace, value string) [32]byte {
+	mac := hmac.New(sha256.New, securityVersionKey)
+	raw, _ := json.Marshal([]string{namespace, value})
+	_, _ = mac.Write(raw)
+	var digest [32]byte
+	copy(digest[:], mac.Sum(nil))
+	return digest
 }
 
 func validateBinding(ctx context.Context, binding credential.Binding) error {

@@ -128,8 +128,10 @@ func (e *Engine) digest(prefix []byte, code string) []byte {
 }
 
 func (e *Engine) reserve(user string, d Destination) bool {
-	userKey := sha256.Sum256([]byte("user:" + user))
-	targetKey := sha256.Sum256([]byte("target:" + d.Kind + ":" + d.Address))
+	var userKey, targetKey [32]byte
+	copy(userKey[:], e.digest([]byte("send-user"), user))
+	target, _ := json.Marshal([]string{d.Kind, d.Address})
+	copy(targetKey[:], e.digest([]byte("send-target"), string(target)))
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	now := e.now()

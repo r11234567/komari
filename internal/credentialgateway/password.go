@@ -3,7 +3,6 @@ package credentialgateway
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"strings"
@@ -62,7 +61,7 @@ func (g *Gateway) passwordIdentity(ctx context.Context, token string) (credentia
 	if len(token) != 64 || !passwordLoginEnabled() {
 		return credential.Binding{}, models.User{}, credential.ErrUnauthenticated
 	}
-	key := sha256.Sum256([]byte(token))
+	key := opaqueDigest("password-preauth", token)
 	g.password.mu.Lock()
 	state, ok := g.password.pending[key]
 	g.password.mu.Unlock()
@@ -129,7 +128,7 @@ func (g *Gateway) BeginPassword(ctx context.Context, username, password, remoteI
 	if err != nil || confirmedPasskey.Revision != passkey.Revision {
 		return PasswordStart{}, credential.ErrUnauthenticated
 	}
-	key := sha256.Sum256([]byte(token))
+	key := opaqueDigest("password-preauth", token)
 	g.password.mu.Lock()
 	count := 0
 	for k, state := range g.password.pending {
@@ -194,7 +193,7 @@ func (g *Gateway) finishPassword(ctx context.Context, token, userAgent, remoteIP
 	if err != nil {
 		return "", "", err
 	}
-	key := sha256.Sum256([]byte(token))
+	key := opaqueDigest("password-preauth", token)
 	g.password.mu.Lock()
 	state, ok := g.password.pending[key]
 	if ok && state.binding == b && time.Now().Before(state.expires) {
@@ -215,7 +214,7 @@ func (g *Gateway) finishPassword(ctx context.Context, token, userAgent, remoteIP
 }
 
 func (g *Gateway) CancelPassword(token string) bool {
-	key := sha256.Sum256([]byte(token))
+	key := opaqueDigest("password-preauth", token)
 	g.password.mu.Lock()
 	state, ok := g.password.pending[key]
 	delete(g.password.pending, key)
@@ -227,7 +226,7 @@ func (g *Gateway) CancelPassword(token string) bool {
 }
 
 func (g *Gateway) reservePasswordAttempt(username, remoteIP string) bool {
-	keys := [][32]byte{sha256.Sum256([]byte("name:" + strings.ToLower(username))), sha256.Sum256([]byte("ip:" + remoteIP))}
+	keys := [][32]byte{opaqueDigest("password-account-budget", strings.ToLower(username)), opaqueDigest("password-ip-budget", remoteIP)}
 	now := time.Now()
 	g.password.mu.Lock()
 	defer g.password.mu.Unlock()
