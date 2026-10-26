@@ -101,6 +101,7 @@ func TestZeroDeltaModeSwitchIsRecorded(t *testing.T) {
 
 func TestTotalCalibrationRecoversMissingHistoryWithZeroDelta(t *testing.T) {
 	db := openCalibrationTestDB(t, "provider-total-incomplete")
+	openTrafficMetricStore(t, 1)
 	day := 20
 	client := models.Client{UUID: "node", Token: "token", TrafficResetDay: &day, TrafficResetTime: "00:05:00", TrafficLimitType: "sum"}
 	require.NoError(t, db.Create(&client).Error)
