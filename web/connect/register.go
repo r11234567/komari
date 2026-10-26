@@ -6,6 +6,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/internal/passkeycredential"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/workspace"
@@ -109,7 +110,9 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 				meta.SessionToken = session
 			}
 		}
-		c.Request = c.Request.WithContext(workspace.WithSecure(workspace.WithToken(rpc.NewContextWithMeta(c.Request.Context(), meta), c.GetHeader(workspace.Header)), c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"))
+		secure := c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
+		ctx := passkeycredential.WithRequestOrigin(rpc.NewContextWithMeta(c.Request.Context(), meta), c.Request.Host, secure)
+		c.Request = c.Request.WithContext(workspace.WithSecure(workspace.WithToken(ctx, c.GetHeader(workspace.Header)), secure))
 		handler.ServeHTTP(c.Writer, c.Request)
 	}
 }
