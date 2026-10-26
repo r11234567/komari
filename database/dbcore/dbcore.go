@@ -522,6 +522,7 @@ func doInitialize() error {
 		&models.TrafficReportNotification{},
 		&models.TrafficDailyLedger{},
 		&models.TrafficCalibrationAdjustment{},
+		&models.TrafficCycleFirstDay{},
 		&models.PingTask{},
 		&models.PingLossNotification{},
 		&models.ReturnRouteTask{},
@@ -629,6 +630,7 @@ func cleanupOrphanedClientData(db *gorm.DB) error {
 			"traffic report notifications":    &models.TrafficReportNotification{},
 			"traffic daily ledger":            &models.TrafficDailyLedger{},
 			"traffic calibration adjustments": &models.TrafficCalibrationAdjustment{},
+			"traffic cycle first day":         &models.TrafficCycleFirstDay{},
 		} {
 			if !tx.Migrator().HasTable(model) {
 				continue

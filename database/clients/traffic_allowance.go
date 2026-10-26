@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/pkg/trafficreset"
 	"gorm.io/gorm"
 )
 
@@ -34,21 +35,15 @@ func cycleBoundary(year int, month time.Month, resetDay int) time.Time {
 }
 
 func currentTrafficCycle(resetDay *int, now time.Time) string {
-	if resetDay == nil || *resetDay < 1 || *resetDay > 31 {
-		return ""
-	}
-	local := now.In(trafficCycleLocation)
-	boundary := cycleBoundary(local.Year(), local.Month(), *resetDay)
-	if local.Before(boundary) {
-		previous := local.AddDate(0, -1, 0)
-		boundary = cycleBoundary(previous.Year(), previous.Month(), *resetDay)
-	}
-	return boundary.Format(time.DateOnly)
+	return currentTrafficCycleAt(resetDay, "", "", now)
+}
+func currentTrafficCycleAt(resetDay *int, clock, timezone string, now time.Time) string {
+	return trafficreset.FromFields(resetDay, clock, timezone).CycleKey(now)
 }
 
 func applyClientDisplayFields(client *models.Client, now time.Time) bool {
 	changed := false
-	cycle := currentTrafficCycle(client.TrafficResetDay, now)
+	cycle := currentTrafficCycleAt(client.TrafficResetDay, client.TrafficResetTime, client.TrafficResetTimezone, now)
 	if client.TrafficResetAllowance < 0 || cycle == "" || client.TrafficResetCycle != cycle {
 		if client.TrafficResetAllowance != 0 || client.TrafficResetCycle != "" {
 			client.TrafficResetAllowance = 0

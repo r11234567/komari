@@ -259,6 +259,11 @@ func maintainWithDailyCalculator(ctx context.Context, db *gorm.DB, now time.Time
 			return err
 		}
 	}
+	if db.Migrator().HasTable(&models.TrafficCycleFirstDay{}) {
+		if err := persistCycleFirstDays(ctx, db, now); err != nil {
+			return err
+		}
+	}
 	for _, target := range targets {
 		cutoff := dayKey(today.AddDate(0, 0, -target.retentionDays))
 		if err := db.WithContext(ctx).

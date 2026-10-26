@@ -16,14 +16,14 @@ import (
 )
 
 type trafficCalibrationRequest struct {
-	TargetUp   int64 `json:"target_up"`
-	TargetDown int64 `json:"target_down"`
+	TargetUp   *int64 `json:"target_up"`
+	TargetDown *int64 `json:"target_down"`
 }
 
 func findTrafficCalibrationClient(uuid string) (models.Client, error) {
 	var client models.Client
 	err := dbcore.GetDBInstance().
-		Select("uuid", "name", "traffic_reset_day").
+		Select("uuid", "name", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone").
 		Where("uuid = ?", uuid).
 		First(&client).Error
 	return client, err
@@ -39,7 +39,7 @@ func GetTrafficCalibration(c *gin.Context) {
 		api.RespondError(c, http.StatusInternalServerError, "读取服务器失败："+err.Error())
 		return
 	}
-	if _, _, err := trafficledger.CurrentTrafficCycle(client.TrafficResetDay, time.Now().UTC()); err != nil {
+	if _, _, err := trafficledger.CurrentTrafficCycleFor(client, time.Now().UTC()); err != nil {
 		api.RespondSuccess(c, gin.H{
 			"available": false,
 			"client":    client.UUID,
@@ -63,7 +63,7 @@ func UpdateTrafficCalibration(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "流量校准参数无效："+err.Error())
 		return
 	}
-	if request.TargetUp < 0 || request.TargetDown < 0 {
+	if request.TargetUp == nil || request.TargetDown == nil || *request.TargetUp < 0 || *request.TargetDown < 0 {
 		api.RespondError(c, http.StatusBadRequest, "校准后的上传和下载流量不能小于 0")
 		return
 	}
@@ -82,7 +82,7 @@ func UpdateTrafficCalibration(c *gin.Context) {
 		c.Request.Context(),
 		dbcore.GetDBInstance(),
 		client,
-		trafficledger.Usage{Up: request.TargetUp, Down: request.TargetDown},
+		trafficledger.Usage{Up: *request.TargetUp, Down: *request.TargetDown},
 		fmt.Sprint(actor),
 		now,
 	)
@@ -93,7 +93,7 @@ func UpdateTrafficCalibration(c *gin.Context) {
 	auditlog.Log(
 		c.ClientIP(),
 		fmt.Sprint(actor),
-		fmt.Sprintf("calibrated traffic for client %s to up=%d down=%d", client.UUID, request.TargetUp, request.TargetDown),
+		fmt.Sprintf("calibrated traffic for client %s to up=%d down=%d", client.UUID, *request.TargetUp, *request.TargetDown),
 		"warn",
 	)
 	api.RespondSuccess(c, gin.H{"available": true, "snapshot": snapshot})

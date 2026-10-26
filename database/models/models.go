@@ -47,8 +47,10 @@ type Client struct {
 	TrafficLimit           int64      `json:"traffic_limit" gorm:"type:bigint"`
 	TrafficLimitType       string     `json:"traffic_limit_type" gorm:"type:varchar(10);default:'max'"` // 流量阈值类型：sum max min up down
 	TrafficResetDay        *int       `json:"traffic_reset_day,omitempty" gorm:"type:int"`              // nil: follow agent; 0: disabled; 1-31: monthly reset day
+	TrafficResetTime       string     `json:"traffic_reset_time" gorm:"type:varchar(8);not null;default:'00:00:00'"`
+	TrafficResetTimezone   string     `json:"traffic_reset_timezone" gorm:"type:varchar(64);not null;default:'Asia/Shanghai'"`
 	TrafficResetAllowance  int64      `json:"traffic_reset_allowance" gorm:"type:bigint;not null;default:0"`
-	TrafficResetCycle      string     `json:"traffic_reset_cycle,omitempty" gorm:"type:varchar(10);not null;default:''"`
+	TrafficResetCycle      string     `json:"traffic_reset_cycle,omitempty" gorm:"type:varchar(64);not null;default:''"`
 	EffectiveTrafficLimit  int64      `json:"effective_traffic_limit" gorm:"-"`
 	EffectiveTrafficType   string     `json:"effective_traffic_type" gorm:"-"`
 	DeploymentStatus       string     `json:"deployment_status" gorm:"-"`

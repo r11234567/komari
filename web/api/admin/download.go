@@ -42,6 +42,7 @@ var configOnlyEmptyTables = []string{
 	"logs",
 	"traffic_daily_ledgers",
 	"traffic_calibration_adjustments",
+	"traffic_cycle_first_days",
 	"return_route_events",
 	"return_route_statuses",
 }

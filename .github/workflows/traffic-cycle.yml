@@ -1,0 +1,28 @@
+name: Traffic cycle and calibration checkpoint
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  traffic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 3GiB
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: UTC offsets, month ends, persistence, signed correction and raw metric isolation
+        run: bash scripts/ci/run-audit-check.sh traffic-cycle bash scripts/ci/run-go-tests.sh -race ./pkg/trafficreset ./database/trafficledger ./database/clients ./database/billing ./web/api/admin ./web/connect ./utils/notifier
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: traffic-cycle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
