@@ -133,9 +133,8 @@ func routesMigrated() (bool, error) {
 	return migrated, nil
 }
 
-// methodToSeed returns the old single channel when it is a real provider
-// with a saved connection. Unknown names and providers without a connection
-// seed an empty table, matching the previous silent fallback.
+// methodToSeed preserves registered channels and saved legacy plugin selections.
+// Unconfigured names seed an empty table.
 func methodToSeed(method string) (string, error) {
 	method = strings.TrimSpace(method)
 	if method == "" || method == "none" || method == "empty" {

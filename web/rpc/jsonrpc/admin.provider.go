@@ -154,8 +154,12 @@ func adminGetMessageSender(_ context.Context, req *rpc.JsonRpcRequest) (any, *rp
 		cfg, err := database.GetMessageSenderConfigByName(params.Provider)
 		if errors.Is(err, gorm.ErrRecordNotFound) && messageSender.NotificationChannelRegistered(params.Provider) {
 			defaults := map[string]any{}
-			for _, it := range senderConfigurations()[params.Provider] {
-				defaults[it.Name] = it.Default
+			for _, channel := range messageSender.ListNotificationChannels() {
+				if channel.ID == params.Provider {
+					for _, field := range managedconfig.Items(channel.Configuration) {
+						defaults[field.Key] = managedconfig.DefaultValue(field)
+					}
+				}
 			}
 			raw, _ := json.Marshal(defaults)
 			cfg = &models.MessageSenderProvider{Name: params.Provider, Addition: string(raw)}

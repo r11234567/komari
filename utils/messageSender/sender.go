@@ -99,9 +99,6 @@ func Initialize() {
 			}
 		})
 	}()
-	if err := EnsureRoutes(); err != nil {
-		logger.Errorf("message-sender", "Failed to prepare notification routes: %v", err)
-	}
 	if err := SyncProviders(); err != nil {
 		logger.Errorf("message-sender", "Failed to load notification channels: %v", err)
 	}
@@ -125,6 +122,27 @@ func SendNotification(event models.EventMessage) error {
 		}
 		event.Clients = eventClients
 	}
+	if event.Kind == "" {
+		event.Kind = KindForEvent(event.Event)
+	}
+	if event.Kind == "" {
+		enabled, err := config.GetAs[bool](config.NotificationEnabledKey, false)
+		if err != nil || !enabled {
+			return err
+		}
+		name, err := config.GetAs[string](config.NotificationMethodKey, "none")
+		if err != nil || name == "" || name == "none" {
+			return err
+		}
+		_, template, err := notificationDeliverySettings()
+		if err != nil {
+			return err
+		}
+		if event.Time.IsZero() {
+			event.Time = time.Now().UTC()
+		}
+		return deliverTo(name, event, template)
+	}
 	return SendEvent(event)
 }
 
@@ -138,7 +156,7 @@ func SendTextMessage(message, title string) error {
 	if err != nil || method == "none" || method == "" {
 		return err
 	}
-	return SendTestEventTo(method, models.EventMessage{Event: title, Message: message, Time: time.Now().UTC()})
+	return deliverTo(method, models.EventMessage{Event: title, Message: message, Time: time.Now().UTC()}, "{{message}}")
 }
 
 func SendEvent(event models.EventMessage) error {

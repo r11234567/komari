@@ -43,6 +43,7 @@ func loadProviderFromAdditionLocked(name, addition string) error {
 
 func loadProviderLocked(name string, provider factory.IMessageSender) error {
 	if err := provider.Init(); err != nil {
+		_ = provider.Destroy()
 		return fmt.Errorf("failed to init provider %s: %w", name, err)
 	}
 	if current, ok := providers[name]; ok && current != nil {
