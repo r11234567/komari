@@ -154,3 +154,22 @@ func TestNativeOTPSendBudgetCapacity(t *testing.T) {
 		t.Fatal("budget capacity exceeded")
 	}
 }
+
+func TestExistingContactThenNewDestinationCanBeVerifiedWithoutCooldownConflict(t *testing.T) {
+	now := time.Now()
+	sends := 0
+	e := New(Options{Now: func() time.Time { return now }, Deliver: func(context.Context, string, factory.CredentialDelivery) error { sends++; return nil }})
+	a := otpAttempt(now)
+	if _, _, err := e.Prepare(context.Background(), a, syntheticDestination()); err != nil {
+		t.Fatal(err)
+	}
+	d := syntheticDestination()
+	d.Address = "new-recipient@example.test"
+	a.ChallengeID = "new-binding"
+	if _, _, err := e.Prepare(context.Background(), a, d); err != nil {
+		t.Fatal("new-recipient proof blocked after existing-factor verification")
+	}
+	if sends != 2 {
+		t.Fatal("incorrect send count")
+	}
+}

@@ -91,11 +91,12 @@ func (e *Engine) Prepare(ctx context.Context, a credential.Attempt, d Destinatio
 		return credential.Prompt{}, nil, credential.ErrProviderUnavailable
 	}
 	prompt, _ := json.Marshal(map[string]any{"digits": 6, "method": "notification_otp", "destination": MaskAddress(d.Kind, d.Address)})
+	expires := a.ExpiresAt
 	verify := func(ctx context.Context, raw json.RawMessage) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !e.now().Before(a.ExpiresAt) {
+		if !e.now().Before(expires) {
 			return credential.ErrVerificationFailed
 		}
 		var proof struct {
@@ -140,7 +141,7 @@ func (e *Engine) reserve(user string, d Destination) bool {
 	newKeys := 0
 	for _, key := range [][32]byte{userKey, targetKey} {
 		b, exists := e.budgets[key]
-		if exists && (now.Before(b.Next) || b.Count >= MaxSendsPerWindow) {
+		if exists && ((key == targetKey && now.Before(b.Next)) || b.Count >= MaxSendsPerWindow) {
 			return false
 		}
 		if !exists {

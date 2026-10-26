@@ -6,7 +6,9 @@ import (
 	"errors"
 
 	"connectrpc.com/connect"
+	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/internal/credentialgateway"
+	"github.com/komari-monitor/komari/internal/notificationotp"
 	credential "github.com/komari-monitor/komari/internal/trustedcredential"
 	credentialv1 "github.com/r11234567/komari-proto/gen/go/komari/credential/v1"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -115,6 +117,8 @@ func credentialResponse[T any](msg *T) *connect.Response[T] {
 func credentialConnectError(err error) error {
 	code := connect.CodeInternal
 	switch {
+	case errors.Is(err, accounts.ErrLastCredential):
+		code = connect.CodeFailedPrecondition
 	case errors.Is(err, context.Canceled):
 		code = connect.CodeCanceled
 	case errors.Is(err, context.DeadlineExceeded):
@@ -135,4 +139,50 @@ func credentialConnectError(err error) error {
 		err = errors.New("credential operation failed")
 	}
 	return connect.NewError(code, err)
+}
+
+func (s *credentialService) GetCredentialContacts(ctx context.Context, _ *connect.Request[credentialv1.GetCredentialContactsRequest]) (*connect.Response[credentialv1.GetCredentialContactsResponse], error) {
+	settings, err := credentialgateway.Default.Contacts(ctx)
+	if err != nil {
+		return nil, credentialConnectError(err)
+	}
+	result := &credentialv1.GetCredentialContactsResponse{PasswordBootstrapAllowed: settings.PasswordBootstrapAllowed}
+	for _, contact := range settings.Contacts {
+		result.Contacts = append(result.Contacts, &credentialv1.CredentialContact{Kind: contact.Kind, MaskedAddress: notificationotp.MaskAddress(contact.Kind, contact.Address), Transport: contact.Transport, VerifiedAt: timestamppb.New(contact.VerifiedAt)})
+	}
+	for _, transport := range settings.Transports {
+		result.Transports = append(result.Transports, &credentialv1.CredentialTransport{Id: transport.ID, Kinds: transport.Kinds})
+	}
+	return credentialResponse(result), nil
+}
+
+func (s *credentialService) BeginContactBinding(ctx context.Context, req *connect.Request[credentialv1.BeginContactBindingRequest]) (*connect.Response[credentialv1.BeginContactBindingResponse], error) {
+	if len(req.Msg.Password) > 1024 {
+		return nil, credentialConnectError(credential.ErrInvalidArgument)
+	}
+	c, err := credentialgateway.Default.BeginContactBinding(ctx, notificationotp.Destination{Kind: req.Msg.Kind, Address: req.Msg.Address, Transport: req.Msg.Transport}, req.Msg.AuthorizationToken, req.Msg.Password)
+	if err != nil {
+		return nil, credentialConnectError(err)
+	}
+	prompt := &structpb.Struct{}
+	if err := prompt.UnmarshalJSON(c.Prompt.Data); err != nil {
+		return nil, credentialConnectError(credential.ErrProviderUnavailable)
+	}
+	return credentialResponse(&credentialv1.BeginContactBindingResponse{ChallengeId: c.ID, ExpiresAt: timestamppb.New(c.ExpiresAt), PromptType: c.Prompt.Type, Prompt: prompt}), nil
+}
+
+func (s *credentialService) SaveCredentialContact(ctx context.Context, req *connect.Request[credentialv1.SaveCredentialContactRequest]) (*connect.Response[credentialv1.SaveCredentialContactResponse], error) {
+	c, err := credentialgateway.Default.SaveContact(ctx, notificationotp.Destination{Kind: req.Msg.Kind, Address: req.Msg.Address, Transport: req.Msg.Transport}, req.Msg.GrantToken)
+	if err != nil {
+		return nil, credentialConnectError(err)
+	}
+	return credentialResponse(&credentialv1.SaveCredentialContactResponse{Contact: &credentialv1.CredentialContact{Kind: c.Kind, MaskedAddress: notificationotp.MaskAddress(c.Kind, c.Address), Transport: c.Transport, VerifiedAt: timestamppb.New(c.VerifiedAt)}}), nil
+}
+
+func (s *credentialService) DeleteCredentialContact(ctx context.Context, req *connect.Request[credentialv1.DeleteCredentialContactRequest]) (*connect.Response[credentialv1.DeleteCredentialContactResponse], error) {
+	deleted, err := credentialgateway.Default.DeleteContact(ctx, req.Msg.Kind, req.Msg.GrantToken)
+	if err != nil {
+		return nil, credentialConnectError(err)
+	}
+	return credentialResponse(&credentialv1.DeleteCredentialContactResponse{Deleted: deleted}), nil
 }

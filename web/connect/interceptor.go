@@ -48,7 +48,7 @@ func newPolicyInterceptor() *policyInterceptor {
 		}
 	}
 	add("/komari.workspace.v1.WorkspaceService/", rpc.RoleAdmin, 30*time.Second, "UnlockWorkspace", "GetWorkspace", "TouchWorkspace", "LockWorkspace")
-	add("/komari.credential.v1.TrustedCredentialService/", rpc.RoleAdmin, 30*time.Second, "ListTrustedCredentialProviders", "BeginVerification", "CompleteVerification", "CancelVerification")
+	add("/komari.credential.v1.TrustedCredentialService/", rpc.RoleAdmin, 30*time.Second, "ListTrustedCredentialProviders", "BeginVerification", "CompleteVerification", "CancelVerification", "GetCredentialContacts", "BeginContactBinding", "SaveCredentialContact", "DeleteCredentialContact")
 	add(dashboard, rpc.RoleAdmin, 30*time.Second, "GetDashboardSummary", "GetDashboardCharts", "ListDashboardAlertItems")
 	add(maintenance, rpc.RoleAdmin, 30*time.Second, "ListSessions", "DeleteSession", "DeleteAllSessions", "ListAuditLogs",
 		"ListClipboardEntries", "GetClipboardEntry", "CreateClipboardEntry", "UpdateClipboardEntry", "DeleteClipboardEntries",
