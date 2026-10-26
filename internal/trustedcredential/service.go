@@ -467,9 +467,12 @@ func validToken(token string) bool {
 	return err == nil
 }
 
-func providerError(ctx context.Context, _ error) error {
+func providerError(ctx context.Context, err error) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if errors.Is(err, ErrLimit) {
+		return ErrLimit
 	}
 	return ErrProviderUnavailable
 }
