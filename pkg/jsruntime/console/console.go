@@ -66,6 +66,18 @@ func (m *Module) write(vm *moe.Runtime, l level, values []moe.Value, withStack b
 		if err != nil {
 			x = native.String(vm, v)
 		}
+		// Error.message and Error.name are normally non-enumerable. ToGo only
+		// exports enumerable properties, hiding the explanation of RPC failures
+		// behind e.g. {"code":-32602}. Enrich the log snapshot, not the JS object.
+		if v.IsObject() && v.AsObject().Class() == e.ClassError {
+			if fields, ok := x.(map[string]any); ok && fields != nil {
+				for _, key := range []string{"name", "message"} {
+					if value, getErr := vm.Get(v, key); getErr == nil && value.IsString() {
+						fields[key] = value.AsString().GoString()
+					}
+				}
+			}
+		}
 		args[i] = x
 	}
 	message := ""

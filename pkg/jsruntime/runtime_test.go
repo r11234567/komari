@@ -138,6 +138,33 @@ func TestCallHandlesPromise(t *testing.T) {
 	}
 }
 
+func TestConsoleRetainsErrorMessagesAndCodes(t *testing.T) {
+	var output consoleTestBuffer
+	runtime, err := New(`
+		function sendMessage() {
+			const error = new Error("Invalid notification parameters");
+			error.code = -32602;
+			console.error("synthetic RPC failure:", error);
+			console.error("formatted=%o", error);
+			console.error(new TypeError("synthetic type failure"));
+			return !Object.prototype.propertyIsEnumerable.call(error, "message") &&
+				JSON.stringify(error) === '{"code":-32602}';
+		}
+	`, Options{Console: &output, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	if err := runtime.Call("sendMessage"); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"Invalid notification parameters", `"code":-32602`, `"name":"Error"`, "synthetic type failure", `"name":"TypeError"`, "formatted="} {
+		if !strings.Contains(output.String(), expected) {
+			t.Errorf("console output lost %q: %s", expected, output.String())
+		}
+	}
+}
+
 func TestNewDoesNotRequireSendMessage(t *testing.T) {
 	runtime, err := New(`
 		function ping() {
