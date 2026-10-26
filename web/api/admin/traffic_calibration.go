@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,6 +19,8 @@ import (
 type trafficCalibrationRequest struct {
 	TargetUp   *int64 `json:"target_up"`
 	TargetDown *int64 `json:"target_down"`
+	Cycle      string `json:"cycle"`
+	Note       string `json:"note"`
 }
 
 func findTrafficCalibrationClient(uuid string) (models.Client, error) {
@@ -78,6 +81,15 @@ func UpdateTrafficCalibration(c *gin.Context) {
 	}
 	actor, _ := c.Get("uuid")
 	now := time.Now().UTC()
+	_, cycle, cycleErr := trafficledger.CurrentTrafficCycleFor(client, now)
+	if cycleErr != nil || (request.Cycle != "" && request.Cycle != cycle) {
+		api.RespondError(c, http.StatusConflict, "流量周期已变化，请重新打开校准窗口")
+		return
+	}
+	if len([]rune(request.Note)) > 300 {
+		api.RespondError(c, http.StatusBadRequest, "校准说明最多 300 字")
+		return
+	}
 	snapshot, err := trafficledger.CalibrateCurrentCycle(
 		c.Request.Context(),
 		dbcore.GetDBInstance(),
@@ -93,7 +105,7 @@ func UpdateTrafficCalibration(c *gin.Context) {
 	auditlog.Log(
 		c.ClientIP(),
 		fmt.Sprint(actor),
-		fmt.Sprintf("calibrated traffic for client %s to up=%d down=%d", client.UUID, *request.TargetUp, *request.TargetDown),
+		fmt.Sprintf("calibrated traffic for client %s cycle=%s to up=%d down=%d note=%q", client.UUID, cycle, *request.TargetUp, *request.TargetDown, strings.TrimSpace(request.Note)),
 		"warn",
 	)
 	api.RespondSuccess(c, gin.H{"available": true, "snapshot": snapshot})
