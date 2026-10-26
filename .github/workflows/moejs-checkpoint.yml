@@ -23,6 +23,9 @@ jobs:
       - name: RPC2 allowlist, roles and workspace credential isolation
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh gateway bash scripts/ci/run-go-tests.sh ./pkg/rpc ./web/rpc/jsonrpc ./web/workspace ./web/connect
+      - name: Repeat fast-child output and close-order regression
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh child-output bash scripts/ci/run-go-tests.sh -count=20 -run 'TestChildProcessPermissionAndExecution|TestChildSpawnCloseWaitsForBothStreams' ./pkg/jsruntime
       - name: Require committed dependency metadata
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh dependency-diff git diff --exit-code -- go.mod go.sum
