@@ -24,7 +24,7 @@ type injectEntry struct {
 // response cannot be buffered.
 func (m *Manager) htmlInjectHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isUpgradeRequest(r) {
+		if isUpgradeRequest(r) || protectedWorkspacePath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}

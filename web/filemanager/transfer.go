@@ -345,7 +345,7 @@ func uploadRemoteChunkStream(c *gin.Context, clientUUID string) {
 
 	bodyDone := make(chan streamCopyResult, 1)
 	go func() {
-		written, copyErr := copyExactStream(transfer.writer, c.Request.Body, expectedSize, false, nil)
+		written, copyErr := copyExactPipe(transfer.writer, c.Request.Body, expectedSize)
 		if copyErr == nil && written != expectedSize {
 			copyErr = fmt.Errorf("upload body ended after %d of %d bytes", written, expectedSize)
 		}

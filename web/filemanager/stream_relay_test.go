@@ -125,6 +125,24 @@ func TestAgentTransferDownloadKeepsNormalEOFForSlowConsumer(t *testing.T) {
 	}
 }
 
+func TestCopyExactPipePreservesOrdinaryFileBytes(t *testing.T) {
+	for _, data := range [][]byte{nil, []byte("ordinary file contents\n"), bytes.Repeat([]byte("file-block\n"), streamBufferSize/10+1)} {
+		reader, writer := io.Pipe()
+		done := make(chan streamCopyResult, 1)
+		go func() {
+			written, err := copyExactPipe(writer, bytes.NewReader(data), int64(len(data)))
+			_ = writer.CloseWithError(err)
+			done <- streamCopyResult{bytes: written, err: err}
+		}()
+		got, err := io.ReadAll(reader)
+		_ = reader.Close()
+		result := <-done
+		if err != nil || result.err != nil || result.bytes != int64(len(data)) || !bytes.Equal(got, data) {
+			t.Fatalf("normal pipe copy: read=%v write=%v copied=%d expected=%d", err, result.err, result.bytes, len(data))
+		}
+	}
+}
+
 func TestAgentTransferRelaysLargeBodyOverHTTP(t *testing.T) {
 	testAgentTransferOverHTTP(t, false)
 }
