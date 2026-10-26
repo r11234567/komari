@@ -246,7 +246,7 @@ func AgentTransfer(c *gin.Context) {
 			c.String(http.StatusConflict, err.Error())
 			return
 		}
-		written, copyErr := copyExactStream(transfer.writer, c.Request.Body, transfer.size, false, nil)
+		written, copyErr := copyExactPipe(transfer.writer, c.Request.Body, transfer.size)
 		if copyErr == nil && written != transfer.size {
 			copyErr = fmt.Errorf("download stream ended after %d of %d bytes", written, transfer.size)
 		}
@@ -676,7 +676,42 @@ func copyStream(dst io.Writer, src io.Reader, limit int64, flush bool, onFirstWr
 	}
 }
 
-// copyExactStream copies exactly expected bytes and probes one additional byte
+// copyExactPipe is the inbound request-body boundary. Its concrete destination
+// can only be the relay pipe, never an HTTP response or a plugin response
+// wrapper. HTTP delivery is a separate path which commits its own MIME,
+// disposition and nosniff headers before forwarding any file bytes.
+func copyExactPipe(dst *io.PipeWriter, src io.Reader, expected int64) (int64, error) {
+	if expected < 0 {
+		return 0, errors.New("negative expected stream size")
+	}
+	buffer := streamBufferPool.Get().([]byte)
+	defer streamBufferPool.Put(buffer)
+	reader := io.LimitReader(src, expected)
+	var total int64
+	for total < expected {
+		read, readErr := reader.Read(buffer)
+		if read > 0 {
+			written, writeErr := dst.Write(buffer[:read])
+			total += int64(written)
+			if writeErr != nil {
+				return total, writeErr
+			}
+			if written != read {
+				return total, io.ErrShortWrite
+			}
+		}
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				return total, readErr
+			}
+			break
+		}
+	}
+	return finishExactStream(src, total, expected)
+}
+
+// copyExactStream is the outbound response path. It copies exactly expected
+// bytes and probes one additional byte
 // so an oversized request is rejected without forwarding the extra byte.
 func copyExactStream(dst io.Writer, src io.Reader, expected int64, flush bool, onFirstWrite func()) (int64, error) {
 	if expected < 0 {
@@ -686,6 +721,10 @@ func copyExactStream(dst io.Writer, src io.Reader, expected int64, flush bool, o
 	if err != nil {
 		return written, err
 	}
+	return finishExactStream(src, written, expected)
+}
+
+func finishExactStream(src io.Reader, written, expected int64) (int64, error) {
 	if written != expected {
 		return written, fmt.Errorf("stream ended after %d of %d bytes", written, expected)
 	}
