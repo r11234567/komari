@@ -515,6 +515,7 @@ func doInitialize() error {
 	err = instance.AutoMigrate(
 		&models.User{},
 		&models.CredentialContact{},
+		&models.PasskeyCounter{},
 		&models.Client{},
 		&models.ClientDeploymentProfile{},
 		&models.Log{},

@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Calcium-Ion/moejs"
@@ -113,6 +114,7 @@ type Manager struct {
 
 // Instance is one loaded plugin runtime plus its host bindings.
 type Instance struct {
+	generation           uint64
 	mu                   sync.RWMutex
 	info                 models.Plugin
 	dir                  string
@@ -123,6 +125,19 @@ type Instance struct {
 	rpcMethods           map[string]moejs.Value   // registered RPC method -> JS handler
 	cronJobs             []string                 // scheduler job names, removed on unload
 	notificationChannels map[string]struct{}
+}
+
+var runtimeGeneration atomic.Uint64
+
+// RuntimeGeneration is a Go-only lifecycle fingerprint. A disable/reload must
+// invalidate credential ceremonies even if the same package is enabled again.
+func RuntimeGeneration(short string) uint64 {
+	global.mu.RLock()
+	defer global.mu.RUnlock()
+	if instance := global.instances[short]; instance != nil {
+		return instance.generation
+	}
+	return 0
 }
 
 // global is the process-wide plugin manager.
@@ -262,7 +277,7 @@ func (m *Manager) load(short string) error {
 	logs.Reset()
 	_, _ = logs.Write([]byte("[plugin] loading " + short + "\n"))
 
-	inst := &Instance{info: info, dir: dir, handlers: make(map[string]moejs.Value), statics: make(map[string]*staticConfig)}
+	inst := &Instance{generation: runtimeGeneration.Add(1), info: info, dir: dir, handlers: make(map[string]moejs.Value), statics: make(map[string]*staticConfig)}
 	m.mu.Lock()
 	if _, ok := m.instances[short]; ok {
 		m.mu.Unlock()

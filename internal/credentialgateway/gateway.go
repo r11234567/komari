@@ -14,6 +14,7 @@ import (
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/notificationotp"
+	"github.com/komari-monitor/komari/internal/passkeycredential"
 	credential "github.com/komari-monitor/komari/internal/trustedcredential"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
@@ -43,6 +44,9 @@ func newGateway(engine *notificationotp.Engine) *Gateway {
 	g := &Gateway{core: credential.New(credential.Options{ValidateBinding: validateBinding}), otp: engine}
 	if err := g.core.Register(totpProvider{}); err != nil {
 		panic("invalid native credential provider")
+	}
+	if err := g.core.Register(passkeycredential.Provider{}); err != nil {
+		panic("invalid trusted Passkey adapter")
 	}
 	for _, kind := range []string{"email", "telegram"} {
 		contactKind := kind
@@ -76,7 +80,11 @@ func identity(ctx context.Context) (credential.Binding, models.User, error) {
 	}
 	// Length-delimited encoding prevents ambiguous concatenation. Secret inputs
 	// are hashed, remain server-side and invalidate pending work after changes.
-	version, _ := json.Marshal([]string{user.Passwd, user.TwoFactor, user.CredentialVersion, created.UTC().Format(time.RFC3339Nano)})
+	passkey, err := passkeycredential.Read(ctx, id)
+	if err != nil {
+		return credential.Binding{}, models.User{}, credential.ErrProviderUnavailable
+	}
+	version, _ := json.Marshal([]string{user.Passwd, user.TwoFactor, user.CredentialVersion, created.UTC().Format(time.RFC3339Nano), passkey.Revision})
 	sessionHash := sha256.Sum256([]byte(m.SessionToken))
 	mac := hmac.New(sha256.New, securityVersionKey)
 	_, _ = mac.Write(version)

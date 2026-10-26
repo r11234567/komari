@@ -7,6 +7,7 @@ import (
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/notificationotp"
+	"github.com/komari-monitor/komari/internal/passkeycredential"
 	credential "github.com/komari-monitor/komari/internal/trustedcredential"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/messageSender/factory"
@@ -27,7 +28,11 @@ func (g *Gateway) Contacts(ctx context.Context) (ContactSettings, error) {
 	if err != nil {
 		return ContactSettings{}, credential.ErrProviderUnavailable
 	}
-	return ContactSettings{Contacts: contacts, Transports: messageSender.ListCredentialTransports(), PasswordBootstrapAllowed: user.TwoFactor == "" && len(contacts) == 0}, nil
+	passkey, err := passkeycredential.Read(ctx, user.UUID)
+	if err != nil {
+		return ContactSettings{}, credential.ErrProviderUnavailable
+	}
+	return ContactSettings{Contacts: contacts, Transports: messageSender.ListCredentialTransports(), PasswordBootstrapAllowed: user.TwoFactor == "" && len(contacts) == 0 && len(passkey.Records) == 0}, nil
 }
 
 func resolveContact(ctx context.Context, b credential.Binding, kind string) (notificationotp.Destination, error) {
@@ -102,7 +107,11 @@ func (g *Gateway) BeginContactBinding(ctx context.Context, d notificationotp.Des
 		if err != nil {
 			return credential.Challenge{}, credential.ErrProviderUnavailable
 		}
-		if user.TwoFactor != "" || len(contacts) != 0 {
+		passkey, err := passkeycredential.Read(ctx, user.UUID)
+		if err != nil {
+			return credential.Challenge{}, credential.ErrProviderUnavailable
+		}
+		if user.TwoFactor != "" || len(contacts) != 0 || len(passkey.Records) != 0 {
 			return credential.Challenge{}, credential.ErrUnauthenticated
 		}
 		if err := g.core.ChargeAttempt(ctx, b); err != nil {
