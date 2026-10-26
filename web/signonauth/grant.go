@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/accounts"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
@@ -23,6 +24,7 @@ var ErrLocked = errors.New("login settings locked: fresh interactive 2FA is requ
 type binding struct {
 	user, session string
 	secret        [32]byte
+	state         string
 }
 type grant struct {
 	binding
@@ -36,6 +38,10 @@ type store struct {
 }
 
 var grants = newStore(time.Now, func(b binding) bool {
+	if b.state != "" {
+		state, err := credentialaction.SessionState(context.Background(), b.user, b.session)
+		return err == nil && state == b.state
+	}
 	id, _, err := accounts.GetSessionIdentity(b.session)
 	if err != nil || id != b.user {
 		return false
@@ -96,6 +102,15 @@ func Create(p *rpc.Principal, session string) (string, error) {
 		return "", ErrLocked
 	}
 	return grants.create(binding{user: p.UserUUID, session: session, secret: sha256.Sum256([]byte(user.TwoFactor))})
+}
+
+// CreateVerified is Go-only and is called after consuming a login-settings
+// authorization. Revalidate the exact security state captured before consume.
+func CreateVerified(p *rpc.Principal, session, state string) (string, error) {
+	if p == nil || p.Type != rpc.PrincipalUser || p.IsAPIKey || !p.HasRole(rpc.RoleAdmin) || state == "" {
+		return "", ErrLocked
+	}
+	return grants.create(binding{user: p.UserUUID, session: session, state: state})
 }
 
 type tokenKey struct{}

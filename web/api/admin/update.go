@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 	"github.com/komari-monitor/komari/utils/geoip"
 	"github.com/komari-monitor/komari/web/api"
 )
@@ -42,6 +43,7 @@ func UpdateUser(c *gin.Context) {
 		return
 	}
 	if req.Password != nil {
+		c.Set("credential_action_resource", credentialaction.PasswordResource(req.Uuid))
 		c.Set("2fa_code", req.TwoFa)
 		if err := api.VerifySensitive2FA(c); err != nil {
 			api.RespondError(c, 401, err.Error())

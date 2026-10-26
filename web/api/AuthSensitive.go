@@ -10,6 +10,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
+	"github.com/komari-monitor/komari/internal/credentialaction"
+	credential "github.com/komari-monitor/komari/internal/trustedcredential"
+	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
 var sensitive2FAReplayCache = struct {
@@ -81,6 +84,37 @@ func claimSensitive2FACode(userUUID, code string, now time.Time) bool {
 
 // VerifySensitive2FA gin 适配层:从 gin.Context 提取参数后委托核心校验。
 func VerifySensitive2FA(c *gin.Context) error {
+	if token := c.GetHeader(credentialaction.Header); token != "" {
+		p := GetPrincipal(c)
+		if p == nil || p.Type != rpc.PrincipalUser || p.IsAPIKey {
+			return err2FARequired()
+		}
+		session, _ := c.Cookie("session_token")
+		ctx := rpc.NewContextWithMeta(c.Request.Context(), &rpc.ContextMeta{Principal: p, UserUUID: p.UserUUID, SessionToken: session})
+		purpose := credential.SensitiveOperation
+		resource := credentialaction.RESTResource(c.Request.Method, c.Request.URL.Path)
+		if target := c.GetString("credential_action_resource"); target != "" {
+			resource = target
+		}
+		switch c.Request.URL.Path {
+		case "/api/admin/2fa/verify":
+			resource = credentialaction.AccountEntry
+		case "/api/admin/2fa/sign-on":
+			purpose, resource = credential.LoginSettings, credentialaction.LoginSettings
+		}
+		if purpose == credential.LoginSettings {
+			state, err := credentialaction.SessionState(ctx, p.UserUUID, session)
+			if err != nil {
+				return err
+			}
+			c.Set("trusted_credential_state", state)
+		}
+		if _, err := credentialaction.Consume(ctx, token, purpose, resource); err != nil {
+			return err
+		}
+		c.Set("trusted_credential_verified", true)
+		return nil
+	}
 	_, isAPIKey := c.Get("api_key")
 	uuidRaw, _ := c.Get("uuid")
 	uuid, _ := uuidRaw.(string)

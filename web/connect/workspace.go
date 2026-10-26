@@ -10,6 +10,9 @@ import (
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/internal/credentialaction"
+	"github.com/komari-monitor/komari/internal/credentialgateway"
+	credential "github.com/komari-monitor/komari/internal/trustedcredential"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/workspace"
 	workspacev1 "github.com/r11234567/komari-proto/gen/go/komari/workspace/v1"
@@ -35,8 +38,14 @@ func (s *workspaceService) UnlockWorkspace(ctx context.Context, req *connect.Req
 	if err != nil || !allowed {
 		return nil, connectError(connect.CodePermissionDenied, errors.New("remote control is disabled"))
 	}
-	if err := verifyConnectTwoFactor(meta, req.Msg.TwoFactor); err != nil {
-		return nil, err
+	if token := req.Msg.TwoFactor.GetAuthorizationToken(); token != "" {
+		if _, err := credentialgateway.Default.Consume(ctx, token, credential.UnlockWorkspace, credentialaction.WorkspaceResource(agent, req.Msg.SystemUser)); err != nil {
+			return nil, credentialConnectError(err)
+		}
+	} else {
+		if err := verifyConnectTwoFactor(meta, req.Msg.TwoFactor); err != nil {
+			return nil, err
+		}
 	}
 	token, snapshot, err := workspace.Default.Create(workspace.Binding{UserID: user, Session: session, AgentID: agent, SystemUser: req.Msg.SystemUser})
 	if err != nil {
