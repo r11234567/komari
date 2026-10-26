@@ -9,6 +9,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/models"
 	pluginapp "github.com/komari-monitor/komari/internal/plugin"
+	"github.com/komari-monitor/komari/internal/plugingateway"
 	pluginv1 "github.com/r11234567/komari-proto/gen/go/komari/plugin/v1"
 	pluginv1connect "github.com/r11234567/komari-proto/gen/go/komari/plugin/v1/pluginv1connect"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -18,8 +19,11 @@ type pluginService struct {
 	pluginv1connect.UnimplementedPluginServiceHandler
 }
 
-func (s *pluginService) ListPlugins(context.Context, *connect.Request[pluginv1.ListPluginsRequest]) (*connect.Response[pluginv1.ListPluginsResponse], error) {
-	items := pluginapp.List()
+func (s *pluginService) ListPlugins(ctx context.Context, _ *connect.Request[pluginv1.ListPluginsRequest]) (*connect.Response[pluginv1.ListPluginsResponse], error) {
+	items, err := plugingateway.List(ctx)
+	if err != nil {
+		return nil, pluginGatewayConnectError(err)
+	}
 	plugins := make([]*pluginv1.Plugin, 0, len(items))
 	for _, item := range items {
 		plugins = append(plugins, pluginInfoToProto(item))
@@ -27,67 +31,67 @@ func (s *pluginService) ListPlugins(context.Context, *connect.Request[pluginv1.L
 	return connect.NewResponse(&pluginv1.ListPluginsResponse{Plugins: plugins}), nil
 }
 
-func (s *pluginService) SetPluginEnabled(_ context.Context, req *connect.Request[pluginv1.SetPluginEnabledRequest]) (*connect.Response[pluginv1.SetPluginEnabledResponse], error) {
+func (s *pluginService) SetPluginEnabled(ctx context.Context, req *connect.Request[pluginv1.SetPluginEnabledRequest]) (*connect.Response[pluginv1.SetPluginEnabledResponse], error) {
 	short, err := requiredPluginShort(req.Msg.ShortName)
 	if err != nil {
 		return nil, err
 	}
-	err = pluginapp.SetEnabled(short, req.Msg.Enabled, req.Msg.PermissionsApproved)
+	err = plugingateway.SetEnabled(ctx, short, req.Msg.Enabled, req.Msg.PermissionsApproved)
 	if errors.Is(err, pluginapp.ErrPermissionApprovalRequired) {
 		return connect.NewResponse(&pluginv1.SetPluginEnabledResponse{RequiresPermissionApproval: true}), nil
 	}
 	if err != nil {
-		return nil, connectError(connect.CodeInternal, err)
+		return nil, pluginGatewayConnectError(err)
 	}
 	return connect.NewResponse(&pluginv1.SetPluginEnabledResponse{}), nil
 }
 
-func (s *pluginService) GetPluginLogs(_ context.Context, req *connect.Request[pluginv1.GetPluginLogsRequest]) (*connect.Response[pluginv1.GetPluginLogsResponse], error) {
+func (s *pluginService) GetPluginLogs(ctx context.Context, req *connect.Request[pluginv1.GetPluginLogsRequest]) (*connect.Response[pluginv1.GetPluginLogsResponse], error) {
 	short, err := requiredPluginShort(req.Msg.ShortName)
 	if err != nil {
 		return nil, err
 	}
-	return connect.NewResponse(&pluginv1.GetPluginLogsResponse{Logs: pluginapp.GetLogs(short)}), nil
+	logs, err := plugingateway.Logs(ctx, short)
+	if err != nil {
+		return nil, pluginGatewayConnectError(err)
+	}
+	return connect.NewResponse(&pluginv1.GetPluginLogsResponse{Logs: logs}), nil
 }
 
-func (s *pluginService) DeletePlugin(_ context.Context, req *connect.Request[pluginv1.DeletePluginRequest]) (*connect.Response[pluginv1.DeletePluginResponse], error) {
+func (s *pluginService) DeletePlugin(ctx context.Context, req *connect.Request[pluginv1.DeletePluginRequest]) (*connect.Response[pluginv1.DeletePluginResponse], error) {
 	short, err := requiredPluginShort(req.Msg.ShortName)
 	if err != nil {
 		return nil, err
 	}
-	if err := pluginapp.Delete(short); err != nil {
+	if err := plugingateway.Delete(ctx, short); err != nil {
 		if errors.Is(err, pluginapp.ErrNotInstalled) {
 			return nil, connectError(connect.CodeNotFound, err)
 		}
-		return nil, connectError(connect.CodeInternal, err)
+		return nil, pluginGatewayConnectError(err)
 	}
 	return connect.NewResponse(&pluginv1.DeletePluginResponse{}), nil
 }
 
-func (s *pluginService) GetPluginConfiguration(_ context.Context, req *connect.Request[pluginv1.GetPluginConfigurationRequest]) (*connect.Response[pluginv1.GetPluginConfigurationResponse], error) {
+func (s *pluginService) GetPluginConfiguration(ctx context.Context, req *connect.Request[pluginv1.GetPluginConfigurationRequest]) (*connect.Response[pluginv1.GetPluginConfigurationResponse], error) {
 	short, err := requiredPluginShort(req.Msg.ShortName)
 	if err != nil {
 		return nil, err
 	}
-	manifest, err := pluginapp.Manifest(short)
+	configuration, values, err := plugingateway.Configuration(ctx, short)
 	if err != nil {
-		return nil, connectError(connect.CodeNotFound, err)
-	}
-	values, err := pluginapp.GetConfiguration(short)
-	if err != nil {
-		return nil, connectError(connect.CodeInternal, err)
+		return nil, pluginGatewayConnectError(err)
 	}
 	encoded, err := structpb.NewStruct(values)
 	if err != nil {
-		return nil, connectError(connect.CodeInternal, err)
+		return nil, pluginGatewayConnectError(err)
 	}
 	return connect.NewResponse(&pluginv1.GetPluginConfigurationResponse{
-		Configuration: pluginConfigurationToProto(manifest.Configuration),
+		Configuration: pluginConfigurationToProto(configuration),
 		Values:        encoded,
 	}), nil
 }
 
-func (s *pluginService) SetPluginConfiguration(_ context.Context, req *connect.Request[pluginv1.SetPluginConfigurationRequest]) (*connect.Response[pluginv1.SetPluginConfigurationResponse], error) {
+func (s *pluginService) SetPluginConfiguration(ctx context.Context, req *connect.Request[pluginv1.SetPluginConfigurationRequest]) (*connect.Response[pluginv1.SetPluginConfigurationResponse], error) {
 	short, err := requiredPluginShort(req.Msg.ShortName)
 	if err != nil {
 		return nil, err
@@ -96,8 +100,8 @@ func (s *pluginService) SetPluginConfiguration(_ context.Context, req *connect.R
 	if req.Msg.Values != nil {
 		values = req.Msg.Values.AsMap()
 	}
-	if err := pluginapp.SaveConfiguration(short, values); err != nil {
-		return nil, connectError(connect.CodeInternal, err)
+	if err := plugingateway.SaveConfiguration(ctx, short, values); err != nil {
+		return nil, pluginGatewayConnectError(err)
 	}
 	return connect.NewResponse(&pluginv1.SetPluginConfigurationResponse{}), nil
 }
@@ -202,4 +206,21 @@ func pluginConfigurationToProto(configuration models.Configuration) *pluginv1.Pl
 		})
 	}
 	return result
+}
+
+func pluginGatewayConnectError(err error) error {
+	code := connect.CodeInternal
+	switch {
+	case errors.Is(err, plugingateway.ErrPermissionDenied):
+		code = connect.CodePermissionDenied
+	case errors.Is(err, plugingateway.ErrShortRequired):
+		code = connect.CodeInvalidArgument
+	case errors.Is(err, pluginapp.ErrNotInstalled):
+		code = connect.CodeNotFound
+	case errors.Is(err, context.Canceled):
+		code = connect.CodeCanceled
+	case errors.Is(err, context.DeadlineExceeded):
+		code = connect.CodeDeadlineExceeded
+	}
+	return connectError(code, err)
 }

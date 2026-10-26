@@ -31,6 +31,8 @@ func TestRPC2CompatibilitySurface(t *testing.T) {
 
 	denied := []string{
 		"admin:getSettings",
+		"admin:listPlugins", "admin:setPluginEnabled", "admin:getPluginLogs",
+		"admin:deletePlugin", "admin:getPluginConfiguration", "admin:setPluginConfiguration",
 		"admin:setXtermjsSettings",
 		"admin:fileList",
 		"admin:getClipboard",

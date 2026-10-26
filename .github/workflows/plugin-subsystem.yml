@@ -21,7 +21,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Plugin subsystem, JS runtime, notifications and RPC gateway regression
-        run: scripts/ci/run-go-tests.sh ./internal/plugin ./pkg/jsruntime ./utils/messageSender ./web/rpc/jsonrpc
+        run: scripts/ci/run-go-tests.sh ./internal/plugin ./internal/plugingateway ./web/connect ./pkg/jsruntime ./utils/messageSender ./web/rpc/jsonrpc
       - name: Preserve complete logs, including compiler failures
         if: always()
         uses: actions/upload-artifact@v4
