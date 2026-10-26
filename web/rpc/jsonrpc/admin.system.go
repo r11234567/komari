@@ -249,8 +249,17 @@ func adminExec(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcE
 	}, nil
 }
 
-func adminTestSendMessage(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	err := messageSender.SendEvent(models.EventMessage{
+func adminTestSendMessage(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var params struct {
+		Provider string `json:"provider"`
+	}
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid test request", nil)
+	}
+	if params.Provider == "" {
+		params.Provider, _ = config.GetAs[string](config.NotificationMethodKey, "none")
+	}
+	err := messageSender.SendTestEventTo(params.Provider, models.EventMessage{
 		Event:   "Test",
 		Time:    time.Now().UTC(),
 		Message: "This is a test message from Komari.",

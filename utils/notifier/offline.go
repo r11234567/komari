@@ -151,6 +151,7 @@ func OfflineNotification(clientID string, endedConnectionID int64) {
 		message := fmt.Sprintf("🔴%s is offline", client.Name)
 		go func(msg string) {
 			if err := messageSender.SendEvent(models.EventMessage{
+				Kind:    messageSender.KindOffline,
 				Event:   messageevent.Offline,
 				Clients: []models.Client{client},
 				Time:    time.Now().UTC(),
@@ -199,6 +200,7 @@ func OnlineNotification(clientID string, connectionID int64) {
 	message := fmt.Sprintf("🟢%s is online", client.Name)
 	go func(msg string) {
 		if err := messageSender.SendEvent(models.EventMessage{
+			Kind:    messageSender.KindOnline,
 			Event:   messageevent.Online,
 			Clients: []models.Client{client},
 			Time:    time.Now().UTC(),

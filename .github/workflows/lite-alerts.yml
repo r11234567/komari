@@ -1,0 +1,31 @@
+name: Lite alert routing and digest checkpoint
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  notifications:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 3GiB
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Migration, explicit empty routes, fanout, plugin channels, batching and policy changes
+        run: bash scripts/ci/run-audit-check.sh lite-alerts bash scripts/ci/run-go-tests.sh -race ./utils/messageSender/... ./utils/notifier ./internal/plugin ./web/rpc/jsonrpc ./pkg/config
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lite-alerts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30

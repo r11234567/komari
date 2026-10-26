@@ -50,6 +50,7 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 				loc = ipinfo.Name
 			}
 			messageSender.SendEvent(models.EventMessage{
+				Kind:    messageSender.KindLogin,
 				Event:   messageevent.Login,
 				Time:    time.Now().UTC(),
 				Message: fmt.Sprintf("%s: %s (%s)\n%s", login_method, ip, loc, userAgent),

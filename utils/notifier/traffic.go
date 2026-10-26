@@ -128,6 +128,7 @@ func CheckTraffic() {
 			msg := fmt.Sprintf("used %d%% (%s / %s), type=%s", curStep, humanBytes(usage.Used), humanBytes(usage.Limit), usage.Type)
 			// 发送通知（内部会检查 NotificationEnabled）
 			_ = messageSender.SendEvent(models.EventMessage{
+				Kind:    messageSender.KindTraffic,
 				Event:   "Traffic",
 				Clients: []models.Client{c},
 				Time:    time.Now().UTC(),

@@ -112,6 +112,9 @@ func adminSendNotification(_ context.Context, req *rpc.JsonRpcRequest) (any, *rp
 	if err := req.BindParams(&params); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
 	}
+	if params.Kind == "" {
+		params.Kind = messageSender.KindForEvent(params.Event)
+	}
 	if err := messageSender.SendNotification(params); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to send notification: "+err.Error(), nil)
 	}

@@ -3,6 +3,11 @@ package jsonrpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/komari-monitor/komari/internal/managedconfig"
+	"github.com/komari-monitor/komari/utils/item"
+	"gorm.io/gorm"
 	"strings"
 	"unicode/utf8"
 
@@ -56,7 +61,7 @@ func maskSecretString(s string) string {
 
 func getSenderSecretFields(providerName string) map[string]bool {
 	fields := make(map[string]bool)
-	configs := msfactory.GetSenderConfigs()
+	configs := senderConfigurations()
 	if items, ok := configs[providerName]; ok {
 		for _, it := range items {
 			if it.Secret || it.Type == "password" || it.Type == "secret" || isSecretFieldName(it.Name) {
@@ -147,6 +152,19 @@ func adminGetMessageSender(_ context.Context, req *rpc.JsonRpcRequest) (any, *rp
 	req.BindParams(&params)
 	if params.Provider != "" {
 		cfg, err := database.GetMessageSenderConfigByName(params.Provider)
+		if errors.Is(err, gorm.ErrRecordNotFound) && messageSender.NotificationChannelRegistered(params.Provider) {
+			defaults := map[string]any{}
+			for _, channel := range messageSender.ListNotificationChannels() {
+				if channel.ID == params.Provider {
+					for _, field := range managedconfig.Items(channel.Configuration) {
+						defaults[field.Key] = managedconfig.DefaultValue(field)
+					}
+				}
+			}
+			raw, _ := json.Marshal(defaults)
+			cfg = &models.MessageSenderProvider{Name: params.Provider, Addition: string(raw)}
+			err = nil
+		}
 		if err != nil {
 			return nil, rpc.MakeError(rpc.NotFound, "Provider not found: "+err.Error(), nil)
 		}
@@ -155,7 +173,7 @@ func adminGetMessageSender(_ context.Context, req *rpc.JsonRpcRequest) (any, *rp
 		maskedCfg.Addition = maskAdditionSecrets(params.Provider, cfg.Addition, secretFields)
 		return &maskedCfg, nil
 	}
-	providers := msfactory.GetSenderConfigs()
+	providers := senderConfigurations()
 	if len(providers) == 0 {
 		return nil, rpc.MakeError(rpc.NotFound, "No message sender providers found", nil)
 	}
@@ -170,7 +188,7 @@ func adminSetMessageSender(_ context.Context, req *rpc.JsonRpcRequest) (any, *rp
 	if senderConfig.Name == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Provider name is required", nil)
 	}
-	if _, exists := msfactory.GetConstructor(senderConfig.Name); !exists {
+	if _, exists := msfactory.GetConstructor(senderConfig.Name); !exists && !messageSender.NotificationChannelRegistered(senderConfig.Name) {
 		return nil, rpc.MakeError(rpc.NotFound, "Provider not found: "+senderConfig.Name, nil)
 	}
 	secretFields := getSenderSecretFields(senderConfig.Name)
@@ -180,8 +198,11 @@ func adminSetMessageSender(_ context.Context, req *rpc.JsonRpcRequest) (any, *rp
 	if err := database.SaveMessageSenderConfig(&senderConfig); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to save message sender provider configuration: "+err.Error(), nil)
 	}
-	method, _ := config.GetAs[string](config.NotificationMethodKey, "none")
-	if method == senderConfig.Name { // 正在使用，重载
+	selected, err := messageSender.ChannelSelected(senderConfig.Name)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
+	}
+	if selected && !messageSender.NotificationChannelRegistered(senderConfig.Name) {
 		if err := messageSender.LoadProvider(senderConfig.Name, senderConfig.Addition); err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to load message sender provider: "+err.Error(), nil)
 		}
@@ -236,4 +257,33 @@ func adminSetOidc(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		}
 	}
 	return map[string]any{"message": "OIDC provider set successfully"}, nil
+}
+
+func senderConfigurations() map[string][]item.Item {
+	out := map[string][]item.Item{}
+	for name, fields := range msfactory.GetSenderConfigs() {
+		out[name] = fields
+	}
+	for _, channel := range messageSender.ListNotificationChannels() {
+		fields := []item.Item{}
+		for _, field := range managedconfig.Items(channel.Configuration) {
+			kind := field.Type
+			switch kind {
+			case "select":
+				kind = "option"
+			case "switch":
+				kind = "bool"
+			case "number":
+				kind = "float64"
+			}
+			value := managedconfig.DefaultValue(field)
+			def := ""
+			if value != nil {
+				def = fmt.Sprint(value)
+			}
+			fields = append(fields, item.Item{Name: field.Key, Required: field.Required, Type: kind, Options: field.Options, Default: def, Help: fmt.Sprint(field.Help), Secret: kind == "password" || kind == "secret" || isSecretFieldName(field.Key)})
+		}
+		out[channel.ID] = fields
+	}
+	return out
 }

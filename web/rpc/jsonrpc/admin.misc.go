@@ -16,6 +16,7 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/utils/messageSender"
 )
 
 // admin.misc.go
@@ -104,6 +105,10 @@ func adminDeleteAllSessions(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *r
 }
 
 func adminGetSettings(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	if err := messageSender.EnsureRoutes(); err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
+	}
+
 	cst, err := config.GetAll()
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to get settings: "+err.Error(), nil)
@@ -139,6 +144,28 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	cfg := make(map[string]interface{})
 	if err := req.BindParams(&cfg); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid or missing request body: "+err.Error(), nil)
+	}
+	// The migration marker is internal; explicit route saves mark it in this transaction.
+	delete(cfg, config.NotificationRoutesMigratedKey)
+	if raw, ok := cfg[config.NotificationRoutesKey]; ok {
+		normalized, err := messageSender.NormalizeRoutes(raw)
+		if err != nil {
+			return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
+		}
+		cfg[config.NotificationRoutesKey] = normalized
+		cfg[config.NotificationRoutesMigratedKey] = true
+	}
+	if raw, ok := cfg[config.NotificationDigestSecondsKey]; ok {
+		seconds, err := messageSender.NormalizeDigestSeconds(raw)
+		if err != nil {
+			return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
+		}
+		cfg[config.NotificationDigestSecondsKey] = seconds
+	}
+	if raw, ok := cfg[config.NotificationDigestEnabledKey]; ok {
+		if _, ok := raw.(bool); !ok {
+			return nil, rpc.MakeError(rpc.InvalidParams, "digest enabled must be boolean", nil)
+		}
 	}
 	if rawTime, ok := cfg[config.TrafficReportTimeKey]; ok {
 		reportTime, ok := rawTime.(string)
@@ -199,7 +226,7 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 		cancel()
 	}
 
-	if err := config.SetMany(cfg); err != nil {
+	if err := messageSender.SaveSettings(cfg); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to update settings: "+err.Error(), nil)
 	}
 	// 配置已落库，热重载 metric store（无需重启）。连接已在上面验证过，

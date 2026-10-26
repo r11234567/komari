@@ -240,6 +240,7 @@ func sendTrafficReport(daily, weekly, monthly, currentDaily bool) (TrafficReport
 	}
 
 	if err := messageSender.SendEvent(models.EventMessage{
+		Kind:    map[string]string{messageevent.DReport: messageSender.KindTrafficReportDaily, messageevent.WReport: messageSender.KindTrafficReportWeekly, messageevent.MReport: messageSender.KindTrafficReportMonthly}[eventType],
 		Event:   eventType,
 		Clients: eventClients,
 		Time:    now,

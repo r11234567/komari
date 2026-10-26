@@ -215,6 +215,7 @@ func sendLoadNotification(clientUUIDs []string, task models.LoadNotification) {
 	}
 	go func() {
 		messageSender.SendEvent(models.EventMessage{
+			Kind:    messageSender.KindLoad,
 			Event:   messageevent.Alert,
 			Clients: ex_clients,
 			Time:    time.Now().UTC(),

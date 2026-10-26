@@ -49,14 +49,18 @@ type Settings struct {
 	CustomBody string `json:"custom_body" default:""`
 
 	// 通知
-	NotificationEnabled        bool    `json:"notification_enabled" default:"true"` // 通知总开关
-	NotificationMethod         string  `json:"notification_method" default:"none"`
-	NotificationTemplate       string  `json:"notification_template" default:"{{emoji}}{{emoji}}{{emoji}}\nEvent: {{event}}\nClients: {{client}}\nMessage: {{message}}\nTime: {{time}}"`
-	ExpireNotificationEnabled  bool    `json:"expire_notification_enabled" default:"true"` // 是否启用过期通知
-	ExpireNotificationLeadDays int     `json:"expire_notification_lead_days" default:"7"`  // 过期前多少天通知，默认7天
-	LoginNotification          bool    `json:"login_notification" default:"true"`          // 登录通知
-	TrafficLimitPercentage     float64 `json:"traffic_limit_percentage" default:"80.00"`   // 流量限制百分比，默认80.00%
-	TrafficReportTime          string  `json:"traffic_report_time" default:"00:00"`        // 流量日报/周报/月报发送时间（北京时间）
+	NotificationRoutes         map[string][]string `json:"notification_routes" default:"{}"`
+	NotificationRoutesMigrated bool                `json:"notification_routes_migrated" default:"false"`
+	NotificationDigestEnabled  bool                `json:"notification_digest_enabled" default:"false"`
+	NotificationDigestSeconds  int                 `json:"notification_digest_seconds" default:"5"`
+	NotificationEnabled        bool                `json:"notification_enabled" default:"true"` // 通知总开关
+	NotificationMethod         string              `json:"notification_method" default:"none"`
+	NotificationTemplate       string              `json:"notification_template" default:"{{emoji}}{{emoji}}{{emoji}}\nEvent: {{event}}\nClients: {{client}}\nMessage: {{message}}\nTime: {{time}}"`
+	ExpireNotificationEnabled  bool                `json:"expire_notification_enabled" default:"true"` // 是否启用过期通知
+	ExpireNotificationLeadDays int                 `json:"expire_notification_lead_days" default:"7"`  // 过期前多少天通知，默认7天
+	LoginNotification          bool                `json:"login_notification" default:"true"`          // 登录通知
+	TrafficLimitPercentage     float64             `json:"traffic_limit_percentage" default:"80.00"`   // 流量限制百分比，默认80.00%
+	TrafficReportTime          string              `json:"traffic_report_time" default:"00:00"`        // 流量日报/周报/月报发送时间（北京时间）
 	UpdatedAt                  time.Time
 }
 
@@ -98,6 +102,10 @@ const (
 	CustomHeadKey            = "custom_head"
 	CustomBodyKey            = "custom_body"
 
+	NotificationRoutesKey         = "notification_routes"
+	NotificationRoutesMigratedKey = "notification_routes_migrated"
+	NotificationDigestEnabledKey  = "notification_digest_enabled"
+	NotificationDigestSecondsKey  = "notification_digest_seconds"
 	NotificationEnabledKey        = "notification_enabled"
 	NotificationMethodKey         = "notification_method"
 	NotificationTemplateKey       = "notification_template"

@@ -72,6 +72,7 @@ func CheckExpire() {
 				message += fmt.Sprintf("• %s (%dd)\n", clientInfo.Name, clientInfo.DaysLeft)
 			}
 			messageSender.SendEvent(models.EventMessage{
+				Kind:    messageSender.KindExpire,
 				Event:   messageevent.Expire,
 				Time:    time.Now().UTC(),
 				Message: message,
