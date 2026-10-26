@@ -6,11 +6,12 @@ import (
 
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/trafficledger"
+	"github.com/komari-monitor/komari/pkg/trafficreset"
 	"gorm.io/gorm"
 )
 
 type clientBillingMeta struct {
-	ResetDay int
+	Schedule trafficreset.Schedule
 }
 
 type committedCycle struct {
@@ -49,7 +50,7 @@ func listBillableVersions(ctx context.Context, db *gorm.DB, clients, nativeCurre
 }
 
 func loadClientBillingMeta(ctx context.Context, db *gorm.DB, clients []string) (map[string]clientBillingMeta, error) {
-	query := db.WithContext(ctx).Model(&models.Client{}).Select("uuid", "traffic_reset_day")
+	query := db.WithContext(ctx).Model(&models.Client{}).Select("uuid", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone")
 	if len(clients) > 0 {
 		query = query.Where("uuid IN ?", clients)
 	}
@@ -59,9 +60,38 @@ func loadClientBillingMeta(ctx context.Context, db *gorm.DB, clients []string) (
 	}
 	result := make(map[string]clientBillingMeta, len(rows))
 	for _, row := range rows {
-		result[row.UUID] = clientBillingMeta{ResetDay: trafficledger.NormalizedResetDay(row.TrafficResetDay)}
+		day := trafficledger.NormalizedResetDay(row.TrafficResetDay)
+		result[row.UUID] = clientBillingMeta{
+			Schedule: trafficreset.FromFields(&day, row.TrafficResetTime, row.TrafficResetTimezone),
+		}
 	}
 	return result, nil
+}
+
+func loadClientNames(ctx context.Context, db *gorm.DB, clients []string) (map[string]string, error) {
+	query := db.WithContext(ctx).Model(&models.Client{}).Select("uuid", "name")
+	if len(clients) > 0 {
+		query = query.Where("uuid IN ?", clients)
+	}
+	var rows []models.Client
+	if err := query.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	result := make(map[string]string, len(rows))
+	for _, row := range rows {
+		result[row.UUID] = row.Name
+	}
+	return result, nil
+}
+
+func applyLiveClientNames(rows []BillingEntryRow, names map[string]string) {
+	for index := range rows {
+		name, ok := names[rows[index].Client]
+		if !ok {
+			continue
+		}
+		rows[index].ClientName = name
+	}
 }
 
 func billingCycleMonths(days int) int {
@@ -114,18 +144,14 @@ func convertLockedMicros(nativeAmount int64, version models.BillingPriceVersion,
 	if nativeAmount == 0 {
 		return 0, true
 	}
-	if version.USDPriceMicros == nil || version.FXSnapshotID == nil || version.PriceMicros == 0 {
+	if version.FXSnapshotID == nil {
 		return 0, false
 	}
 	rates := snapshots[*version.FXSnapshotID]
 	if len(rates) == 0 {
 		return 0, false
 	}
-	usd, err := multiplyRatio(*version.USDPriceMicros, nativeAmount, version.PriceMicros)
-	if err != nil {
-		return 0, false
-	}
-	converted, err := ConvertMicros(usd, "USD", to, rates)
+	converted, err := ConvertMicros(nativeAmount, version.Currency, to, rates)
 	return converted, err == nil
 }
 
@@ -170,15 +196,15 @@ func latestVersionForCycle(versions []models.BillingPriceVersion, client string,
 	return best
 }
 
-func iterCycleStarts(resetDay int, from, until time.Time) []time.Time {
+func iterCycleStarts(schedule trafficreset.Schedule, from, until time.Time) []time.Time {
 	if until.IsZero() || !from.Before(until) {
 		return nil
 	}
-	start := trafficledger.CycleContaining(resetDay, from)
+	start := schedule.Last(from)
 	starts := make([]time.Time, 0, 24)
 	for i := 0; i < 240 && start.Before(until); i++ {
 		starts = append(starts, start)
-		start = trafficledger.NextCycleStart(start, resetDay)
+		start = schedule.Next(start)
 	}
 	return starts
 }
@@ -227,12 +253,13 @@ func walkCommittedCycles(
 	}
 	result := make([]committedCycle, 0, len(clients)*12)
 	for client := range clients {
-		resetDay := 1
+		defaultDay := 1
+		reset := trafficreset.FromFields(&defaultDay, "", "")
 		if item, ok := meta[client]; ok {
-			resetDay = item.ResetDay
+			reset = item.Schedule
 		}
-		for _, start := range iterCycleStarts(resetDay, from, until) {
-			end := trafficledger.NextCycleStart(start, resetDay)
+		for _, start := range iterCycleStarts(reset, from, until) {
+			end := reset.Next(start)
 			version := latestVersionForCycle(versions, client, start, end)
 			if version == nil {
 				continue

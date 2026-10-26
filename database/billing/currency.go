@@ -20,6 +20,7 @@ var legacyCurrencies = map[string]string{
 	"€": "EUR", "EUR": "EUR",
 	"£": "GBP", "GBP": "GBP",
 	"C$": "CAD", "CA$": "CAD", "CAD": "CAD",
+	"HK$": "HKD", "HKD": "HKD",
 }
 
 func NormalizeCurrency(value string) (string, bool) {
