@@ -125,6 +125,10 @@ func (g *Gateway) BeginPassword(ctx context.Context, username, password, remoteI
 	if err != nil {
 		return PasswordStart{}, err
 	}
+	confirmedPasskey, err := passkeycredential.Read(ctx, id)
+	if err != nil || confirmedPasskey.Revision != passkey.Revision {
+		return PasswordStart{}, credential.ErrUnauthenticated
+	}
 	key := sha256.Sum256([]byte(token))
 	g.password.mu.Lock()
 	count := 0
