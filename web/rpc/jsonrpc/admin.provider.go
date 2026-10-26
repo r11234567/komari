@@ -19,6 +19,7 @@ import (
 	msfactory "github.com/komari-monitor/komari/utils/messageSender/factory"
 	"github.com/komari-monitor/komari/web/oauth"
 	oauthfactory "github.com/komari-monitor/komari/web/oauth/factory"
+	"github.com/komari-monitor/komari/web/signonauth"
 )
 
 // admin.provider.go
@@ -210,7 +211,10 @@ func adminSetMessageSender(_ context.Context, req *rpc.JsonRpcRequest) (any, *rp
 	return map[string]any{"message": "Message sender provider set successfully"}, nil
 }
 
-func adminGetOidc(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminGetOidc(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	if err := signonauth.Require(ctx); err != nil {
+		return nil, rpc.MakeError(rpc.PermissionDenied, err.Error(), nil)
+	}
 	var params struct {
 		Provider string `json:"provider"`
 	}
@@ -232,7 +236,10 @@ func adminGetOidc(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 	return providers, nil
 }
 
-func adminSetOidc(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminSetOidc(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	if err := signonauth.Require(ctx); err != nil {
+		return nil, rpc.MakeError(rpc.PermissionDenied, err.Error(), nil)
+	}
 	var oidcConfig models.OidcProvider
 	if err := req.BindParams(&oidcConfig); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid configuration: "+err.Error(), nil)

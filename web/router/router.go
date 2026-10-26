@@ -160,6 +160,7 @@ func registerAdminRoutes(r *gin.Engine) {
 		twoFactor.POST("/enable", admin.Enable2FA)
 		twoFactor.POST("/disable", api.RequireSensitive2FA(), admin.Disable2FA)
 		twoFactor.POST("/verify", api.RequireSensitive2FA(), admin.Verify2FA)
+		twoFactor.POST("/sign-on", api.RequireSensitive2FA(), admin.UnlockSignOn)
 	}
 
 	// oauth2 绑定走重定向，保留 REST handler。

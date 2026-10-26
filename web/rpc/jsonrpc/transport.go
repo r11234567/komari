@@ -14,6 +14,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/signonauth"
 )
 
 // rpc2CompatibilityMethods is the complete compatibility surface for
@@ -76,7 +77,9 @@ func OnRpcRequest(c *gin.Context) {
 func CallFromGin(c *gin.Context, method string, params any) *rpc.JsonRpcResponse {
 	meta := buildContextMeta(c)
 	req := &rpc.JsonRpcRequest{Version: rpc.RPC_VERSION, Method: method, Params: params}
-	return dispatchWithSensitive(c.Request.Context(), c, meta, req)
+	token, _ := c.Cookie(signonauth.CookieName)
+	ctx := signonauth.WithToken(c.Request.Context(), token)
+	return dispatchWithSensitive(ctx, c, meta, req)
 }
 
 // dispatchWithSensitive 在统一分发前对敏感方法补充二次验证，使各调用入口行为一致。

@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"github.com/komari-monitor/komari/web/signonauth"
 	"image/png"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
@@ -56,4 +58,19 @@ func Disable2FA(c *gin.Context) {
 
 func Verify2FA(c *gin.Context) {
 	api.RespondSuccess(c, "2FA verified successfully")
+}
+
+// UnlockSignOn is separate from account-page verification and workspace unlocks.
+func UnlockSignOn(c *gin.Context) {
+	session, _ := c.Cookie("session_token")
+	token, err := signonauth.Create(api.GetPrincipal(c), session)
+	if err != nil {
+		api.RespondError(c, http.StatusUnauthorized, err.Error())
+		return
+	}
+	http.SetCookie(c.Writer, &http.Cookie{Name: signonauth.CookieName, Value: token,
+		Path: "/api/admin/settings", MaxAge: int(signonauth.Lifetime.Seconds()),
+		Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	c.Header("Cache-Control", "no-store")
+	api.RespondSuccess(c, gin.H{"expires_in": int(signonauth.Lifetime.Seconds())})
 }
