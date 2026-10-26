@@ -37,6 +37,7 @@ func TestExpiryWallClockValidationPreservationAndConcurrentRenewal(t *testing.T)
 	err = saveClient(db, map[string]interface{}{"uuid": "expiry", "expired_at": stamp.AddDate(0, 1, 0), "_match_expired_at": stamp})
 	require.True(t, errors.Is(err, ErrExpiryAlreadyChanged), "%v", err)
 	require.NoError(t, saveClient(db, map[string]interface{}{"uuid": "expiry", "expired_at": nil}))
+	client = models.Client{}
 	require.NoError(t, db.First(&client, "uuid = ?", "expiry").Error)
 	require.Nil(t, client.ExpiredAt)
 }
