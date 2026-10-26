@@ -177,8 +177,8 @@ func (s *privilegedDeliveryService) ConfirmPrivilegedDelivery(ctx context.Contex
 	}
 	// Confirming is what authorizes a privilege change on a host, so it always
 	// costs a fresh second factor regardless of what the change contains.
-	if err := verifyConnectTwoFactor(meta, req.Msg.GetTwoFactor()); err != nil {
-		return nil, connectError(connect.CodeUnauthenticated, err)
+	if err := verifyConnectCredential(ctx, req.Msg.GetTwoFactor(), "privileged:confirm", req.Msg.GetAgentId(), fmt.Sprint(req.Msg.GetRevision())); err != nil {
+		return nil, err
 	}
 	revision, err := privilegeddelivery.Confirm(req.Msg.GetAgentId(), req.Msg.GetRevision(), meta.Principal.UserUUID)
 	if err != nil {

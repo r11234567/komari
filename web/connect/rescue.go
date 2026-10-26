@@ -45,8 +45,8 @@ func (s *rescueService) CreateRescueSession(ctx context.Context, req *connect.Re
 		return nil, err
 	}
 	if rescueapp.RequiresTwoFactor(req.Msg.Action) {
-		if err := verifyConnectTwoFactor(meta, req.Msg.TwoFactor); err != nil {
-			return nil, connectError(connect.CodeUnauthenticated, err)
+		if err := verifyConnectCredential(ctx, req.Msg.TwoFactor, "rescue:create", req.Msg.AgentId, strconv.Itoa(int(req.Msg.Action)), strconv.FormatUint(uint64(req.Msg.GetSshPort()), 10)); err != nil {
+			return nil, err
 		}
 	}
 	session, err := rescueapp.Create(req.Msg.AgentId, req.Msg.Action, req.Msg.Arguments, req.Msg.Timeout, req.Msg.MaxOutputBytes, req.Msg.IdempotencyKey, req.Msg.GetSshPort())
@@ -145,8 +145,8 @@ func (s *rescueService) WatchRescueSession(ctx context.Context, req *connect.Req
 
 func (s *rescueService) CancelRescueSession(ctx context.Context, req *connect.Request[rescuev1.CancelRescueSessionRequest]) (*connect.Response[rescuev1.CancelRescueSessionResponse], error) {
 	meta := rpc.MetaFromContext(ctx)
-	if err := verifyConnectTwoFactor(meta, req.Msg.TwoFactor); err != nil {
-		return nil, connectError(connect.CodeUnauthenticated, err)
+	if err := verifyConnectCredential(ctx, req.Msg.TwoFactor, "rescue:cancel", req.Msg.SessionId); err != nil {
+		return nil, err
 	}
 	session, err := rescueapp.Cancel(req.Msg.SessionId, req.Msg.Reason)
 	if err != nil {

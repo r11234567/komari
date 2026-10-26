@@ -192,8 +192,8 @@ func (s *enrollmentService) RefreshCredentials(ctx context.Context, req *connect
 
 func (s *enrollmentService) RevokeCredentials(ctx context.Context, req *connect.Request[enrollmentv1.RevokeCredentialsRequest]) (*connect.Response[enrollmentv1.RevokeCredentialsResponse], error) {
 	meta := rpc.MetaFromContext(ctx)
-	if err := verifyConnectTwoFactor(meta, req.Msg.GetTwoFactor()); err != nil {
-		return nil, connectError(connect.CodeUnauthenticated, err)
+	if err := verifyConnectCredential(ctx, req.Msg.GetTwoFactor(), "enrollment:revoke", req.Msg.GetAgentId()); err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(req.Msg.GetAgentId()) == "" {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("an agent ID is required"))
