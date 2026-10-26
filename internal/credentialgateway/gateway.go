@@ -4,6 +4,8 @@ package credentialgateway
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -18,6 +20,16 @@ import (
 type Gateway struct{ core *credential.Service }
 
 var Default = New()
+
+// This is a process-local invalidation fingerprint, not password storage or
+// password verification. Keying it also avoids an offline comparison oracle.
+var securityVersionKey = func() []byte {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		panic("credential fingerprint entropy unavailable")
+	}
+	return key
+}()
 
 func New() *Gateway {
 	g := &Gateway{core: credential.New(credential.Options{ValidateBinding: validateBinding})}
@@ -46,8 +58,10 @@ func identity(ctx context.Context) (credential.Binding, models.User, error) {
 	// Length-delimited encoding prevents ambiguous concatenation. Secret inputs
 	// are hashed, remain server-side and invalidate pending work after changes.
 	version, _ := json.Marshal([]string{user.Passwd, user.TwoFactor, created.UTC().Format(time.RFC3339Nano)})
-	sessionHash, versionHash := sha256.Sum256([]byte(m.SessionToken)), sha256.Sum256(version)
-	return credential.Binding{UserID: id, SessionDigest: hex.EncodeToString(sessionHash[:]), SecurityVersion: hex.EncodeToString(versionHash[:])}, user, nil
+	sessionHash := sha256.Sum256([]byte(m.SessionToken))
+	mac := hmac.New(sha256.New, securityVersionKey)
+	_, _ = mac.Write(version)
+	return credential.Binding{UserID: id, SessionDigest: hex.EncodeToString(sessionHash[:]), SecurityVersion: hex.EncodeToString(mac.Sum(nil))}, user, nil
 }
 
 func validateBinding(ctx context.Context, binding credential.Binding) error {
