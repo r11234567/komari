@@ -16,6 +16,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/database/trafficledger"
+	"github.com/komari-monitor/komari/pkg/trafficreset"
 	"github.com/komari-monitor/komari/utils"
 
 	"github.com/google/uuid"
@@ -83,6 +84,7 @@ func deleteClient(db *gorm.DB, clientUuid string) (bool, error) {
 			"traffic report notifications":    &models.TrafficReportNotification{},
 			"traffic daily ledger":            &models.TrafficDailyLedger{},
 			"traffic calibration adjustments": &models.TrafficCalibrationAdjustment{},
+			"traffic cycle first day":         &models.TrafficCycleFirstDay{},
 			"ping loss notifications":         &models.PingLossNotification{},
 			"task results":                    &models.TaskResult{},
 			"installation baseline":           &models.ClientConfigBaseline{},
@@ -534,7 +536,7 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 	}
 
 	var existing models.Client
-	if err := db.Select("uuid", "name", "region", "group", "price", "billing_cycle", "currency", "expired_at", "region_override", "traffic_limit", "traffic_limit_type", "traffic_reset_day", "traffic_reset_allowance", "traffic_reset_cycle").
+	if err := db.Select("uuid", "name", "region", "group", "price", "billing_cycle", "currency", "expired_at", "region_override", "traffic_limit", "traffic_limit_type", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone", "traffic_reset_allowance", "traffic_reset_cycle").
 		Where("uuid = ?", clientUUID).First(&existing).Error; err != nil {
 		return err
 	}
@@ -579,6 +581,34 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 		updates["traffic_reset_day"] = normalized
 		resetDay = normalized
 	}
+	resetTime := existing.TrafficResetTime
+	resetTimezone := existing.TrafficResetTimezone
+	for _, field := range []string{"traffic_reset_time", "traffic_reset_timezone"} {
+		value, exists := updates[field]
+		if !exists {
+			continue
+		}
+		raw, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("%s must be a string", field)
+		}
+		var normalized string
+		var err error
+		if field == "traffic_reset_time" {
+			normalized, err = trafficreset.NormalizeClock(raw)
+		} else {
+			normalized, err = trafficreset.NormalizeTimezone(raw)
+		}
+		if err != nil {
+			return err
+		}
+		updates[field] = normalized
+		if field == "traffic_reset_time" {
+			resetTime = normalized
+		} else {
+			resetTimezone = normalized
+		}
+	}
 	resetAllowance := existing.TrafficResetAllowance
 	if value, exists := updates["traffic_reset_allowance"]; exists {
 		numeric, ok := toInt64(value)
@@ -590,7 +620,7 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 	}
 	if _, allowanceChanged := updates["traffic_reset_allowance"]; allowanceChanged {
 		if resetAllowance > 0 {
-			cycle := currentTrafficCycle(resetDay, time.Now().UTC())
+			cycle := currentTrafficCycleAt(resetDay, resetTime, resetTimezone, time.Now().UTC())
 			if cycle == "" {
 				return fmt.Errorf("set a traffic reset day from 1 to 31 before adding reset traffic")
 			}
@@ -605,8 +635,8 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 		} else {
 			updates["traffic_reset_cycle"] = ""
 		}
-	} else if _, resetDayChanged := updates["traffic_reset_day"]; resetDayChanged {
-		cycle := currentTrafficCycle(resetDay, time.Now().UTC())
+	} else if _, dayChanged := updates["traffic_reset_day"]; dayChanged || updates["traffic_reset_time"] != nil || updates["traffic_reset_timezone"] != nil {
+		cycle := currentTrafficCycleAt(resetDay, resetTime, resetTimezone, time.Now().UTC())
 		if resetAllowance <= 0 || cycle == "" {
 			updates["traffic_reset_allowance"] = 0
 			updates["traffic_reset_cycle"] = ""

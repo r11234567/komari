@@ -259,6 +259,11 @@ func maintainWithDailyCalculator(ctx context.Context, db *gorm.DB, now time.Time
 			return err
 		}
 	}
+	if db.Migrator().HasTable(&models.TrafficCycleFirstDay{}) {
+		if err := persistCycleFirstDays(ctx, db, now); err != nil {
+			return err
+		}
+	}
 	for _, target := range targets {
 		cutoff := dayKey(today.AddDate(0, 0, -target.retentionDays))
 		if err := db.WithContext(ctx).
@@ -280,13 +285,13 @@ func maintainWithDailyCalculator(ctx context.Context, db *gorm.DB, now time.Time
 // BillableUsage applies the same traffic accounting rule used by limits and
 // scheduled reports. Unknown values retain the historical "max" default.
 func BillableUsage(kind string, up, down int64) int64 {
-	switch strings.ToLower(strings.TrimSpace(kind)) {
+	switch NormalizedCountingType(kind) {
 	case "up":
 		return up
 	case "down":
 		return down
 	case "sum":
-		return up + down
+		return saturatingAdd(up, down)
 	case "min":
 		if up < down {
 			return up
@@ -299,6 +304,15 @@ func BillableUsage(kind string, up, down int64) int64 {
 			return up
 		}
 		return down
+	}
+}
+
+func NormalizedCountingType(kind string) string {
+	switch kind = strings.ToLower(strings.TrimSpace(kind)); kind {
+	case "up", "down", "sum", "min", "max":
+		return kind
+	default:
+		return "max"
 	}
 }
 

@@ -11,7 +11,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/trafficledger"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	legacyv1 "github.com/komari-monitor/komari/protocol/v1"
@@ -112,6 +114,7 @@ func (s *browserService) GetAgent(ctx context.Context, req *connect.Request[brow
 		return nil, connectError(connect.CodeNotFound, errors.New("agent not found"))
 	}
 	report := agent_runtime.GetLatestReport()[item.UUID]
+	report = trafficDisplayReport(ctx, item.UUID, report)
 	online := stringSet(agent_runtime.GetAllOnlineUUIDs())
 	return connect.NewResponse(&browserv1.GetAgentResponse{
 		Agent: browserSummary(
@@ -249,12 +252,13 @@ func (s *browserService) WatchAgentStatus(ctx context.Context, req *connect.Requ
 			return connectError(connect.CodeInternal, err)
 		}
 		latest := agent_runtime.GetLatestReport()
+		cycleUsages, _ := trafficledger.CurrentCalibratedCycleUsages(ctx, dbcore.GetDBInstance(), time.Now().UTC())
 		online := stringSet(agent_runtime.GetAllOnlineUUIDs())
 		for _, item := range items {
 			if item.Hidden && !isAdmin || len(requested) > 0 && !requested[item.UUID] {
 				continue
 			}
-			report := latest[item.UUID]
+			report := reportWithTrafficUsage(latest[item.UUID], cycleUsages, item.UUID)
 			summary := browserSummary(item, report, online[item.UUID], isAdmin, showGuestIP)
 			version := browserStatusVersion(summary, report)
 			if last[item.UUID] == version {
@@ -282,7 +286,7 @@ func (s *browserService) WatchAgentStatus(ctx context.Context, req *connect.Requ
 func browserStatusVersion(summary *browserv1.AgentSummary, report *legacyv1.Report) string {
 	updated := ""
 	if report != nil {
-		updated = report.UpdatedAt.UTC().Format(time.RFC3339Nano)
+		updated = fmt.Sprintf("%s:%d:%d", report.UpdatedAt.UTC().Format(time.RFC3339Nano), report.Network.TotalUp, report.Network.TotalDown)
 	}
 	capabilities := ""
 	if value := summary.Capabilities; value != nil {
