@@ -16,6 +16,10 @@ import (
 func TestPolicyDeclaresEveryGeneratedProcedure(t *testing.T) {
 	interceptor := newPolicyInterceptor()
 	expected := []string{
+		credentialv1connect.PasswordLoginServiceBeginPasswordLoginProcedure,
+		credentialv1connect.PasswordLoginServiceBeginLoginVerificationProcedure,
+		credentialv1connect.PasswordLoginServiceCompletePasswordLoginProcedure,
+		credentialv1connect.PasswordLoginServiceCancelPasswordLoginProcedure,
 		credentialv1connect.TrustedCredentialServiceListTrustedCredentialProvidersProcedure,
 		credentialv1connect.TrustedCredentialServiceBeginVerificationProcedure,
 		credentialv1connect.TrustedCredentialServiceCompleteVerificationProcedure,

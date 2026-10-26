@@ -42,6 +42,7 @@ func Register(r *gin.Engine) {
 		path    string
 		handler http.Handler
 	}{
+		newHandler(credentialv1connect.NewPasswordLoginServiceHandler(&passwordLoginService{}, connect.WithInterceptors(policy), connect.WithReadMaxBytes(128<<10))),
 		newHandler(credentialv1connect.NewTrustedCredentialServiceHandler(&credentialService{}, connect.WithInterceptors(policy), connect.WithReadMaxBytes(128<<10))),
 		newHandler(browserv1connect.NewBrowserServiceHandler(&browserService{}, opts...)),
 		newHandler(adminv1connect.NewDashboardServiceHandler(&dashboardService{}, opts...)),

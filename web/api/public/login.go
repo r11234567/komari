@@ -7,6 +7,7 @@ import (
 
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/internal/passkeycredential"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/security"
@@ -55,7 +56,17 @@ func Login(c *gin.Context) {
 		return
 	}
 	// 2FA
-	user, _ := accounts.GetUserByUUID(uuid)
+	user, err := accounts.GetUserByUUID(uuid)
+	if err != nil {
+		api.RespondError(c, http.StatusUnauthorized, "Invalid credentials")
+		return
+	}
+	contacts, err := accounts.ListCredentialContacts(c.Request.Context(), uuid)
+	passkey, passkeyErr := passkeycredential.Read(c.Request.Context(), uuid)
+	if err != nil || passkeyErr != nil || len(contacts) != 0 || len(passkey.Records) != 0 {
+		api.RespondError(c, http.StatusUnauthorized, "Use the two-step password login flow")
+		return
+	}
 	if user.TwoFactor != "" { // 开启了2FA
 		if data.TwoFa == "" {
 			api.RespondError(c, http.StatusUnauthorized, "2FA code is required")

@@ -128,8 +128,10 @@ func (e *Engine) digest(prefix []byte, code string) []byte {
 }
 
 func (e *Engine) reserve(user string, d Destination) bool {
-	userKey := sha256.Sum256([]byte("user:" + user))
-	targetKey := sha256.Sum256([]byte("target:" + d.Kind + ":" + d.Address))
+	var userKey, targetKey [32]byte
+	copy(userKey[:], e.digest([]byte("send-user"), user))
+	target, _ := json.Marshal([]string{d.Kind, d.Address})
+	copy(targetKey[:], e.digest([]byte("send-target"), string(target)))
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	now := e.now()
@@ -191,7 +193,7 @@ func (p *Provider) Descriptor() credential.Descriptor {
 		kind = "telegram_otp"
 		name = "Telegram OTP"
 	}
-	return credential.Descriptor{ID: "native:" + kind, DisplayName: name, Kind: kind, Purposes: []credential.Purpose{credential.BindContact, credential.ManageCredentials, credential.UnlockWorkspace, credential.LoginSettings, credential.SensitiveOperation}}
+	return credential.Descriptor{ID: "native:" + kind, DisplayName: name, Kind: kind, Purposes: []credential.Purpose{credential.BindContact, credential.ManageCredentials, credential.UnlockWorkspace, credential.LoginSettings, credential.SensitiveOperation, credential.PasswordLogin}}
 }
 func (p *Provider) Available(ctx context.Context, b credential.Binding) (bool, error) {
 	if p.Resolve == nil || p.Engine == nil {

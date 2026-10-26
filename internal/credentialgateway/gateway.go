@@ -20,8 +20,9 @@ import (
 )
 
 type Gateway struct {
-	core *credential.Service
-	otp  *notificationotp.Engine
+	core     *credential.Service
+	otp      *notificationotp.Engine
+	password *passwordLogins
 }
 
 var Default = New()
@@ -41,7 +42,7 @@ func New() *Gateway {
 }
 
 func newGateway(engine *notificationotp.Engine) *Gateway {
-	g := &Gateway{core: credential.New(credential.Options{ValidateBinding: validateBinding}), otp: engine}
+	g := &Gateway{core: credential.New(credential.Options{ValidateBinding: validateBinding}), otp: engine, password: newPasswordLogins()}
 	if err := g.core.Register(totpProvider{}); err != nil {
 		panic("invalid native credential provider")
 	}
@@ -66,6 +67,9 @@ func identity(ctx context.Context) (credential.Binding, models.User, error) {
 	if ctx == nil || ctx.Err() != nil {
 		return credential.Binding{}, models.User{}, credential.ErrUnauthenticated
 	}
+	if preauth, ok := ctx.Value(passwordContextKey{}).(passwordContext); ok {
+		return preauth.gateway.passwordIdentity(ctx, preauth.token)
+	}
 	m := rpc.MetaFromContext(ctx)
 	if m == nil || m.Principal == nil || m.Principal.Type != rpc.PrincipalUser || m.Principal.IsAPIKey || !m.Principal.HasRole(rpc.RoleAdmin) || m.Principal.UserUUID == "" || m.UserUUID != m.Principal.UserUUID || m.SessionToken == "" {
 		return credential.Binding{}, models.User{}, credential.ErrUnauthenticated
@@ -78,17 +82,33 @@ func identity(ctx context.Context) (credential.Binding, models.User, error) {
 	if err != nil {
 		return credential.Binding{}, models.User{}, credential.ErrUnauthenticated
 	}
+	binding, err := deriveBinding(ctx, user, m.SessionToken, created)
+	return binding, user, err
+}
+
+func deriveBinding(ctx context.Context, user models.User, token string, created time.Time) (credential.Binding, error) {
 	// Length-delimited encoding prevents ambiguous concatenation. Secret inputs
 	// are hashed, remain server-side and invalidate pending work after changes.
-	passkey, err := passkeycredential.Read(ctx, id)
+	passkey, err := passkeycredential.Read(ctx, user.UUID)
 	if err != nil {
-		return credential.Binding{}, models.User{}, credential.ErrProviderUnavailable
+		return credential.Binding{}, credential.ErrProviderUnavailable
 	}
 	version, _ := json.Marshal([]string{user.Passwd, user.TwoFactor, user.CredentialVersion, created.UTC().Format(time.RFC3339Nano), passkey.Revision})
-	sessionHash := sha256.Sum256([]byte(m.SessionToken))
+	sessionHash := opaqueDigest("session", token)
 	mac := hmac.New(sha256.New, securityVersionKey)
 	_, _ = mac.Write(version)
-	return credential.Binding{UserID: id, SessionDigest: hex.EncodeToString(sessionHash[:]), SecurityVersion: hex.EncodeToString(mac.Sum(nil))}, user, nil
+	return credential.Binding{UserID: user.UUID, SessionDigest: hex.EncodeToString(sessionHash[:]), SecurityVersion: hex.EncodeToString(mac.Sum(nil))}, nil
+}
+
+// opaqueDigest indexes random capabilities and rate-limit identities. This is
+// not password verification/storage; actual passwords are checked with bcrypt.
+func opaqueDigest(namespace, value string) [32]byte {
+	mac := hmac.New(sha256.New, securityVersionKey)
+	raw, _ := json.Marshal([]string{namespace, value})
+	_, _ = mac.Write(raw)
+	var digest [32]byte
+	copy(digest[:], mac.Sum(nil))
+	return digest
 }
 
 func validateBinding(ctx context.Context, binding credential.Binding) error {

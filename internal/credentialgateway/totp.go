@@ -11,7 +11,7 @@ import (
 type totpProvider struct{}
 
 func (totpProvider) Descriptor() credential.Descriptor {
-	return credential.Descriptor{ID: "native:totp", DisplayName: "TOTP", Kind: "legacy_totp", Purposes: []credential.Purpose{credential.BindContact, credential.ManageCredentials, credential.UnlockWorkspace, credential.LoginSettings, credential.SensitiveOperation}}
+	return credential.Descriptor{ID: "native:totp", DisplayName: "TOTP", Kind: "legacy_totp", Purposes: []credential.Purpose{credential.BindContact, credential.ManageCredentials, credential.UnlockWorkspace, credential.LoginSettings, credential.SensitiveOperation, credential.PasswordLogin}}
 }
 
 func (totpProvider) Available(ctx context.Context, binding credential.Binding) (bool, error) {

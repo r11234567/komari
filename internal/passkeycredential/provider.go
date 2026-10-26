@@ -29,7 +29,7 @@ func (p Provider) snapshot(ctx context.Context, user string) (Snapshot, error) {
 }
 
 func (Provider) Descriptor() credential.Descriptor {
-	return credential.Descriptor{ID: "plugin:komari-passkey", DisplayName: "Passkey", Kind: "plugin", Purposes: []credential.Purpose{credential.ManageCredentials, credential.UnlockWorkspace, credential.LoginSettings, credential.SensitiveOperation}}
+	return credential.Descriptor{ID: "plugin:komari-passkey", DisplayName: "Passkey", Kind: "plugin", Purposes: []credential.Purpose{credential.ManageCredentials, credential.UnlockWorkspace, credential.LoginSettings, credential.SensitiveOperation, credential.PasswordLogin}}
 }
 
 func (p Provider) Available(ctx context.Context, b credential.Binding) (bool, error) {
