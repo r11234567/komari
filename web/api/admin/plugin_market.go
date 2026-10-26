@@ -38,6 +38,7 @@ type PluginMarketSource struct {
 }
 
 type PluginMarketPlugin struct {
+	Category    string `json:"category,omitempty"`
 	Name        any    `json:"name"`
 	Short       string `json:"short"`
 	Description any    `json:"description"`

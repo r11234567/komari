@@ -125,7 +125,7 @@ func pluginGatewayRPCError(err error) *rpc.JsonRpcError {
 		code = rpc.PermissionDenied
 	case errors.Is(err, plugingateway.ErrShortRequired):
 		code = rpc.InvalidParams
-	case errors.Is(err, plugin.ErrNotInstalled):
+	case errors.Is(err, plugin.ErrNotInstalled), errors.Is(err, plugingateway.ErrManifestLookup):
 		code = rpc.NotFound
 	case errors.Is(err, context.Canceled):
 		code = rpc.Cancelled

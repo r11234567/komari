@@ -32,3 +32,17 @@ checked inside the RPC handlers too, so an internal plugin/API key cannot use
 an admin role to bypass interactive 2FA. Other settings keep their current APIs.
 The grant expires on logout/session revocation or 2FA secret changes and cannot
 unlock the workspace. Accounts without 2FA must enable it on their profile first.
+
+## Archive uploads and market categories
+
+The official 5 MiB chunk protocol supports plugin/theme/backup uploads, preserving
+legacy upload endpoints. Every new upload is bound to a live interactive admin
+session. Quotas are two uploads per session, four globally, 512 MiB total staged;
+per-archive limits are 100 MiB for plugins, 128 MiB for themes and 256 MiB for
+backups on this low-resource fork (legacy backup restore retains its limit).
+Chunks stream to disk; exact sizes and indices are validated, duplicate chunks
+replace atomically, and merge/finalize/cancel are serialized. Sessions expire
+absolutely after 30 minutes, cleanup runs every minute and restart discards orphan
+staging directories. Finalizers reuse existing archive validation and permission
+approval. The old plugin upload now streams to disk with a 100 MiB limit too.
+Market catalogs retain upstream's optional `category` field.

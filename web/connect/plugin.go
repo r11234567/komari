@@ -215,7 +215,7 @@ func pluginGatewayConnectError(err error) error {
 		code = connect.CodePermissionDenied
 	case errors.Is(err, plugingateway.ErrShortRequired):
 		code = connect.CodeInvalidArgument
-	case errors.Is(err, pluginapp.ErrNotInstalled):
+	case errors.Is(err, pluginapp.ErrNotInstalled), errors.Is(err, plugingateway.ErrManifestLookup):
 		code = connect.CodeNotFound
 	case errors.Is(err, context.Canceled):
 		code = connect.CodeCanceled
