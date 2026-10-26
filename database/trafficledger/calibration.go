@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,23 +25,27 @@ type SignedUsage struct {
 }
 
 type CalibrationHistory struct {
-	CalibrationID string      `json:"calibration_id"`
-	Target        Usage       `json:"target"`
-	Adjustment    SignedUsage `json:"adjustment"`
-	Operator      string      `json:"operator,omitempty"`
-	CreatedAt     time.Time   `json:"created_at"`
+	CalibrationID  string      `json:"calibration_id"`
+	Mode           string      `json:"mode"`
+	BillableOffset *int64      `json:"billable_offset,omitempty"`
+	TargetTotal    *int64      `json:"target_total,omitempty"`
+	Target         Usage       `json:"target"`
+	Adjustment     SignedUsage `json:"adjustment"`
+	Operator       string      `json:"operator,omitempty"`
+	CreatedAt      time.Time   `json:"created_at"`
 }
 
 type CalibrationSnapshot struct {
-	Client          string               `json:"client"`
-	Cycle           string               `json:"cycle"`
-	CycleStart      time.Time            `json:"cycle_start"`
-	CycleEnd        time.Time            `json:"cycle_end"`
-	Raw             Usage                `json:"raw"`
-	Adjustment      SignedUsage          `json:"adjustment"`
-	Effective       Usage                `json:"effective"`
-	History         []CalibrationHistory `json:"history"`
-	HistoryComplete bool                 `json:"history_complete"`
+	Client             string               `json:"client"`
+	Cycle              string               `json:"cycle"`
+	CycleStart         time.Time            `json:"cycle_start"`
+	CycleEnd           time.Time            `json:"cycle_end"`
+	Raw                Usage                `json:"raw"`
+	Adjustment         SignedUsage          `json:"adjustment"`
+	Effective          Usage                `json:"effective"`
+	History            []CalibrationHistory `json:"history"`
+	HistoryComplete    bool                 `json:"history_complete"`
+	CalibrationWarning string               `json:"calibration_warning,omitempty"`
 }
 
 type calibrationDay struct {
@@ -52,8 +57,12 @@ type calibrationDay struct {
 
 type calibratedCycleCacheState struct {
 	sync.Mutex
-	expires time.Time
-	values  map[string]Usage
+	loadMu     sync.Mutex
+	generation uint64
+	db         *gorm.DB
+	from       time.Time
+	expires    time.Time
+	values     map[string]Usage
 }
 
 var calibratedCycleCache calibratedCycleCacheState
@@ -113,6 +122,22 @@ func LoadCalibrationSnapshot(ctx context.Context, db *gorm.DB, client models.Cli
 		return CalibrationSnapshot{}, err
 	}
 	snapshot.History = history
+	if len(history) > 0 && history[0].BillableOffset != nil && strings.HasPrefix(history[0].Mode, "total:") {
+		kind := strings.TrimPrefix(history[0].Mode, "total:")
+		if kind != NormalizedCountingType(client.TrafficLimitType) {
+			snapshot.Effective = snapshot.Raw
+			snapshot.Adjustment = SignedUsage{}
+			snapshot.CalibrationWarning = "计费口径已变化，原总量校准已停用，请重新校准"
+			return snapshot, nil
+		}
+		target := addSignedNonNegative(BillableUsage(kind, snapshot.Raw.Up, snapshot.Raw.Down), *history[0].BillableOffset)
+		effective, err := CalibrationTargetsForTotal(kind, snapshot.Effective, target)
+		if err != nil {
+			return CalibrationSnapshot{}, err
+		}
+		snapshot.Effective = effective
+		snapshot.Adjustment = SignedUsage{Up: effective.Up - snapshot.Raw.Up, Down: effective.Down - snapshot.Raw.Down}
+	}
 	return snapshot, nil
 }
 
@@ -410,6 +435,10 @@ func CalibrateCurrentCycle(ctx context.Context, db *gorm.DB, client models.Clien
 	// correction, otherwise concurrent saves would apply the same delta twice.
 	calibrationWriteMu.Lock()
 	defer calibrationWriteMu.Unlock()
+	return calibrateCycle(ctx, db, client, target, operator, now, "directions", nil, nil)
+}
+
+func calibrateCycle(ctx context.Context, db *gorm.DB, client models.Client, target Usage, operator string, now time.Time, mode string, billableOffset, targetTotal *int64) (CalibrationSnapshot, error) {
 	if target.Up < 0 || target.Down < 0 {
 		return CalibrationSnapshot{}, fmt.Errorf("traffic calibration values cannot be negative")
 	}
@@ -425,19 +454,14 @@ func CalibrateCurrentCycle(ctx context.Context, db *gorm.DB, client models.Clien
 	upDelta := target.Up - snapshot.Effective.Up
 	downDelta := target.Down - snapshot.Effective.Down
 	if upDelta == 0 && downDelta == 0 {
-		if !snapshot.HistoryComplete {
-			if err := markCycleFirstDayRecovered(ctx, db, client, now); err != nil {
-				return CalibrationSnapshot{}, err
-			}
-			InvalidateCalibratedCycleCache()
-			return LoadCalibrationSnapshot(ctx, db, client, now)
-		}
 		history, historyErr := loadCalibrationHistory(ctx, db, client.UUID, snapshot.Cycle)
 		if historyErr != nil {
 			return CalibrationSnapshot{}, historyErr
 		}
-		snapshot.History = history
-		return snapshot, nil
+		if snapshot.HistoryComplete && billableOffset == nil && (len(history) == 0 || !strings.HasPrefix(history[0].Mode, "total:")) {
+			snapshot.History = history
+			return snapshot, nil
+		}
 	}
 
 	upAllocation, err := allocateCalibration(days, upDelta, func(day calibrationDay) int64 { return day.Effective.Up })
@@ -457,20 +481,23 @@ func CalibrateCurrentCycle(ctx context.Context, db *gorm.DB, client models.Clien
 	for _, day := range days {
 		up := upAllocation[day.Day]
 		down := downAllocation[day.Day]
-		if up == 0 && down == 0 {
+		if up == 0 && down == 0 && len(rows) > 0 {
 			continue
 		}
 		rows = append(rows, models.TrafficCalibrationAdjustment{
-			CalibrationID: calibrationID,
-			Client:        client.UUID,
-			Cycle:         snapshot.Cycle,
-			Day:           day.Day,
-			UpDelta:       up,
-			DownDelta:     down,
-			TargetUp:      target.Up,
-			TargetDown:    target.Down,
-			Operator:      operator,
-			CreatedAt:     createdAt,
+			CalibrationID:   calibrationID,
+			CalibrationMode: mode,
+			BillableOffset:  billableOffset,
+			TargetTotal:     targetTotal,
+			Client:          client.UUID,
+			Cycle:           snapshot.Cycle,
+			Day:             day.Day,
+			UpDelta:         up,
+			DownDelta:       down,
+			TargetUp:        target.Up,
+			TargetDown:      target.Down,
+			Operator:        operator,
+			CreatedAt:       createdAt,
 		})
 	}
 	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -616,17 +643,33 @@ func applyHourlyDirection(hours []HourlyUsage, delta int64, field func(*HourlyUs
 
 func CurrentCalibratedCycleUsages(ctx context.Context, db *gorm.DB, now time.Time) (map[string]Usage, error) {
 	calibratedCycleCache.Lock()
-	if now.Before(calibratedCycleCache.expires) && calibratedCycleCache.values != nil {
+	if calibratedCycleCache.db == db && !now.Before(calibratedCycleCache.from) && now.Before(calibratedCycleCache.expires) && calibratedCycleCache.values != nil {
 		values := cloneUsageMap(calibratedCycleCache.values)
 		calibratedCycleCache.Unlock()
 		return values, nil
 	}
 	calibratedCycleCache.Unlock()
+	// Collapse simultaneous cold requests on the panel's small machines. A save
+	// can invalidate while this load is running; the generation prevents an old
+	// load from publishing over that invalidation.
+	calibratedCycleCache.loadMu.Lock()
+	defer calibratedCycleCache.loadMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	calibratedCycleCache.Lock()
+	if calibratedCycleCache.db == db && !now.Before(calibratedCycleCache.from) && now.Before(calibratedCycleCache.expires) && calibratedCycleCache.values != nil {
+		values := cloneUsageMap(calibratedCycleCache.values)
+		calibratedCycleCache.Unlock()
+		return values, nil
+	}
+	generation := calibratedCycleCache.generation
+	calibratedCycleCache.Unlock()
 
 	// Configured cycles are computed centrally, so custom vendor clocks work
 	// with existing Agents without changing their raw counters or privileges.
 	var clients []models.Client
-	if err := db.WithContext(ctx).Select("uuid", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone").Where("traffic_reset_day BETWEEN 1 AND 31").Find(&clients).Error; err != nil {
+	if err := db.WithContext(ctx).Select("uuid", "traffic_limit_type", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone").Where("traffic_reset_day BETWEEN 1 AND 31").Find(&clients).Error; err != nil {
 		return nil, fmt.Errorf("load traffic cycle clients: %w", err)
 	}
 	values := make(map[string]Usage)
@@ -642,14 +685,19 @@ func CurrentCalibratedCycleUsages(ctx context.Context, db *gorm.DB, now time.Tim
 		values[client.UUID] = snapshot.Effective
 	}
 	calibratedCycleCache.Lock()
-	calibratedCycleCache.values = cloneUsageMap(values)
-	calibratedCycleCache.expires = expires
+	if generation == calibratedCycleCache.generation {
+		calibratedCycleCache.values = cloneUsageMap(values)
+		calibratedCycleCache.expires = expires
+		calibratedCycleCache.from = now
+		calibratedCycleCache.db = db
+	}
 	calibratedCycleCache.Unlock()
 	return values, nil
 }
 
 func InvalidateCalibratedCycleCache() {
 	calibratedCycleCache.Lock()
+	calibratedCycleCache.generation++
 	calibratedCycleCache.expires = time.Time{}
 	calibratedCycleCache.values = nil
 	calibratedCycleCache.Unlock()
@@ -672,19 +720,22 @@ func rangeAdjustment(ctx context.Context, db *gorm.DB, clientID string, startDay
 
 func loadCalibrationHistory(ctx context.Context, db *gorm.DB, clientID, cycle string) ([]CalibrationHistory, error) {
 	var rows []struct {
-		CalibrationID string
-		TargetUp      int64
-		TargetDown    int64
-		UpDelta       int64
-		DownDelta     int64
-		Operator      string
-		CreatedAt     time.Time
+		CalibrationID   string
+		CalibrationMode string
+		BillableOffset  *int64
+		TargetTotal     *int64
+		TargetUp        int64
+		TargetDown      int64
+		UpDelta         int64
+		DownDelta       int64
+		Operator        string
+		CreatedAt       time.Time
 	}
 	if err := db.WithContext(ctx).Model(&models.TrafficCalibrationAdjustment{}).
-		Select("calibration_id, target_up, target_down, operator, created_at, SUM(up_delta) AS up_delta, SUM(down_delta) AS down_delta").
+		Select("calibration_id, calibration_mode, billable_offset, target_total, target_up, target_down, operator, created_at, SUM(up_delta) AS up_delta, SUM(down_delta) AS down_delta, MAX(id) AS newest_id").
 		Where("client = ? AND cycle = ?", clientID, cycle).
-		Group("calibration_id, target_up, target_down, operator, created_at").
-		Order("created_at DESC").
+		Group("calibration_id, calibration_mode, billable_offset, target_total, target_up, target_down, operator, created_at").
+		Order("created_at DESC, newest_id DESC").
 		Limit(10).
 		Scan(&rows).Error; err != nil {
 		return nil, fmt.Errorf("read traffic calibration history: %w", err)
@@ -692,11 +743,14 @@ func loadCalibrationHistory(ctx context.Context, db *gorm.DB, clientID, cycle st
 	history := make([]CalibrationHistory, 0, len(rows))
 	for _, row := range rows {
 		history = append(history, CalibrationHistory{
-			CalibrationID: row.CalibrationID,
-			Target:        Usage{Up: row.TargetUp, Down: row.TargetDown},
-			Adjustment:    SignedUsage{Up: row.UpDelta, Down: row.DownDelta},
-			Operator:      row.Operator,
-			CreatedAt:     row.CreatedAt.UTC(),
+			CalibrationID:  row.CalibrationID,
+			Mode:           row.CalibrationMode,
+			BillableOffset: row.BillableOffset,
+			TargetTotal:    row.TargetTotal,
+			Target:         Usage{Up: row.TargetUp, Down: row.TargetDown},
+			Adjustment:     SignedUsage{Up: row.UpDelta, Down: row.DownDelta},
+			Operator:       row.Operator,
+			CreatedAt:      row.CreatedAt.UTC(),
 		})
 	}
 	return history, nil

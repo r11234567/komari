@@ -17,16 +17,18 @@ import (
 )
 
 type trafficCalibrationRequest struct {
-	TargetUp   *int64 `json:"target_up"`
-	TargetDown *int64 `json:"target_down"`
-	Cycle      string `json:"cycle"`
-	Note       string `json:"note"`
+	TargetUp     *int64 `json:"target_up"`
+	TargetDown   *int64 `json:"target_down"`
+	TargetTotal  *int64 `json:"target_total"`
+	CountingType string `json:"counting_type"`
+	Cycle        string `json:"cycle"`
+	Note         string `json:"note"`
 }
 
 func findTrafficCalibrationClient(uuid string) (models.Client, error) {
 	var client models.Client
 	err := dbcore.GetDBInstance().
-		Select("uuid", "name", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone").
+		Select("uuid", "name", "traffic_limit_type", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone").
 		Where("uuid = ?", uuid).
 		First(&client).Error
 	return client, err
@@ -57,7 +59,7 @@ func GetTrafficCalibration(c *gin.Context) {
 		api.RespondError(c, http.StatusInternalServerError, "读取流量校准信息失败："+err.Error())
 		return
 	}
-	api.RespondSuccess(c, gin.H{"available": true, "snapshot": snapshot})
+	api.RespondSuccess(c, gin.H{"available": true, "snapshot": snapshot, "counting_type": trafficledger.NormalizedCountingType(client.TrafficLimitType)})
 }
 
 func UpdateTrafficCalibration(c *gin.Context) {
@@ -66,8 +68,8 @@ func UpdateTrafficCalibration(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "流量校准参数无效："+err.Error())
 		return
 	}
-	if request.TargetUp == nil || request.TargetDown == nil || *request.TargetUp < 0 || *request.TargetDown < 0 {
-		api.RespondError(c, http.StatusBadRequest, "校准后的上传和下载流量不能小于 0")
+	if err := validateCalibrationRequest(request); err != nil {
+		api.RespondError(c, http.StatusBadRequest, "请输入非负总量，或同时输入非负的上传和下载；两种方式不能混用")
 		return
 	}
 	client, err := findTrafficCalibrationClient(c.Param("uuid"))
@@ -90,14 +92,19 @@ func UpdateTrafficCalibration(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "校准说明最多 300 字")
 		return
 	}
-	snapshot, err := trafficledger.CalibrateCurrentCycle(
-		c.Request.Context(),
-		dbcore.GetDBInstance(),
-		client,
-		trafficledger.Usage{Up: *request.TargetUp, Down: *request.TargetDown},
-		fmt.Sprint(actor),
-		now,
-	)
+	countingType := trafficledger.NormalizedCountingType(client.TrafficLimitType)
+	if request.TargetTotal != nil && request.CountingType != "" && request.CountingType != countingType {
+		api.RespondError(c, http.StatusConflict, "计费口径已变化，请重新打开校准窗口")
+		return
+	}
+	var snapshot trafficledger.CalibrationSnapshot
+	mode := "directions"
+	if request.TargetTotal != nil {
+		mode = "total:" + countingType
+		snapshot, err = trafficledger.CalibrateBillableCycle(c.Request.Context(), dbcore.GetDBInstance(), client, *request.TargetTotal, fmt.Sprint(actor), now)
+	} else {
+		snapshot, err = trafficledger.CalibrateCurrentCycle(c.Request.Context(), dbcore.GetDBInstance(), client, trafficledger.Usage{Up: *request.TargetUp, Down: *request.TargetDown}, fmt.Sprint(actor), now)
+	}
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, "保存流量校准失败："+err.Error())
 		return
@@ -105,8 +112,21 @@ func UpdateTrafficCalibration(c *gin.Context) {
 	auditlog.Log(
 		c.ClientIP(),
 		fmt.Sprint(actor),
-		fmt.Sprintf("calibrated traffic for client %s cycle=%s to up=%d down=%d note=%q", client.UUID, cycle, *request.TargetUp, *request.TargetDown, strings.TrimSpace(request.Note)),
+		fmt.Sprintf("calibrated traffic for client %s cycle=%s mode=%s to up=%d down=%d note=%q", client.UUID, cycle, mode, snapshot.Effective.Up, snapshot.Effective.Down, strings.TrimSpace(request.Note)),
 		"warn",
 	)
-	api.RespondSuccess(c, gin.H{"available": true, "snapshot": snapshot})
+	api.RespondSuccess(c, gin.H{"available": true, "snapshot": snapshot, "counting_type": countingType})
+}
+
+func validateCalibrationRequest(request trafficCalibrationRequest) error {
+	if request.TargetTotal != nil {
+		if *request.TargetTotal < 0 || request.TargetUp != nil || request.TargetDown != nil {
+			return fmt.Errorf("provide either a nonnegative total or both directions")
+		}
+		return nil
+	}
+	if request.TargetUp == nil || request.TargetDown == nil || *request.TargetUp < 0 || *request.TargetDown < 0 {
+		return fmt.Errorf("both nonnegative directions are required")
+	}
+	return nil
 }
