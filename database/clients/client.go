@@ -16,6 +16,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/database/trafficledger"
+	"github.com/komari-monitor/komari/pkg/expiry"
 	"github.com/komari-monitor/komari/pkg/trafficreset"
 	"github.com/komari-monitor/komari/utils"
 
@@ -493,6 +494,8 @@ func applyClientDeploymentStatuses(db *gorm.DB, clientList []models.Client) erro
 	return nil
 }
 
+var ErrExpiryAlreadyChanged = errors.New("expiry has already changed")
+
 func SaveClient(updates map[string]interface{}) error {
 	return SaveClientWithSource(updates, billing.PriceSourceClientEdit)
 }
@@ -536,7 +539,7 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 	}
 
 	var existing models.Client
-	if err := db.Select("uuid", "name", "region", "group", "price", "billing_cycle", "currency", "expired_at", "region_override", "traffic_limit", "traffic_limit_type", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone", "traffic_reset_allowance", "traffic_reset_cycle").
+	if err := db.Select("uuid", "name", "region", "group", "price", "billing_cycle", "currency", "expired_at", "expiry_timezone", "region_override", "traffic_limit", "traffic_limit_type", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone", "traffic_reset_allowance", "traffic_reset_cycle").
 		Where("uuid = ?", clientUUID).First(&existing).Error; err != nil {
 		return err
 	}
@@ -655,27 +658,54 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 		}
 		updates["currency"] = currency
 	}
-	if value, exists := updates["expired_at"]; exists {
-		switch typed := value.(type) {
-		case nil:
-			updates["expired_at"] = nil
-		case time.Time:
-			updates["expired_at"] = typed.UTC()
-		case *time.Time:
-			if typed == nil {
-				updates["expired_at"] = nil
-			} else {
-				updates["expired_at"] = typed.UTC()
-			}
-		case string:
-			stamp, err := time.Parse(time.RFC3339Nano, typed)
-			if err != nil {
-				return fmt.Errorf("expired_at must be an RFC3339 timestamp with a timezone: %w", err)
-			}
-			updates["expired_at"] = stamp.UTC()
-		default:
-			return fmt.Errorf("expired_at must be an RFC3339 timestamp with a timezone")
+	_, hasExpiredAt := updates["expired_at"]
+	localRaw, hasLocal := updates["expiry_local_datetime"]
+	if hasExpiredAt && hasLocal {
+		return fmt.Errorf("expired_at and expiry_local_datetime cannot be set together")
+	}
+	timezone := existing.ExpiryTimezone
+	if raw, exists := updates["expiry_timezone"]; exists {
+		name, ok := raw.(string)
+		if !ok {
+			return fmt.Errorf("expiry_timezone must be a string")
 		}
+		normalized, err := expiry.NormalizeTimezone(name)
+		if err != nil {
+			return err
+		}
+		timezone = normalized
+		updates["expiry_timezone"] = normalized
+	}
+	if hasLocal {
+		delete(updates, "expiry_local_datetime")
+		local, ok := localRaw.(string)
+		if !ok {
+			return fmt.Errorf("expiry local datetime must be YYYY-MM-DDTHH:mm:ss")
+		}
+		stamp, err := expiry.ParseLocalDateTime(local, timezone)
+		if err != nil {
+			return err
+		}
+		updates["expired_at"] = stamp
+	} else if raw, exists := updates["expired_at"]; exists {
+		if stamp, ok := raw.(*time.Time); raw == nil || (ok && stamp == nil) {
+			updates["expired_at"] = nil
+		} else {
+			stamp, err := parseExpiryInstant(raw)
+			if err != nil {
+				return err
+			}
+			updates["expired_at"] = stamp
+		}
+	}
+	match, hasMatch := updates["_match_expired_at"]
+	if hasMatch {
+		delete(updates, "_match_expired_at")
+		stamp, err := parseExpiryInstant(match)
+		if err != nil {
+			return err
+		}
+		match = stamp
 	}
 
 	updates["updated_at"] = time.Now().UTC()
@@ -686,9 +716,16 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 		}
 	}
 
-	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error
-	if err != nil {
-		return err
+	query := db.Model(&models.Client{}).Where("uuid = ?", clientUUID)
+	if hasMatch {
+		query = query.Where("expired_at = ?", match)
+	}
+	result := query.Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if hasMatch && result.RowsAffected == 0 {
+		return ErrExpiryAlreadyChanged
 	}
 	if _, changesResetDay := updates["traffic_reset_day"]; changesResetDay && db.Migrator().HasTable(&models.ClientDeploymentProfile{}) {
 		var stored models.ClientDeploymentProfile
@@ -798,4 +835,20 @@ func AdoptTrafficResetDay(clientUUID string, value interface{}) error {
 	return db.Model(&models.Client{}).
 		Where("uuid = ? AND traffic_reset_day IS NULL", clientUUID).
 		Update("traffic_reset_day", *day).Error
+}
+
+func parseExpiryInstant(raw interface{}) (time.Time, error) {
+	switch value := raw.(type) {
+	case time.Time:
+		return value.UTC(), nil
+	case *time.Time:
+		if value != nil {
+			return value.UTC(), nil
+		}
+	case string:
+		if stamp, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			return stamp.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("expiry must be an RFC3339 timestamp with a timezone")
 }

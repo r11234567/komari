@@ -8,7 +8,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/pkg/config"
-	"github.com/komari-monitor/komari/pkg/timeutil"
+	"github.com/komari-monitor/komari/pkg/expiry"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/renewal"
 )
@@ -45,7 +45,7 @@ func CheckExpire() {
 		var clientLeadToExpire []clientToExpireInfo
 
 		for _, client := range clients_all {
-			if client.ExpiredAt == nil {
+			if !expiry.IsFinite(client.ExpiredAt) {
 				continue
 			}
 			clientExpireTime := client.ExpiredAt.UTC()
@@ -54,10 +54,10 @@ func CheckExpire() {
 				continue
 			}
 
-			notificationThreshold := checkTime.In(time.Local).AddDate(0, 0, notificationLeadDays).UTC()
+			notificationThreshold := checkTime.Add(time.Duration(notificationLeadDays) * 24 * time.Hour)
 
 			if clientExpireTime.Before(notificationThreshold) || clientExpireTime.Equal(notificationThreshold) {
-				daysLeft := timeutil.SystemDateDistance(checkTime, clientExpireTime)
+				daysLeft := expiry.RemainingDaysCeil(clientExpireTime, checkTime)
 
 				clientLeadToExpire = append(clientLeadToExpire, clientToExpireInfo{
 					Name:     client.Name,

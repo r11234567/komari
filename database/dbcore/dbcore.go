@@ -2,6 +2,7 @@ package dbcore
 
 import (
 	"archive/zip"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -559,7 +560,7 @@ func doInitialize() error {
 	if err := billing.ReconcileStoredCurrencies(instance); err != nil {
 		return fmt.Errorf("failed to reconcile billing currencies: %w", err)
 	}
-	if err := billing.BackfillPriceVersionFX(instance); err != nil {
+	if err := billing.ApplyUpgradeFX(context.Background(), instance, nil, ""); err != nil {
 		return fmt.Errorf("failed to backfill billing FX snapshots: %w", err)
 	}
 	if copyLegacyReturnRouteNotify {

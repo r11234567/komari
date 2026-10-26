@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/pkg/expiry"
 	"gorm.io/gorm"
 )
 
@@ -95,6 +96,7 @@ type BillingServerRow struct {
 	MonthExtra       string     `json:"month_extra"`
 	MonthTotal       string     `json:"month_total"`
 	ExpiredAt        *time.Time `json:"expired_at"`
+	ExpiryTimezone   string     `json:"expiry_timezone,omitempty"`
 	RemainingDays    *int       `json:"remaining_days"`
 	RemainingValue   *string    `json:"remaining_value"`
 }
@@ -179,6 +181,9 @@ func GetOverview(ctx context.Context, db *gorm.DB, currency string, now time.Tim
 	now = normalizedNow(now)
 	currency, err := requireDisplayCurrency(currency)
 	if err != nil {
+		return BillingOverview{}, err
+	}
+	if err := BackfillPriceVersionFX(db.WithContext(ctx)); err != nil {
 		return BillingOverview{}, err
 	}
 	entries, snapshots, coverage, err := queryCalculatedEntries(ctx, db, now, nil, nil, nil, "", "")
@@ -310,6 +315,9 @@ func GetServers(ctx context.Context, db *gorm.DB, query ServerQuery) (ServerPage
 	if err != nil {
 		return ServerPage{}, err
 	}
+	if err := BackfillPriceVersionFX(db.WithContext(ctx)); err != nil {
+		return ServerPage{}, err
+	}
 	query.Page, query.PageSize = normalizePage(query.Page, query.PageSize)
 	entries, snapshots, _, err := queryCalculatedEntries(ctx, db, query.Now, nil, nil, nil, "", "")
 	if err != nil {
@@ -338,7 +346,7 @@ func GetServers(ctx context.Context, db *gorm.DB, query ServerQuery) (ServerPage
 		return ServerPage{}, err
 	}
 	var clients []models.Client
-	if err := db.WithContext(ctx).Select("uuid", "name", "region", "group", "tags", "weight", "created_at").Find(&clients).Error; err != nil {
+	if err := db.WithContext(ctx).Select("uuid", "name", "region", "region_override", "group", "tags", "weight", "created_at", "expiry_timezone").Find(&clients).Error; err != nil {
 		return ServerPage{}, err
 	}
 	clientByID := make(map[string]models.Client, len(clients))
@@ -381,7 +389,7 @@ func GetServers(ctx context.Context, db *gorm.DB, query ServerQuery) (ServerPage
 	for _, version := range versions {
 		clientName, region, group, tags := version.ClientName, version.Region, version.Group, ""
 		if client, ok := clientByID[version.Client]; ok {
-			clientName, region, group, tags = client.Name, client.Region, client.Group, client.Tags
+			clientName, region, group, tags = client.Name, billingDisplayRegion(client), client.Group, client.Tags
 		}
 		if len(query.NativeCurrencies) > 0 {
 			if len(nativeSet) == 0 {
@@ -426,6 +434,12 @@ func GetServers(ctx context.Context, db *gorm.DB, query ServerQuery) (ServerPage
 			CurrencyValid: version.CurrencyValid, BillingCycleDays: version.BillingCycleDays,
 			ExpiredAt: version.ExpiredAt,
 		}
+		if client, ok := clientByID[version.Client]; ok {
+			row.ExpiryTimezone = client.ExpiryTimezone
+			if strings.TrimSpace(row.ExpiryTimezone) == "" {
+				row.ExpiryTimezone = expiry.DefaultTimezone
+			}
+		}
 		switch {
 		case version.PriceMicros == -MicrosPerUnit:
 			row.BillingStatus = "free"
@@ -444,6 +458,9 @@ func GetServers(ctx context.Context, db *gorm.DB, query ServerQuery) (ServerPage
 		row.MonthBase = FormatAmountMicros(base)
 		row.MonthExtra = FormatAmountMicros(extra + other + oneTime)
 		row.MonthTotal = FormatAmountMicros(base + extra + other + oneTime)
+		// Free and one-time servers still have an expiry. Only residual value
+		// stays limited to recurring prices.
+		row.RemainingDays = finiteRemainingDays(version.ExpiredAt, query.Now)
 		if row.BillingStatus == "recurring" && version.CurrencyValid {
 			dailyNative, monthlyNative, yearlyNative, calcErr := cycleAverageMicros(version)
 			if calcErr != nil {
@@ -452,7 +469,8 @@ func GetServers(ctx context.Context, db *gorm.DB, query ServerQuery) (ServerPage
 			row.DailyAverage = convertedLockedForecast(dailyNative, version, currency, lockedRates)
 			row.MonthlyAverage = convertedLockedForecast(monthlyNative, version, currency, lockedRates)
 			row.YearlyAverage = convertedLockedForecast(yearlyNative, version, currency, lockedRates)
-			row.RemainingValue, row.RemainingDays = remainingValue(version, currency, latestRates, query.Now)
+			value, _ := remainingValue(version, currency, latestRates, query.Now)
+			row.RemainingValue = value
 		}
 		rows = append(rows, row)
 	}
@@ -479,6 +497,13 @@ func GetServers(ctx context.Context, db *gorm.DB, query ServerQuery) (ServerPage
 	total := len(rows)
 	start, end := pageBounds(total, query.Page, query.PageSize)
 	return ServerPage{Currency: currency, Items: rows[start:end], Page: pageInfo(total, query.Page, query.PageSize)}, nil
+}
+
+func billingDisplayRegion(client models.Client) string {
+	if override := strings.TrimSpace(client.RegionOverride); override != "" {
+		return override
+	}
+	return client.Region
 }
 
 func regionKey(region string) string {
@@ -560,6 +585,9 @@ func normalizeMonthlyMonths(query *PeriodQuery) error {
 func getPeriods(ctx context.Context, db *gorm.DB, query PeriodQuery, monthly bool) (PeriodPage, error) {
 	currency, err := requireDisplayCurrency(query.Currency)
 	if err != nil {
+		return PeriodPage{}, err
+	}
+	if err := BackfillPriceVersionFX(db.WithContext(ctx)); err != nil {
 		return PeriodPage{}, err
 	}
 	query.Page, query.PageSize = normalizePage(query.Page, query.PageSize)
@@ -772,6 +800,11 @@ func GetEntries(ctx context.Context, db *gorm.DB, query EntryQuery) (EntryPage, 
 		}
 		return rows[i].OccurredAt.After(rows[j].OccurredAt)
 	})
+	names, err := loadClientNames(ctx, db, clients)
+	if err != nil {
+		return EntryPage{}, err
+	}
+	applyLiveClientNames(rows, names)
 	if needle := strings.ToLower(strings.TrimSpace(query.Q)); needle != "" {
 		filtered := make([]BillingEntryRow, 0, len(rows))
 		for _, row := range rows {
@@ -1065,14 +1098,14 @@ func convertedEntryAmount(entry models.BillingEntry, currency string, snapshots 
 	if entry.OriginalCurrency == currency {
 		return entry.OriginalAmountMicros, true
 	}
-	if entry.USDAmountMicros == nil || entry.FXSnapshotID == nil {
+	if entry.FXSnapshotID == nil {
 		return 0, false
 	}
 	rates := snapshots[*entry.FXSnapshotID]
 	if len(rates) == 0 {
 		return 0, false
 	}
-	value, err := ConvertMicros(*entry.USDAmountMicros, "USD", currency, rates)
+	value, err := ConvertMicros(entry.OriginalAmountMicros, entry.OriginalCurrency, currency, rates)
 	return value, err == nil
 }
 
@@ -1229,20 +1262,16 @@ func convertedLockedForecast(amount int64, version models.BillingPriceVersion, t
 	return &value
 }
 
-// isLongTermExpiry reports whether an expiry date is a "never expires"
-// placeholder rather than a real one.
-//
-// Operators mark permanent servers with a far-future sentinel - 9999-12-31 is
-// the usual choice. Treating that as a date makes remainingValue prorate nearly
-// three million days of a billing cycle into prepaid value, which then lands in
-// the dashboard total and swamps every real figure. A zero or absurdly early
-// date is equally meaningless and is rejected the same way.
-func isLongTermExpiry(expiry *time.Time) bool {
-	if expiry == nil || expiry.IsZero() {
-		return true
+func isLongTermExpiry(expiredAt *time.Time) bool {
+	return expiry.IsLongTerm(expiredAt)
+}
+
+func finiteRemainingDays(expiredAt *time.Time, now time.Time) *int {
+	if expiredAt == nil || isLongTermExpiry(expiredAt) {
+		return nil
 	}
-	year := expiry.UTC().Year()
-	return year < 2 || year > 2200
+	days := expiry.RemainingDaysCeil(*expiredAt, now)
+	return &days
 }
 
 func remainingValue(version models.BillingPriceVersion, currency string, rates map[string]string, now time.Time) (*string, *int) {
@@ -1250,22 +1279,50 @@ func remainingValue(version models.BillingPriceVersion, currency string, rates m
 		return nil, nil
 	}
 	if isLongTermExpiry(version.ExpiredAt) {
-		// No meaningful remaining value: the server is not on a countdown.
 		return nil, nil
 	}
 	remaining := version.ExpiredAt.Sub(now)
-	days := int(remaining.Hours() / 24)
 	if remaining <= 0 {
-		days = 0
+		days := 0
 		value := "0.000000"
 		return &value, &days
 	}
+	days := expiry.RemainingDaysCeil(*version.ExpiredAt, now)
 	cycle := time.Duration(version.BillingCycleDays) * 24 * time.Hour
 	amount, err := multiplyRatio(version.PriceMicros, remaining.Nanoseconds(), cycle.Nanoseconds())
 	if err != nil {
 		return nil, &days
 	}
 	return convertedForecast(amount, version.Currency, currency, rates), &days
+}
+
+type RemainingAmount struct {
+	Value    string
+	Currency string
+}
+
+func RemainingByClient(ctx context.Context, db *gorm.DB, now time.Time) (map[string]RemainingAmount, error) {
+	now = normalizedNow(now)
+	_, rates, err := LatestFXSnapshot(db.WithContext(ctx))
+	if err != nil && err != gorm.ErrRecordNotFound {
+		return nil, err
+	}
+	var versions []models.BillingPriceVersion
+	if err := db.WithContext(ctx).Where("effective_to IS NULL").Find(&versions).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]RemainingAmount, len(versions))
+	for _, version := range versions {
+		if !version.CurrencyValid || version.PriceMicros <= 0 || version.BillingCycleDays <= 0 {
+			continue
+		}
+		value, _ := remainingValue(version, version.Currency, rates, now)
+		if value == nil {
+			continue
+		}
+		out[version.Client] = RemainingAmount{Value: *value, Currency: version.Currency}
+	}
+	return out, nil
 }
 
 func remainingValueSummary(ctx context.Context, db *gorm.DB, currency string, now time.Time) (int64, int, error) {
@@ -1288,13 +1345,14 @@ func remainingValueSummary(ctx context.Context, db *gorm.DB, currency string, no
 		if _, ok := liveSet[version.Client]; !ok {
 			continue
 		}
-		value, days := remainingValue(version, currency, rates, now)
+		value, _ := remainingValue(version, currency, rates, now)
 		if value != nil {
 			amount, parseErr := ParseAmountMicros(*value)
 			if parseErr == nil {
 				total += amount
 			}
 		}
+		days := finiteRemainingDays(version.ExpiredAt, now)
 		if days != nil && version.ExpiredAt != nil && version.ExpiredAt.After(now) && !version.ExpiredAt.After(now.AddDate(0, 0, 30)) {
 			expiring++
 		}
