@@ -24,6 +24,7 @@ var credentialPurposes = map[credentialv1.CredentialPurpose]credential.Purpose{
 	credentialv1.CredentialPurpose_CREDENTIAL_PURPOSE_UNLOCK_WORKSPACE:    credential.UnlockWorkspace,
 	credentialv1.CredentialPurpose_CREDENTIAL_PURPOSE_LOGIN_SETTINGS:      credential.LoginSettings,
 	credentialv1.CredentialPurpose_CREDENTIAL_PURPOSE_SENSITIVE_OPERATION: credential.SensitiveOperation,
+	credentialv1.CredentialPurpose_CREDENTIAL_PURPOSE_PASSWORD_LOGIN:      credential.PasswordLogin,
 }
 
 func protoCredentialPurpose(p credential.Purpose) credentialv1.CredentialPurpose {

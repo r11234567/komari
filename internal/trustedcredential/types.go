@@ -19,6 +19,7 @@ const (
 	UnlockWorkspace       Purpose = "unlock_workspace"
 	LoginSettings         Purpose = "login_settings"
 	SensitiveOperation    Purpose = "sensitive_operation"
+	PasswordLogin         Purpose = "password_login"
 	ChallengeLifetime             = 3 * time.Minute
 	AuthorizationLifetime         = time.Minute
 	MaxAttempts                   = 5
@@ -110,7 +111,7 @@ type Options struct {
 
 func validPurpose(p Purpose) bool {
 	switch p {
-	case BindContact, ManageCredentials, UnlockWorkspace, LoginSettings, SensitiveOperation:
+	case BindContact, ManageCredentials, UnlockWorkspace, LoginSettings, SensitiveOperation, PasswordLogin:
 		return true
 	}
 	return false

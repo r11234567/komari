@@ -191,7 +191,7 @@ func (p *Provider) Descriptor() credential.Descriptor {
 		kind = "telegram_otp"
 		name = "Telegram OTP"
 	}
-	return credential.Descriptor{ID: "native:" + kind, DisplayName: name, Kind: kind, Purposes: []credential.Purpose{credential.BindContact, credential.ManageCredentials, credential.UnlockWorkspace, credential.LoginSettings, credential.SensitiveOperation}}
+	return credential.Descriptor{ID: "native:" + kind, DisplayName: name, Kind: kind, Purposes: []credential.Purpose{credential.BindContact, credential.ManageCredentials, credential.UnlockWorkspace, credential.LoginSettings, credential.SensitiveOperation, credential.PasswordLogin}}
 }
 func (p *Provider) Available(ctx context.Context, b credential.Binding) (bool, error) {
 	if p.Resolve == nil || p.Engine == nil {

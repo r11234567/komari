@@ -81,7 +81,7 @@ func (s *Service) Register(provider Provider) error {
 		return ErrInvalidArgument
 	}
 	d := provider.Descriptor()
-	if !providerIDPattern.MatchString(d.ID) || strings.TrimSpace(d.DisplayName) == "" || len(d.DisplayName) > 128 || !utf8.ValidString(d.DisplayName) || len(d.Purposes) == 0 || len(d.Purposes) > 5 {
+	if !providerIDPattern.MatchString(d.ID) || strings.TrimSpace(d.DisplayName) == "" || len(d.DisplayName) > 128 || !utf8.ValidString(d.DisplayName) || len(d.Purposes) == 0 || len(d.Purposes) > 6 {
 		return ErrInvalidArgument
 	}
 	switch d.Kind {
@@ -371,6 +371,23 @@ func (s *Service) RevokeUser(userID string) {
 	}
 	for key, g := range s.grants {
 		if g.binding.UserID == userID {
+			delete(s.grants, key)
+		}
+	}
+}
+
+// RevokeBinding cancels one preauthentication without revoking other browser
+// sessions or independent workspace/credential-management authorizations.
+func (s *Service) RevokeBinding(binding Binding) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, p := range s.pending {
+		if p.binding == binding {
+			s.removePendingLocked(key, p)
+		}
+	}
+	for key, g := range s.grants {
+		if g.binding == binding {
 			delete(s.grants, key)
 		}
 	}
