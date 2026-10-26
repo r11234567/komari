@@ -182,7 +182,7 @@ func (s *Service) Begin(ctx context.Context, binding Binding, request Request) (
 	}
 	if s.attempts[binding.UserID].count >= MaxUserAttempts {
 		s.mu.Unlock()
-		return Challenge{}, ErrLimit
+		return Challenge{}, ErrAttemptLimit
 	}
 	if len(s.pending) >= MaxChallenges || s.pendingCountLocked(binding, false) >= MaxPerSession || s.pendingCountLocked(binding, true) >= MaxPerUser {
 		s.mu.Unlock()
@@ -262,6 +262,7 @@ func (s *Service) Complete(ctx context.Context, binding Binding, id string, proo
 		s.mu.Unlock()
 		return Authorization{}, err
 	}
+	attemptWindow := s.attempts[binding.UserID].expires
 	p.busy = true
 	p.attempts++
 	verifying, cancel := context.WithDeadline(ctx, p.expires)
@@ -300,6 +301,17 @@ func (s *Service) Complete(ctx context.Context, binding Binding, id string, proo
 			return Authorization{}, ErrProviderUnavailable
 		}
 		return Authorization{}, ErrVerificationFailed
+	}
+	// Reserve before verification to bound concurrent attempts. Only refund this
+	// successful reservation; earlier failures and other in-flight attempts remain
+	// charged. A completed old-window proof cannot refund a new-window attempt.
+	if budget, exists := s.attempts[binding.UserID]; exists && budget.expires.Equal(attemptWindow) && budget.count > 0 {
+		budget.count--
+		if budget.count == 0 {
+			delete(s.attempts, binding.UserID)
+		} else {
+			s.attempts[binding.UserID] = budget
+		}
 	}
 	s.pruneLocked()
 	if len(s.grants) >= MaxAuthorizations || s.grantCountLocked(binding, false) >= MaxPerSession || s.grantCountLocked(binding, true) >= MaxPerUser {
@@ -407,7 +419,10 @@ func (s *Service) ChargeAttempt(ctx context.Context, binding Binding) error {
 
 func (s *Service) chargeAttemptLocked(binding Binding) error {
 	budget, exists := s.attempts[binding.UserID]
-	if budget.count >= MaxUserAttempts || (!exists && len(s.attempts) >= MaxAttemptBuckets) {
+	if budget.count >= MaxUserAttempts {
+		return ErrAttemptLimit
+	}
+	if !exists && len(s.attempts) >= MaxAttemptBuckets {
 		return ErrLimit
 	}
 	if !exists {
@@ -506,6 +521,12 @@ func providerError(ctx context.Context, err error) error {
 		return err
 	}
 	if errors.Is(err, ErrLimit) {
+		// Preserve only known public reasons, never arbitrary provider diagnostics.
+		for _, public := range []error{ErrAttemptLimit, ErrSendCooldown, ErrSendWindow} {
+			if errors.Is(err, public) {
+				return public
+			}
+		}
 		return ErrLimit
 	}
 	return ErrProviderUnavailable

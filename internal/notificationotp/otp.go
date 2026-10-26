@@ -9,7 +9,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
-	"fmt"
 	"math/big"
 	"strings"
 	"sync"
@@ -21,10 +20,14 @@ import (
 )
 
 const (
-	SendCooldown      = time.Minute
-	SendWindow        = time.Hour
-	MaxSendsPerWindow = 10
+	SendCooldown = time.Minute
+	SendWindow   = time.Hour
+	// A workspace can legitimately relock every three idle minutes. Sixty
+	// messages/hour leaves room for login, account and sensitive action proofs.
+	MaxSendsPerWindow = 60
 	MaxSendBuckets    = 4096
+	CodeLength        = 8
+	codeAlphabet      = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 )
 
 type Destination struct{ Kind, Address, Transport string }
@@ -36,6 +39,7 @@ type Options struct {
 type sendBudget struct {
 	Count         int
 	Expires, Next time.Time
+	Challenge     string
 }
 type Engine struct {
 	mu      sync.Mutex
@@ -71,14 +75,13 @@ func (e *Engine) Prepare(ctx context.Context, a credential.Attempt, d Destinatio
 		return credential.Prompt{}, nil, credential.ErrProviderUnavailable
 	}
 	d.Address = address
-	if !e.reserve(a.Binding.UserID, d) {
-		return credential.Prompt{}, nil, credential.ErrLimit
+	if err := e.reserve(a.Binding.UserID, d, a.ChallengeID); err != nil {
+		return credential.Prompt{}, nil, err
 	}
-	n, err := rand.Int(rand.Reader, big.NewInt(1000000))
+	code, err := newCode()
 	if err != nil {
 		return credential.Prompt{}, nil, credential.ErrProviderUnavailable
 	}
-	code := fmt.Sprintf("%06d", n.Int64())
 	// Store only an HMAC, salted by this challenge/binding/target. The expected
 	// plaintext OTP is used once for delivery and is not retained in the verifier.
 	prefix, _ := json.Marshal([]string{a.ChallengeID, a.Binding.UserID, a.Binding.SessionDigest, a.Binding.SecurityVersion, string(a.Request.Purpose), a.Request.Resource, d.Kind, d.Address, d.Transport})
@@ -90,7 +93,7 @@ func (e *Engine) Prepare(ctx context.Context, a credential.Attempt, d Destinatio
 		}
 		return credential.Prompt{}, nil, credential.ErrProviderUnavailable
 	}
-	prompt, _ := json.Marshal(map[string]any{"digits": 6, "method": "notification_otp", "destination": MaskAddress(d.Kind, d.Address)})
+	prompt, _ := json.Marshal(map[string]any{"length": CodeLength, "charset": "alphanumeric", "method": "notification_otp", "destination": MaskAddress(d.Kind, d.Address)})
 	expires := a.ExpiresAt
 	verify := func(ctx context.Context, raw json.RawMessage) error {
 		if err := ctx.Err(); err != nil {
@@ -102,18 +105,19 @@ func (e *Engine) Prepare(ctx context.Context, a credential.Attempt, d Destinatio
 		var proof struct {
 			Code string `json:"code"`
 		}
-		if json.Unmarshal(raw, &proof) != nil || len(proof.Code) != 6 {
+		if json.Unmarshal(raw, &proof) != nil || len(proof.Code) != CodeLength {
 			return credential.ErrVerificationFailed
 		}
 		for _, c := range proof.Code {
-			if c < '0' || c > '9' {
+			if !(c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z') {
 				return credential.ErrVerificationFailed
 			}
 		}
-		got := e.digest(prefix, proof.Code)
+		got := e.digest(prefix, strings.ToUpper(proof.Code))
 		if subtle.ConstantTimeCompare(expected, got) != 1 {
 			return credential.ErrVerificationFailed
 		}
+		e.releaseCooldown(d, a.ChallengeID)
 		return nil
 	}
 	return credential.Prompt{Type: "otp", Data: prompt}, verify, nil
@@ -127,11 +131,49 @@ func (e *Engine) digest(prefix []byte, code string) []byte {
 	return mac.Sum(nil)
 }
 
-func (e *Engine) reserve(user string, d Destination) bool {
+// Rejection sampling guarantees an unbiased code containing both letters and
+// digits. Delivery is the only use of the plaintext outside this stack frame.
+func newCode() (string, error) {
+	bound := big.NewInt(int64(len(codeAlphabet)))
+	for {
+		var code [CodeLength]byte
+		letter, digit := false, false
+		for i := range code {
+			n, err := rand.Int(rand.Reader, bound)
+			if err != nil {
+				return "", err
+			}
+			code[i] = codeAlphabet[n.Int64()]
+			letter = letter || code[i] >= 'A' && code[i] <= 'Z'
+			digit = digit || code[i] >= '0' && code[i] <= '9'
+		}
+		if letter && digit {
+			return string(code[:]), nil
+		}
+	}
+}
+
+func (e *Engine) targetKey(d Destination) (key [32]byte) {
+	target, _ := json.Marshal([]string{d.Kind, d.Address})
+	copy(key[:], e.digest([]byte("send-target"), string(target)))
+	return
+}
+
+func (e *Engine) releaseCooldown(d Destination, challenge string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	key := e.targetKey(d)
+	if b, ok := e.budgets[key]; ok && b.Challenge == challenge {
+		b.Next = time.Time{}
+		b.Challenge = ""
+		e.budgets[key] = b
+	}
+}
+
+func (e *Engine) reserve(user string, d Destination, challenge string) error {
 	var userKey, targetKey [32]byte
 	copy(userKey[:], e.digest([]byte("send-user"), user))
-	target, _ := json.Marshal([]string{d.Kind, d.Address})
-	copy(targetKey[:], e.digest([]byte("send-target"), string(target)))
+	targetKey = e.targetKey(d)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	now := e.now()
@@ -143,15 +185,18 @@ func (e *Engine) reserve(user string, d Destination) bool {
 	newKeys := 0
 	for _, key := range [][32]byte{userKey, targetKey} {
 		b, exists := e.budgets[key]
-		if exists && ((key == targetKey && now.Before(b.Next)) || b.Count >= MaxSendsPerWindow) {
-			return false
+		if exists && key == targetKey && now.Before(b.Next) {
+			return credential.ErrSendCooldown
+		}
+		if exists && b.Count >= MaxSendsPerWindow {
+			return credential.ErrSendWindow
 		}
 		if !exists {
 			newKeys++
 		}
 	}
 	if len(e.budgets)+newKeys > MaxSendBuckets {
-		return false
+		return credential.ErrLimit
 	}
 	for _, key := range [][32]byte{userKey, targetKey} {
 		b, exists := e.budgets[key]
@@ -160,9 +205,10 @@ func (e *Engine) reserve(user string, d Destination) bool {
 		}
 		b.Count++
 		b.Next = now.Add(SendCooldown)
+		b.Challenge = challenge
 		e.budgets[key] = b
 	}
-	return true
+	return nil
 }
 
 func MaskAddress(kind, address string) string {

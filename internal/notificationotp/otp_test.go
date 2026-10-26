@@ -43,13 +43,13 @@ func TestNativeOTPIsDeliveredPrivatelyAndConsumedByCore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if delivered.Address != "user@example.test" || delivered.Kind != "email" || len(code) != 6 {
+	if delivered.Address != "user@example.test" || delivered.Kind != "email" || len(code) != CodeLength {
 		t.Fatal("invalid addressed delivery")
 	}
 	if strings.Contains(string(c.Prompt.Data), code) || strings.Contains(string(c.Prompt.Data), delivered.Address) {
 		t.Fatal("public prompt exposed private material")
 	}
-	proof, _ := json.Marshal(map[string]string{"code": code})
+	proof, _ := json.Marshal(map[string]string{"code": strings.ToLower(code)})
 	grant, err := svc.Complete(context.Background(), a.Binding, c.ID, proof)
 	if err != nil {
 		t.Fatal(err)
@@ -75,12 +75,14 @@ func TestNativeOTPCooldownAndWindowCannotBeResetByNewChallenge(t *testing.T) {
 			t.Fatal(err)
 		}
 		a.ChallengeID = "another-challenge"
-		if _, _, err := e.Prepare(context.Background(), a, syntheticDestination()); err != credential.ErrLimit {
+		if _, _, err := e.Prepare(context.Background(), a, syntheticDestination()); !errors.Is(err, credential.ErrLimit) {
 			t.Fatalf("cooldown: %v", err)
 		}
-		now = now.Add(SendCooldown)
+		if i < MaxSendsPerWindow-1 {
+			now = now.Add(SendCooldown)
+		}
 	}
-	if _, _, err := e.Prepare(context.Background(), otpAttempt(now), syntheticDestination()); err != credential.ErrLimit {
+	if _, _, err := e.Prepare(context.Background(), otpAttempt(now), syntheticDestination()); !errors.Is(err, credential.ErrLimit) {
 		t.Fatalf("window: %v", err)
 	}
 	if sends != MaxSendsPerWindow {
@@ -115,7 +117,7 @@ func TestNativeOTPExpiryRedactionAndPrivateTargets(t *testing.T) {
 	if _, _, err := e.Prepare(context.Background(), otpAttempt(now), syntheticDestination()); err != credential.ErrProviderUnavailable {
 		t.Fatalf("unredacted error: %v", err)
 	}
-	if _, _, err := e.Prepare(context.Background(), otpAttempt(now), syntheticDestination()); err != credential.ErrLimit {
+	if _, _, err := e.Prepare(context.Background(), otpAttempt(now), syntheticDestination()); !errors.Is(err, credential.ErrLimit) {
 		t.Fatal("delivery failure reset cooldown")
 	}
 	now = now.Add(SendWindow)
@@ -150,7 +152,7 @@ func TestNativeOTPSendBudgetCapacity(t *testing.T) {
 		key[1] = byte(i >> 8)
 		e.budgets[key] = sendBudget{Expires: now.Add(SendWindow)}
 	}
-	if e.reserve("new-user", syntheticDestination()) {
+	if err := e.reserve("new-user", syntheticDestination(), "synthetic-challenge"); !errors.Is(err, credential.ErrLimit) {
 		t.Fatal("budget capacity exceeded")
 	}
 }
@@ -171,5 +173,57 @@ func TestExistingContactThenNewDestinationCanBeVerifiedWithoutCooldownConflict(t
 	}
 	if sends != 2 {
 		t.Fatal("incorrect send count")
+	}
+}
+
+func TestNativeOTPFormatIncludesLettersAndDigits(t *testing.T) {
+	for range 100 {
+		code, err := newCode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		letter, digit := false, false
+		for _, c := range code {
+			if c >= 'A' && c <= 'Z' {
+				letter = true
+			} else if c >= '0' && c <= '9' {
+				digit = true
+			} else {
+				t.Fatal("unexpected code alphabet")
+			}
+		}
+		if len(code) != CodeLength || !letter || !digit {
+			t.Fatal("code must contain eight letters and digits")
+		}
+	}
+}
+
+func TestSuccessfulOTPAllowsNextActionImmediately(t *testing.T) {
+	now := time.Now()
+	var code string
+	e := New(Options{Now: func() time.Time { return now }, Deliver: func(_ context.Context, _ string, d factory.CredentialDelivery) error {
+		code = strings.Split(strings.Split(d.Message, "is: ")[1], "\n")[0]
+		return nil
+	}})
+	a := otpAttempt(now)
+	prompt, verify, err := e.Prepare(context.Background(), a, syntheticDestination())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]any
+	if json.Unmarshal(prompt.Data, &metadata) != nil || metadata["length"] != float64(CodeLength) || metadata["charset"] != "alphanumeric" {
+		t.Fatal("incorrect public input format")
+	}
+	proof, _ := json.Marshal(map[string]string{"code": strings.ToLower(code)})
+	if err := verify(context.Background(), proof); err != nil {
+		t.Fatal(err)
+	}
+	a.ChallengeID = "synthetic-next-action"
+	a.Request.Purpose = credential.ManageCredentials
+	if _, _, err := e.Prepare(context.Background(), a, syntheticDestination()); err != nil {
+		t.Fatalf("next legitimate action blocked: %v", err)
+	}
+	if e.budgets[e.targetKey(syntheticDestination())].Count != 2 {
+		t.Fatal("successful proof must retain hourly message accounting")
 	}
 }

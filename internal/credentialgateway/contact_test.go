@@ -242,7 +242,7 @@ func TestBootstrapPasswordAttemptsAreBoundedAcrossChallenges(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := f.gateway.BeginContactBinding(f.ctx, d, "", "Synthetic-password-123"); err != credential.ErrLimit {
+	if _, err := f.gateway.BeginContactBinding(f.ctx, d, "", "Synthetic-password-123"); !errors.Is(err, credential.ErrLimit) {
 		t.Fatal("bootstrap attempt limit missing")
 	}
 	if f.sends != 0 {
