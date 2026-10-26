@@ -46,9 +46,10 @@ const Lifetime = 30 * time.Minute
 const MaxStagedBytes int64 = 512 << 20
 
 type ownedSession struct {
-	owner   [32]byte
-	size    int64
-	expires time.Time
+	directory string
+	owner     [32]byte
+	size      int64
+	expires   time.Time
 }
 
 // Operations serialize disk writes, retry replacement, merge/finalize and cancel.
@@ -93,7 +94,11 @@ func (s *Store) sweepLocked() {
 	}
 }
 func (s *Store) removeLocked(id string) {
-	_ = os.RemoveAll(filepath.Join(s.Root, id))
+	session, ok := s.sessions[id]
+	if !ok {
+		return
+	}
+	_ = os.RemoveAll(session.directory)
 	delete(s.sessions, id)
 }
 func (s *Store) ownLocked(owner, id string) error {
@@ -176,7 +181,7 @@ func (s *Store) Init(owner string, purpose Purpose, filename string, size int64)
 		_ = os.RemoveAll(directory)
 		return Session{}, fmt.Errorf("write upload metadata: %w", err)
 	}
-	s.sessions[id] = ownedSession{owner: ownerKey, size: size, expires: s.now().Add(Lifetime)}
+	s.sessions[id] = ownedSession{directory: directory, owner: ownerKey, size: size, expires: s.now().Add(Lifetime)}
 	return Session{ID: id, Metadata: metadata, Directory: directory}, nil
 }
 
