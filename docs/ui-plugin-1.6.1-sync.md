@@ -21,3 +21,14 @@ is implied by this gateway.
 
 Validation runs on GitHub Actions using the plugin subsystem checkpoint, with
 complete JSON/text/compiler logs retained for 30 days; no local build or E2E.
+
+## Login settings step-up
+
+The Account → Login route obtains its own 30-minute, session-bound grant after
+consuming fresh 2FA. The HttpOnly/Secure/Strict cookie is restricted to settings
+paths. Login settings (API key, password-login switch and OAuth settings) are
+redacted from general settings reads until unlocked. Writes and OIDC reads are
+checked inside the RPC handlers too, so an internal plugin/API key cannot use
+an admin role to bypass interactive 2FA. Other settings keep their current APIs.
+The grant expires on logout/session revocation or 2FA secret changes and cannot
+unlock the workspace. Accounts without 2FA must enable it on their profile first.

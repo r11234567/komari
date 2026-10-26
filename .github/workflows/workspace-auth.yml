@@ -16,7 +16,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Absolute and idle deadlines, scope, logout and stream cancellation
-        run: bash scripts/ci/run-audit-check.sh workspace bash scripts/ci/run-go-tests.sh ./web/workspace ./web/connect ./web/filemanager ./web/remotemanagement
+        run: bash scripts/ci/run-audit-check.sh workspace bash scripts/ci/run-go-tests.sh ./web/signonauth ./web/workspace ./web/connect ./web/filemanager ./web/remotemanagement
       - name: RPC2 compatibility allowlist and 2FA boundaries
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh gateway bash scripts/ci/run-go-tests.sh ./web/rpc/jsonrpc ./web/api ./web/router

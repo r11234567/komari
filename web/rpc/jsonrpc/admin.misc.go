@@ -17,6 +17,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/utils/messageSender"
+	"github.com/komari-monitor/komari/web/signonauth"
 )
 
 // admin.misc.go
@@ -104,7 +105,7 @@ func adminDeleteAllSessions(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *r
 	return nil, nil
 }
 
-func adminGetSettings(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminGetSettings(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	if err := messageSender.EnsureRoutes(); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
@@ -112,6 +113,11 @@ func adminGetSettings(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonR
 	cst, err := config.GetAll()
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to get settings: "+err.Error(), nil)
+	}
+	if signonauth.Require(ctx) != nil {
+		for _, key := range loginSettingKeys {
+			delete(cst, key)
+		}
 	}
 	delete(cst, config.CloudflareTunnelTokenKey)
 	delete(cst, config.LowResourceModeKey)
@@ -144,6 +150,11 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	cfg := make(map[string]interface{})
 	if err := req.BindParams(&cfg); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid or missing request body: "+err.Error(), nil)
+	}
+	if loginSettingsTouched(cfg) {
+		if err := signonauth.Require(ctx); err != nil {
+			return nil, rpc.MakeError(rpc.PermissionDenied, err.Error(), nil)
+		}
 	}
 	// The migration marker is internal; explicit route saves mark it in this transaction.
 	delete(cfg, config.NotificationRoutesMigratedKey)
@@ -349,4 +360,15 @@ func adminOrderClients(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	actor, ip := auditActor(ctx)
 	auditlog.Log(ip, actor, "order clients", "info")
 	return nil, nil
+}
+
+var loginSettingKeys = []string{config.ApiKeyKey, config.OAuthEnabledKey, config.OAuthProviderKey, config.DisablePasswordLoginKey}
+
+func loginSettingsTouched(cfg map[string]any) bool {
+	for _, key := range loginSettingKeys {
+		if _, ok := cfg[key]; ok {
+			return true
+		}
+	}
+	return false
 }
