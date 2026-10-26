@@ -21,8 +21,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Migration, explicit empty routes, fanout, plugin channels, batching and policy changes
+      - name: Official plugin payload compatibility, routing, channels, batching and policy changes
         run: bash scripts/ci/run-audit-check.sh lite-alerts bash scripts/ci/run-go-tests.sh -race ./utils/messageSender/... ./utils/notifier ./internal/plugin ./web/rpc/jsonrpc ./pkg/config
+      - name: Preserve RPC error explanations in plugin console logs
+        run: bash scripts/ci/run-audit-check.sh notification-rpc-errors bash scripts/ci/run-go-tests.sh -race ./pkg/jsruntime -run '^TestConsoleRetainsErrorMessagesAndCodes$'
       - uses: actions/upload-artifact@v4
         if: always()
         with:

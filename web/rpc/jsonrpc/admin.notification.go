@@ -1,8 +1,11 @@
 package jsonrpc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -108,17 +111,42 @@ func adminSetNotificationChannelConfiguration(_ context.Context, req *rpc.JsonRp
 }
 
 func adminSendNotification(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	var params models.EventMessage
-	if err := req.BindParams(&params); err != nil {
-		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
+	event, err := bindNotificationEvent(req)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
 	}
-	if params.Kind == "" {
-		params.Kind = messageSender.KindForEvent(params.Event)
-	}
-	if err := messageSender.SendNotification(params); err != nil {
+	if err := messageSender.SendNotification(event); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to send notification: "+err.Error(), nil)
 	}
 	return nil, nil
+}
+
+// Official plugins pass {event: EventMessage}; this fork also accepted a flat
+// EventMessage. Keep both contracts without guessing from notification text.
+func bindNotificationEvent(req *rpc.JsonRpcRequest) (models.EventMessage, error) {
+	var envelope struct {
+		Event json.RawMessage `json:"event"`
+	}
+	invalid := errors.New("Invalid notification parameters: expected {event: {...}} or a flat event object")
+	if err := req.BindParams(&envelope); err != nil {
+		return models.EventMessage{}, invalid
+	}
+	var event models.EventMessage
+	raw := bytes.TrimSpace(envelope.Event)
+	if len(raw) > 0 && raw[0] == '{' {
+		if err := json.Unmarshal(raw, &event); err != nil {
+			return models.EventMessage{}, invalid
+		}
+	} else if err := req.BindParams(&event); err != nil {
+		return models.EventMessage{}, invalid
+	}
+	if strings.TrimSpace(event.Event) == "" {
+		return models.EventMessage{}, errors.New("Notification event name is required")
+	}
+	if event.Kind == "" {
+		event.Kind = messageSender.KindForEvent(event.Event)
+	}
+	return event, nil
 }
 
 func adminAddLoadNotification(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
