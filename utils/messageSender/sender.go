@@ -3,45 +3,78 @@ package messageSender
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"strings"
 	"sync"
 	"time"
 
+	logger "github.com/komari-monitor/komari/utils/log"
+
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/auditlog"
-	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/config"
-	logger "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/messageSender/factory"
+	"gorm.io/gorm"
 )
 
 var (
-	currentProvider factory.IMessageSender
-	mu              = sync.Mutex{}
-	once            = sync.Once{}
+	providers                = map[string]factory.IMessageSender{}
+	mu                       = sync.Mutex{}
+	providerDeliveryMu       = sync.RWMutex{}
+	once                     = sync.Once{}
+	loadNotificationSettings = config.GetMany
+	writeSendAudit           = func(ip, actor, level, event string, fields map[string]string) {
+		auditlog.Log(ip, actor, fmt.Sprintf("%s %v", event, fields), level)
+	}
+	channelsForKind = storedChannels
 )
 
 func CurrentProvider() factory.IMessageSender {
 	mu.Lock()
 	defer mu.Unlock()
-	return currentProvider
+	if provider, ok := providers["email"]; ok {
+		return provider
+	}
+	for _, provider := range providers {
+		return provider
+	}
+	return nil
 }
 
-// Shutdown 销毁当前消息发送 provider，释放其持有的资源。供关闭流程调用。
-func Shutdown() error {
+func providerByName(name string) factory.IMessageSender {
 	mu.Lock()
 	defer mu.Unlock()
-	if currentProvider == nil {
-		return nil
+	return providers[name]
+}
+
+// Shutdown 销毁已加载的消息发送 provider。供关闭流程调用。
+func Shutdown() error {
+	flushDigestBatches()
+	providerDeliveryMu.Lock()
+	defer providerDeliveryMu.Unlock()
+	mu.Lock()
+	defer mu.Unlock()
+	var errs []error
+	for name, provider := range providers {
+		if provider != nil {
+			if err := provider.Destroy(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		delete(providers, name)
 	}
-	err := currentProvider.Destroy()
-	currentProvider = nil
-	return err
+	return errors.Join(errs...)
 }
 
 func Initialize() {
+	if err := EnsureRoutes(); err != nil {
+		logger.Errorf("message-sender", "Failed to migrate routes: %v", err)
+		return
+	}
+
 	go func() {
 		once.Do(func() {
 			all := factory.GetAllMessageSenders()
@@ -66,56 +99,14 @@ func Initialize() {
 			}
 		})
 	}()
-	NotificationMethod, _ := config.GetAs[string](config.NotificationMethodKey, "none")
-
-	if NotificationMethod == "" || NotificationMethod == "none" {
-		LoadProvider("empty", "{}")
-		return
+	if err := EnsureRoutes(); err != nil {
+		logger.Errorf("message-sender", "Failed to prepare notification routes: %v", err)
 	}
-
-	// 尝试从数据库加载配置
-	senderConfig, err := database.GetMessageSenderConfigByName(NotificationMethod)
-	if err != nil {
-		// 如果没有找到配置，使用empty provider
-		LoadProvider("empty", "{}")
-		return
+	if err := SyncProviders(); err != nil {
+		logger.Errorf("message-sender", "Failed to load notification channels: %v", err)
 	}
-	LoadProvider(NotificationMethod, senderConfig.Addition)
 }
 
-func SendTextMessage(message string, title string) error {
-	method, _ := config.GetAs[string](config.NotificationMethodKey, "none")
-	if NotificationChannelRegistered(method) {
-		return CallNotificationChannel(context.Background(), method, Notification{
-			Title:   title,
-			Message: message,
-		})
-	}
-
-	if CurrentProvider() == nil {
-		return fmt.Errorf("message sender provider is not initialized")
-	}
-	var err error
-	NotificationEnabled, err := config.GetAs[bool](config.NotificationEnabledKey, false)
-	if err != nil {
-		return err
-	}
-	if !NotificationEnabled {
-		return nil
-	}
-	for i := 0; i < 3; i++ {
-		err = CurrentProvider().SendTextMessage(message, title)
-		if err == nil {
-			auditlog.Log("", "", "Message sent: "+title, "info")
-			return nil
-		}
-	}
-	auditlog.Log("", "", "Failed to send message after 3 attempts: "+err.Error()+","+title, "error")
-	return err
-}
-
-// SendNotification 是通知发送的统一实现：解析事件中的客户端 UUID（外部传入可只含
-// UUID 字段）后委托 SendEvent。内部调用与 admin:sendNotification RPC 共用此实现。
 func SendNotification(event models.EventMessage) error {
 	if len(event.Clients) > 0 {
 		db := dbcore.GetDBInstance()
@@ -137,74 +128,241 @@ func SendNotification(event models.EventMessage) error {
 	return SendEvent(event)
 }
 
+// SendTextMessage retains the legacy direct-send API used by integrations.
+func SendTextMessage(message, title string) error {
+	enabled, err := config.GetAs[bool](config.NotificationEnabledKey, false)
+	if err != nil || !enabled {
+		return err
+	}
+	method, err := config.GetAs[string](config.NotificationMethodKey, "none")
+	if err != nil || method == "none" || method == "" {
+		return err
+	}
+	return SendTestEventTo(method, models.EventMessage{Event: title, Message: message, Time: time.Now().UTC()})
+}
+
 func SendEvent(event models.EventMessage) error {
 	if event.Time.IsZero() {
 		event.Time = time.Now().UTC()
 	} else {
 		event.Time = event.Time.UTC()
 	}
-	var err error
-	cfg, err := config.GetMany(map[string]any{
-		config.NotificationEnabledKey:  false,
-		config.NotificationTemplateKey: "{{emoji}}{{emoji}}{{emoji}}\nEvent: {{event}}\nClients: {{client}}\nMessage: {{message}}\nTime: {{time}}",
-	})
+	cfg, template, err := notificationDeliverySettings()
 	if err != nil {
 		return err
 	}
-	if !cfg[config.NotificationEnabledKey].(bool) {
+	enabled, _ := cfg[config.NotificationEnabledKey].(bool)
+	if !enabled {
 		return nil
 	}
-
-	method, _ := config.GetAs[string](config.NotificationMethodKey, "none")
-	if method == "" || method == "none" {
-		return nil
+	if strings.TrimSpace(event.Kind) == "" {
+		return fmt.Errorf("notification kind is required")
 	}
-
-	messageTemplate := cfg[config.NotificationTemplateKey].(string)
-	messageTemplate = parseTemplate(messageTemplate, event)
-
-	if NotificationChannelRegistered(method) {
-		err = CallNotificationChannel(context.Background(), method, Notification{
-			Event:   event,
-			Title:   fmt.Sprint(event.Event),
-			Message: messageTemplate,
-		})
-		if err == nil {
-			auditlog.Log("", "", "Event message sent: "+fmt.Sprint(event.Event), "info")
-			return nil
-		}
-		auditlog.Log("", "", "Failed to send event message: "+err.Error()+","+fmt.Sprint(event.Event), "error")
+	channels, err := channelsForKind(event.Kind)
+	if err != nil {
 		return err
 	}
+	if len(channels) == 0 {
+		return nil
+	}
+	if digestOn, window := digestFrom(cfg); digestOn && digestibleKind(event.Kind) {
+		// Return before the window closes. A caller that sends servers one
+		// after another, such as the load alert loop, must join the same batch.
+		enqueueDigest(event, window)
+		return nil
+	}
+	return deliverPrepared(event, channels, template)
+}
 
-	if CurrentProvider() == nil {
-		return fmt.Errorf("message sender provider is not initialized")
+func deliverEvent(event models.EventMessage) error {
+	if event.Time.IsZero() {
+		event.Time = time.Now().UTC()
+	} else {
+		event.Time = event.Time.UTC()
+	}
+	cfg, template, err := notificationDeliverySettings()
+	if err != nil {
+		return err
+	}
+	enabled, _ := cfg[config.NotificationEnabledKey].(bool)
+	if !enabled {
+		return nil
+	}
+	if strings.TrimSpace(event.Kind) == "" {
+		return fmt.Errorf("notification kind is required")
+	}
+	channels, err := channelsForKind(event.Kind)
+	if err != nil {
+		return err
+	}
+	if len(channels) == 0 {
+		return nil
+	}
+	return deliverPrepared(event, channels, template)
+}
+
+func deliverPrepared(event models.EventMessage, channels []string, template string) error {
+	var failures []error
+	sent := 0
+	for _, name := range channels {
+		if err := deliverTo(name, event, template); err != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", name, err))
+			writeSendAudit("", "", "error", "audit.event_fail", map[string]string{
+				"event": event.Event,
+				"error": name + ": " + err.Error(),
+			})
+			logger.Errorf("message-sender", "Failed to send %s via %s: %v", event.Event, name, err)
+			continue
+		}
+		sent++
+		writeSendAudit("", "", "info", "audit.event_ok", map[string]string{
+			"event":   event.Event,
+			"channel": name,
+		})
+	}
+	if sent == 0 {
+		return errors.Join(failures...)
+	}
+	return nil
+}
+
+// SendTestEventTo delivers a manual test to one channel.
+// The master notification switch and the route table do not apply.
+func SendTestEventTo(name string, event models.EventMessage) error {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "none" || name == "empty" {
+		return fmt.Errorf("provider is required")
+	}
+	if _, ok := factory.GetConstructor(name); !ok && !NotificationChannelRegistered(name) {
+		return fmt.Errorf("message sender provider not found: %s", name)
+	}
+	if event.Time.IsZero() {
+		event.Time = time.Now().UTC()
+	} else {
+		event.Time = event.Time.UTC()
+	}
+	_, template, err := notificationDeliverySettings()
+	if err != nil {
+		template = "{{emoji}}{{emoji}}{{emoji}}\nEvent: {{event}}\nClients: {{client}}\nMessage: {{message}}\nTime: {{time}}"
+	}
+	if err := deliverTo(name, event, template); err != nil {
+		writeSendAudit("", "", "error", "audit.event_fail", map[string]string{
+			"event": event.Event,
+			"error": name + ": " + err.Error(),
+		})
+		return err
+	}
+	writeSendAudit("", "", "info", "audit.event_ok", map[string]string{
+		"event":   event.Event,
+		"channel": name,
+	})
+	return nil
+}
+
+func notificationDeliverySettings() (map[string]any, string, error) {
+	cfg, err := loadNotificationSettings(map[string]any{
+		config.NotificationEnabledKey:       false,
+		config.NotificationTemplateKey:      "{{emoji}}{{emoji}}{{emoji}}\nEvent: {{event}}\nClients: {{client}}\nMessage: {{message}}\nTime: {{time}}",
+		config.NotificationDigestEnabledKey: false,
+		config.NotificationDigestSecondsKey: DefaultDigestSeconds,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	template, _ := cfg[config.NotificationTemplateKey].(string)
+	return cfg, template, nil
+}
+
+// SyncProviders loads every channel selected by the route table and drops the rest.
+func SyncProviders() error {
+	providerDeliveryMu.Lock()
+	defer providerDeliveryMu.Unlock()
+	routes, err := config.GetAs[map[string][]string](config.NotificationRoutesKey)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	needed := map[string]struct{}{}
+	for _, channels := range routes {
+		for _, name := range channels {
+			if name == "" || NotificationChannelRegistered(name) {
+				continue
+			}
+			needed[name] = struct{}{}
+		}
 	}
 
-	// 检查提供者是否实现了 IEventMessageSender 接口
-	if eventSender, ok := CurrentProvider().(factory.IEventMessageSender); ok {
-		// 如果实现了,直接调用 SendEvent
-		for i := 0; i < 3; i++ {
+	mu.Lock()
+	defer mu.Unlock()
+	for name, provider := range providers {
+		if _, ok := needed[name]; ok {
+			continue
+		}
+		if provider != nil {
+			_ = provider.Destroy()
+		}
+		delete(providers, name)
+	}
+	var errs []error
+	for name := range needed {
+		cfg, lookupErr := database.GetMessageSenderConfigByName(name)
+		if lookupErr != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, lookupErr))
+			continue
+		}
+		if err := loadProviderFromAdditionLocked(name, cfg.Addition); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func deliverTo(name string, event models.EventMessage, template string) error {
+	if NotificationChannelRegistered(name) {
+		return CallNotificationChannel(context.Background(), name, Notification{Event: event, Title: event.Event, Message: parseTemplate(template, event)})
+	}
+
+	provider := providerByName(name)
+	if provider == nil {
+		cfg, err := database.GetMessageSenderConfigByName(name)
+		if err != nil {
+			return err
+		}
+		if err := LoadProvider(name, cfg.Addition); err != nil {
+			return err
+		}
+		provider = providerByName(name)
+	}
+	providerDeliveryMu.RLock()
+	defer providerDeliveryMu.RUnlock()
+	provider = providerByName(name)
+	if provider == nil {
+		return fmt.Errorf("message sender %s is not loaded", name)
+	}
+	var err error
+	if eventSender, ok := provider.(factory.IEventMessageSender); ok {
+		for range 3 {
 			err = eventSender.SendEvent(event)
-			if err == nil || err.Error() == "short response: \x00\x00\x00\x1a\x00\x00\x00" {
-				auditlog.Log("", "", "Event message sent: "+event.Event, "info")
+			if deliverySucceeded(err) {
 				return nil
 			}
 		}
-		auditlog.Log("", "", "Failed to send event message after 3 attempts: "+err.Error()+","+event.Event, "error")
 		return err
 	}
-
-	// 如果没有实现,使用模板格式化为文本消息
-	for i := 0; i < 3; i++ {
-		err = CurrentProvider().SendTextMessage(messageTemplate, event.Event)
-		if err == nil || err.Error() == "short response: \x00\x00\x00\x1a\x00\x00\x00" { // QQ 会返回这个错误，但实际上消息是发送成功的
-			auditlog.Log("", "", "Event message sent: "+event.Event, "info")
+	message := parseTemplate(template, event)
+	for range 3 {
+		err = provider.SendTextMessage(message, event.Event)
+		if deliverySucceeded(err) {
 			return nil
 		}
 	}
-	auditlog.Log("", "", "Failed to send event message after 3 attempts: "+err.Error()+","+event.Event, "error")
 	return err
+}
+
+func deliverySucceeded(err error) bool {
+	return err == nil || err.Error() == "short response: \x00\x00\x00\x1a\x00\x00\x00"
 }
 
 func parseTemplate(messageTemplate string, event models.EventMessage) string {
@@ -223,7 +381,6 @@ func parseTemplate(messageTemplate string, event models.EventMessage) string {
 	replaceMap := map[string]string{
 		"{{event}}":   event.Event,
 		"{{client}}":  joinedClients,
-		"{{clients}}": joinedClients,
 		"{{time}}":    event.Time.UTC().Format(time.RFC3339Nano),
 		"{{message}}": event.Message,
 		"{{emoji}}":   event.Emoji,

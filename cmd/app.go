@@ -571,7 +571,7 @@ func (a *App) registerReloadHandlers(cors *security.CorsController) {
 
 	// 消息发送方式切换。
 	a.reload.Register("message-sender", func(event config.ConfigEvent) {
-		if event.IsChanged(config.NotificationMethodKey) {
+		if event.IsChanged(config.NotificationMethodKey) || event.IsChanged(config.NotificationRoutesKey) {
 			go messageSender.Initialize()
 		}
 	})

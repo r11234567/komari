@@ -856,7 +856,7 @@ func sendReturnRouteNotification(task models.ReturnRouteTask, event models.Retur
 		client.UUID = task.Client
 	}
 	message := formatReturnRouteNotification(task, event)
-	if err := messageSender.SendEvent(models.EventMessage{Event: messageevent.ReturnRoute, Clients: []models.Client{client}, Time: event.OccurredAt, Message: title + "\n" + message}); err == nil {
+	if err := messageSender.SendEvent(models.EventMessage{Kind: messageSender.KindReturnRoute, Event: messageevent.ReturnRoute, Clients: []models.Client{client}, Time: event.OccurredAt, Message: title + "\n" + message}); err == nil {
 		_ = db.Model(&models.ReturnRouteStatus{}).Where("task_id = ?", task.Id).Update("last_notified_at", now).Error
 	}
 }

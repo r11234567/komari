@@ -201,6 +201,7 @@ func sendPingLossNotification(notification models.PingLossNotification, stats pi
 		emoji = "✅"
 	}
 	return messageSender.SendEvent(models.EventMessage{
+		Kind:    messageSender.KindPingLoss,
 		Event:   messageevent.PingLoss,
 		Clients: []models.Client{client},
 		Time:    now,
