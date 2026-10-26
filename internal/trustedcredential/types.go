@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 )
@@ -43,6 +44,9 @@ var (
 	ErrNotFound            = errors.New("verification or authorization is no longer available")
 	ErrBusy                = errors.New("verification is already in progress")
 	ErrLimit               = errors.New("credential verification capacity reached")
+	ErrAttemptLimit        = fmt.Errorf("%w: too many failed verification attempts; wait for the 15-minute window to reset", ErrLimit)
+	ErrSendCooldown        = fmt.Errorf("%w: a verification code was recently sent; finish that verification or wait up to 60 seconds", ErrLimit)
+	ErrSendWindow          = fmt.Errorf("%w: verification message hourly limit reached; wait for the sending window to reset", ErrLimit)
 )
 
 // Binding contains digests only. The gateway derives it from a live session;

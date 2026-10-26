@@ -177,7 +177,7 @@ func TestAttemptBudgetSurvivesNewChallenges(t *testing.T) {
 			t.Fatalf("attempt limit: %v", err)
 		}
 	}
-	if _, err := s.Begin(context.Background(), testBinding, Request{ProviderID: "native:test", Purpose: UnlockWorkspace, Resource: "agent:alice"}); err != ErrLimit {
+	if _, err := s.Begin(context.Background(), testBinding, Request{ProviderID: "native:test", Purpose: UnlockWorkspace, Resource: "agent:alice"}); !errors.Is(err, ErrLimit) {
 		t.Fatalf("user budget: %v", err)
 	}
 	*now = now.Add(AttemptWindow)
@@ -227,7 +227,7 @@ func TestCapacityInputAndMissingValidator(t *testing.T) {
 	for range MaxPerSession {
 		beginTest(t, s, testBinding)
 	}
-	if _, err := s.Begin(context.Background(), testBinding, Request{ProviderID: "native:test", Purpose: UnlockWorkspace, Resource: "agent:alice"}); err != ErrLimit {
+	if _, err := s.Begin(context.Background(), testBinding, Request{ProviderID: "native:test", Purpose: UnlockWorkspace, Resource: "agent:alice"}); !errors.Is(err, ErrLimit) {
 		t.Fatal(err)
 	}
 	s.RevokeUser(testBinding.UserID)
@@ -295,7 +295,28 @@ func TestServerConfirmationAndProofCompletionShareAttemptBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.Complete(context.Background(), testBinding, c.ID, json.RawMessage(`{}`)); err != ErrLimit {
+	if _, err := s.Complete(context.Background(), testBinding, c.ID, json.RawMessage(`{}`)); !errors.Is(err, ErrLimit) {
 		t.Fatal("proof bypassed shared confirmation budget")
+	}
+}
+
+func TestSuccessfulWorkspaceReauthorizationsDoNotSpendFailureBudget(t *testing.T) {
+	for _, previousAttempts := range []int{0, 1} {
+		s, _, _ := fixture(t)
+		if previousAttempts != 0 {
+			if err := s.ChargeAttempt(context.Background(), testBinding); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for range MaxUserAttempts + 2 {
+			c := beginTest(t, s, testBinding)
+			grant := completeTest(t, s, testBinding, c)
+			if _, err := s.Consume(context.Background(), testBinding, grant.Token, UnlockWorkspace, "agent:alice"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if budget := s.attempts[testBinding.UserID]; budget.count != previousAttempts {
+			t.Fatal("successful proof changed previously charged attempt accounting")
+		}
 	}
 }
