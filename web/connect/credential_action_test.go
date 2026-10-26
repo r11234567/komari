@@ -144,3 +144,25 @@ func TestTrustedActionWorkspaceUnlock(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTrustedActionTypedSensitiveConsumers(t *testing.T) {
+	for _, item := range []struct {
+		action  string
+		targets []string
+	}{
+		{"execution:create", []string{"synthetic-agent-a", "synthetic-agent-b"}},
+		{"execution:cancel", []string{"synthetic-execution"}},
+		{"rescue:create", []string{"synthetic-agent", "1", "0"}},
+		{"rescue:cancel", []string{"synthetic-rescue-session"}},
+		{"privileged:confirm", []string{"synthetic-agent", "7"}},
+		{"enrollment:revoke", []string{"synthetic-agent"}},
+	} {
+		t.Run(item.action, func(t *testing.T) {
+			ctx, _, _ := actionFixture(t)
+			token := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource(item.action, item.targets...))
+			if err := verifyConnectCredential(ctx, &commonv1.TwoFactorProof{AuthorizationToken: token}, item.action, item.targets...); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

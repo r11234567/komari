@@ -5,6 +5,8 @@ package credentialaction
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"sync/atomic"
@@ -56,6 +58,21 @@ func HasSecondFactor(ctx context.Context, user string) (bool, error) {
 
 func RESTResource(method, path string) string { return "rest:" + strings.ToUpper(method) + ":" + path }
 func PasswordResource(user string) string     { return "account:password:" + user }
+
+// ScopedResource hashes public target identifiers only, not passwords/proofs.
+// Fixed-size resources also support large execution target batches.
+func ScopedResource(action string, targets ...string) string {
+	if targets == nil {
+		targets = []string{}
+	}
+	var b bytes.Buffer
+	encoder := json.NewEncoder(&b)
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(targets)
+	digest := sha256.Sum256(bytes.TrimSuffix(b.Bytes(), []byte("\n")))
+	return "action:" + action + ":" + hex.EncodeToString(digest[:])
+}
+
 func WorkspaceResource(agent, user string) string {
 	var b bytes.Buffer
 	encoder := json.NewEncoder(&b)

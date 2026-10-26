@@ -25,8 +25,10 @@ func (s *executionService) CreateExecution(ctx context.Context, req *connect.Req
 	if err != nil {
 		return nil, err
 	}
-	if err := verifyConnectTwoFactor(meta, req.Msg.TwoFactor); err != nil {
-		return nil, connectError(connect.CodeUnauthenticated, err)
+	if req.Msg.TwoFactor.GetAuthorizationToken() == "" {
+		if err := verifyConnectTwoFactor(meta, req.Msg.TwoFactor); err != nil {
+			return nil, err
+		}
 	}
 	agentIDs := append([]string(nil), req.Msg.AgentIds...)
 	if strings.TrimSpace(req.Msg.AgentId) != "" {
@@ -61,6 +63,11 @@ func (s *executionService) CreateExecution(ctx context.Context, req *connect.Req
 		}
 		if !agentRuntime.IsAgentOnline(agentID) || !agentRuntime.SupportsExecution(agentID) {
 			return nil, connectError(connect.CodeFailedPrecondition, errors.New("agent is offline or does not support Connect execution: "+agentID))
+		}
+	}
+	if req.Msg.TwoFactor.GetAuthorizationToken() != "" {
+		if err := verifyConnectCredential(ctx, req.Msg.TwoFactor, "execution:create", agentIDs...); err != nil {
+			return nil, err
 		}
 	}
 	executions, err := executionapp.CreateBatch(agentIDs, ownerID, req.Msg.IdempotencyKey, &execv1.ExecutionSpec{
@@ -107,8 +114,8 @@ func (s *executionService) CancelExecution(ctx context.Context, req *connect.Req
 	if err != nil {
 		return nil, err
 	}
-	if err := verifyConnectTwoFactor(meta, req.Msg.TwoFactor); err != nil {
-		return nil, connectError(connect.CodeUnauthenticated, err)
+	if err := verifyConnectCredential(ctx, req.Msg.TwoFactor, "execution:cancel", req.Msg.ExecutionId); err != nil {
+		return nil, err
 	}
 	if _, err := executionapp.GetOwned(req.Msg.ExecutionId, ownerID); err != nil {
 		return nil, executionError(err)

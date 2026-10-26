@@ -11,6 +11,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
+	"github.com/komari-monitor/komari/internal/credentialaction"
+	credential "github.com/komari-monitor/komari/internal/trustedcredential"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
@@ -84,7 +86,7 @@ func CallFromGin(c *gin.Context, method string, params any) *rpc.JsonRpcResponse
 
 // dispatchWithSensitive 在统一分发前对敏感方法补充二次验证，使各调用入口行为一致。
 // 对已通过命名空间权限校验的敏感方法，要求调用方满足敏感操作 2FA。
-// 校验基于 Principal(API Key 放行、未配置 2FA 的账号放行),Dispatch 仍为权威鉴权点。
+// API keys cannot satisfy step-up verification. Dispatch remains authoritative.
 //
 // 2FA code 按"每请求"提取:优先取自本条 RPC 请求的 params(2fa_code/two_factor_code/otp),
 // 这对 WebSocket 长连接尤其重要——每条敏感消息携带新鲜的 TOTP 码,避免连接级握手码过期或被复用;
@@ -94,6 +96,24 @@ func CallFromGin(c *gin.Context, method string, params any) *rpc.JsonRpcResponse
 func dispatchWithSensitive(ctx context.Context, c *gin.Context, meta *rpc.ContextMeta, req *rpc.JsonRpcRequest) *rpc.JsonRpcResponse {
 	if meta != nil && meta.Principal != nil && (c == nil || !c.GetBool("sensitive_2fa_verified")) &&
 		rpc.IsSensitive(req.Method) && rpc.CheckPrincipal(meta.Principal, req.Method) {
+		// Native proofs belong to one RPC message, never to a WebSocket handshake.
+		token, _ := rpc.GetParamAs[string](req, "authorization_token")
+		if token == "" && c != nil && c.Request.Method == http.MethodPost {
+			token = c.GetHeader(credentialaction.Header)
+		}
+		if token != "" {
+			var params struct {
+				Clients []string `json:"clients"`
+			}
+			if req.Method != "admin:exec" || req.BindParams(&params) != nil {
+				return rpc.ErrorResponse(req.ID, rpc.PermissionDenied, "unsupported credential action", nil)
+			}
+			bound := rpc.NewContextWithMeta(ctx, meta)
+			if _, err := credentialaction.Consume(bound, token, credential.SensitiveOperation, credentialaction.ScopedResource("rpc:"+req.Method, params.Clients...)); err != nil {
+				return rpc.ErrorResponse(req.ID, rpc.PermissionDenied, err.Error(), nil)
+			}
+			return Dispatch(ctx, meta, req)
+		}
 		code := extractRequestTwoFACode(req)
 		if code == "" && c != nil {
 			code = headerOrQueryTwoFACode(c)

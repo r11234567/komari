@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	v2 "github.com/komari-monitor/komari/protocol/v2"
 	"github.com/komari-monitor/komari/utils"
@@ -62,6 +63,7 @@ func CreateSession(c *gin.Context) {
 		return
 	}
 	loginSession, _ := c.Cookie("session_token")
+	c.Set("credential_action_resource", credentialaction.ScopedResource("remote:create", uuid))
 	if err := verifyRemoteAccess(c, loginSession); err != nil {
 		api.RespondError(c, http.StatusUnauthorized, err.Error())
 		return
