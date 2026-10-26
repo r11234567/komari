@@ -40,6 +40,28 @@ func credentialTestIdentity(t *testing.T) (context.Context, string, string) {
 	return ctx, id, session
 }
 
+func TestCredentialContactReadReturnsOnlyMaskedPrivateRecipient(t *testing.T) {
+	ctx, id, _ := credentialTestIdentity(t)
+	user, err := accounts.GetUserByUUID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := accounts.ChangeVerifiedContact(ctx, user, models.CredentialContact{Kind: "email", Address: "synthetic-private@example.test", Transport: "email"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dbcore.GetDBInstance().Where("user_uuid = ?", id).Delete(&models.CredentialContact{}) })
+	result, err := (&credentialService{}).GetCredentialContacts(ctx, connect.NewRequest(&credentialv1.GetCredentialContactsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Msg.Contacts) != 1 || result.Msg.Contacts[0].MaskedAddress != "s***@example.test" || result.Msg.PasswordBootstrapAllowed {
+		t.Fatal("incorrect private contact metadata")
+	}
+	if result.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("contact response may be cached")
+	}
+}
+
 func TestCredentialGatewayNativeTOTPAndSharedInternalRPC(t *testing.T) {
 	ctx, id, _ := credentialTestIdentity(t)
 	svc := &credentialService{}
@@ -114,7 +136,7 @@ func TestCredentialSessionAndSecurityChangesInvalidatePendingWork(t *testing.T) 
 
 func TestCredentialServicePolicyAndHTTPAuthentication(t *testing.T) {
 	prefix := "/komari.credential.v1.TrustedCredentialService/"
-	for _, method := range []string{"ListTrustedCredentialProviders", "BeginVerification", "CompleteVerification", "CancelVerification"} {
+	for _, method := range []string{"ListTrustedCredentialProviders", "BeginVerification", "CompleteVerification", "CancelVerification", "GetCredentialContacts", "BeginContactBinding", "SaveCredentialContact", "DeleteCredentialContact"} {
 		p, ok := newPolicyInterceptor().policies[prefix+method]
 		if !ok || p.role != rpc.RoleAdmin || p.maxDuration != 30*time.Second {
 			t.Fatalf("missing policy for %s", method)

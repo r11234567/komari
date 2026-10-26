@@ -286,3 +286,16 @@ func TestPreparationFailureReleasesCapacity(t *testing.T) {
 		t.Fatal("failed preparations leaked")
 	}
 }
+
+func TestServerConfirmationAndProofCompletionShareAttemptBudget(t *testing.T) {
+	s, _, _ := fixture(t)
+	c := beginTest(t, s, testBinding)
+	for range MaxUserAttempts {
+		if err := s.ChargeAttempt(context.Background(), testBinding); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Complete(context.Background(), testBinding, c.ID, json.RawMessage(`{}`)); err != ErrLimit {
+		t.Fatal("proof bypassed shared confirmation budget")
+	}
+}

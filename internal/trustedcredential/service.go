@@ -258,18 +258,10 @@ func (s *Service) Complete(ctx context.Context, binding Binding, id string, proo
 		s.mu.Unlock()
 		return Authorization{}, ErrBusy
 	}
-	budget, exists := s.attempts[binding.UserID]
-	if budget.count >= MaxUserAttempts || (!exists && len(s.attempts) >= MaxAttemptBuckets) {
+	if err := s.chargeAttemptLocked(binding); err != nil {
 		s.mu.Unlock()
-		return Authorization{}, ErrLimit
+		return Authorization{}, err
 	}
-	if !exists {
-		budget.expires = s.now().Add(AttemptWindow)
-	}
-	// Reserve before invoking the provider: concurrent challenges cannot exceed
-	// this user-wide budget. It deliberately includes successful/in-flight tries.
-	budget.count++
-	s.attempts[binding.UserID] = budget
 	p.busy = true
 	p.attempts++
 	verifying, cancel := context.WithDeadline(ctx, p.expires)
@@ -382,6 +374,31 @@ func (s *Service) RevokeUser(userID string) {
 			delete(s.grants, key)
 		}
 	}
+}
+
+// ChargeAttempt is server-only and shares the same user-wide budget with proof
+// completion. Use it before an initial password enrollment confirmation.
+func (s *Service) ChargeAttempt(ctx context.Context, binding Binding) error {
+	if err := s.checkBinding(ctx, binding); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked()
+	return s.chargeAttemptLocked(binding)
+}
+
+func (s *Service) chargeAttemptLocked(binding Binding) error {
+	budget, exists := s.attempts[binding.UserID]
+	if budget.count >= MaxUserAttempts || (!exists && len(s.attempts) >= MaxAttemptBuckets) {
+		return ErrLimit
+	}
+	if !exists {
+		budget.expires = s.now().Add(AttemptWindow)
+	}
+	budget.count++
+	s.attempts[binding.UserID] = budget
+	return nil
 }
 
 func (s *Service) checkBinding(ctx context.Context, b Binding) error {

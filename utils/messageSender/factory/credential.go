@@ -31,6 +31,11 @@ func NormalizeCredentialAddress(kind, address string) (string, error) {
 	}
 	switch kind {
 	case "email":
+		for _, c := range address {
+			if c > 127 {
+				return "", ErrCredentialDelivery
+			}
+		}
 		parsed, err := mail.ParseAddress(address)
 		if err != nil || parsed.Name != "" || parsed.Address != address {
 			return "", ErrCredentialDelivery
