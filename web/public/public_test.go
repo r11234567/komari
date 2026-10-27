@@ -217,6 +217,7 @@ func TestCustomHTMLIsLimitedToPublicPages(t *testing.T) {
 		{path: "/index.html", wantCustom: true},
 		{path: "/admin"},
 		{path: "/admin/settings"},
+		{path: "/login"},
 		{path: "/terminal"},
 		{path: "/terminal/session"},
 		{path: "/install"},
@@ -232,6 +233,9 @@ func TestCustomHTMLIsLimitedToPublicPages(t *testing.T) {
 			t.Fatalf("GET %s status = %d, want %d", tt.path, recorder.Code, http.StatusOK)
 		}
 		body := recorder.Body.String()
+		if strings.Contains(body, nativeLoginBridgeMarker) != tt.wantCustom {
+			t.Fatalf("GET %s native login bridge must be public-theme-only", tt.path)
+		}
 		hasCustomHead := strings.Contains(body, `data-custom-head`)
 		hasCustomBody := strings.Contains(body, `data-custom-body`)
 		if hasCustomHead != tt.wantCustom || hasCustomBody != tt.wantCustom {

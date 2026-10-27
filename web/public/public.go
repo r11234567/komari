@@ -60,6 +60,7 @@ const documentTitleSyncMarker = "data-komari-title-sync"
 
 var (
 	documentTitlePattern = regexp.MustCompile(`(?is)<title(?:\s[^>]*)?>.*?</title\s*>`)
+	headOpenPattern      = regexp.MustCompile(`(?i)<head(?:\s[^>]*)?>`)
 	headClosePattern     = regexp.MustCompile(`(?i)</head\s*>`)
 	bodyClosePattern     = regexp.MustCompile(`(?i)</body\s*>`)
 )
@@ -438,7 +439,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		// theme replaces the whole application, so a rejected request would
 		// otherwise leave a blank chart with nothing explaining why.
 		c.Data(http.StatusOK, "text/html; charset=utf-8",
-			[]byte(injectHTTPErrorNotice(injectThemeChangeReload(rendered))))
+			[]byte(injectNativeLoginBridge(injectHTTPErrorNotice(injectThemeChangeReload(rendered)))))
 	}
 
 	// ================= 路由定义 =================
