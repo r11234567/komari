@@ -29,7 +29,7 @@ function harness(result = pending(), status = 200, denyStorage = false) {
     sessionStorage: { setItem(k, v) { if (denyStorage) throw new Error('storage disabled'); values.set(k, v); }, removeItem(k) { values.delete(k); } },
     async fetch(...args) { requests.push(args); return new Response(JSON.stringify(result), { status }); },
   };
-  const context = vm.createContext({ window, URL, Request, Response, XMLHttpRequest: XHR, console });
+  const context = vm.createContext({ window, URL, Request, Response, Error, XMLHttpRequest: XHR, console });
   vm.runInContext(script, context);
   return { window, navigations, requests, XHR, values, repeat() { vm.runInContext(script, context); } };
 }
@@ -108,4 +108,7 @@ test('XHR storage failure cannot be mistaken for successful authentication', () 
   xhr.open('POST', '/api/login'); xhr.send(password); xhr.finish(pending());
   assert.equal(xhr.status, 409); assert.equal(JSON.parse(xhr.responseText).status, 'error');
   assert.deepEqual(h.navigations, []);
+  xhr.open('GET', '/api/version'); xhr.send(); xhr.finish({ version: 'synthetic' });
+  assert.equal(xhr.status, 200);
+  assert.equal(JSON.parse(xhr.responseText).version, 'synthetic');
 });

@@ -60,6 +60,9 @@
   const setRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
   const requests = new WeakMap();
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    if (requests.get(this)?.overridden) {
+      delete this.status; delete this.responseText; delete this.response;
+    }
     requests.delete(this);
     if (method.toUpperCase() === "POST" && legacyEndpoint(url)) requests.set(this, { handled: false, navigating: false });
     const state = requests.get(this);
@@ -73,6 +76,7 @@
             if (this.status >= 200 && this.status < 300) { finish(result); state.navigating = true; }
           } catch {
             // Storage/metadata failures must never look like a full login.
+            state.overridden = true;
             Object.defineProperty(this, "status", { configurable: true, value: 409 });
             const failed = { status: "error", message: "Unable to continue login; please retry" };
             Object.defineProperty(this, "responseText", { configurable: true, value: JSON.stringify(failed) });
