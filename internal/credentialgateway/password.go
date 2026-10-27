@@ -25,7 +25,13 @@ type passwordContext struct {
 	gateway *Gateway
 	token   string
 }
+type passwordVerification struct {
+	mu        sync.Mutex
+	challenge credential.Challenge
+}
+
 type passwordPending struct {
+	verification     *passwordVerification
 	binding          credential.Binding
 	created, expires time.Time
 }
@@ -143,7 +149,7 @@ func (g *Gateway) BeginPassword(ctx context.Context, username, password, remoteI
 		g.password.mu.Unlock()
 		return PasswordStart{}, credential.ErrLimit
 	}
-	g.password.pending[key] = passwordPending{binding: b, created: now, expires: now.Add(PasswordLoginLifetime)}
+	g.password.pending[key] = passwordPending{binding: b, created: now, expires: now.Add(PasswordLoginLifetime), verification: &passwordVerification{}}
 	g.password.mu.Unlock()
 	pctx := g.passwordContext(ctx, token)
 	result := PasswordStart{Preauthentication: token, UserID: id, ExpiresAt: now.Add(PasswordLoginLifetime)}
@@ -166,10 +172,48 @@ func (g *Gateway) BeginPasswordVerification(ctx context.Context, token, provider
 	if err != nil {
 		return credential.Challenge{}, err
 	}
-	// Switching factors replaces this flow's previous challenge; send and proof
-	// budgets remain shared and do not reset.
+	key := opaqueDigest("password-preauth", token)
+	g.password.mu.Lock()
+	state, ok := g.password.pending[key]
+	g.password.mu.Unlock()
+	if !ok || state.verification == nil {
+		return credential.Challenge{}, credential.ErrUnauthenticated
+	}
+	// Serialize within this ceremony only, including provider delivery. A page
+	// refresh or duplicate request must not revoke an OTP or send another one.
+	v := state.verification
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if _, _, err := identity(ctx); err != nil {
+		return credential.Challenge{}, err
+	}
+	if provider == "" {
+		if v.challenge.ID != "" && time.Now().Before(v.challenge.ExpiresAt) {
+			return v.challenge, nil
+		}
+		providers, err := g.core.List(ctx, b, credential.PasswordLogin)
+		if err != nil {
+			return credential.Challenge{}, err
+		}
+		if len(providers) == 0 {
+			return credential.Challenge{}, credential.ErrProviderUnavailable
+		}
+		provider = providers[0].ID
+		for _, item := range providers {
+			if item.ID == "native:email_otp" {
+				provider = item.ID
+				break
+			}
+		}
+	}
+	// Explicit factor switching retains its previous semantics and budgets.
 	g.core.RevokeBinding(b)
-	return g.core.Begin(ctx, b, credential.Request{ProviderID: provider, Purpose: credential.PasswordLogin, Resource: passwordLoginResource})
+	v.challenge = credential.Challenge{}
+	challenge, err := g.core.Begin(ctx, b, credential.Request{ProviderID: provider, Purpose: credential.PasswordLogin, Resource: passwordLoginResource})
+	if err == nil {
+		v.challenge = challenge
+	}
+	return challenge, err
 }
 
 func (g *Gateway) CompletePassword(ctx context.Context, token, id string, proof json.RawMessage, remoteIP, userAgent string) (string, string, error) {
