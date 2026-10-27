@@ -199,3 +199,41 @@ func TestCycleCacheDoesNotPublishAfterInvalidation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int32(2), calls.Load())
 }
+
+func TestCycleCacheDoesNotPublishFailedOrCanceledLoads(t *testing.T) {
+	for _, cancelRequest := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancel-%t", cancelRequest), func(t *testing.T) {
+			db := openCalibrationTestDB(t, fmt.Sprintf("failed-cycle-cache-%t", cancelRequest))
+			day := 26
+			client := models.Client{UUID: "node", Token: "synthetic-token", TrafficResetDay: &day}
+			require.NoError(t, db.Create(&client).Error)
+			now := time.Date(2026, 10, 26, 2, 0, 0, 0, time.UTC)
+			InvalidateCalibratedCycleCache()
+			t.Cleanup(InvalidateCalibratedCycleCache)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var calls atomic.Int32
+			setMetricUsageForTest(t, func(context.Context, string, time.Time, time.Time) (Usage, error) {
+				if calls.Add(1) == 1 {
+					if cancelRequest {
+						cancel()
+						return Usage{}, context.Canceled
+					}
+					return Usage{}, fmt.Errorf("synthetic transient metric read failure")
+				}
+				return Usage{Up: 42, Down: 21}, nil
+			})
+			_, err := CurrentCalibratedCycleUsages(ctx, db, now)
+			require.Error(t, err, "failed reads must not be reported or cached as successful empty usage")
+			if cancelRequest {
+				require.ErrorIs(t, err, context.Canceled)
+			}
+			values, err := CurrentCalibratedCycleUsages(context.Background(), db, now)
+			require.NoError(t, err)
+			require.Equal(t, Usage{Up: 42, Down: 21}, values[client.UUID], "next read must reload immediately, not wait 15 seconds")
+			_, err = CurrentCalibratedCycleUsages(context.Background(), db, now)
+			require.NoError(t, err)
+			require.Equal(t, int32(2), calls.Load(), "successful retry should still be cached")
+		})
+	}
+}
