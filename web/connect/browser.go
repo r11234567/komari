@@ -74,6 +74,8 @@ func (s *browserService) ListAgents(ctx context.Context, req *connect.Request[br
 		return nil, connectError(connect.CodeInternal, err)
 	}
 	latest := agent_runtime.GetLatestReport()
+	now := time.Now().UTC()
+	cycleUsages, _ := trafficledger.CurrentCalibratedCycleUsages(ctx, dbcore.GetDBInstance(), now)
 	online := stringSet(agent_runtime.GetAllOnlineUUIDs())
 	meta := rpc.MetaFromContext(ctx)
 	isAdmin := meta != nil && meta.Principal != nil && meta.Principal.HasRole(rpc.RoleAdmin)
@@ -91,10 +93,9 @@ func (s *browserService) ListAgents(ctx context.Context, req *connect.Request[br
 		if search != "" && !strings.Contains(strings.ToLower(item.Name+" "+item.UUID), search) {
 			continue
 		}
-		result = append(
-			result,
-			browserSummary(item, latest[item.UUID], online[item.UUID], isAdmin, showGuestIP),
-		)
+		summary := browserSummary(item, latest[item.UUID], online[item.UUID], isAdmin, showGuestIP)
+		summary.TrafficAccounting = browserTrafficAccounting(item, latest[item.UUID], cycleUsages, now)
+		result = append(result, summary)
 	}
 	return connect.NewResponse(&browserv1.ListAgentsResponse{Agents: result}), nil
 }
@@ -114,16 +115,15 @@ func (s *browserService) GetAgent(ctx context.Context, req *connect.Request[brow
 		return nil, connectError(connect.CodeNotFound, errors.New("agent not found"))
 	}
 	report := agent_runtime.GetLatestReport()[item.UUID]
-	report = trafficDisplayReport(ctx, item.UUID, report)
+	now := time.Now().UTC()
+	cycleUsages, _ := trafficledger.CurrentCalibratedCycleUsages(ctx, dbcore.GetDBInstance(), now)
+	accounting := browserTrafficAccounting(item, report, cycleUsages, now)
+	report = reportWithTrafficUsage(report, cycleUsages, item.UUID)
 	online := stringSet(agent_runtime.GetAllOnlineUUIDs())
+	summary := browserSummary(item, report, online[item.UUID], isAdmin, showGuestIP)
+	summary.TrafficAccounting = accounting
 	return connect.NewResponse(&browserv1.GetAgentResponse{
-		Agent: browserSummary(
-			item,
-			report,
-			online[item.UUID],
-			isAdmin,
-			showGuestIP,
-		),
+		Agent:        summary,
 		LatestReport: legacyReportToProto(item, report, isAdmin),
 	}), nil
 }
@@ -252,7 +252,8 @@ func (s *browserService) WatchAgentStatus(ctx context.Context, req *connect.Requ
 			return connectError(connect.CodeInternal, err)
 		}
 		latest := agent_runtime.GetLatestReport()
-		cycleUsages, _ := trafficledger.CurrentCalibratedCycleUsages(ctx, dbcore.GetDBInstance(), time.Now().UTC())
+		now := time.Now().UTC()
+		cycleUsages, _ := trafficledger.CurrentCalibratedCycleUsages(ctx, dbcore.GetDBInstance(), now)
 		online := stringSet(agent_runtime.GetAllOnlineUUIDs())
 		for _, item := range items {
 			if item.Hidden && !isAdmin || len(requested) > 0 && !requested[item.UUID] {
@@ -260,6 +261,7 @@ func (s *browserService) WatchAgentStatus(ctx context.Context, req *connect.Requ
 			}
 			report := reportWithTrafficUsage(latest[item.UUID], cycleUsages, item.UUID)
 			summary := browserSummary(item, report, online[item.UUID], isAdmin, showGuestIP)
+			summary.TrafficAccounting = browserTrafficAccounting(item, report, cycleUsages, now)
 			version := browserStatusVersion(summary, report)
 			if last[item.UUID] == version {
 				continue
@@ -304,6 +306,7 @@ func browserStatusVersion(summary *browserv1.AgentSummary, report *legacyv1.Repo
 		fmt.Sprintf("%.6f", summary.CpuPercent),
 		fmt.Sprintf("%.6f", summary.MemoryPercent),
 		capabilities,
+		summary.TrafficAccounting.String(),
 	}, "|")
 }
 

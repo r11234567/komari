@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/database/trafficledger"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	legacyv1 "github.com/komari-monitor/komari/protocol/v1"
 	agentRuntime "github.com/komari-monitor/komari/web/agent"
@@ -180,12 +182,17 @@ func (s *metricsService) WatchMetrics(ctx context.Context, req *connect.Request[
 		return err
 	}
 	requested := stringSet(req.Msg.Metrics)
-	last := make(map[string]time.Time, len(agentIDs))
+	last := make(map[string]string, len(agentIDs))
 	for {
 		latest := agentRuntimeReports()
+		cycleUsages, _ := trafficledger.CurrentCalibratedCycleUsages(ctx, dbcore.GetDBInstance(), time.Now().UTC())
 		for _, agentID := range agentIDs {
-			report := latest[agentID]
-			if report == nil || !report.UpdatedAt.After(last[agentID]) {
+			report := reportWithTrafficUsage(latest[agentID], cycleUsages, agentID)
+			if report == nil {
+				continue
+			}
+			version := fmt.Sprintf("%s:%d:%d", report.UpdatedAt.UTC().Format(time.RFC3339Nano), report.Network.TotalUp, report.Network.TotalDown)
+			if version == last[agentID] {
 				continue
 			}
 			for _, point := range legacyReportMetricPoints(report) {
@@ -196,7 +203,7 @@ func (s *metricsService) WatchMetrics(ctx context.Context, req *connect.Request[
 					return err
 				}
 			}
-			last[agentID] = report.UpdatedAt
+			last[agentID] = version
 		}
 		timer := time.NewTimer(period)
 		select {
