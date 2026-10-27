@@ -673,16 +673,30 @@ func CurrentCalibratedCycleUsages(ctx context.Context, db *gorm.DB, now time.Tim
 		return nil, fmt.Errorf("load traffic cycle clients: %w", err)
 	}
 	values := make(map[string]Usage)
+	var loadErr error
 	expires := now.Add(calibratedCycleCacheTTL)
 	for _, client := range clients {
 		if next := clientSchedule(client).Next(now); !next.IsZero() && next.Before(expires) {
 			expires = next
 		}
 		snapshot, err := LoadCalibrationSnapshot(ctx, db, client, now)
-		if err != nil || !snapshot.HistoryComplete {
+		if err != nil {
+			loadErr = errors.Join(loadErr, fmt.Errorf("load calibrated cycle for %s: %w", client.UUID, err))
+			continue
+		}
+		if !snapshot.HistoryComplete {
 			continue
 		}
 		values[client.UUID] = snapshot.Effective
+	}
+	// A canceled browser read or transient database error must not publish a
+	// partial map as a successful cache entry. Otherwise every subsequent
+	// consumer loses calibration until the cache expires, even after recovery.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if loadErr != nil {
+		return values, loadErr
 	}
 	calibratedCycleCache.Lock()
 	if generation == calibratedCycleCache.generation {

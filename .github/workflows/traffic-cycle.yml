@@ -20,6 +20,9 @@ jobs:
           go-version-file: go.mod
       - name: UTC offsets, month ends, persistence, signed correction and raw metric isolation
         run: bash scripts/ci/run-audit-check.sh traffic-cycle bash scripts/ci/run-go-tests.sh -race ./pkg/trafficreset ./database/trafficledger ./database/clients ./database/billing ./web/api/admin ./web/connect ./utils/notifier
+      - name: Canceled and transiently failed reads must not erase calibrated cache entries
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh traffic-cache-recovery bash scripts/ci/run-go-tests.sh -race -run TestCycleCacheDoesNotPublish ./database/trafficledger
       - name: Real calibration to browser list/detail, later counter growth and exact reset timestamps
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh traffic-consumers bash scripts/ci/run-go-tests.sh -race -run 'TestTrafficAccounting|TestTrafficCalibrationReaches' ./web/connect
