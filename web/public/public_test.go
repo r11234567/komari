@@ -302,6 +302,31 @@ func TestEnsureBundledThemesMigratesLiteDefaultToOfficialTheme(t *testing.T) {
 	}
 }
 
+func TestEnsureBundledThemesRetainsDeliberatelySelectedNezha(t *testing.T) {
+	t.Chdir(t.TempDir())
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.SetDb(db)
+	if err := EnsureBundledThemes(); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SetMany(map[string]any{
+		config.ThemeKey:         LegacyLiteDefaultTheme,
+		themeBundleMigrationKey: currentThemeBundleMigration - 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureBundledThemes(); err != nil {
+		t.Fatal(err)
+	}
+	active, err := config.GetAs[string](config.ThemeKey)
+	if err != nil || active != LegacyLiteDefaultTheme {
+		t.Fatalf("selected theme changed: %q, %v", active, err)
+	}
+}
+
 func TestEnsureBundledThemesRepairsRestoreWithoutThemeFiles(t *testing.T) {
 	t.Chdir(t.TempDir())
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})

@@ -20,6 +20,9 @@ jobs:
           go-version-file: go.mod
       - name: UTC offsets, month ends, persistence, signed correction and raw metric isolation
         run: bash scripts/ci/run-audit-check.sh traffic-cycle bash scripts/ci/run-go-tests.sh -race ./pkg/trafficreset ./database/trafficledger ./database/clients ./database/billing ./web/api/admin ./web/connect ./utils/notifier
+      - name: Real calibration to browser list/detail, later counter growth and exact reset timestamps
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh traffic-consumers bash scripts/ci/run-go-tests.sh -race -run 'TestTrafficAccounting|TestTrafficCalibrationReaches' ./web/connect
       - uses: actions/upload-artifact@v4
         if: always()
         with:

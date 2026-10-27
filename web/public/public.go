@@ -51,8 +51,9 @@ const (
 const themeBundleMigrationKey = "theme_bundle_migration_v1"
 
 // Increment whenever the embedded official default theme must replace an
-// already-installed bundle. Version 11 refreshes Passkey navigation and same-tab settings.
-const currentThemeBundleMigration = 11
+// already-installed bundle. Version 12 ships the billing-cycle display and
+// decimal GB formatting; leaving installed version 11 would retain stale UI.
+const currentThemeBundleMigration = 12
 
 const themeChangeReloadScript = `<script>(()=>{window.addEventListener("storage",(event)=>{if(event.key==="komari-active-theme-changed"){window.location.reload();}});})();</script>`
 
@@ -347,7 +348,7 @@ func EnsureBundledThemes() error {
 		// Snapshots up to migration 3 selected Nezha automatically. Move those
 		// installations back to the official Komari theme while retaining Nezha
 		// as an optional managed theme.
-		if currentTheme == LegacyLiteDefaultTheme {
+		if migrated < 4 && currentTheme == LegacyLiteDefaultTheme {
 			currentTheme = DefaultTheme
 		}
 	}
