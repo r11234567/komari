@@ -3,7 +3,10 @@ package credentialgateway
 import (
 	"context"
 	"encoding/json"
+	credential "github.com/komari-monitor/komari/internal/trustedcredential"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -63,5 +66,86 @@ func TestPasswordOnlyCompatibilityAndCancelledPendingState(t *testing.T) {
 	}
 	if !factor.gateway.CancelPassword(pending.Preauthentication) || len(factor.gateway.password.pending) != 0 {
 		t.Fatal("cancellation did not clear pending state")
+	}
+}
+
+func TestPasswordResumeSelectsEmailAndReusesChallenge(t *testing.T) {
+	f := newContactFixture(t, true)
+	address := "synthetic-resume@example.test"
+	if err := accounts.ChangeVerifiedContact(context.Background(), f.user, models.CredentialContact{Kind: "email", Address: address, Transport: "email"}); err != nil {
+		t.Fatal(err)
+	}
+	started, err := f.gateway.BeginPassword(context.Background(), f.user.Username, "Synthetic-password-123", "192.0.2.30", "synthetic-ci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	challenges := make(chan credential.Challenge, 8)
+	errors := make(chan error, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, err := f.gateway.BeginPasswordVerification(context.Background(), started.Preauthentication, "")
+			challenges <- c
+			errors <- err
+		}()
+	}
+	wg.Wait()
+	close(challenges)
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	id := ""
+	for c := range challenges {
+		if id == "" {
+			id = c.ID
+		}
+		if c.ID != id {
+			t.Fatal("navigation replaced the pending challenge")
+		}
+	}
+	if f.sends != 1 || f.codes[address] == "" {
+		t.Fatal("default factor was not email or refresh resent OTP")
+	}
+	proof, _ := json.Marshal(map[string]string{"code": f.codes[address]})
+	session, _, err := f.gateway.CompletePassword(context.Background(), started.Preauthentication, id, proof, "192.0.2.30", "synthetic-ci")
+	if err != nil || session == "" {
+		t.Fatal("resumed OTP did not complete", err)
+	}
+	if _, err := f.gateway.BeginPasswordVerification(context.Background(), started.Preauthentication, ""); err == nil {
+		t.Fatal("completed ceremony resumed")
+	}
+}
+
+func TestPasswordResumeRejectsMissingCancelledAndExpiredState(t *testing.T) {
+	f := newContactFixture(t, true)
+	if _, err := f.gateway.BeginPasswordVerification(context.Background(), "", ""); err == nil {
+		t.Fatal("missing password cookie accepted")
+	}
+	start := func() string {
+		result, err := f.gateway.BeginPassword(context.Background(), f.user.Username, "Synthetic-password-123", "192.0.2.31", "synthetic-ci")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.Preauthentication
+	}
+	cancelled := start()
+	f.gateway.CancelPassword(cancelled)
+	if _, err := f.gateway.BeginPasswordVerification(context.Background(), cancelled, ""); err == nil {
+		t.Fatal("cancelled ceremony resumed")
+	}
+	expired := start()
+	key := opaqueDigest("password-preauth", expired)
+	f.gateway.password.mu.Lock()
+	state := f.gateway.password.pending[key]
+	state.expires = time.Now().Add(-time.Second)
+	f.gateway.password.pending[key] = state
+	f.gateway.password.mu.Unlock()
+	if _, err := f.gateway.BeginPasswordVerification(context.Background(), expired, ""); err == nil {
+		t.Fatal("expired ceremony resumed")
 	}
 }
