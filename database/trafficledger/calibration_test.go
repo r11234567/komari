@@ -179,6 +179,12 @@ func TestCurrentTrafficCycleForEmptyResetClockAndTimezone(t *testing.T) {
 
 func TestCurrentCalibratedCycleUsagesEmptyResetClockDoesNotPanic(t *testing.T) {
 	db := openLedgerTestDB(t, "calibration-empty-reset-clock")
+	// This test exercises the legacy empty-clock default, not unavailable
+	// metric storage. Supply a valid zero usage instead of relying on swallowed
+	// metric-store errors to make an empty cache look successful.
+	setMetricUsageForTest(t, func(context.Context, string, time.Time, time.Time) (Usage, error) {
+		return Usage{}, nil
+	})
 	InvalidateCalibratedCycleCache()
 	t.Cleanup(InvalidateCalibratedCycleCache)
 
@@ -212,6 +218,7 @@ func TestCurrentCalibratedCycleUsagesEmptyResetClockDoesNotPanic(t *testing.T) {
 		require.NoError(t, loadErr)
 	})
 	assert.NotNil(t, usages)
+	assert.Equal(t, Usage{Up: 1}, usages["client-a"])
 }
 
 func TestCycleEndDayDoesNotDereferenceNilResetDay(t *testing.T) {
