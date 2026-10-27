@@ -52,9 +52,10 @@ const themeBundleMigrationKey = "theme_bundle_migration_v1"
 
 // Increment whenever the embedded official default theme must replace an
 // already-installed bundle. Version 12 ships the billing-cycle display and
-// decimal GB formatting. Version 13 adds the password-to-factor handoff;
+// decimal GB formatting. Version 14 keeps the default theme login inline and
+// adds the dedicated third-party password-to-factor verification page;
 // existing installations must receive the matching frontend bundle.
-const currentThemeBundleMigration = 13
+const currentThemeBundleMigration = 14
 
 const themeChangeReloadScript = `<script>(()=>{window.addEventListener("storage",(event)=>{if(event.key==="komari-active-theme-changed"){window.location.reload();}});})();</script>`
 

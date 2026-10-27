@@ -4,7 +4,6 @@ const test = require('node:test');
 const vm = require('node:vm');
 const script = readFileSync('web/public/native_login_bridge.js', 'utf8');
 const endpoint = '/komari.credential.v1.PasswordLoginService/BeginPasswordLogin';
-const key = 'komari:password-login-handoff';
 const password = JSON.stringify({ username: 'synthetic', password: 'synthetic-password', '2fa_code': 'unused' });
 const pending = () => ({ expiresAt: new Date(Date.now() + 170_000).toISOString(), providers: [{ id: 'native:email_otp', displayName: 'Email OTP', token: 'must-not-persist' }] });
 
@@ -46,18 +45,15 @@ test('installing the bridge or opening a dialog never redirects or submits crede
   const h = harness(); h.repeat();
   assert.deepEqual(h.navigations, []); assert.deepEqual(h.requests, []);
 });
-test('Continue verifies password before handing off to plain /login without secrets', async () => {
+test('Continue verifies password before handing off to dedicated /login/verify without secrets', async () => {
   const h = harness();
   await submit(h);
   assert.equal(h.requests.length, 1);
   assert.equal(h.requests[0][0], endpoint);
   assert.deepEqual(JSON.parse(h.requests[0][1].body), { username: 'synthetic', password: 'synthetic-password' });
   assert.equal(h.requests[0][1].credentials, 'same-origin');
-  assert.deepEqual(h.navigations, ['/login']);
-  const stored = JSON.parse(h.values.get(key));
-  assert.deepEqual(stored.providers, [{ id: 'native:email_otp', displayName: 'Email OTP' }]);
-  assert.deepEqual(Object.keys(stored).sort(), ['expiresAt', 'providers']);
-  assert.doesNotMatch(h.values.get(key), /synthetic|password|token|must-not-persist/);
+  assert.deepEqual(h.navigations, ['/login/verify']);
+  assert.equal(h.values.size, 0);
 });
 test('incorrect password stays in original dialog and displays the actual server error', async () => {
   const h = harness({ code: 'unauthenticated', message: 'Invalid credentials' }, 401);
@@ -75,10 +71,13 @@ test('Request bodies are supported and full no-factor sessions go directly to da
   await submit(h, new Request('https://panel.test/api/login', { method: 'POST', body: password }), {});
   assert.deepEqual(h.navigations, ['/admin/dashboard']); assert.equal(h.values.size, 0);
 });
-test('malformed input and unavailable session storage never navigate or claim login', async () => {
+test('disabled browser storage does not break the cookie-bound handoff', async () => {
   const h = harness(pending(), 200, true);
-  const result = await h.window.fetch('/api/login', { method: 'POST', body: password });
-  assert.equal(result.status, 400); assert.deepEqual(h.navigations, []);
+  await submit(h);
+  assert.deepEqual(h.navigations, ['/login/verify']);
+  assert.equal(h.values.size, 0);
+});
+test('malformed input never submits or claims login', async () => {
   const invalid = harness();
   const response = await invalid.window.fetch('/api/login', { method: 'POST', body: '{}' });
   assert.equal(response.status, 400); assert.equal(invalid.requests.length, 0);
@@ -93,7 +92,7 @@ test('XHR submits the native flow without duplicate Content-Type or early redire
   assert.equal(h.requests[0].headers['Content-Type'], 'application/json');
   assert.deepEqual(h.navigations, []);
   xhr.finish(pending());
-  assert.deepEqual(h.navigations, ['/login']); assert.equal(themeLoads, 0);
+  assert.deepEqual(h.navigations, ['/login/verify']); assert.equal(themeLoads, 0);
 });
 test('XHR bad password stays put, and reuse for non-login requests is normal', () => {
   const h = harness(), xhr = new h.XHR(); let loads = 0;
@@ -103,12 +102,9 @@ test('XHR bad password stays put, and reuse for non-login requests is normal', (
   xhr.open('GET', '/api/version'); xhr.send(); xhr.finish({ version: 'synthetic' });
   assert.equal(loads, 2); assert.equal(h.requests[1].args[1], '/api/version');
 });
-test('XHR storage failure cannot be mistaken for successful authentication', () => {
+test('XHR also hands off without browser storage', () => {
   const h = harness(pending(), 200, true), xhr = new h.XHR();
   xhr.open('POST', '/api/login'); xhr.send(password); xhr.finish(pending());
-  assert.equal(xhr.status, 409); assert.equal(JSON.parse(xhr.responseText).status, 'error');
-  assert.deepEqual(h.navigations, []);
-  xhr.open('GET', '/api/version'); xhr.send(); xhr.finish({ version: 'synthetic' });
-  assert.equal(xhr.status, 200);
-  assert.equal(JSON.parse(xhr.responseText).version, 'synthetic');
+  assert.deepEqual(h.navigations, ['/login/verify']);
+  assert.equal(h.values.size, 0);
 });

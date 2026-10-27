@@ -218,6 +218,7 @@ func TestCustomHTMLIsLimitedToPublicPages(t *testing.T) {
 		{path: "/admin"},
 		{path: "/admin/settings"},
 		{path: "/login"},
+		{path: "/login/verify"},
 		{path: "/terminal"},
 		{path: "/terminal/session"},
 		{path: "/install"},
