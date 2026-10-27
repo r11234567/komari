@@ -6,7 +6,6 @@
   if (window.__komariNativeLoginBridge) return;
   window.__komariNativeLoginBridge = true;
   const endpoint = "/komari.credential.v1.PasswordLoginService/BeginPasswordLogin";
-  const key = "komari:password-login-handoff";
   const originalFetch = window.fetch;
   const legacyEndpoint = (value) => {
     try {
@@ -21,14 +20,13 @@
   };
   const finish = (result) => {
     if (result.authenticated === true) {
-      try { window.sessionStorage.removeItem(key); } catch { /* No handoff needed. */ }
       window.location.assign("/admin/dashboard");
       return;
     }
-    const expiresAt = Date.parse(result.expiresAt);
-    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() || !Array.isArray(result.providers) || !result.providers.length) throw new Error("No available second factor");
-    window.sessionStorage.setItem(key, JSON.stringify({ expiresAt, providers: result.providers.map(({ id, displayName }) => ({ id, displayName: displayName || "" })) }));
-    window.location.assign("/login");
+    if (!Array.isArray(result.providers) || !result.providers.length) throw new Error("No available second factor");
+    // The HttpOnly service cookie is the only authority across documents.
+    // No browser storage, client clock, URL credential or password replay.
+    window.location.assign("/login/verify");
   };
   const failure = (message, status = 400) => new Response(JSON.stringify({ status: "error", message }), { status, headers: { "Content-Type": "application/json" } });
   window.fetch = async function (input, init) {
@@ -75,7 +73,7 @@
             const result = this.responseType === "json" ? this.response : JSON.parse(this.responseText);
             if (this.status >= 200 && this.status < 300) { finish(result); state.navigating = true; }
           } catch {
-            // Storage/metadata failures must never look like a full login.
+            // Invalid response metadata must never look like a full login.
             state.overridden = true;
             Object.defineProperty(this, "status", { configurable: true, value: 409 });
             const failed = { status: "error", message: "Unable to continue login; please retry" };
