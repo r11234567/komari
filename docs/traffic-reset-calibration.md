@@ -18,6 +18,17 @@ the panel's cycle does not reset or rewrite that counter. Browser Connect
 responses, RPC2 compatibility views and traffic alerts use the same cycle totals.
 Raw metric history and instantaneous network speeds retain their original meaning.
 
+BrowserService list/detail/status also expose an additive `traffic_accounting`
+view with the effective upload/download/billable bytes and the exact reset
+day, clock, timezone, cycle start and next reset instant. `cycle_available`
+distinguishes confirmed monthly usage from fallback Agent cumulative counters.
+The default theme and admin node list display this view outside the calibration
+dialog, in the same decimal GB as provider input. A shared visible-page refresh
+runs at most once every 15 seconds and is triggered immediately after saving.
+MetricsService live cumulative traffic points use the same accounting overlay;
+persisted metric history and ingestion baselines stay raw so corrections cannot
+be counted a second time. Existing Agents require no upgrade for these views.
+
 Calibration accepts either the provider's current-period upload/download totals
 or a single billable total using the node's sum/max/min/up/down counting rule.
 The administrator interface uses decimal GB (1 GB = 1,000,000,000 bytes), with
