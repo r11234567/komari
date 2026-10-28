@@ -101,3 +101,12 @@ runs:
       with:
         name: ${{ inputs.artifact-name }}
         path: ${{ runner.temp }}/${{ inputs.artifact-name }}.tar.gz
+
+    - name: Preserve dependency security logs on success or failure
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: web-security-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ inputs.source-dir }}/ci-artifacts/
+        retention-days: 30
+        if-no-files-found: error
