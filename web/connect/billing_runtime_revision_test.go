@@ -23,19 +23,24 @@ func TestBillingResetDayGetsNewRevisionAndReachesConnectWatcher(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	delivered := make(chan clients.DeploymentDeliveryState, 1)
+	type outcome struct {
+		state clients.DeploymentDeliveryState
+		found bool
+		err   error
+	}
+	delivered := make(chan outcome, 1)
 	go func() {
 		_, found, state, err := deploymentapp.WaitForDesired(ctx, id, first.Revision)
-		if err == nil && found {
-			delivered <- state
-		}
+		delivered <- outcome{state, found, err}
 	}()
 	require.NoError(t, clients.SaveClient(map[string]interface{}{"uuid": id, "traffic_reset_day": float64(17)}))
 	_, err = deploymentapp.DispatchCurrent(id)
 	require.NoError(t, err)
 	select {
-	case state := <-delivered:
-		require.Equal(t, first.Revision+1, state.Revision)
+	case result := <-delivered:
+		require.NoError(t, result.err)
+		require.True(t, result.found)
+		require.Equal(t, first.Revision+1, result.state.Revision)
 	case <-ctx.Done():
 		t.Fatal("billing update did not reach the Connect runtime watcher")
 	}

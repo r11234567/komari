@@ -58,7 +58,9 @@ runs:
 
         echo "Building Komari Web bundles from $web_dir..."
         cd "$web_dir"
-        npm ci
+        bash "$GITHUB_WORKSPACE/scripts/ci/run-audit-check.sh" web-install npm ci --no-audit
+        bash "$GITHUB_WORKSPACE/scripts/ci/run-audit-check.sh" web-dependency-security npm run test:dependency-security
+        bash "$GITHUB_WORKSPACE/scripts/ci/run-audit-check.sh" web-dependency-audit npm run audit:security
         npm run lint
         npm test
         npm run build:system
@@ -99,3 +101,12 @@ runs:
       with:
         name: ${{ inputs.artifact-name }}
         path: ${{ runner.temp }}/${{ inputs.artifact-name }}.tar.gz
+
+    - name: Preserve dependency security logs on success or failure
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: web-security-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ inputs.source-dir }}/ci-artifacts/
+        retention-days: 30
+        if-no-files-found: error

@@ -2,6 +2,7 @@ package clients
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -465,5 +466,44 @@ func TestPreviousRuntimeSurvivesRedispatchAndPreservesInstallSettings(t *testing
 	}
 	if _, state, changed, err := saveDeploymentProfileForDispatch(db, "node-rollback", rollback, true); err != nil || !changed || state.Revision != 4 {
 		t.Fatalf("save rollback: state=%+v changed=%v error=%v", state, changed, err)
+	}
+}
+
+// Reproduce the exact read/write interleaving from the flaky runtime watcher:
+// the reader sees the old client day, then the writer commits a new profile.
+func TestDeploymentProfileRetriesConcurrentBillingSnapshot(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "snapshot.db")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&models.Client{}, &models.ClientDeploymentProfile{}, &models.ClientPrivilegedState{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.Client{UUID: "node-race", Token: "synthetic"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := saveDeploymentProfile(db, "node-race", DeploymentProfile{Platform: "linux", EnableMonthRotate: true, MonthRotate: 7}); err != nil {
+		t.Fatal(err)
+	}
+	triggered := false
+	hook := "test:commit-billing-between-reads"
+	if err := db.Callback().Query().After("gorm:query").Register(hook, func(query *gorm.DB) {
+		if triggered || query.Statement.Table != "clients" {
+			return
+		}
+		triggered = true
+		if err := saveClient(db, map[string]interface{}{"uuid": "node-race", "traffic_reset_day": float64(17)}); err != nil {
+			query.AddError(err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Callback().Query().Remove(hook)
+	profile, saved, err := getDeploymentProfile(db, "node-race")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !triggered || !saved || profile.MonthRotate != 17 {
+		t.Fatalf("interleaved read returned wrong snapshot: triggered=%v saved=%v day=%d", triggered, saved, profile.MonthRotate)
 	}
 }
