@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Gate the exact Web gitlink on all independent Web verification workflows."""
-import json, os, pathlib, subprocess, sys, time
+import json, pathlib, subprocess, sys
 required = ['development.yaml', 'codeql.yml', 'privileged-delivery.yml',
  'terminal-workbench.yml', 'admin-ui.yml', 'lite-alerts.yml', 'lite-billing.yml',
  'native-otp.yml', 'native-password-login.yml', 'trusted-actions.yml', 'workspace-gate.yml']
