@@ -125,6 +125,7 @@ func GetStateWithDB(db *gorm.DB, id string) (Snapshot, error) {
 }
 
 func Negotiate(db *gorm.DB, id, service, startup string, mode int32, actions []int32) (models.ClientPrivilegedState, error) {
+	defer Notify(id) // after the transaction commits or rolls back
 	var out models.ClientPrivilegedState
 	if strings.TrimSpace(service) == "" || len(service) > 255 || strings.TrimSpace(startup) == "" || len(startup) > 128 || mode < 1 || mode > 5 {
 		return out, errors.New("valid service, startup ID and actual mode are required")

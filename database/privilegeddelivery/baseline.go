@@ -27,6 +27,7 @@ type BaselineResult struct {
 // Existing nodes can only add a missing deny-only privileged baseline while
 // preserving ordinary history. Neither path replaces privileged history.
 func InitializeBaseline(db *gorm.DB, r *configv1.InitializeNodeConfigRequest, profile clients.DeploymentProfile) (BaselineResult, error) {
+	defer Notify(r.GetAgentId()) // after the transaction commits or rolls back
 	var out BaselineResult
 	if r.Runtime == nil || r.Privileged == nil || len(r.PolicyHash) != 64 {
 		return out, errors.New("runtime, privileged settings and policy hash are required")

@@ -44,6 +44,8 @@ type privilegedDeliveryService struct {
 }
 
 const privilegedWatchHeartbeat = 20 * time.Second
+const rescueWatchHeartbeat = time.Second
+const rescueWatchHeader = "X-Komari-Rescue-Watch"
 
 func (s *privilegedDeliveryService) GetPrivilegedDelivery(ctx context.Context, req *connect.Request[configv1.GetPrivilegedDeliveryRequest]) (*connect.Response[configv1.GetPrivilegedDeliveryResponse], error) {
 	agentID, err := requireAgent(rpc.MetaFromContext(ctx), req.Msg.GetAgentId())
@@ -70,16 +72,34 @@ func (s *privilegedDeliveryService) WatchPrivilegedDelivery(ctx context.Context,
 	if err != nil {
 		return err
 	}
+	rescue := req.Header().Get(rescueWatchHeader) == "v1"
+	if rescue {
+		stream.ResponseHeader().Set(rescueWatchHeader, "v1")
+	}
+	heartbeat := privilegedWatchHeartbeat
+	if rescue {
+		heartbeat = rescueWatchHeartbeat
+	}
 	after := req.Msg.GetAfterRevision()
 	sequence := req.Msg.GetAfterSequence()
 	for {
+		changed, unsubscribe := privilegeddelivery.Subscribe(agentID)
 		var revision privilegeddelivery.Revision
 		var found bool
-		var err error
+		if rescue {
+			// A live stream must not outlive revocation or replacement of the
+			// credential that opened it. Reauthentication uses current DB state.
+			token := strings.TrimPrefix(req.Header().Get("Authorization"), "Bearer ")
+			id, e := enrollment.ResolveAccessToken(token)
+			if e != nil || id != agentID {
+				unsubscribe()
+				return connectError(connect.CodeUnauthenticated, errors.New("rescue stream credential expired or revoked"))
+			}
+		}
 		if req.Msg.GetProtocolVersion() == 2 {
-			snapshot, e := privilegeddelivery.GetState(agentID)
+			snapshot, e := privilegeddelivery.GetStateWithDB(dbcore.GetDBInstance().WithContext(ctx), agentID)
 			err = e
-			found = e == nil && snapshot.Desired != nil && snapshot.State.UpdateSequence > sequence
+			found = e == nil && snapshot.Desired != nil && (rescue || snapshot.State.UpdateSequence > sequence)
 			if found {
 				revision = *snapshot.Desired
 			}
@@ -87,29 +107,35 @@ func (s *privilegedDeliveryService) WatchPrivilegedDelivery(ctx context.Context,
 			revision, found, err = privilegeddelivery.Latest(agentID, after)
 		}
 		if err != nil {
+			unsubscribe()
 			return connectError(connect.CodeInternal, err)
 		}
 		if found {
-			signed, err := signedPrivilegedRevision(revision)
-			if err != nil {
-				return connectError(connect.CodeInternal, err)
+			signed, e := signedPrivilegedRevision(revision)
+			if e != nil {
+				unsubscribe()
+				return connectError(connect.CodeInternal, e)
 			}
-			if err := stream.Send(&configv1.WatchPrivilegedDeliveryResponse{Revision: signed, UpdateSequence: revision.UpdateSequence}); err != nil {
-				return err
+			if e = stream.Send(&configv1.WatchPrivilegedDeliveryResponse{Revision: signed, UpdateSequence: revision.UpdateSequence}); e != nil {
+				unsubscribe()
+				return e
 			}
-			after = revision.Revision
-			sequence = revision.UpdateSequence
+			after, sequence = revision.Revision, revision.UpdateSequence
+		} else if rescue {
+			unsubscribe()
+			return connectError(connect.CodeFailedPrecondition, errors.New("no signed rescue revision available"))
 		}
-		// Polling rather than signalling: a privileged revision is created by a
-		// human at human cadence, so the simplicity is worth more here than the
-		// latency a signal would save.
-		timer := time.NewTimer(privilegedWatchHeartbeat)
+		timer := time.NewTimer(heartbeat)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			unsubscribe()
 			return connectError(connect.CodeCanceled, ctx.Err())
+		case <-changed:
+			timer.Stop()
 		case <-timer.C:
 		}
+		unsubscribe()
 	}
 }
 

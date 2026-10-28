@@ -112,6 +112,7 @@ func Save(clientUUID string, settings Settings, expectedRevision uint64, reason 
 
 // SaveWithDB stores a new revision using the provided database connection.
 func SaveWithDB(db *gorm.DB, clientUUID string, settings Settings, expectedRevision uint64, reason string) (Revision, error) {
+	defer Notify(clientUUID) // after the transaction commits or rolls back
 	var result Revision
 	err := db.Transaction(func(tx *gorm.DB) error {
 		state, err := lockState(tx, clientUUID)
@@ -207,6 +208,7 @@ func Confirm(clientUUID string, revision uint64, userUUID string) (Revision, err
 }
 
 func ConfirmWithDB(db *gorm.DB, clientUUID string, revision uint64, userUUID string) (Revision, error) {
+	defer Notify(clientUUID) // after the transaction commits or rolls back
 	var result Revision
 	err := db.Transaction(func(tx *gorm.DB) error {
 		state, err := lockState(tx, clientUUID)
@@ -286,6 +288,7 @@ func Report(clientUUID string, revision uint64, state, activeMode int32, detail 
 }
 
 func ReportWithDB(db *gorm.DB, clientUUID string, revision uint64, event, activeMode int32, detail string) (Revision, error) {
+	defer Notify(clientUUID) // after the transaction commits or rolls back
 	var result Revision
 	err := db.Transaction(func(tx *gorm.DB) error {
 		state, err := lockState(tx, clientUUID)

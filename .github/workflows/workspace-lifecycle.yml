@@ -8,6 +8,42 @@ concurrency:
   group: workspace-lifecycle-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  agent-rescue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 3GiB
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Read exact Agent dependency commit
+        id: dependency
+        run: |
+          revision=$(cat scripts/ci/workspace-agent-revision.txt)
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: r11234567/komari-agent
+          ref: ${{ steps.dependency.outputs.revision }}
+          path: workspace-agent
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: workspace-agent/go.mod
+      - name: Real signed rescue stream, replay rejection and existing host boundaries
+        run: bash scripts/ci/run-audit-check.sh agent-rescue bash -c 'cd workspace-agent && bash scripts/ci/run-go-tests.sh -race ./rescue ./core/hostops ./clientcore ./internal/hostcmd'
+      - name: Preserve complete Agent command and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workspace-agent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+          if-no-files-found: error
   workspace-state:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -53,6 +89,9 @@ jobs:
       - name: Real session orphan cleanup, sibling consumers and grant revocation
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh workspace-session bash scripts/ci/run-go-tests.sh -race ./web/remotemanagement ./web/workspace
+      - name: Actual committed wake, signed watch heartbeats and live credential revocation
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh workspace-watch bash scripts/ci/run-go-tests.sh -race -run 'TestRescueWatch|TestWorkspaceCommitted' ./web/connect ./database/privilegeddelivery
       - name: Measure HTTP instrumentation allocations and CPU overhead against uninstrumented handler
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh diagnostics-benchmark go test -run '^$' -bench '^BenchmarkDiagnosticsHTTP$' -benchmem -benchtime=500ms -count=3 ./internal/diagnostics
