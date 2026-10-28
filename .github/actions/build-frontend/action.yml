@@ -58,7 +58,9 @@ runs:
 
         echo "Building Komari Web bundles from $web_dir..."
         cd "$web_dir"
-        npm ci
+        bash "$GITHUB_WORKSPACE/scripts/ci/run-audit-check.sh" web-install npm ci --no-audit
+        bash "$GITHUB_WORKSPACE/scripts/ci/run-audit-check.sh" web-dependency-security npm run test:dependency-security
+        bash "$GITHUB_WORKSPACE/scripts/ci/run-audit-check.sh" web-dependency-audit npm run audit:security
         npm run lint
         npm test
         npm run build:system
