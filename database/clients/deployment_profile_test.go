@@ -2,6 +2,7 @@ package clients
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -471,7 +472,7 @@ func TestPreviousRuntimeSurvivesRedispatchAndPreservesInstallSettings(t *testing
 // Reproduce the exact read/write interleaving from the flaky runtime watcher:
 // the reader sees the old client day, then the writer commits a new profile.
 func TestDeploymentProfileRetriesConcurrentBillingSnapshot(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "snapshot.db")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
 		t.Fatal(err)
 	}
