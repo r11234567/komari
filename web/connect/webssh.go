@@ -108,6 +108,8 @@ func (s *webSSHService) WatchSession(ctx context.Context, req *connect.Request[w
 	if err != nil {
 		return remoteSessionError(err)
 	}
+	release := session.RetainBrowser()
+	defer release()
 	if _, err := session.AcknowledgeEvents(req.Msg.AfterSequence); err != nil {
 		return remoteSessionError(err)
 	}
@@ -154,6 +156,11 @@ func (s *webSSHService) CloseSession(ctx context.Context, req *connect.Request[w
 	session, err := getWorkspaceSession(ctx, req.Msg.SessionId, ownerID)
 	if err != nil {
 		return nil, remoteSessionError(err)
+	}
+	if req.Msg.Reason == "tab_closed" || req.Msg.Reason == "stream_closed" {
+		// WatchSession's final consumer release starts the bounded grace period.
+		// A transport reconnect during that minute may retain the same session.
+		return connect.NewResponse(&websshv1.CloseSessionResponse{}), nil
 	}
 	return connect.NewResponse(&websshv1.CloseSessionResponse{Closed: session.Close(websshv1.CloseReason_CLOSE_REASON_CANCELLED)}), nil
 }

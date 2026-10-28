@@ -50,6 +50,9 @@ jobs:
       - name: Real Connect authentication, panic recovery, administrator access and queue saturation
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh diagnostics-integration bash scripts/ci/run-go-tests.sh -race -run '^TestDiagnostics' ./web/connect ./database/metricstore ./web/workspace ./internal/trustedcredential
+      - name: Real session orphan cleanup, sibling consumers and grant revocation
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh workspace-session bash scripts/ci/run-go-tests.sh -race ./web/remotemanagement ./web/workspace
       - name: Measure HTTP instrumentation allocations and CPU overhead against uninstrumented handler
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh diagnostics-benchmark go test -run '^$' -bench '^BenchmarkDiagnosticsHTTP$' -benchmem -benchtime=500ms -count=3 ./internal/diagnostics

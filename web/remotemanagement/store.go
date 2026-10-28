@@ -46,16 +46,63 @@ type Session struct {
 	WorkingDirectory string
 	Size             *websshv1.TerminalSize
 
-	attached       bool
-	closed         *websshv1.SessionClosed
-	commandSeq     uint64
-	agentSeq       uint64
-	commands       []*websshv1.AttachSessionResponse
-	events         []*websshv1.SessionEvent
-	bufferedOutput uint64
-	commandNotify  chan struct{}
-	eventNotify    chan struct{}
-	grantStop      func() bool
+	attached         bool
+	closed           *websshv1.SessionClosed
+	commandSeq       uint64
+	agentSeq         uint64
+	commands         []*websshv1.AttachSessionResponse
+	events           []*websshv1.SessionEvent
+	bufferedOutput   uint64
+	commandNotify    chan struct{}
+	eventNotify      chan struct{}
+	grantStop        func() bool
+	browserConsumers int
+	browserDeadline  time.Time
+}
+
+const BrowserDisconnectGrace = time.Minute
+
+func init() {
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for now := range ticker.C {
+			SweepBrowserConsumers(now)
+		}
+	}()
+}
+
+// RetainBrowser tracks actual authenticated WatchSession consumers. Output,
+// agent heartbeats and acknowledgments do not renew an unattended browser.
+func (s *Session) RetainBrowser() func() {
+	s.mu.Lock()
+	s.browserConsumers++
+	s.browserDeadline = time.Time{}
+	s.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.browserConsumers--
+			if s.browserConsumers == 0 {
+				s.browserDeadline = time.Now().Add(BrowserDisconnectGrace)
+			}
+		})
+	}
+}
+
+func SweepBrowserConsumers(now time.Time) {
+	sessions.Lock()
+	defer sessions.Unlock()
+	for _, s := range sessions.values {
+		s.mu.Lock()
+		if s.closed == nil && s.browserConsumers == 0 && !s.browserDeadline.IsZero() && !now.Before(s.browserDeadline) {
+			s.closeLocked(websshv1.CloseReason_CLOSE_REASON_CANCELLED)
+		}
+		s.mu.Unlock()
+	}
+	pruneLocked(now)
 }
 
 var sessions = struct {
@@ -78,7 +125,8 @@ func Create(agentID, ownerID, shell, workingDirectory string, size *websshv1.Ter
 	session := &Session{
 		ID: uuid.NewString(), AgentID: agentID, OwnerID: ownerID, AssignmentID: uuid.NewString(),
 		CreatedAt: now, Shell: shell, WorkingDirectory: workingDirectory, Size: cloneSize(size),
-		commandNotify: make(chan struct{}), eventNotify: make(chan struct{}),
+		browserDeadline: now.Add(BrowserDisconnectGrace),
+		commandNotify:   make(chan struct{}), eventNotify: make(chan struct{}),
 	}
 	if len(grants) > 0 && grants[0] != nil {
 		session.Grant = grants[0]
@@ -352,6 +400,10 @@ func (s *Session) NextEvent(ctx context.Context, after uint64) (*websshv1.Sessio
 func (s *Session) Close(reason websshv1.CloseReason) *websshv1.SessionClosed {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.closeLocked(reason)
+}
+
+func (s *Session) closeLocked(reason websshv1.CloseReason) *websshv1.SessionClosed {
 	if s.closed == nil {
 		if s.grantStop != nil {
 			s.grantStop()
