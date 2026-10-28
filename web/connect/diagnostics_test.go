@@ -39,7 +39,7 @@ func TestDiagnosticsRealConnectAuthenticationAndRecovery(t *testing.T) {
 				return v
 			}
 		}
-		return diagnostics.RouteSnapshot{}
+		return diagnostics.RouteSnapshot{HTTPStatusClasses: make([]int64, 6)}
 	}
 	before := read()
 	if _, err := client.ListTrustedCredentialProviders(context.Background(), connect.NewRequest(&credentialv1.ListTrustedCredentialProvidersRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {

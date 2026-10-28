@@ -25,7 +25,7 @@ credential into reports. The normal JSON response contains:
 
 | Field | Meaning |
 | --- | --- |
-| `requests.routes` | Started/completed/in-flight/peak request counts; completion duration sum/max/histogram; first response duration sum/count; HTTP classes and Connect outcome counts. |
+| `requests.routes` | Started/completed/in-flight/peak request counts; completion duration sum/max/histogram; first response duration sum/count/max/histogram; HTTP classes and Connect outcome counts. |
 | `requests.recent_slow_or_failed` | A bounded ring of the last 64 slow unary or failed/canceled requests, containing only route templates, time, status and duration. |
 | `database.primary_pool` | Primary database open/in-use/idle connections and cumulative pool wait count/duration. Sampling does not acquire a connection. |
 | `database.primary_queries` | Cumulative GORM statement duration and errors, including a separate record-not-found count. No SQL or query values are retained. |
@@ -90,7 +90,9 @@ enabled. No tests use real production accounts, credentials or traffic.
   cancellation and an early flushed response before a blocked stream completes.
 * Actual Connect clients/handlers verify successful and rejected authentication,
   DPoP rejection before the RPC handler, recovered panics, and an HTTP-200 stream
-  whose actual outcome is `resource_exhausted`.
+  whose actual outcome is `resource_exhausted`. A real WebSocket upgrade and echo
+  verifies that HTTP hijacking is preserved; a server-side RPC deadline is
+  distinguished from client cancellation.
 * Real temporary SQLite with a held single database connection forces a query
   to wait and expire. Tests assert pool wait counters, query cancellation and
   that the canceled INSERT did not execute.

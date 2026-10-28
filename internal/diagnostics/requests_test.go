@@ -16,6 +16,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	credentialv1 "github.com/r11234567/komari-proto/gen/go/komari/credential/v1"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
@@ -57,7 +58,7 @@ func TestDiagnosticsMeasuredSlowHTTPAndPrivacy(t *testing.T) {
 		t.Fatalf("changed response: %d %q", w.Code, w.Body.String())
 	}
 	v := find(t, r, "POST /files/:id")
-	if v.DurationNS != int64(2*time.Second) || v.FirstResponseNS != int64(2*time.Second) || v.DurationBuckets[5] != 1 || v.HTTPStatusClasses[2] != 1 {
+	if v.DurationNS != int64(2*time.Second) || v.FirstResponseNS != int64(2*time.Second) || v.FirstResponseMaxNS != int64(2*time.Second) || v.FirstResponseCount != 1 || v.FirstResponseBuckets[5] != 1 || v.DurationBuckets[5] != 1 || v.HTTPStatusClasses[2] != 1 {
 		t.Fatalf("incorrect measured latency: %+v", v)
 	}
 	raw, _ := json.Marshal(r.Snapshot())
@@ -180,6 +181,65 @@ func TestDiagnosticsLiveStreamDoesNotBuffer(t *testing.T) {
 	v := find(t, r, "GET /stream")
 	if v.InFlight != 1 || v.FirstResponseCount != 1 {
 		t.Fatalf("stream not visible while open: %+v", v)
+	}
+}
+
+func TestDiagnosticsPreservesWebSocketHijacking(t *testing.T) {
+	r := New()
+	e := testEngine(r)
+	e.GET("/socket", func(c *gin.Context) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		kind, body, err := conn.ReadMessage()
+		if err == nil {
+			conn.WriteMessage(kind, body)
+		}
+	})
+	server := httptest.NewServer(e)
+	defer server.Close()
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/socket", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if err = conn.WriteMessage(websocket.TextMessage, []byte("synthetic-echo")); err != nil {
+		t.Fatal(err)
+	}
+	_, body, err := conn.ReadMessage()
+	if err != nil || string(body) != "synthetic-echo" {
+		t.Fatalf("hijacked connection broken: %q %v", body, err)
+	}
+}
+
+func TestDiagnosticsServerDeadlineIsNotClientCancellation(t *testing.T) {
+	r := New()
+	e := testEngine(r)
+	const path = "/diagnostic.synthetic.Service/Deadline"
+	r.RegisterProcedure(path, false)
+	handler := connect.NewUnaryHandler(path, func(ctx context.Context, req *connect.Request[emptypb.Empty]) (*connect.Response[emptypb.Empty], error) {
+		bounded, cancel := context.WithTimeout(ctx, 25*time.Millisecond)
+		defer cancel()
+		<-bounded.Done()
+		return nil, connect.NewError(connect.CodeDeadlineExceeded, bounded.Err())
+	}, connect.WithInterceptors(OutcomeInterceptor{}))
+	e.POST(path, gin.WrapH(handler))
+	server := httptest.NewServer(e)
+	defer server.Close()
+	client := connect.NewClient[emptypb.Empty, emptypb.Empty](server.Client(), server.URL+path)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := client.CallUnary(ctx, connect.NewRequest(&emptypb.Empty{}))
+	if connect.CodeOf(err) != connect.CodeDeadlineExceeded {
+		t.Fatalf("deadline outcome changed: %v", err)
+	}
+	server.Close()
+	v := find(t, r, "CONNECT "+path+" unary")
+	if v.RPCCodes["deadline_exceeded"] != 1 || v.Canceled != 0 || v.InFlight != 0 {
+		t.Fatalf("server deadline misclassified: %+v", v)
 	}
 }
 

@@ -20,8 +20,9 @@ var durationBounds = [...]time.Duration{10 * time.Millisecond, 50 * time.Millise
 
 type counter struct {
 	started, completed, active, peak, canceled, panics atomic.Int64
-	totalNS, maxNS, firstNS, firstCount                atomic.Int64
+	totalNS, maxNS, firstNS, firstCount, firstMaxNS    atomic.Int64
 	buckets                                            [len(durationBounds) + 1]atomic.Int64
+	firstBuckets                                       [len(durationBounds) + 1]atomic.Int64
 	status                                             [6]atomic.Int64
 	codes                                              [17]atomic.Int64
 }
@@ -124,7 +125,14 @@ type request struct {
 
 func (q *request) firstResponse() {
 	if q.first.CompareAndSwap(false, true) {
-		q.count.firstNS.Add(max(0, q.registry.clock().Sub(q.start).Nanoseconds()))
+		d := max(time.Duration(0), q.registry.clock().Sub(q.start))
+		q.count.firstNS.Add(int64(d))
+		raise(&q.count.firstMaxNS, int64(d))
+		i := 0
+		for i < len(durationBounds) && d > durationBounds[i] {
+			i++
+		}
+		q.count.firstBuckets[i].Add(1)
 		q.count.firstCount.Add(1)
 	}
 }
@@ -157,7 +165,7 @@ func (q *request) finish(status int, canceled, panicked bool) {
 	q.count.active.Add(-1)
 	// Stream lifetime is not request latency. Record only failures for streams;
 	// their first-response latency is reported separately above.
-	if (!strings.HasSuffix(q.route, " stream") && d >= time.Second) || status >= 500 || canceled || panicked || code > 0 {
+	if (!strings.HasSuffix(q.route, " stream") && d >= time.Second) || status >= 400 || canceled || panicked || code > 0 {
 		q.registry.recentMu.Lock()
 		q.registry.recent[q.registry.recentNext%uint64(len(q.registry.recent))] = SlowRequest{At: time.Now().UTC(), Route: q.route, DurationNS: int64(d), HTTPStatus: status, Canceled: canceled, RPCCode: code}
 		q.registry.recentNext++
@@ -245,20 +253,22 @@ func recordOutcome(ctx context.Context, err error) {
 }
 
 type RouteSnapshot struct {
-	Route              string           `json:"route"`
-	Started            int64            `json:"started"`
-	Completed          int64            `json:"completed"`
-	InFlight           int64            `json:"in_flight"`
-	PeakInFlight       int64            `json:"peak_in_flight"`
-	Canceled           int64            `json:"client_canceled"`
-	Panics             int64            `json:"panics"`
-	DurationNS         int64            `json:"duration_sum_ns"`
-	MaxDurationNS      int64            `json:"duration_max_ns"`
-	FirstResponseNS    int64            `json:"first_response_sum_ns"`
-	FirstResponseCount int64            `json:"first_response_count"`
-	DurationBuckets    []int64          `json:"duration_buckets"`
-	HTTPStatusClasses  []int64          `json:"http_status_classes"`
-	RPCCodes           map[string]int64 `json:"rpc_codes"`
+	Route                string           `json:"route"`
+	Started              int64            `json:"started"`
+	Completed            int64            `json:"completed"`
+	InFlight             int64            `json:"in_flight"`
+	PeakInFlight         int64            `json:"peak_in_flight"`
+	Canceled             int64            `json:"client_canceled"`
+	Panics               int64            `json:"panics"`
+	DurationNS           int64            `json:"duration_sum_ns"`
+	MaxDurationNS        int64            `json:"duration_max_ns"`
+	FirstResponseNS      int64            `json:"first_response_sum_ns"`
+	FirstResponseCount   int64            `json:"first_response_count"`
+	FirstResponseMaxNS   int64            `json:"first_response_max_ns"`
+	FirstResponseBuckets []int64          `json:"first_response_buckets"`
+	DurationBuckets      []int64          `json:"duration_buckets"`
+	HTTPStatusClasses    []int64          `json:"http_status_classes"`
+	RPCCodes             map[string]int64 `json:"rpc_codes"`
 }
 type RequestSnapshot struct {
 	StartedAt          time.Time       `json:"started_at"`
@@ -288,8 +298,10 @@ func (r *Registry) Snapshot() RequestSnapshot {
 	}
 	for route, c := range r.routes {
 		v := RouteSnapshot{Route: route, Started: c.started.Load(), Completed: c.completed.Load(), InFlight: c.active.Load(), PeakInFlight: c.peak.Load(), Canceled: c.canceled.Load(), Panics: c.panics.Load(), DurationNS: c.totalNS.Load(), MaxDurationNS: c.maxNS.Load(), FirstResponseNS: c.firstNS.Load(), FirstResponseCount: c.firstCount.Load(), RPCCodes: make(map[string]int64)}
+		v.FirstResponseMaxNS = c.firstMaxNS.Load()
 		for i := range c.buckets {
 			v.DurationBuckets = append(v.DurationBuckets, c.buckets[i].Load())
+			v.FirstResponseBuckets = append(v.FirstResponseBuckets, c.firstBuckets[i].Load())
 		}
 		for i := range c.status {
 			v.HTTPStatusClasses = append(v.HTTPStatusClasses, c.status[i].Load())

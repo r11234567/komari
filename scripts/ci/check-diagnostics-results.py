@@ -13,6 +13,8 @@ expected = {
         'TestDiagnosticsInFlightAndClientCancellation',
         'TestDiagnosticsConnectStreamErrorAndFlush',
         'TestDiagnosticsLiveStreamDoesNotBuffer',
+        'TestDiagnosticsPreservesWebSocketHijacking',
+        'TestDiagnosticsServerDeadlineIsNotClientCancellation',
         'TestDiagnosticsUnknownURLsAndRecentHistoryAreBounded',
         'TestDiagnosticsConcurrentSnapshotsAndAccounting',
         'TestDiagnosticsRealSQLitePoolWaitAndQueryCancellation',
