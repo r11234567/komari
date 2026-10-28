@@ -36,6 +36,9 @@ jobs:
           go-version-file: workspace-agent/go.mod
       - name: Real signed rescue stream, replay rejection and existing host boundaries
         run: bash scripts/ci/run-audit-check.sh agent-rescue bash -c 'cd workspace-agent && bash scripts/ci/run-go-tests.sh -race ./rescue ./core/hostops ./clientcore ./internal/hostcmd'
+      - name: Require actual non-skipped Agent stream and denial assertions
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh agent-rescue-evidence python3 scripts/ci/check-workspace-agent-results.py ci-artifacts/agent-rescue-go
       - name: Preserve complete Agent command and failure evidence
         if: always()
         uses: actions/upload-artifact@v4

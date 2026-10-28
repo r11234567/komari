@@ -1,18 +1,20 @@
-# Workspace lifecycle and performance: stage 1 diagnostics
+# Workspace lifecycle and performance diagnostics
 
-All five stages are tracked in **one draft PR**. This first stage changes
-observability only. It does not change authorization timeouts, rescue revocation,
-workbench UI, session retention, Agent polling or database transaction policy.
+All five stages are tracked in one PR, in implementation order. The initial
+diagnostic baseline was followed by machine isolation, session cleanup,
+signed rescue streaming and read-path optimization.
 
-1. Diagnostics and evidence-producing hosted CI (this stage).
+1. Diagnostics and evidence-producing hosted CI.
 2. Per-machine activity, prompts and request cancellation.
 3. Locked-session restoration and final-consumer cleanup.
 4. Event-driven rescue authorization with bounded fail-closed revocation.
 5. Read-path and Agent background-work optimization against the stage-1 baseline.
 
-Do not merge the draft as though the remaining stages have been implemented.
-No production deployment, local builds, dependency installation, load testing or
-browser E2E is part of this stage.
+See [workspace authorization](workspace-authorization.md) for the resulting
+behavior, dependency revisions and upgrade order. No production deployment,
+local builds, dependency installation, load testing or browser E2E is part of
+this work. Source changes and hosted regressions are not a production profile
+or proof that every source of the reported stall has been eliminated.
 
 ## Read the snapshot
 
@@ -75,7 +77,7 @@ request parameters and raw error messages are not diagnostic labels.
   bounded administrator CPU/goroutine profiles remain available after access
   recovers. No unauthenticated diagnostic bypass is added.
 
-The stage adds no periodic profiler, SQL tracing, per-request log writing or
+The instrumentation adds no periodic profiler, SQL tracing, per-request log writing or
 unbounded request history. A slow/error ring is diagnostic context, not a
 durable audit log. Cancellation counts are server-observed client context
 cancellation, not a claim that every browser-side `Failed to fetch` reaches
@@ -107,7 +109,10 @@ enabled. No tests use real production accounts, credentials or traffic.
   labeled as negative controls and excluded from positive test evidence.
 * A result validator requires every named positive assertion to have actually
   passed. Missing JSON, skipped tests, compilation failures or missing repeated
-  benchmarks fail validation.
+  benchmarks fail validation. It also requires the actual workspace deadline,
+  grant cancellation, final-browser cleanup, bounded buffer, signed watch,
+  committed wake, cross-machine mutex and SQLite read-only tests from stages
+  2–5. A successful command without these named assertions is insufficient.
 * Repeated real Gin-handler benchmarks compare instrumentation enabled/disabled.
   Fixed guardrails are added median time ≤25 microseconds/request, bytes ≤2048
   and allocations ≤12. Full measurements and deltas are uploaded. These detect
@@ -118,3 +123,19 @@ All steps stream complete output to the Actions log, and retain raw JSON,
 build stderr, command context, coverage, benchmark samples, validation evidence
 and exit codes for 30 days even on failure. The displayed summary may be short;
 the uploaded artifact is not truncated. No test is marked `continue-on-error`.
+
+The companion jobs check out the exact Agent revision in
+`scripts/ci/workspace-agent-revision.txt` and the exact Web submodule commit.
+Real Node BroadcastChannels exercise cross-window sharing and delayed lock
+messages. Node state tests exercise silent expiry, independent cancellation,
+single-flight renewal and final-consumer timing. React component units execute
+the actual boundary and terminal effects using JSDOM; only network/PTY and
+canvas peripherals are substituted. They check renderer retention, cancellation,
+session-token binding and failed-create retry suppression. These are component
+units, not an actual browser, authenticator, Nginx or production OS shell.
+
+Agent tests use a real temporary Connect stream with synthetic signed payloads,
+including replay/tamper/disconnect rejection. Root/systemd integration cases
+may skip on an unprivileged hosted runner; their inclusion in the package does
+not mean privileged host operations were exercised. Production UI, reverse-proxy
+and deployment behavior still require a separately authorized staged rollout.

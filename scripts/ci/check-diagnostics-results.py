@@ -23,13 +23,29 @@ expected = {
     'web/connect': {
         'TestDiagnosticsRealConnectAuthenticationAndRecovery',
         'TestDiagnosticsAdminEndpointAuthorizationAndNoSQL',
+        'TestRescueWatchFreshSignedHeartbeatAndCredentialRevocation',
     },
     'database/metricstore': {'TestDiagnosticsReportQueueReflectsRealEnqueueAndOverflow'},
-    'web/workspace': {'TestDiagnosticsWorkspaceSnapshotNeverValidatesOrWaits'},
+    'web/workspace': {
+        'TestDiagnosticsWorkspaceSnapshotNeverValidatesOrWaits',
+        'TestGrantDeadlinesAndPolling',
+        'TestGrantScopeRevocationAndConcurrentChecks',
+        'TestWorkspaceSlowValidationDoesNotHoldOtherMachineLock',
+    },
+    'web/remotemanagement': {
+        'TestSessionGrantCancellationAndNormalCloseCleanup',
+        'TestWorkspaceLastBrowserConsumerCleanup',
+        'TestWorkspaceClosedBuffersDoNotExhaustLiveCapacity',
+    },
+    'database/privilegeddelivery': {
+        'TestWorkspaceCommittedMutationWakesOnlyMatchingWatchers',
+        'TestWorkspaceStablePrivilegedReadIsActuallyReadOnly',
+    },
     'internal/trustedcredential': {'TestDiagnosticsVerificationCountsAndBusySnapshot'},
 }
 passed, rejected = set(), []
-for path in sorted(root.glob('diagnostics-*-go/tests.jsonl')):
+logs = [*root.glob('diagnostics-*-go/tests.jsonl'), *root.glob('workspace-*-go/tests.jsonl')]
+for path in sorted(logs):
     for line in path.read_text().splitlines():
         event = json.loads(line)
         package = event.get('Package', '').removeprefix('github.com/komari-monitor/komari/')
