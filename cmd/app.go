@@ -28,6 +28,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/diagnostics"
 	"github.com/komari-monitor/komari/internal/notifications"
 	"github.com/komari-monitor/komari/internal/plugin"
 	"github.com/komari-monitor/komari/pkg/config"
@@ -594,6 +595,7 @@ func (a *App) registerReloadHandlers(cors *security.CorsController) {
 // BuildRouter 构建 Gin 引擎、中间件与全部路由，并登记热重载处理器。
 func (a *App) BuildRouter() error {
 	r := gin.New()
+	r.Use(diagnostics.Default.Middleware())
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
 

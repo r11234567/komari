@@ -47,6 +47,16 @@ type Store struct {
 	sessionValid func(Binding) bool
 }
 
+// DiagnosticCounts does not validate sessions, sweep grants, or read a database.
+// Stored grants can include entries awaiting the periodic sweep.
+func (s *Store) DiagnosticCounts() map[string]int {
+	if !s.mu.TryLock() {
+		return map[string]int{"snapshot_busy": 1}
+	}
+	defer s.mu.Unlock()
+	return map[string]int{"stored_grants": len(s.grants)}
+}
+
 func NewStore(now func() time.Time, valid func(Binding) bool) *Store {
 	return &Store{grants: make(map[[32]byte]*Grant), now: now, sessionValid: valid}
 }
@@ -103,12 +113,22 @@ func (s *Store) Create(b Binding) (string, Snapshot, error) {
 
 func (s *Store) Check(token, user, session, agent string, touch bool) (Snapshot, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	g := s.grants[sha256.Sum256([]byte(token))]
 	if g == nil || g.Binding.UserID != user || g.Binding.Session != session || (agent != "" && g.Binding.AgentID != agent) {
+		s.mu.Unlock()
 		return Snapshot{}, ErrLocked
 	}
 	if !s.validLocked(g) {
+		s.removeLocked(g)
+		s.mu.Unlock()
+		return Snapshot{}, ErrLocked
+	}
+	s.mu.Unlock()
+	// Database-backed validation must never hold the cross-machine state mutex.
+	valid := s.sessionValid(g.Binding)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !valid || s.grants[g.tokenKey] != g || !s.validLocked(g) {
 		s.removeLocked(g)
 		return Snapshot{}, ErrLocked
 	}
@@ -134,7 +154,18 @@ func (s *Store) Lock(token, user, session string) error {
 	s.removeLocked(g)
 	return nil
 }
-func (s *Store) Sweep() { s.mu.Lock(); defer s.mu.Unlock(); s.sweepLocked() }
+func (s *Store) Sweep() {
+	s.mu.Lock()
+	s.sweepLocked()
+	candidates := make([]*Grant, 0, len(s.grants))
+	for _, g := range s.grants {
+		candidates = append(candidates, g)
+	}
+	s.mu.Unlock()
+	for _, g := range candidates {
+		_ = g.Alive()
+	}
+}
 func (s *Store) sweepLocked() {
 	for _, g := range s.grants {
 		if !s.validLocked(g) {
@@ -143,30 +174,53 @@ func (s *Store) sweepLocked() {
 	}
 }
 func (s *Store) validLocked(g *Grant) bool {
-	return s.now().Before(g.ExpiresAt) && s.now().Before(g.idleExpiresAt) && s.sessionValid(g.Binding)
+	return s.now().Before(g.ExpiresAt) && s.now().Before(g.idleExpiresAt) && g.ctx.Err() == nil
 }
-func (s *Store) removeLocked(g *Grant)    { delete(s.grants, g.tokenKey); g.cancel() }
+func (s *Store) removeLocked(g *Grant) {
+	if s.grants[g.tokenKey] == g {
+		delete(s.grants, g.tokenKey)
+	}
+	g.cancel()
+}
 func (g *Grant) Context() context.Context { return g.ctx }
 
 // ByID is the Agent-side lease lookup; it never treats an Agent as a browser user.
 func (s *Store) ByID(id, agent, username string) (*Grant, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var found *Grant
 	for _, g := range s.grants {
 		if g.ID == id && g.Binding.AgentID == agent && g.Binding.SystemUser == username {
-			if !s.validLocked(g) {
-				s.removeLocked(g)
-				return nil, ErrLocked
-			}
-			return g, nil
+			found = g
+			break
 		}
 	}
-	return nil, ErrLocked
+	s.mu.Unlock()
+	if found == nil || !found.Alive() {
+		return nil, ErrLocked
+	}
+	return found, nil
 }
-func (g *Grant) Alive() bool {
+
+// Active is for an already authenticated stream only. The existing one-second
+// sweep still revalidates login and machine policy; command entry points always
+// use Check/Alive and never treat this local liveness test as authorization.
+func (g *Grant) Active() bool {
 	g.store.mu.Lock()
 	defer g.store.mu.Unlock()
 	if g.store.grants[g.tokenKey] != g || !g.store.validLocked(g) {
+		g.store.removeLocked(g)
+		return false
+	}
+	return true
+}
+func (g *Grant) Alive() bool {
+	if !g.Active() {
+		return false
+	}
+	valid := g.store.sessionValid(g.Binding)
+	g.store.mu.Lock()
+	defer g.store.mu.Unlock()
+	if !valid || g.store.grants[g.tokenKey] != g || !g.store.validLocked(g) {
 		g.store.removeLocked(g)
 		return false
 	}

@@ -8,8 +8,18 @@ mkdir -p "$log_dir"
 { date -u; git rev-parse HEAD; go version; go env GOOS GOARCH GOTOOLCHAIN; } > "$log_dir/context.log" 2>&1
 if [ "$#" -eq 0 ]; then set -- ./...; fi
 export GOMAXPROCS="${GOMAXPROCS:-2}"
-go test -json -count=1 -timeout=12m -p=2 "$@" 2> >(tee "$log_dir/build-stderr.log" >&2) | tee "$log_dir/tests.jsonl"
-status=${PIPESTATUS[0]}
+# Wait for the stderr logger as well as stdout, and propagate either logger's
+# failure. Otherwise a full disk can produce a green check with missing logs.
+exec 3> >(tee "$log_dir/build-stderr.log" >&2)
+stderr_logger=$!
+go test -json -count=1 -timeout=12m -p=2 "$@" 2>&3 | tee "$log_dir/tests.jsonl"
+statuses=("${PIPESTATUS[@]}")
+status="${statuses[0]}"
+if [ "$status" -eq 0 ] && [ "${statuses[1]}" -ne 0 ]; then status="${statuses[1]}"; fi
+exec 3>&-
+wait "$stderr_logger"
+stderr_status=$?
+if [ "$status" -eq 0 ] && [ "$stderr_status" -ne 0 ]; then status="$stderr_status"; fi
 printf '%s\n' "$status" > "$log_dir/exit-code.txt"
 python3 - "$log_dir" <<'REPORT'
 import json,sys

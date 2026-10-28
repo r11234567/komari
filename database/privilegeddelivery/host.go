@@ -41,6 +41,7 @@ func GetOperation(db *gorm.DB, id, key string) (*hostv1.HostOperation, error) {
 }
 
 func PrepareOperation(db *gorm.DB, r *hostv1.PrepareHostOperationRequest) (*hostv1.HostOperation, error) {
+	defer Notify(r.GetAgentId()) // after the transaction commits or rolls back
 	var result *hostv1.HostOperation
 	if strings.TrimSpace(r.OperationId) == "" || len(r.OperationId) > 128 {
 		return nil, errors.New("operation ID is required (max 128 bytes)")
@@ -110,6 +111,7 @@ func PrepareOperation(db *gorm.DB, r *hostv1.PrepareHostOperationRequest) (*host
 }
 
 func ReportOperation(db *gorm.DB, r *hostv1.ReportHostOperationRequest) (*hostv1.HostOperation, error) {
+	defer Notify(r.GetAgentId()) // after the transaction commits or rolls back
 	var result *hostv1.HostOperation
 	if len(r.Error) > 4096 || len(r.Operator) > 128 || len(r.LocalAuthentication) > 64 {
 		return nil, errors.New("host report exceeds size limit")
@@ -185,6 +187,7 @@ func ReportOperation(db *gorm.DB, r *hostv1.ReportHostOperationRequest) (*hostv1
 // Observe is the only v2 completion path. An authenticated report is checked
 // against approval and host transaction; it is not a kernel attestation scheme.
 func Observe(db *gorm.DB, id, key string, o *hostv1.DaemonObservation) (Revision, error) {
+	defer Notify(id) // after the transaction commits or rolls back
 	var result Revision
 	if o == nil || len(o.StartupId) > 128 || strings.TrimSpace(o.StartupId) == "" {
 		return result, errors.New("daemon startup identity is required")
@@ -296,6 +299,7 @@ func Observe(db *gorm.DB, id, key string, o *hostv1.DaemonObservation) (Revision
 // FailApply records a bound application failure without inventing an observation
 // or rolling the applied pointer back. Old and unapproved reports cannot use it.
 func FailApply(db *gorm.DB, id string, revision uint64, key, hash string, generation uint64, detail string) (Revision, error) {
+	defer Notify(id) // after the transaction commits or rolls back
 	var result Revision
 	payload := &configv1.ReportPrivilegedDeliveryRequest{AgentId: id, Revision: revision, State: configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_FAILED, ProtocolVersion: 2, ConfigHash: hash, ApprovalGeneration: generation, ReceiptId: key, Errors: []*commonv1.ErrorDetail{{Message: detail}}}
 	err := db.Transaction(func(tx *gorm.DB) error {

@@ -12,6 +12,11 @@ import (
 )
 
 func resetSessions() {
+	sessions.Lock()
+	defer sessions.Unlock()
+	for _, session := range sessions.values {
+		session.Close(websshv1.CloseReason_CLOSE_REASON_CANCELLED)
+	}
 	sessions.values = make(map[string]*Session)
 	sessions.notify = make(map[string]chan struct{})
 }
@@ -113,6 +118,76 @@ func TestSessionGrantCancellationAndNormalCloseCleanup(t *testing.T) {
 		}
 		if closeFirst && reason != websshv1.CloseReason_CLOSE_REASON_CANCELLED {
 			t.Fatalf("grant callback changed a normal close: %v", reason)
+		}
+	}
+}
+
+func TestWorkspaceLastBrowserConsumerCleanup(t *testing.T) {
+	resetSessions()
+	t.Cleanup(resetSessions)
+	s, err := Create("SJC", "user", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := Create("FRA", "user", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := s.RetainBrowser(), s.RetainBrowser()
+	defer other.RetainBrowser()()
+	a()
+	a()
+	SweepBrowserConsumers(time.Now().Add(2 * time.Minute))
+	if _, err := s.EnqueueCommand(1, Input("pwd\n")); err != nil {
+		t.Fatalf("sibling consumer lost session: %v", err)
+	}
+	b()
+	s.mu.Lock()
+	deadline := s.browserDeadline
+	s.mu.Unlock()
+	SweepBrowserConsumers(deadline.Add(-time.Nanosecond))
+	if _, err := s.EnqueueCommand(2, Input("whoami\n")); err != nil {
+		t.Fatal(err)
+	}
+	reopened := s.RetainBrowser()
+	SweepBrowserConsumers(deadline.Add(time.Second))
+	if _, err := s.EnqueueCommand(3, Input("true\n")); err != nil {
+		t.Fatalf("reconnect did not cancel cleanup: %v", err)
+	}
+	reopened()
+	s.mu.Lock()
+	deadline = s.browserDeadline
+	s.mu.Unlock()
+	SweepBrowserConsumers(deadline)
+	if _, err := s.EnqueueCommand(4, Input("must not execute\n")); err != ErrClosed {
+		t.Fatalf("orphan session survived: %v", err)
+	}
+	command, err := s.NextCommand(context.Background(), 3)
+	if err != nil || command.GetCloseReason() == "" {
+		t.Fatalf("agent not notified of cleanup: %v %v", command, err)
+	}
+	if _, err := other.EnqueueCommand(1, Input("pwd\n")); err != nil {
+		t.Fatalf("cleanup affected FRA: %v", err)
+	}
+}
+
+func TestWorkspaceClosedBuffersDoNotExhaustLiveCapacity(t *testing.T) {
+	resetSessions()
+	t.Cleanup(resetSessions)
+	for i := 0; i < maxActiveSessions+5; i++ {
+		s, err := Create("node", "user", "", "", nil)
+		if err != nil {
+			t.Fatalf("closed tombstones exhausted live capacity at %d: %v", i, err)
+		}
+		if _, err := s.AppendAgentEvent(&websshv1.AgentSessionEvent{Sequence: 1, Event: &websshv1.AgentSessionEvent_Output{Output: make([]byte, 64<<10)}}); err != nil {
+			t.Fatal(err)
+		}
+		s.Close(websshv1.CloseReason_CLOSE_REASON_CANCELLED)
+		s.mu.Lock()
+		retained := len(s.events) + len(s.commands) + int(s.bufferedOutput)
+		s.mu.Unlock()
+		if retained != 0 {
+			t.Fatalf("closed session retained terminal content: %d", retained)
 		}
 	}
 }

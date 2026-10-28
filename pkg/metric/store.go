@@ -300,6 +300,16 @@ func (s *Store) reader() *sql.DB {
 	return s.db
 }
 
+// PoolStats returns local database/sql counters; it executes no SQL and does
+// not wait for an available connection. Keys identify roles, never DSNs.
+func (s *Store) PoolStats() map[string]sql.DBStats {
+	out := map[string]sql.DBStats{"write": s.db.Stats()}
+	if s.readDB != nil && s.readDB != s.db {
+		out["read"] = s.readDB.Stats()
+	}
+	return out
+}
+
 // closeDBs closes database pools owned by the Store.
 //
 // closeDBs 关闭由 Store 自己创建并拥有的数据库连接池。

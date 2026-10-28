@@ -25,6 +25,8 @@ type Gateway struct {
 	password *passwordLogins
 }
 
+func (g *Gateway) DiagnosticCounts() map[string]int { return g.core.DiagnosticCounts() }
+
 var Default = New()
 
 // This is a process-local invalidation fingerprint, not password storage or

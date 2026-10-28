@@ -1,0 +1,120 @@
+name: Workspace lifecycle and diagnostics
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: workspace-lifecycle-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  agent-rescue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 3GiB
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Read exact Agent dependency commit
+        id: dependency
+        run: |
+          revision=$(cat scripts/ci/workspace-agent-revision.txt)
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: r11234567/komari-agent
+          ref: ${{ steps.dependency.outputs.revision }}
+          path: workspace-agent
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: workspace-agent/go.mod
+      - name: Real signed rescue stream, replay rejection and existing host boundaries
+        run: bash scripts/ci/run-audit-check.sh agent-rescue bash -c 'cd workspace-agent && bash scripts/ci/run-go-tests.sh -race ./rescue ./core/hostops ./clientcore ./internal/hostcmd'
+      - name: Require actual non-skipped Agent stream and denial assertions
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh agent-rescue-evidence python3 scripts/ci/check-workspace-agent-results.py ci-artifacts/agent-rescue-go
+      - name: Preserve complete Agent command and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workspace-agent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+          if-no-files-found: error
+  workspace-state:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Actual machine isolation, cancellation, renewal and consumer cleanup
+        run: bash scripts/ci/run-audit-check.sh workspace-state node --test --test-reporter=tap third_party/komari-web/tests/workspaceState.test.ts third_party/komari-web/tests/workspacePeers.test.ts
+      - name: Install locked application dependencies for component units
+        run: bash scripts/ci/run-audit-check.sh workspace-unit-install npm --prefix third_party/komari-web ci --no-audit
+      - name: Install pinned CI-only DOM implementation (no browser or E2E)
+        run: bash scripts/ci/run-audit-check.sh workspace-dom-install npm --prefix third_party/komari-web install --no-save --package-lock=false --ignore-scripts --no-audit jsdom@26.1.0
+      - name: Real React effects, Xterm renderer retention and cross-machine cancellation
+        run: bash scripts/ci/run-audit-check.sh workspace-components node --import ./third_party/komari-web/tests/workspace/register.mjs --test --test-reporter=tap third_party/komari-web/tests/workspace/components.test.ts
+      - name: Preserve complete output and original exit code
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workspace-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+          if-no-files-found: error
+  diagnostics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CGO_ENABLED: '1'
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 3GiB
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify failure propagation and complete failure artifacts (negative controls)
+        run: bash scripts/ci/run-audit-check.sh diagnostics-runner python3 scripts/ci/check-diagnostics-runner.py
+      - name: Actual HTTP streaming, cancellation, concurrent accounting and real SQLite contention
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh diagnostics-core bash scripts/ci/run-go-tests.sh -race -coverprofile=ci-artifacts/diagnostics-core.cover ./internal/diagnostics
+      - name: Real Connect authentication, panic recovery, administrator access and queue saturation
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh diagnostics-integration bash scripts/ci/run-go-tests.sh -race -run '^TestDiagnostics' ./web/connect ./database/metricstore ./web/workspace ./internal/trustedcredential
+      - name: Real session orphan cleanup, sibling consumers and grant revocation
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh workspace-session bash scripts/ci/run-go-tests.sh -race ./web/remotemanagement ./web/workspace
+      - name: Actual committed wake, signed watch heartbeats and live credential revocation
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh workspace-watch bash scripts/ci/run-go-tests.sh -race -run 'TestRescueWatch|TestWorkspaceCommitted' ./web/connect ./database/privilegeddelivery
+      - name: Actual SQLite read-only enforcement and existing approval state transitions
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh workspace-read-path bash scripts/ci/run-go-tests.sh -race ./database/privilegeddelivery
+      - name: Measure HTTP instrumentation allocations and CPU overhead against uninstrumented handler
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh diagnostics-benchmark go test -run '^$' -bench '^BenchmarkDiagnosticsHTTP$' -benchmem -benchtime=500ms -count=3 ./internal/diagnostics
+      - name: Require non-skipped assertion evidence and enforce fixed measured overhead budgets
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh diagnostics-evidence python3 scripts/ci/check-diagnostics-results.py ci-artifacts
+      - name: Retain all commands, raw Go JSON, stderr, human logs, coverage and measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workspace-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+          if-no-files-found: error

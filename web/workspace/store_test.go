@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -89,5 +90,64 @@ func TestGrantScopeRevocationAndConcurrentChecks(t *testing.T) {
 	}
 	if _, err := store.Check(token, "user", "session", "node", false); err == nil {
 		t.Fatal("revoked login accepted")
+	}
+}
+
+func TestWorkspaceSlowValidationDoesNotHoldOtherMachineLock(t *testing.T) {
+	var block atomic.Bool
+	entered, release := make(chan struct{}), make(chan struct{})
+	store := NewStore(time.Now, func(b Binding) bool {
+		if block.Load() && b.AgentID == "SJC" {
+			close(entered)
+			<-release
+			return false
+		}
+		return true
+	})
+	sjc, grant, err := store.Create(Binding{"user", "login", "SJC", "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fra, _, err := store.Create(Binding{"user", "login", "FRA", "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	block.Store(true)
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	checked := make(chan error, 1)
+	go func() { _, err := store.Check(sjc, "user", "login", "SJC", true); checked <- err }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("validation did not block")
+	}
+	locked := make(chan error, 1)
+	go func() { locked <- store.Lock(fra, "user", "login") }()
+	select {
+	case err := <-locked:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SJC validation held FRA state mutex")
+	}
+	if grant.Grant.Context().Err() != nil {
+		t.Fatal("locking FRA revoked SJC")
+	}
+	// Cleanup unblocks validation via defer; the final result is observed below
+	// by a separate explicit close so there are no leaked test goroutines.
+	block.Store(false)
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case err := <-checked:
+		if err == nil {
+			t.Fatal("failed validation accepted")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("validation did not finish")
+	}
+	if grant.Grant.Context().Err() == nil {
+		t.Fatal("rejected grant remained alive")
 	}
 }

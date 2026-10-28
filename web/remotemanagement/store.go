@@ -46,16 +46,63 @@ type Session struct {
 	WorkingDirectory string
 	Size             *websshv1.TerminalSize
 
-	attached       bool
-	closed         *websshv1.SessionClosed
-	commandSeq     uint64
-	agentSeq       uint64
-	commands       []*websshv1.AttachSessionResponse
-	events         []*websshv1.SessionEvent
-	bufferedOutput uint64
-	commandNotify  chan struct{}
-	eventNotify    chan struct{}
-	grantStop      func() bool
+	attached         bool
+	closed           *websshv1.SessionClosed
+	commandSeq       uint64
+	agentSeq         uint64
+	commands         []*websshv1.AttachSessionResponse
+	events           []*websshv1.SessionEvent
+	bufferedOutput   uint64
+	commandNotify    chan struct{}
+	eventNotify      chan struct{}
+	grantStop        func() bool
+	browserConsumers int
+	browserDeadline  time.Time
+}
+
+const BrowserDisconnectGrace = time.Minute
+
+func init() {
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for now := range ticker.C {
+			SweepBrowserConsumers(now)
+		}
+	}()
+}
+
+// RetainBrowser tracks actual authenticated WatchSession consumers. Output,
+// agent heartbeats and acknowledgments do not renew an unattended browser.
+func (s *Session) RetainBrowser() func() {
+	s.mu.Lock()
+	s.browserConsumers++
+	s.browserDeadline = time.Time{}
+	s.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.browserConsumers--
+			if s.browserConsumers == 0 {
+				s.browserDeadline = time.Now().Add(BrowserDisconnectGrace)
+			}
+		})
+	}
+}
+
+func SweepBrowserConsumers(now time.Time) {
+	sessions.Lock()
+	defer sessions.Unlock()
+	for _, s := range sessions.values {
+		s.mu.Lock()
+		if s.closed == nil && s.browserConsumers == 0 && !s.browserDeadline.IsZero() && !now.Before(s.browserDeadline) {
+			s.closeLocked(websshv1.CloseReason_CLOSE_REASON_CANCELLED)
+		}
+		s.mu.Unlock()
+	}
+	pruneLocked(now)
 }
 
 var sessions = struct {
@@ -71,14 +118,35 @@ func Create(agentID, ownerID, shell, workingDirectory string, size *websshv1.Ter
 	sessions.Lock()
 	defer sessions.Unlock()
 	pruneLocked(time.Now().UTC())
-	if len(sessions.values) >= maxActiveSessions {
+	active := 0
+	for _, s := range sessions.values {
+		s.mu.Lock()
+		if s.closed == nil {
+			active++
+		}
+		s.mu.Unlock()
+	}
+	if active >= maxActiveSessions {
 		return nil, ErrSessionLimit
+	}
+	// Closed tombstones are not live sessions and must not exhaust the live
+	// limit during lock/unlock cycles. Bound their own retention separately.
+	if len(sessions.values) >= 2*maxActiveSessions {
+		for id, s := range sessions.values {
+			s.mu.Lock()
+			closed := s.closed != nil
+			s.mu.Unlock()
+			if closed {
+				delete(sessions.values, id)
+			}
+		}
 	}
 	now := time.Now().UTC()
 	session := &Session{
 		ID: uuid.NewString(), AgentID: agentID, OwnerID: ownerID, AssignmentID: uuid.NewString(),
 		CreatedAt: now, Shell: shell, WorkingDirectory: workingDirectory, Size: cloneSize(size),
-		commandNotify: make(chan struct{}), eventNotify: make(chan struct{}),
+		browserDeadline: now.Add(BrowserDisconnectGrace),
+		commandNotify:   make(chan struct{}), eventNotify: make(chan struct{}),
 	}
 	if len(grants) > 0 && grants[0] != nil {
 		session.Grant = grants[0]
@@ -352,6 +420,10 @@ func (s *Session) NextEvent(ctx context.Context, after uint64) (*websshv1.Sessio
 func (s *Session) Close(reason websshv1.CloseReason) *websshv1.SessionClosed {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.closeLocked(reason)
+}
+
+func (s *Session) closeLocked(reason websshv1.CloseReason) *websshv1.SessionClosed {
 	if s.closed == nil {
 		if s.grantStop != nil {
 			s.grantStop()
@@ -359,6 +431,8 @@ func (s *Session) Close(reason websshv1.CloseReason) *websshv1.SessionClosed {
 		}
 		s.closed = &websshv1.SessionClosed{SessionId: s.ID, Reason: reason, ClosedAt: timestamppb.Now()}
 		s.commands = nil
+		s.events = nil
+		s.bufferedOutput = 0
 		s.signalCommands()
 		s.signalEvents()
 	}
@@ -420,6 +494,7 @@ func pruneLocked(now time.Time) {
 		closed := session.closed != nil && session.closed.ClosedAt != nil && session.closed.ClosedAt.IsValid() && now.Sub(session.closed.ClosedAt.AsTime()) > closedRetention
 		session.mu.Unlock()
 		if expired || closed {
+			session.Close(websshv1.CloseReason_CLOSE_REASON_DEADLINE_EXCEEDED)
 			delete(sessions.values, id)
 		}
 	}

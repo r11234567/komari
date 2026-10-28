@@ -42,6 +42,12 @@ func lockState(tx *gorm.DB, id string) (models.ClientPrivilegedState, error) {
 	if err := tx.Select("uuid").First(&client, "uuid = ?", id).Error; err != nil {
 		return models.ClientPrivilegedState{}, err
 	}
+	var existing models.ClientPrivilegedState
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&existing, "client = ?", id).Error; err == nil {
+		return existing, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return existing, err
+	}
 	var latest models.ClientPrivilegedRevision
 	err := tx.Where("client = ?", id).Order("revision DESC").First(&latest).Error
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -74,7 +80,75 @@ type Snapshot struct {
 }
 
 func GetState(id string) (Snapshot, error) { return GetStateWithDB(dbcore.GetDBInstance(), id) }
+
+// GetStateWithDB uses optimistic, read-only snapshots for the steady state.
+// UpdateSequence brackets every read; concurrent writes cause a bounded retry.
+// Initialization and expired-approval transitions retain the original locked
+// transaction, so reading can never silently renew or revive an authorization.
 func GetStateWithDB(db *gorm.DB, id string) (Snapshot, error) {
+	if strings.TrimSpace(id) == "" {
+		return Snapshot{}, errors.New("agent ID is required")
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		var client models.Client
+		if err := db.Select("uuid").First(&client, "uuid = ?", id).Error; err != nil {
+			return Snapshot{}, err
+		}
+		var state models.ClientPrivilegedState
+		if err := db.First(&state, "client = ?", id).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+			defer Notify(id)
+			return getStateTransactional(db, id)
+		} else if err != nil {
+			return Snapshot{}, err
+		}
+		out := Snapshot{State: state}
+		rows := make(map[uint64]models.ClientPrivilegedRevision)
+		for _, entry := range []struct {
+			n      uint64
+			target **Revision
+		}{{state.DesiredRevision, &out.Desired}, {state.AppliedRevision, &out.Applied}} {
+			if entry.n == 0 {
+				continue
+			}
+			row, exists := rows[entry.n]
+			if !exists {
+				if err := db.First(&row, "client = ? AND revision = ?", id, entry.n).Error; err != nil {
+					return Snapshot{}, err
+				}
+				rows[entry.n] = row
+			}
+			if entry.n == state.DesiredRevision && row.ConfirmedAt != nil && row.NonceExpires != nil && !time.Now().Before(*row.NonceExpires) && (row.State == StateNeedsManualAuthorization || row.State == StateAwaitingAgent) {
+				defer Notify(id)
+				return getStateTransactional(db, id)
+			}
+			value := toRevision(row)
+			if entry.n == state.DesiredRevision {
+				value.UpdateSequence = state.UpdateSequence
+			}
+			*entry.target = &value
+		}
+		var operation models.ClientHostOperation
+		if err := db.Where("client = ? AND revision = ?", id, state.DesiredRevision).Order("created_at DESC").First(&operation).Error; err == nil {
+			var err error
+			out.Operation, err = operationMessage(operation)
+			if err != nil {
+				return Snapshot{}, err
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return Snapshot{}, err
+		}
+		var current models.ClientPrivilegedState
+		if err := db.First(&current, "client = ?", id).Error; err != nil {
+			return Snapshot{}, err
+		}
+		if current.UpdateSequence == state.UpdateSequence && current.DesiredRevision == state.DesiredRevision && current.AppliedRevision == state.AppliedRevision {
+			return out, nil
+		}
+	}
+	return Snapshot{}, errors.New("privileged state changed repeatedly; retry the read")
+}
+
+func getStateTransactional(db *gorm.DB, id string) (Snapshot, error) {
 	var out Snapshot
 	err := db.Transaction(func(tx *gorm.DB) error {
 		state, err := lockState(tx, id)
@@ -125,6 +199,7 @@ func GetStateWithDB(db *gorm.DB, id string) (Snapshot, error) {
 }
 
 func Negotiate(db *gorm.DB, id, service, startup string, mode int32, actions []int32) (models.ClientPrivilegedState, error) {
+	defer Notify(id) // after the transaction commits or rolls back
 	var out models.ClientPrivilegedState
 	if strings.TrimSpace(service) == "" || len(service) > 255 || strings.TrimSpace(startup) == "" || len(startup) > 128 || mode < 1 || mode > 5 {
 		return out, errors.New("valid service, startup ID and actual mode are required")
