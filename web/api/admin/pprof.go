@@ -100,6 +100,7 @@ var runtimeProfileNames = []string{
 // of net/http/pprof, which would register unauthenticated /debug/pprof routes
 // on http.DefaultServeMux as a package side effect.
 func RegisterPprofRoutes(group *gin.RouterGroup) {
+	group.GET("/diagnostics", diagnosticsHandler)
 	pprofGroup := group.Group("/pprof")
 	pprofGroup.GET("/summary", pprofSummaryHandler)
 	pprofGroup.GET("/profile", downloadCPUProfile)

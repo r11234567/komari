@@ -1,0 +1,46 @@
+name: Workspace lifecycle and diagnostics
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: workspace-lifecycle-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  diagnostics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CGO_ENABLED: '1'
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 3GiB
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify failure propagation and complete failure artifacts (negative controls)
+        run: bash scripts/ci/run-audit-check.sh diagnostics-runner python3 scripts/ci/check-diagnostics-runner.py
+      - name: Actual HTTP streaming, cancellation, concurrent accounting and real SQLite contention
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh diagnostics-core bash scripts/ci/run-go-tests.sh -race -coverprofile=ci-artifacts/diagnostics-core.cover ./internal/diagnostics
+      - name: Real Connect authentication, panic recovery, administrator access and queue saturation
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh diagnostics-integration bash scripts/ci/run-go-tests.sh -race -run '^TestDiagnostics' ./web/connect ./database/metricstore ./web/workspace ./internal/trustedcredential
+      - name: Measure HTTP instrumentation allocations and CPU overhead against uninstrumented handler
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh diagnostics-benchmark go test -run '^$' -bench '^BenchmarkDiagnosticsHTTP$' -benchmem -benchtime=500ms -count=3 ./internal/diagnostics
+      - name: Require non-skipped assertion evidence and enforce fixed measured overhead budgets
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh diagnostics-evidence python3 scripts/ci/check-diagnostics-results.py ci-artifacts
+      - name: Retain all commands, raw Go JSON, stderr, human logs, coverage and measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workspace-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+          if-no-files-found: error

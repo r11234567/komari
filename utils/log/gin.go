@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/internal/diagnostics"
 )
 
 // GinLogger records completed requests. Query values are intentionally omitted
@@ -35,6 +36,7 @@ func GinRecovery() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			if err := recover(); err != nil {
+				diagnostics.MarkPanic(c.Request.Context())
 				Error("http", "panic recovered",
 					"error", fmt.Sprint(err),
 					"method", c.Request.Method,

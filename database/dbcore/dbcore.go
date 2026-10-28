@@ -3,17 +3,20 @@ package dbcore
 import (
 	"archive/zip"
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/billing"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/diagnostics"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/migrations"
 	"github.com/komari-monitor/komari/utils/fsmove"
@@ -392,8 +395,25 @@ func buildSQLiteDSN(databaseFile string) string {
 func Initialize() error {
 	once.Do(func() {
 		initErr = doInitialize()
+		if initErr == nil {
+			if pool, err := instance.DB(); err == nil {
+				diagnosticPool.Store(pool)
+			}
+		}
 	})
 	return initErr
+}
+
+var diagnosticPool atomic.Pointer[sql.DB]
+
+// DiagnosticPool reads only database/sql's counters, without initializing or
+// acquiring a database connection. It remains usable during pool contention.
+func DiagnosticPool() *diagnostics.PoolSnapshot {
+	if pool := diagnosticPool.Load(); pool != nil {
+		s := diagnostics.PoolStats(pool)
+		return &s
+	}
+	return nil
 }
 
 // GetDBInstance 返回全局数据库实例。
@@ -446,7 +466,7 @@ func doInitialize() error {
 	}
 
 	logConfig := &gorm.Config{
-		Logger:  logger.NewGormLogger(),
+		Logger:  diagnostics.QueryLogger{Interface: logger.NewGormLogger(), Counters: &diagnostics.PrimaryQueries},
 		NowFunc: func() time.Time { return time.Now().UTC() },
 	}
 

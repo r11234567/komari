@@ -55,6 +55,22 @@ type Service struct {
 	attempts  map[string]attemptBudget
 }
 
+// DiagnosticCounts exposes aggregate capacity only, never users, challenge IDs,
+// credential material or bindings; it performs no cleanup/provider callbacks.
+func (s *Service) DiagnosticCounts() map[string]int {
+	if !s.mu.TryLock() {
+		return map[string]int{"snapshot_busy": 1}
+	}
+	defer s.mu.Unlock()
+	busy := 0
+	for _, p := range s.pending {
+		if p.busy {
+			busy++
+		}
+	}
+	return map[string]int{"pending": len(s.pending), "busy": busy, "grants": len(s.grants), "attempt_budgets": len(s.attempts)}
+}
+
 type attemptBudget struct {
 	count   int
 	expires time.Time

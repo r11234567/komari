@@ -8,6 +8,7 @@ import (
 	"math"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
@@ -58,11 +59,39 @@ type reportBatchRequest struct {
 }
 
 type reportBatchWorker struct {
-	mu       sync.Mutex
-	queue    chan v1.Report
-	requests chan reportBatchRequest
-	done     chan struct{}
-	stopping bool
+	mu           sync.Mutex
+	queue        chan v1.Report
+	requests     chan reportBatchRequest
+	done         chan struct{}
+	stopping     bool
+	accepted     atomic.Int64
+	rejected     atomic.Int64
+	pendingCount atomic.Int64
+	flushes      atomic.Int64
+	flushErrors  atomic.Int64
+	flushNS      atomic.Int64
+}
+
+type ReportQueueSnapshot struct {
+	Running     bool  `json:"running"`
+	Depth       int   `json:"depth"`
+	Capacity    int   `json:"capacity"`
+	Pending     int64 `json:"pending_or_writing"`
+	Accepted    int64 `json:"accepted"`
+	Rejected    int64 `json:"rejected_full"`
+	Flushes     int64 `json:"flushes"`
+	FlushErrors int64 `json:"flush_errors"`
+	FlushNS     int64 `json:"flush_duration_sum_ns"`
+}
+
+func ReportQueueDiagnostics() ReportQueueSnapshot {
+	reportBatcherMu.Lock()
+	w := reportBatcher
+	reportBatcherMu.Unlock()
+	if w == nil {
+		return ReportQueueSnapshot{}
+	}
+	return ReportQueueSnapshot{Running: true, Depth: len(w.queue), Capacity: cap(w.queue), Pending: w.pendingCount.Load(), Accepted: w.accepted.Load(), Rejected: w.rejected.Load(), Flushes: w.flushes.Load(), FlushErrors: w.flushErrors.Load(), FlushNS: w.flushNS.Load()}
 }
 
 // StartReportBatcher starts the shared report writer.
@@ -195,8 +224,10 @@ func (w *reportBatchWorker) enqueue(ctx context.Context, report v1.Report) error
 	}
 	select {
 	case w.queue <- report:
+		w.accepted.Add(1)
 		return nil
 	default:
+		w.rejected.Add(1)
 		return ErrReportBatchQueueFull
 	}
 }
@@ -210,7 +241,7 @@ func (w *reportBatchWorker) run() {
 		select {
 		case request := <-w.requests:
 			pending = append(pending, drainReportQueue(w.queue, reportBatchQueueSize)...)
-			err := writePendingReports(request.ctx, &pending)
+			err := w.flush(request.ctx, &pending)
 			if request.stop {
 				if err != nil {
 					logger.Errorf("metricstore", "failed to flush metric report batch during shutdown: %v", err)
@@ -222,11 +253,27 @@ func (w *reportBatchWorker) run() {
 			request.done <- err
 		case <-ticker.C:
 			pending = append(pending, drainReportQueue(w.queue, reportBatchQueueSize)...)
-			if err := writePendingReports(context.Background(), &pending); err != nil {
+			if err := w.flush(context.Background(), &pending); err != nil {
 				logger.Errorf("metricstore", "failed to flush metric report batch: %v", err)
 			}
 		}
 	}
+}
+
+func (w *reportBatchWorker) flush(ctx context.Context, pending *[]v1.Report) error {
+	if len(*pending) == 0 {
+		return nil
+	}
+	w.pendingCount.Store(int64(len(*pending)))
+	start := time.Now()
+	err := writePendingReports(ctx, pending)
+	w.pendingCount.Store(int64(len(*pending)))
+	w.flushes.Add(1)
+	w.flushNS.Add(int64(time.Since(start)))
+	if err != nil {
+		w.flushErrors.Add(1)
+	}
+	return err
 }
 
 func drainReportQueue(queue <-chan v1.Report, limit int) []v1.Report {

@@ -6,6 +6,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/internal/diagnostics"
 	"github.com/komari-monitor/komari/internal/passkeycredential"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
@@ -27,6 +28,8 @@ import (
 	rescuev1connect "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1/rescuev1connect"
 	websshv1connect "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1/websshv1connect"
 	workspacev1connect "github.com/r11234567/komari-proto/gen/go/komari/workspace/v1/workspacev1connect"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
 )
 
 const maxConnectRequestBytes = 4 << 20
@@ -35,15 +38,15 @@ const maxConnectRequestBytes = 4 << 20
 func Register(r *gin.Engine) {
 	policy := newPolicyInterceptor()
 	opts := []connect.HandlerOption{
-		connect.WithInterceptors(policy),
+		connect.WithInterceptors(diagnostics.OutcomeInterceptor{}, policy),
 		connect.WithReadMaxBytes(maxConnectRequestBytes),
 	}
 	handlers := []struct {
 		path    string
 		handler http.Handler
 	}{
-		newHandler(credentialv1connect.NewPasswordLoginServiceHandler(&passwordLoginService{}, connect.WithInterceptors(policy), connect.WithReadMaxBytes(128<<10))),
-		newHandler(credentialv1connect.NewTrustedCredentialServiceHandler(&credentialService{}, connect.WithInterceptors(policy), connect.WithReadMaxBytes(128<<10))),
+		newHandler(credentialv1connect.NewPasswordLoginServiceHandler(&passwordLoginService{}, connect.WithInterceptors(diagnostics.OutcomeInterceptor{}, policy), connect.WithReadMaxBytes(128<<10))),
+		newHandler(credentialv1connect.NewTrustedCredentialServiceHandler(&credentialService{}, connect.WithInterceptors(diagnostics.OutcomeInterceptor{}, policy), connect.WithReadMaxBytes(128<<10))),
 		newHandler(browserv1connect.NewBrowserServiceHandler(&browserService{}, opts...)),
 		newHandler(adminv1connect.NewDashboardServiceHandler(&dashboardService{}, opts...)),
 		newHandler(adminv1connect.NewMaintenanceServiceHandler(&maintenanceService{}, opts...)),
@@ -67,8 +70,25 @@ func Register(r *gin.Engine) {
 		newHandler(agentv1connect.NewAgentEventServiceHandler(&agentEventService{}, opts...)),
 	}
 	for _, item := range handlers {
+		registerDiagnosticProcedures(item.path)
 		pattern := strings.TrimSuffix(item.path, "/") + "/*method"
 		r.Any(pattern, bridge(item.handler))
+	}
+}
+
+func registerDiagnosticProcedures(path string) {
+	name := protoreflect.FullName(strings.Trim(path, "/"))
+	descriptor, err := protoregistry.GlobalFiles.FindDescriptorByName(name)
+	if err != nil {
+		return
+	}
+	service, ok := descriptor.(protoreflect.ServiceDescriptor)
+	if !ok {
+		return
+	}
+	for i := 0; i < service.Methods().Len(); i++ {
+		method := service.Methods().Get(i)
+		diagnostics.Default.RegisterProcedure(path+string(method.Name()), method.IsStreamingClient() || method.IsStreamingServer())
 	}
 }
 

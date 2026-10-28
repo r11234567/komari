@@ -47,6 +47,16 @@ type Store struct {
 	sessionValid func(Binding) bool
 }
 
+// DiagnosticCounts does not validate sessions, sweep grants, or read a database.
+// Stored grants can include entries awaiting the periodic sweep.
+func (s *Store) DiagnosticCounts() map[string]int {
+	if !s.mu.TryLock() {
+		return map[string]int{"snapshot_busy": 1}
+	}
+	defer s.mu.Unlock()
+	return map[string]int{"stored_grants": len(s.grants)}
+}
+
 func NewStore(now func() time.Time, valid func(Binding) bool) *Store {
 	return &Store{grants: make(map[[32]byte]*Grant), now: now, sessionValid: valid}
 }
