@@ -115,7 +115,7 @@ func (s *webSSHService) WatchSession(ctx context.Context, req *connect.Request[w
 	}
 	sequence := req.Msg.AfterSequence
 	for {
-		if session.Grant == nil || !session.Grant.Alive() {
+		if session.Grant == nil || !session.Grant.Active() {
 			return connectError(connect.CodeUnauthenticated, workspace.ErrLocked)
 		}
 		event, err := session.NextEvent(ctx, sequence)

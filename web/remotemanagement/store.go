@@ -118,8 +118,28 @@ func Create(agentID, ownerID, shell, workingDirectory string, size *websshv1.Ter
 	sessions.Lock()
 	defer sessions.Unlock()
 	pruneLocked(time.Now().UTC())
-	if len(sessions.values) >= maxActiveSessions {
+	active := 0
+	for _, s := range sessions.values {
+		s.mu.Lock()
+		if s.closed == nil {
+			active++
+		}
+		s.mu.Unlock()
+	}
+	if active >= maxActiveSessions {
 		return nil, ErrSessionLimit
+	}
+	// Closed tombstones are not live sessions and must not exhaust the live
+	// limit during lock/unlock cycles. Bound their own retention separately.
+	if len(sessions.values) >= 2*maxActiveSessions {
+		for id, s := range sessions.values {
+			s.mu.Lock()
+			closed := s.closed != nil
+			s.mu.Unlock()
+			if closed {
+				delete(sessions.values, id)
+			}
+		}
 	}
 	now := time.Now().UTC()
 	session := &Session{
@@ -411,6 +431,8 @@ func (s *Session) closeLocked(reason websshv1.CloseReason) *websshv1.SessionClos
 		}
 		s.closed = &websshv1.SessionClosed{SessionId: s.ID, Reason: reason, ClosedAt: timestamppb.Now()}
 		s.commands = nil
+		s.events = nil
+		s.bufferedOutput = 0
 		s.signalCommands()
 		s.signalEvents()
 	}
@@ -472,6 +494,7 @@ func pruneLocked(now time.Time) {
 		closed := session.closed != nil && session.closed.ClosedAt != nil && session.closed.ClosedAt.IsValid() && now.Sub(session.closed.ClosedAt.AsTime()) > closedRetention
 		session.mu.Unlock()
 		if expired || closed {
+			session.Close(websshv1.CloseReason_CLOSE_REASON_DEADLINE_EXCEEDED)
 			delete(sessions.values, id)
 		}
 	}

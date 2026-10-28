@@ -46,7 +46,7 @@ jobs:
           if-no-files-found: error
   workspace-state:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,6 +56,12 @@ jobs:
           node-version: '24'
       - name: Actual machine isolation, cancellation, renewal and consumer cleanup
         run: bash scripts/ci/run-audit-check.sh workspace-state node --test --test-reporter=tap third_party/komari-web/tests/workspaceState.test.ts
+      - name: Install locked application dependencies for component units
+        run: bash scripts/ci/run-audit-check.sh workspace-unit-install npm --prefix third_party/komari-web ci --no-audit
+      - name: Install pinned CI-only DOM implementation (no browser or E2E)
+        run: bash scripts/ci/run-audit-check.sh workspace-dom-install npm --prefix third_party/komari-web install --no-save --package-lock=false --ignore-scripts --no-audit jsdom@26.1.0
+      - name: Real React effects, Xterm renderer retention and cross-machine cancellation
+        run: bash scripts/ci/run-audit-check.sh workspace-components node --import ./third_party/komari-web/tests/workspace/register.mjs --test --test-reporter=tap third_party/komari-web/tests/workspace/components.test.ts
       - name: Preserve complete output and original exit code
         if: always()
         uses: actions/upload-artifact@v4
@@ -92,6 +98,9 @@ jobs:
       - name: Actual committed wake, signed watch heartbeats and live credential revocation
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh workspace-watch bash scripts/ci/run-go-tests.sh -race -run 'TestRescueWatch|TestWorkspaceCommitted' ./web/connect ./database/privilegeddelivery
+      - name: Actual SQLite read-only enforcement and existing approval state transitions
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh workspace-read-path bash scripts/ci/run-go-tests.sh -race ./database/privilegeddelivery
       - name: Measure HTTP instrumentation allocations and CPU overhead against uninstrumented handler
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh diagnostics-benchmark go test -run '^$' -bench '^BenchmarkDiagnosticsHTTP$' -benchmem -benchtime=500ms -count=3 ./internal/diagnostics

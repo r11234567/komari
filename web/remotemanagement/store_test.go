@@ -170,3 +170,24 @@ func TestWorkspaceLastBrowserConsumerCleanup(t *testing.T) {
 		t.Fatalf("cleanup affected FRA: %v", err)
 	}
 }
+
+func TestWorkspaceClosedBuffersDoNotExhaustLiveCapacity(t *testing.T) {
+	resetSessions()
+	t.Cleanup(resetSessions)
+	for i := 0; i < maxActiveSessions+5; i++ {
+		s, err := Create("node", "user", "", "", nil)
+		if err != nil {
+			t.Fatalf("closed tombstones exhausted live capacity at %d: %v", i, err)
+		}
+		if _, err := s.AppendAgentEvent(&websshv1.AgentSessionEvent{Sequence: 1, Event: &websshv1.AgentSessionEvent_Output{Output: make([]byte, 64<<10)}}); err != nil {
+			t.Fatal(err)
+		}
+		s.Close(websshv1.CloseReason_CLOSE_REASON_CANCELLED)
+		s.mu.Lock()
+		retained := len(s.events) + len(s.commands) + int(s.bufferedOutput)
+		s.mu.Unlock()
+		if retained != 0 {
+			t.Fatalf("closed session retained terminal content: %d", retained)
+		}
+	}
+}
