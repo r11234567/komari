@@ -55,7 +55,7 @@ jobs:
         with:
           node-version: '24'
       - name: Actual machine isolation, cancellation, renewal and consumer cleanup
-        run: bash scripts/ci/run-audit-check.sh workspace-state node --test --test-reporter=tap third_party/komari-web/tests/workspaceState.test.ts
+        run: bash scripts/ci/run-audit-check.sh workspace-state node --test --test-reporter=tap third_party/komari-web/tests/workspaceState.test.ts third_party/komari-web/tests/workspacePeers.test.ts
       - name: Install locked application dependencies for component units
         run: bash scripts/ci/run-audit-check.sh workspace-unit-install npm --prefix third_party/komari-web ci --no-audit
       - name: Install pinned CI-only DOM implementation (no browser or E2E)
