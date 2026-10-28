@@ -8,6 +8,26 @@ concurrency:
   group: workspace-lifecycle-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  workspace-state:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Actual machine isolation, cancellation, renewal and consumer cleanup
+        run: bash scripts/ci/run-audit-check.sh workspace-state node --test --test-reporter=tap third_party/komari-web/tests/workspaceState.test.ts
+      - name: Preserve complete output and original exit code
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workspace-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+          if-no-files-found: error
   diagnostics:
     runs-on: ubuntu-latest
     timeout-minutes: 35
