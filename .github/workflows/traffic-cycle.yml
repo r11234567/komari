@@ -26,6 +26,9 @@ jobs:
       - name: Real calibration to browser list/detail, later counter growth and exact reset timestamps
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh traffic-consumers bash scripts/ci/run-go-tests.sh -race -run 'TestTrafficAccounting|TestTrafficCalibrationReaches' ./web/connect
+      - name: Repeated concurrent billing watcher and deterministic snapshot conflict regression
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh billing-snapshot-race bash scripts/ci/run-go-tests.sh -race -count=30 -run 'TestDeploymentProfileRetriesConcurrentBillingSnapshot|TestBillingResetDayGetsNewRevisionAndReachesConnectWatcher' ./database/clients ./web/connect
       - uses: actions/upload-artifact@v4
         if: always()
         with:

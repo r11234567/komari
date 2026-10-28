@@ -20,6 +20,8 @@ import (
 
 const defaultReportInterval = 3.0
 
+var errDeploymentSnapshotChanged = errors.New("deployment revision changed while synchronizing billing; retry the request")
+
 const (
 	AgentRuntimeIdentityPrivileged     = "root-or-administrator"
 	AgentRuntimeIdentityServiceAccount = "service-account"
@@ -144,6 +146,14 @@ func GetDeploymentProfileWithDelivery(clientUUID string) (DeploymentProfile, boo
 	if err := db.First(&stored, "client = ?", clientUUID).Error; err != nil {
 		return DeploymentProfile{}, false, DeploymentDeliveryState{}, err
 	}
+	// Config and delivery revision must come from the same row. A concurrent
+	// billing commit may have replaced it since getDeploymentProfile repaired it.
+	if err := json.Unmarshal([]byte(stored.Config), &profile); err != nil {
+		return DeploymentProfile{}, false, DeploymentDeliveryState{}, err
+	}
+	if err := normalizeDeploymentProfile(&profile); err != nil {
+		return DeploymentProfile{}, false, DeploymentDeliveryState{}, err
+	}
 	return profile, true, deploymentDeliveryState(stored), nil
 }
 
@@ -184,6 +194,19 @@ func UpdatePrivilegedStatusInDeploymentProfileWithDB(db *gorm.DB, clientUUID str
 }
 
 func getDeploymentProfile(db *gorm.DB, clientUUID string) (DeploymentProfile, bool, error) {
+	// A billing transaction can commit between the two reads below. Retry only
+	// that precise optimistic-conflict outcome; real SQL/validation errors stay
+	// visible. No polling, delay or unbounded retries are introduced.
+	for attempt := 0; attempt < 3; attempt++ {
+		profile, saved, err := getDeploymentProfileSnapshot(db, clientUUID)
+		if !errors.Is(err, errDeploymentSnapshotChanged) {
+			return profile, saved, err
+		}
+	}
+	return DeploymentProfile{}, false, errDeploymentSnapshotChanged
+}
+
+func getDeploymentProfileSnapshot(db *gorm.DB, clientUUID string) (DeploymentProfile, bool, error) {
 	var client models.Client
 	if err := db.Select("uuid", "traffic_reset_day").First(&client, "uuid = ?", clientUUID).Error; err != nil {
 		return DeploymentProfile{}, false, err
@@ -280,7 +303,7 @@ func reconcileDeploymentResetDay(db *gorm.DB, stored *models.ClientDeploymentPro
 		return false, result.Error
 	}
 	if result.RowsAffected != 1 {
-		return false, errors.New("deployment revision changed while synchronizing billing; retry the request")
+		return false, errDeploymentSnapshotChanged
 	}
 	return true, nil
 }
