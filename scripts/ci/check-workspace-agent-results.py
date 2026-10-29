@@ -9,6 +9,9 @@ expected = {
     'TestRescueHeartbeatRejectsReplayDelayRegressionAndTampering',
     'TestRescueReceivesRealSignedStreamAndReportsDisconnect',
     'TestIdleManagedHelperCannotLeaseOrExecute',
+    'TestRescueAuthorizationWatchSurvivesThirtySeconds',
+    'TestRescueAuthorizationWatchTransportBoundsAndRedirects',
+    'TestRescueAuthorizationWatchContextCancelsStalledHeaders',
 }
 passed, rejected = set(), []
 for line in (root / 'tests.jsonl').read_text().splitlines():

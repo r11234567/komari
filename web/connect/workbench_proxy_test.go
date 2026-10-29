@@ -57,11 +57,7 @@ func TestWorkbenchNginxFileLeaseAndDuplexAttach(t *testing.T) {
 	}), &http2.Server{}))
 	defer upstream.Close()
 	endpoint := startWorkbenchNginx(t, nginx, strings.TrimPrefix(upstream.URL, "http://"))
-	transport := &http2.Transport{AllowHTTP: true, DialTLSContext: func(ctx context.Context, network, address string, _ *tls.Config) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, network, address)
-	}}
-	defer transport.CloseIdleConnections()
-	client := filev1connect.NewFileServiceClient(&http.Client{Transport: transport}, endpoint)
+	client := filev1connect.NewFileServiceClient(workbenchHTTP2Client(t), endpoint)
 	leaseResult := make(chan *filev1.FileAssignment, 1)
 	leaseError := make(chan error, 1)
 	go func() {
@@ -156,7 +152,16 @@ func TestWorkbenchNginxFileLeaseAndDuplexAttach(t *testing.T) {
 	t.Log("small file lease and account-bound duplex result completed through checked-in Nginx routes")
 }
 
-func startWorkbenchNginx(t *testing.T, nginx, upstream string) string {
+func workbenchHTTP2Client(t *testing.T) *http.Client {
+	t.Helper()
+	transport := &http2.Transport{AllowHTTP: true, DialTLSContext: func(ctx context.Context, network, address string, _ *tls.Config) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}}
+	t.Cleanup(transport.CloseIdleConnections)
+	return &http.Client{Transport: transport}
+}
+
+func startWorkbenchNginx(t *testing.T, nginx, upstream string, defaults ...string) string {
 	t.Helper()
 	directory := t.TempDir()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -174,11 +179,16 @@ error_log stderr info;
 events { worker_connections 64; }
 http {
   client_body_timeout 1s;
+  %s
   access_log %s/access.log;
   upstream komari_backend { server %s; }
-  server { listen %s http2; include %s; }
+  server {
+    listen %s http2;
+    include %s;
+    location / { proxy_pass http://komari_backend; proxy_http_version 1.1; }
+  }
 }
-`, directory, directory, upstream, address, locations)
+`, directory, strings.Join(defaults, "\n"), directory, upstream, address, locations)
 	configPath := filepath.Join(directory, "nginx.conf")
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatal(err)

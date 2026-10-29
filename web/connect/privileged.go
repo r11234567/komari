@@ -72,6 +72,10 @@ func (s *privilegedDeliveryService) WatchPrivilegedDelivery(ctx context.Context,
 	if err != nil {
 		return err
 	}
+	// Heartbeats must reach the helper immediately, including deployments
+	// registering this service without the shared streaming interceptor.
+	stream.ResponseHeader().Set("X-Accel-Buffering", "no")
+	stream.ResponseHeader().Set("Cache-Control", "no-store, no-transform")
 	rescue := req.Header().Get(rescueWatchHeader) == "v1"
 	if rescue {
 		stream.ResponseHeader().Set(rescueWatchHeader, "v1")
