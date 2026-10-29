@@ -26,7 +26,7 @@ func rotationFixture(t *testing.T) (*gorm.DB, string, models.AgentCredential, ti
 	require.NoError(t, err)
 	pool.SetMaxOpenConns(8)
 	t.Cleanup(func() { _ = pool.Close() })
-	require.NoError(t, db.AutoMigrate(&models.AgentCredential{}, &models.AgentRefreshUse{}))
+	require.NoError(t, db.AutoMigrate(&models.AgentCredential{}, &models.AgentRefreshUse{}, &models.AgentCredentialPolicy{}))
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	token := "synthetic-refresh-" + uuid.NewString()
 	row := models.AgentCredential{Client: uuid.NewString(), RefreshTokenHash: hashToken(token), AccessTokenHash: hashToken("synthetic-old-access"),

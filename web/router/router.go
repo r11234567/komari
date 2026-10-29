@@ -119,6 +119,7 @@ func registerAdminRoutes(r *gin.Engine) {
 	g := r.Group("/api/admin", api.RequireRole(api.RoleAdmin))
 	// dashboard 读取已迁移到 komari.admin.v1.DashboardService。admin:getDashboard*
 	// 方法仍在 /api/rpc2 上注册，供未改造的第三方主题使用，但不再有 REST 桥接路由。
+	admin.RegisterCredentialLifecycleRoutes(g)
 	admin.RegisterPprofRoutes(g)
 	admin.RegisterHistoryExportRoutes(g)
 

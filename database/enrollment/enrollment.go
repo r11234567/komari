@@ -44,9 +44,8 @@ const (
 	// AccessTokenLifetime is deliberately short: it is presented on every
 	// request, so a captured one should stop working quickly.
 	AccessTokenLifetime = 1 * time.Hour
-	// RefreshTokenLifetime is the sign-in duration an operator experiences.
-	// It is long because re-enrolling requires a human, and forcing that
-	// routinely across a fleet is what makes people automate around it.
+	// RefreshTokenLifetime is the legacy migration horizon. New issuance uses
+	// the stored idle policy and a separate fixed enrollment deadline.
 	RefreshTokenLifetime = 180 * 24 * time.Hour
 	// refreshGracePeriod keeps a superseded refresh token alive briefly, so an
 	// Agent that crashes between receiving a rotation and persisting it is not
@@ -223,6 +222,9 @@ func Poll(deviceCode string) (Attempt, *Issued, error) {
 		if err != nil {
 			return err
 		}
+		if err := tx.Model(&models.AgentCredential{}).Where("client = ?", row.Client).Update("last_approved_by", row.ApprovedBy).Error; err != nil {
+			return err
+		}
 		issued = &credentials
 		// Cache for 60s grace window before deleting row
 		pollGraceCache.Store(code, &cachedPollResult{
@@ -361,26 +363,6 @@ func ValidateRefreshToken(refreshToken string) (models.AgentCredential, error) {
 	return row, nil
 }
 
-// RotateCredential rotates the credentials in database after proof has been verified.
-// RotateCredential is kept for internal callers that already verified a proof.
-// A stale snapshot must never overwrite a newer credential generation.
-func RotateCredential(record models.AgentCredential) (Issued, error) {
-	var issued Issued
-	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
-		var current models.AgentCredential
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("client = ?", record.Client).First(&current).Error; err != nil {
-			return err
-		}
-		if current.RevokedAt != nil || current.RefreshProtocol >= 2 || current.RefreshTokenHash != record.RefreshTokenHash || current.Generation != record.Generation {
-			return ErrRefreshConflict
-		}
-		next, err := issueLocked(tx, current.Client, current.AgentPublicKey, current.AgentKeyID, current.KeyAlgorithm, decodeScopes(current.Scopes), time.Now().UTC())
-		issued = next
-		return err
-	})
-	return issued, err
-}
-
 // Refresh rotates a credential pair presented by its refresh token.
 //
 // The previous token stays valid for a grace period rather than being revoked
@@ -402,6 +384,7 @@ func Revoke(clientUUID, reason string) error {
 		Where("client = ?", clientUUID).
 		Updates(map[string]any{
 			"revoked_at": now, "revoked_reason": trim(reason, 255), "updated_at": now,
+			"refresh_recovery_sealed": "", "refresh_recovery_until": nil, "refresh_recovery_request": "",
 		}).Error
 }
 
@@ -418,6 +401,9 @@ func ResolveAccessToken(accessToken string) (string, error) {
 	}
 	if row.RevokedAt != nil {
 		return "", errors.New("these credentials were revoked")
+	}
+	if (row.EnrollmentExpiresAt != nil && !now.Before(*row.EnrollmentExpiresAt)) || (row.LifecycleVersion > 0 && !now.Before(row.RefreshExpiresAt)) {
+		return "", errors.New("machine authorization expired; administrator reapproval required")
 	}
 	if !now.Before(row.AccessExpiresAt) {
 		return "", errors.New("the access token has expired")
@@ -453,24 +439,31 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 	if accessToken == "" || refreshToken == "" {
 		return Issued{}, errors.New("failed to generate credentials")
 	}
-	accessExpiry := now.Add(AccessTokenLifetime)
-	refreshExpiry := now.Add(RefreshTokenLifetime)
+	policy, err := loadCredentialPolicy(tx)
+	if err != nil {
+		return Issued{}, err
+	}
+	absoluteExpiry := now.Add(time.Duration(policy.AbsoluteDays) * credentialDay)
+	accessExpiry := minDeadline(now.Add(AccessTokenLifetime), absoluteExpiry)
+	refreshExpiry := minDeadline(now.Add(time.Duration(policy.IdleDays)*credentialDay), absoluteExpiry)
 	graceExpiry := now.Add(refreshGracePeriod)
 
 	var existing models.AgentCredential
-	err := tx.Where("client = ?", clientUUID).First(&existing).Error
+	err = tx.Where("client = ?", clientUUID).First(&existing).Error
 	switch {
 	case err == nil:
-		if existing.RevokedAt != nil {
+		if existing.RevokedAt != nil && existing.AgentPublicKey == publicKey {
 			return Issued{}, errors.New("cannot issue credentials for a revoked agent")
 		}
 		updates := map[string]any{
-			"generation":              existing.Generation + 1,
+			"generation":       existing.Generation + 1,
+			"refresh_protocol": 0, "revoked_at": nil, "revoked_reason": "",
+			"lifecycle_version": 1, "enrollment_expires_at": absoluteExpiry, "last_refresh_at": now, "migration_grace_until": nil, "last_approved_at": now,
 			"refresh_recovery_sealed": "", "refresh_recovery_request": "", "refresh_recovery_until": nil,
 			"previous_access_hash": "", "previous_access_expires": nil,
 			"access_token_hash":        hashToken(accessToken),
 			"refresh_token_hash":       hashToken(refreshToken),
-			"previous_refresh_hash":    existing.RefreshTokenHash,
+			"previous_refresh_hash":    "",
 			"previous_refresh_expires": graceExpiry,
 			"access_expires_at":        accessExpiry,
 			"refresh_expires_at":       refreshExpiry,
@@ -479,6 +472,9 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 			"key_algorithm":            algorithm,
 			"scopes":                   encodeScopes(scopes),
 			"updated_at":               now,
+		}
+		if err := tx.Where("client = ?", clientUUID).Delete(&models.AgentRefreshUse{}).Error; err != nil {
+			return Issued{}, err
 		}
 		if err := tx.Model(&existing).Updates(updates).Error; err != nil {
 			return Issued{}, err
@@ -491,6 +487,7 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		row := models.AgentCredential{
 			Client:           clientUUID,
+			LifecycleVersion: 1, EnrollmentExpiresAt: &absoluteExpiry, LastRefreshAt: &now, LastApprovedAt: &now,
 			AccessTokenHash:  hashToken(accessToken),
 			RefreshTokenHash: hashToken(refreshToken),
 			AccessExpiresAt:  accessExpiry,

@@ -80,6 +80,19 @@ func rotateVerifiedDB(ctx context.Context, db *gorm.DB, record models.AgentCrede
 			if cur.RefreshProtocol >= 2 && protocol < 2 {
 				return fmt.Errorf("%w: refresh protocol downgrade", ErrCredentialRejected)
 			}
+			policy, err := loadCredentialPolicy(tx)
+			if err != nil {
+				return err
+			}
+			if err = migrateCredential(tx, &cur, policy, now); err != nil {
+				return err
+			}
+			if cur.EnrollmentExpiresAt == nil {
+				return errors.New("credential lifecycle deadline missing")
+			}
+			if !now.Before(*cur.EnrollmentExpiresAt) {
+				return fmt.Errorf("%w: enrollment authorization expired; administrator reapproval required", ErrCredentialRejected)
+			}
 			if !now.Before(cur.RefreshExpiresAt) {
 				return fmt.Errorf("%w: refresh expired", ErrCredentialRejected)
 			}
@@ -144,8 +157,8 @@ func rotateVerifiedDB(ctx context.Context, db *gorm.DB, record models.AgentCrede
 			if cur.AccessExpiresAt.Before(previousAccessUntil) {
 				previousAccessUntil = cur.AccessExpiresAt
 			}
-			issued = Issued{AgentID: cur.Client, AccessToken: access, AccessTokenExpiresAt: now.Add(AccessTokenLifetime), RefreshToken: refresh,
-				RefreshTokenExpiresAt: now.Add(RefreshTokenLifetime), Generation: cur.Generation + 1, RequestID: requestID, Scopes: decodeScopes(cur.Scopes)}
+			issued = Issued{AgentID: cur.Client, AccessToken: access, AccessTokenExpiresAt: minDeadline(now.Add(AccessTokenLifetime), *cur.EnrollmentExpiresAt), RefreshToken: refresh,
+				RefreshTokenExpiresAt: idleDeadline(cur, policy, now), Generation: cur.Generation + 1, RequestID: requestID, Scopes: decodeScopes(cur.Scopes)}
 			plaintext, err := json.Marshal(issued)
 			if err != nil {
 				return err
@@ -154,12 +167,13 @@ func rotateVerifiedDB(ctx context.Context, db *gorm.DB, record models.AgentCrede
 			if err != nil {
 				return errors.New("cannot seal refresh recovery")
 			}
-			used := models.AgentRefreshUse{TokenHash: digest, Client: cur.Client, Generation: cur.Generation, ConsumedAt: now, ExpiresAt: cur.RefreshExpiresAt}
+			used := models.AgentRefreshUse{TokenHash: digest, Client: cur.Client, Generation: cur.Generation, ConsumedAt: now, ExpiresAt: *cur.EnrollmentExpiresAt}
 			if err := tx.Create(&used).Error; err != nil {
 				return err
 			}
 			result := tx.Model(&models.AgentCredential{}).Where("client = ? AND generation = ? AND refresh_token_hash = ? AND revoked_at IS NULL", cur.Client, cur.Generation, digest).Updates(map[string]any{
-				"generation": issued.Generation, "refresh_protocol": protocol, "access_token_hash": hashToken(access), "access_expires_at": issued.AccessTokenExpiresAt,
+				"last_refresh_at": now,
+				"generation":      issued.Generation, "refresh_protocol": protocol, "access_token_hash": hashToken(access), "access_expires_at": issued.AccessTokenExpiresAt,
 				"refresh_token_hash": hashToken(refresh), "refresh_expires_at": issued.RefreshTokenExpiresAt,
 				"previous_refresh_hash": digest, "previous_refresh_expires": until,
 				"previous_access_hash": cur.AccessTokenHash, "previous_access_expires": previousAccessUntil,

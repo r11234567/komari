@@ -10,6 +10,11 @@ required = {
   'TestCredentialRotationRejectsGenerationDowngradeAndChangedKey',
   'TestCredentialRotationRollbackAndExpiredAccessHandoff',
   'TestCredentialRotationLegacyRecoveryDoesNotRotateAgain',
+  'TestCredentialLifecycleAbsoluteDeadlineNeverSlides',
+  'TestCredentialLifecycleIdleExpiryAndMigrationAreBounded',
+  'TestCredentialLifecycleRecoveryCleanupKeepsReuseDetection',
+  'TestCredentialLifecycleReapprovalRequiresUnchangedUnrevokedKey',
+  'TestCredentialLifecycleStatusRedactionAndPolicyBounds',
  ],
  'credential-refresh-connect': [
   'TestCredentialRefreshV2SignedFullResponseAndLostResponseRecovery',
@@ -18,6 +23,8 @@ required = {
   'TestCredentialRefreshV2RejectsMalformedVersionAndBindings',
   'TestDualEnd_RefreshCredentials_ProofRequiredAndNoDestruction',
   'TestDualEnd_RefreshCredentials_ValidProofRotatesTokens',
+  'TestCredentialLifecycleAdminFreshScopeReplayAndPrincipalBoundaries',
+  'TestCredentialLifecycleExpiredAuthorizationRejectsAccessToken',
  ],
  'credential-rotation-repeat': ['TestCredentialRotationConcurrentSameRequestHasOneResult'] * 20,
 }
