@@ -565,6 +565,8 @@ func doInitialize() error {
 		&models.ClientConfigBaseline{},
 		&models.AgentEnrollment{},
 		&models.AgentCredential{},
+		&models.AgentRefreshUse{},
+		&models.AgentCredentialPolicy{},
 		&models.ControlPlaneKey{},
 		&models.ControlPlanePrivateKey{},
 		&models.InstallToken{},

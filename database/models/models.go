@@ -208,11 +208,23 @@ type AgentEnrollment struct {
 
 // AgentCredential is one issued access/refresh pair.
 //
-// The refresh token is stored hashed. A panel database that leaks must not
-// hand over working credentials for every machine, and the server only ever
-// needs to check a presented token rather than reproduce one.
+// Tokens are indexed by hash. A short-lived response recovery copy is
+// AES-GCM encrypted with the separate panel secret, never stored as plaintext.
 type AgentCredential struct {
-	Client string `json:"-" gorm:"type:varchar(36);primaryKey"`
+	Client                 string     `json:"-" gorm:"type:varchar(36);primaryKey"`
+	LifecycleVersion       int        `json:"-" gorm:"not null;default:0;index"`
+	EnrollmentExpiresAt    *time.Time `json:"-"`
+	LastRefreshAt          *time.Time `json:"-"`
+	MigrationGraceUntil    *time.Time `json:"-"`
+	LastApprovedAt         *time.Time `json:"-"`
+	LastApprovedBy         string     `json:"-"`
+	Generation             uint64     `json:"-" gorm:"not null;default:0"`
+	RefreshProtocol        int        `json:"-" gorm:"not null;default:0"`
+	PreviousAccessHash     string     `json:"-" gorm:"type:varchar(64);index"`
+	PreviousAccessExpires  *time.Time `json:"-"`
+	RefreshRecoverySealed  string     `json:"-" gorm:"type:text"`
+	RefreshRecoveryRequest string     `json:"-" gorm:"type:varchar(64)"`
+	RefreshRecoveryUntil   *time.Time `json:"-" gorm:"index"`
 	// AccessTokenHash and RefreshTokenHash are hex SHA-256 digests.
 	AccessTokenHash  string `json:"-" gorm:"type:varchar(64);index"`
 	RefreshTokenHash string `json:"-" gorm:"type:varchar(64);index"`
@@ -233,6 +245,16 @@ type AgentCredential struct {
 	RevokedReason  string     `json:"-" gorm:"type:varchar(255)"`
 	CreatedAt      time.Time  `json:"-"`
 	UpdatedAt      time.Time  `json:"-"`
+}
+
+// Consumed refresh hashes identify an authenticated replay after recovery
+// expires. No token plaintext or recoverable credential pair is stored here.
+type AgentRefreshUse struct {
+	TokenHash  string    `json:"-" gorm:"type:varchar(64);primaryKey"`
+	Client     string    `json:"-" gorm:"type:varchar(36);index;not null"`
+	Generation uint64    `json:"-"`
+	ConsumedAt time.Time `json:"-"`
+	ExpiresAt  time.Time `json:"-" gorm:"index"`
 }
 
 // ControlPlaneKey is a signing key the panel uses for signed instructions.
@@ -402,4 +424,16 @@ type ClientConfigBaseline struct {
 	RequestHash string `gorm:"type:varchar(64);not null"`
 	Runtime     []byte `gorm:"not null"`
 	CreatedAt   time.Time
+}
+
+// AgentCredentialPolicy governs future approvals and refreshes. Stored absolute
+// deadlines never slide when either the RT or policy is updated.
+type AgentCredentialPolicy struct {
+	ID                 uint      `json:"-" gorm:"primaryKey"`
+	Revision           uint64    `json:"revision"`
+	IdleDays           int       `json:"idle_days"`
+	AbsoluteDays       int       `json:"absolute_days"`
+	MigrationGraceDays int       `json:"migration_grace_days"`
+	WarningDays        int       `json:"warning_days"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }

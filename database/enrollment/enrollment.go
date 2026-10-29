@@ -3,10 +3,9 @@
 //
 // Two decisions shape this package.
 //
-// Tokens are stored hashed. The server only ever needs to check a token it was
-// handed, never to reproduce one, so keeping the plaintext would add nothing
-// except a database leak that hands over working credentials for every
-// machine at once.
+// Tokens are stored hashed. Request-bound response recovery uses a short-lived
+// encrypted copy protected by the separate panel secret, with no plaintext
+// tokens in database columns or audit logs.
 //
 // An unapproved attempt creates nothing. Rows live in their own table and
 // expire, so a machine that was never approved leaves no half-real client
@@ -14,6 +13,7 @@
 package enrollment
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -44,9 +44,8 @@ const (
 	// AccessTokenLifetime is deliberately short: it is presented on every
 	// request, so a captured one should stop working quickly.
 	AccessTokenLifetime = 1 * time.Hour
-	// RefreshTokenLifetime is the sign-in duration an operator experiences.
-	// It is long because re-enrolling requires a human, and forcing that
-	// routinely across a fleet is what makes people automate around it.
+	// RefreshTokenLifetime is the legacy migration horizon. New issuance uses
+	// the stored idle policy and a separate fixed enrollment deadline.
 	RefreshTokenLifetime = 180 * 24 * time.Hour
 	// refreshGracePeriod keeps a superseded refresh token alive briefly, so an
 	// Agent that crashes between receiving a rotation and persisting it is not
@@ -91,9 +90,11 @@ type Attempt struct {
 	CreatedAt       time.Time
 }
 
-// Issued is a freshly minted credential pair. The plaintext tokens exist only
-// in this value, on the way to the Agent that asked for them.
+// Issued is a freshly minted credential pair. Recovery serializes this value
+// only inside an authenticated encryption envelope.
 type Issued struct {
+	Generation            uint64
+	RequestID             string
 	AgentID               string
 	AccessToken           string
 	AccessTokenExpiresAt  time.Time
@@ -219,6 +220,9 @@ func Poll(deviceCode string) (Attempt, *Issued, error) {
 
 		credentials, err := issueLocked(tx, row.Client, row.AgentPublicKey, row.AgentKeyID, row.KeyAlgorithm, decodeScopes(row.RequestedScopes), now)
 		if err != nil {
+			return err
+		}
+		if err := tx.Model(&models.AgentCredential{}).Where("client = ?", row.Client).Update("last_approved_by", row.ApprovedBy).Error; err != nil {
 			return err
 		}
 		issued = &credentials
@@ -359,28 +363,6 @@ func ValidateRefreshToken(refreshToken string) (models.AgentCredential, error) {
 	return row, nil
 }
 
-// RotateCredential rotates the credentials in database after proof has been verified.
-func RotateCredential(record models.AgentCredential) (Issued, error) {
-	var issued Issued
-	now := time.Now().UTC()
-	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
-		var cur models.AgentCredential
-		if err := tx.Where("client = ?", record.Client).First(&cur).Error; err != nil {
-			return err
-		}
-		if cur.RevokedAt != nil {
-			return errors.New("these credentials were revoked")
-		}
-		credentials, err := issueLocked(tx, cur.Client, cur.AgentPublicKey, cur.AgentKeyID, cur.KeyAlgorithm, decodeScopes(cur.Scopes), now)
-		if err != nil {
-			return err
-		}
-		issued = credentials
-		return nil
-	})
-	return issued, err
-}
-
 // Refresh rotates a credential pair presented by its refresh token.
 //
 // The previous token stays valid for a grace period rather than being revoked
@@ -391,7 +373,7 @@ func Refresh(refreshToken string) (Issued, models.AgentCredential, error) {
 	if err != nil {
 		return Issued{}, models.AgentCredential{}, err
 	}
-	issued, err := RotateCredential(record)
+	issued, err := RotateVerified(context.Background(), record, refreshToken, "legacy:"+refreshToken, nil, 1)
 	return issued, record, err
 }
 
@@ -402,6 +384,7 @@ func Revoke(clientUUID, reason string) error {
 		Where("client = ?", clientUUID).
 		Updates(map[string]any{
 			"revoked_at": now, "revoked_reason": trim(reason, 255), "updated_at": now,
+			"refresh_recovery_sealed": "", "refresh_recovery_until": nil, "refresh_recovery_request": "",
 		}).Error
 }
 
@@ -412,13 +395,17 @@ func ResolveAccessToken(accessToken string) (string, error) {
 		return "", errors.New("an access token is required")
 	}
 	var row models.AgentCredential
-	if err := dbcore.GetDBInstance().Where("access_token_hash = ?", digest).First(&row).Error; err != nil {
+	now := time.Now().UTC()
+	if err := dbcore.GetDBInstance().Where("access_token_hash = ? OR (previous_access_hash = ? AND previous_access_expires > ?)", digest, digest, now).First(&row).Error; err != nil {
 		return "", err
 	}
 	if row.RevokedAt != nil {
 		return "", errors.New("these credentials were revoked")
 	}
-	if time.Now().UTC().After(row.AccessExpiresAt) {
+	if (row.EnrollmentExpiresAt != nil && !now.Before(*row.EnrollmentExpiresAt)) || (row.LifecycleVersion > 0 && !now.Before(row.RefreshExpiresAt)) {
+		return "", errors.New("machine authorization expired; administrator reapproval required")
+	}
+	if !now.Before(row.AccessExpiresAt) {
 		return "", errors.New("the access token has expired")
 	}
 	return row.Client, nil
@@ -452,21 +439,31 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 	if accessToken == "" || refreshToken == "" {
 		return Issued{}, errors.New("failed to generate credentials")
 	}
-	accessExpiry := now.Add(AccessTokenLifetime)
-	refreshExpiry := now.Add(RefreshTokenLifetime)
+	policy, err := loadCredentialPolicy(tx)
+	if err != nil {
+		return Issued{}, err
+	}
+	absoluteExpiry := now.Add(time.Duration(policy.AbsoluteDays) * credentialDay)
+	accessExpiry := minDeadline(now.Add(AccessTokenLifetime), absoluteExpiry)
+	refreshExpiry := minDeadline(now.Add(time.Duration(policy.IdleDays)*credentialDay), absoluteExpiry)
 	graceExpiry := now.Add(refreshGracePeriod)
 
 	var existing models.AgentCredential
-	err := tx.Where("client = ?", clientUUID).First(&existing).Error
+	err = tx.Where("client = ?", clientUUID).First(&existing).Error
 	switch {
 	case err == nil:
-		if existing.RevokedAt != nil {
+		if existing.RevokedAt != nil && existing.AgentPublicKey == publicKey {
 			return Issued{}, errors.New("cannot issue credentials for a revoked agent")
 		}
 		updates := map[string]any{
+			"generation":       existing.Generation + 1,
+			"refresh_protocol": 0, "revoked_at": nil, "revoked_reason": "",
+			"lifecycle_version": 1, "enrollment_expires_at": absoluteExpiry, "last_refresh_at": now, "migration_grace_until": nil, "last_approved_at": now,
+			"refresh_recovery_sealed": "", "refresh_recovery_request": "", "refresh_recovery_until": nil,
+			"previous_access_hash": "", "previous_access_expires": nil,
 			"access_token_hash":        hashToken(accessToken),
 			"refresh_token_hash":       hashToken(refreshToken),
-			"previous_refresh_hash":    existing.RefreshTokenHash,
+			"previous_refresh_hash":    "",
 			"previous_refresh_expires": graceExpiry,
 			"access_expires_at":        accessExpiry,
 			"refresh_expires_at":       refreshExpiry,
@@ -475,6 +472,9 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 			"key_algorithm":            algorithm,
 			"scopes":                   encodeScopes(scopes),
 			"updated_at":               now,
+		}
+		if err := tx.Where("client = ?", clientUUID).Delete(&models.AgentRefreshUse{}).Error; err != nil {
+			return Issued{}, err
 		}
 		if err := tx.Model(&existing).Updates(updates).Error; err != nil {
 			return Issued{}, err
@@ -487,6 +487,7 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		row := models.AgentCredential{
 			Client:           clientUUID,
+			LifecycleVersion: 1, EnrollmentExpiresAt: &absoluteExpiry, LastRefreshAt: &now, LastApprovedAt: &now,
 			AccessTokenHash:  hashToken(accessToken),
 			RefreshTokenHash: hashToken(refreshToken),
 			AccessExpiresAt:  accessExpiry,

@@ -3,7 +3,7 @@
 import json, pathlib, subprocess, sys
 required = ['development.yaml', 'codeql.yml', 'privileged-delivery.yml',
  'terminal-workbench.yml', 'admin-ui.yml', 'lite-alerts.yml', 'lite-billing.yml',
- 'native-otp.yml', 'native-password-login.yml', 'trusted-actions.yml', 'workspace-gate.yml']
+ 'credential-lifecycle.yml', 'native-otp.yml', 'native-password-login.yml', 'trusted-actions.yml', 'workspace-gate.yml']
 sha=subprocess.check_output(['git','-C','third_party/komari-web','rev-parse','HEAD'],text=True).strip()
 out=pathlib.Path('ci-artifacts/web-workflow-evidence.json');out.parent.mkdir(exist_ok=True)
 evidence=[]

@@ -120,6 +120,9 @@ func (a *App) Bootstrap() error {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
 	a.dbReady = true
+	if err := enrollment.InitializeLifecycle(context.Background()); err != nil {
+		return fmt.Errorf("initialize credential lifecycle: %w", err)
+	}
 	if _, err := enrollment.ActiveSigningKey(); err != nil {
 		logger.Warnf("server", "failed to initialize active signing key: %v", err)
 	}
@@ -521,6 +524,33 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 
 // StartBackground 启动后台工作：定时任务。
 func (a *App) StartBackground() error {
+	credentialCtx, cancelCredentialCleanup := context.WithCancel(context.Background())
+	credentialDone := make(chan struct{})
+	go func() {
+		defer close(credentialDone)
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			if err := enrollment.CleanupLifecycle(credentialCtx); err != nil && credentialCtx.Err() == nil {
+				logger.Warnf("server", "credential recovery cleanup failed: %v", err)
+			}
+			select {
+			case <-credentialCtx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	a.addCleanup("credential-lifecycle", func(ctx context.Context) error {
+		cancelCredentialCleanup()
+		select {
+		case <-credentialDone:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+
 	stopReturnRouteRules := tasks.StartReturnRouteRuleWatcher()
 	a.addCleanup("return-route-rules", func(context.Context) error {
 		stopReturnRouteRules()
