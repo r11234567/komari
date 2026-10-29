@@ -4,8 +4,8 @@ One ongoing PR per repository. No local dependency installation, build, test or 
 
 | Stage | Backend | Agent | Web | Gate |
 | --- | --- | --- | --- | --- |
-| 1: transactional rotation, generations, bounded recovery | Implemented, awaiting CI | Not started | Not started | Race-enabled real SQLite transactions, actual signed Connect requests, legacy compatibility, repeated concurrent writers and deliberately broken recovery negative control |
-| 2: proactive renewal and rescue handoff | Stage 1 prerequisite | Not started | Not required | Actual persistence, lost responses, restart recovery, renewal concurrency and rescue handoff |
+| 1: transactional rotation, generations, bounded recovery | CI passed: 30 checks at 7d9ffbd2 | Not started | Not started | Race-enabled real SQLite transactions, actual signed Connect requests, legacy compatibility, repeated concurrent writers and deliberately broken recovery negative control |
+| 2: proactive renewal and rescue handoff | Pinned real Agent integration added; awaiting CI | Agent PR in progress | Not required | Actual persistence, lost responses, restart recovery, renewal concurrency and rescue handoff |
 | 3: idle and absolute deadlines, migration, admin visibility | Not started | Depends on stage 2 | Not started | Deadline boundaries, migration, reapproval, access controls and component assertions |
 
 ## Stage 1 protocol
