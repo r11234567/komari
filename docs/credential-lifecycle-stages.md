@@ -6,7 +6,7 @@ One ongoing PR per repository. No local dependency installation, build, test or 
 | --- | --- | --- | --- | --- |
 | 1: transactional rotation, generations, bounded recovery | CI passed: 30 checks at 7d9ffbd2 | Not started | Not started | Race-enabled real SQLite transactions, actual signed Connect requests, legacy compatibility, repeated concurrent writers and deliberately broken recovery negative control |
 | 2: proactive renewal and rescue handoff | CI passed: backend 31 checks at d26e6170 | CI passed: Agent 30 checks at 35e44b7 | Not required | Actual persistence, lost responses, restart recovery, renewal concurrency and rescue handoff |
-| 3: idle and absolute deadlines, migration, admin visibility | Implemented, awaiting CI | Explicit recovery/reapproval behavior in progress | Management UI in progress | Deadline boundaries, migration, reapproval, access controls and component assertions |
+| 3: idle and absolute deadlines, migration, admin visibility | Dedicated CI passed; final pinned integration running | Dedicated CI passed at 78010f6 | CI passed at 8e7bed7 | Deadline boundaries, migration, reapproval, access controls and component assertions |
 
 ## Stage 1 protocol
 
@@ -27,3 +27,9 @@ Defaults: seven days idle refresh validity, 180 days fixed human authorization, 
 An interactive administrator must complete a fresh, single-use, resource-bound trusted-credential challenge for policy changes or explicit reapproval. Reapproval compares current generation and key fingerprint, refuses revoked identities and in-flight recovery, records the actor and renews the human-approved deadline without changing machine keys/tokens. Restart the Agent after manual reapproval to immediately retry; a lost RT or revoked identity needs fresh device enrollment. No API-key/plugin approval path exists.
 
 Recovery ciphertext is cleared by a minute-based, cancellable local database maintenance task; consumed RT hashes remain through their chain's fixed deadline for authenticated reuse detection, then expire. There is no additional Agent network polling for lifecycle administration. The UI uses manual refresh and paginated status reads and displays no tokens, token hashes, public keys, encrypted responses or private keys.
+
+## Final composition gate
+
+The backend pins Agent 78010f6c7a392e31f5d47e16d815cf6f38cabe10 for both actual renewal integration and workspace/rescue regression checks, and Web 8e7bed7 for the shipped UI. Its exact-Web gate also requires the new credential-lifecycle workflow. The Agent final-horizon test proves zero early exchanges when the AT and RT share the fixed deadline, while ordinary short ATs still renew proactively. Permanent denial stops the proactive worker and reactive consumers share a 15-minute cooldown.
+
+Web administration remains independently reachable after the login-settings account verification even if the OAuth provider catalogue is unavailable. No production deployment, merge or release is included.
