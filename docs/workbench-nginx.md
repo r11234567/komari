@@ -42,3 +42,40 @@ through the checked-in Nginx locations on a disposable GitHub runner. It also
 keeps a duplex request idle beyond a deliberately short inherited body timeout. It uses
 synthetic grants and a simulated Agent response, without a browser E2E, and
 retains the full Go and Nginx logs for 30 days.
+
+## Signed rescue authorization stream
+
+The same include now has an **exact** route for
+`/komari.config.v1.PrivilegedDeliveryService/WatchPrivilegedDelivery`.
+It disables request/response buffering and explicitly sets 35-minute upstream
+read/write and downstream send timeouts. Apply this include to each panel
+ingress; a broader `location /` with its own defaults is not sufficient when
+another ingress still inherits a short timeout or buffers responses. Other
+privileged unary methods and RPC2/plugin gateway routes are unaffected.
+
+Timeouts have different meanings:
+
+| Layer | Bound | Meaning |
+| --- | --- | --- |
+| Rescue helper HTTP client | No whole-response timeout | A healthy stream must not be killed after 30 seconds |
+| Helper connection / TLS handshake | 5 seconds each | Unreachable peers cannot stall connection setup |
+| Helper response headers | 10 seconds | Header establishment remains bounded |
+| Helper watch context | 25 minutes | Rotate the connection and reread protected credentials |
+| Backend stream policy | 30 minutes | Server-side maximum stream lifetime |
+| Nginx stream location | 35 minutes | Inactivity limits between reads/writes, not total connection lifetime |
+| Helper signed heartbeat | 1-second cadence, 2-second freshness | Lost/invalid/stale heartbeats close authorization independently of HTTP timeouts |
+
+HTTP client `Timeout` covers the **entire response body**, whereas Nginx
+`proxy_read_timeout` measures the gap between upstream reads. Increasing Nginx
+timeouts cannot fix the helper's former 30-second total-response deadline.
+Nginx `keepalive_timeout` applies to idle connections between requests, not an
+active stream. Ordinary unary RPCs retain their existing deadlines.
+
+The CI checkpoint keeps the real backend handler and policy interceptor open
+through real Nginx for over 32 seconds, checks fresh signed frames on one
+request, then revokes its isolated fixture credential and requires rejection.
+It inherits a deliberately short 500ms read timeout; a negative control removes
+the exact route and must fail with a real upstream timeout. The Agent checkpoint
+also runs its production DPoP client for over 32 seconds and restores the old
+30-second timeout as a separate expected-failure control. Full failure output
+and Nginx logs are retained, without running browser E2E or tests on the VPS.

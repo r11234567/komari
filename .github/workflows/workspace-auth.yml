@@ -33,6 +33,19 @@ jobs:
         env:
           KOMARI_NGINX_COMPONENT_TEST: '1'
         run: bash scripts/ci/run-audit-check.sh workbench-proxy bash scripts/ci/run-go-tests.sh -run '^TestWorkbenchNginxFileLeaseAndDuplexAttach$' ./web/connect
+      - name: Real signed backend heartbeats beyond 30s through Nginx and live revocation
+        if: ${{ !cancelled() }}
+        env:
+          KOMARI_NGINX_COMPONENT_TEST: '1'
+        run: bash scripts/ci/run-audit-check.sh rescue-watch-proxy bash scripts/ci/run-go-tests.sh -race -run '^TestRescueWatch' ./web/connect
+      - name: Reject missing, skipped or shortened rescue transport tests
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh rescue-watch-evidence python3 scripts/ci/check-rescue-watch-results.py ci-artifacts/rescue-watch-proxy-go
+      - name: Prove missing Nginx watch override fails the actual stream
+        if: ${{ !cancelled() }}
+        env:
+          KOMARI_NGINX_COMPONENT_TEST: '1'
+        run: bash scripts/ci/run-audit-check.sh rescue-watch-negative-control bash scripts/ci/test-rescue-watch-negative-control.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
