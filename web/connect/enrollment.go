@@ -12,6 +12,7 @@ package connectapi
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -24,11 +25,13 @@ import (
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/enrollment"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	enrollmentv1 "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1"
 	"github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1/enrollmentv1connect"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -136,21 +139,42 @@ func (s *enrollmentService) PollEnrollment(ctx context.Context, req *connect.Req
 
 func (s *enrollmentService) RefreshCredentials(ctx context.Context, req *connect.Request[enrollmentv1.RefreshCredentialsRequest]) (*connect.Response[enrollmentv1.RefreshCredentialsResponse], error) {
 	refreshToken := req.Msg.GetRefreshToken()
-	record, err := enrollment.ValidateRefreshToken(refreshToken)
-	if err != nil {
-		return nil, connectError(connect.CodeUnauthenticated, err)
+	protocol := 1
+	requestID := "legacy:" + refreshToken
+	var expected *uint64
+	var record models.AgentCredential
+	var err error
+	version, versionErr := refreshProtocolVersion(req.Msg.GetProof())
+	if versionErr != nil {
+		return nil, connectError(connect.CodeUnauthenticated, errors.New("unsupported refresh proof protocol"))
 	}
-
-	// The proof is what makes a leaked refresh token insufficient on its own.
-	// We verify it BEFORE rotating anything in the database, ensuring that
-	// an invalid or missing proof NEVER destroys the current valid credentials.
-	if err := verifyRefreshProof(req.Msg.GetProof(), record.AgentPublicKey, record.Client, refreshToken); err != nil {
-		return nil, connectError(connect.CodeUnauthenticated, err)
+	if version == 2 {
+		protocol = 2
+		record, err = enrollment.LookupRefresh(ctx, refreshToken)
+		if err == nil {
+			requestID, expected, err = verifyRefreshV2(req.Msg.Proof, record, refreshToken)
+		}
+	} else {
+		record, err = enrollment.ValidateRefreshToken(refreshToken)
+		if err == nil {
+			err = verifyRefreshProof(req.Msg.GetProof(), record.AgentPublicKey, record.Client, refreshToken)
+		}
 	}
-
-	issued, err := enrollment.RotateCredential(record)
 	if err != nil {
-		return nil, connectError(connect.CodeInternal, err)
+		return nil, connectError(connect.CodeUnauthenticated, errors.New("invalid refresh proof or credential"))
+	}
+	issued, err := enrollment.RotateVerified(ctx, record, refreshToken, requestID, expected, protocol)
+	if err != nil {
+		if errors.Is(err, enrollment.ErrRefreshConflict) {
+			return nil, connectError(connect.CodeAborted, err)
+		}
+		if errors.Is(err, enrollment.ErrRefreshReuse) {
+			auditlog.Log("", "", "agent credential chain revoked after authenticated refresh reuse: client="+record.Client, "warn")
+		}
+		if errors.Is(err, enrollment.ErrCredentialRejected) || errors.Is(err, enrollment.ErrRefreshReuse) {
+			return nil, connectError(connect.CodeUnauthenticated, err)
+		}
+		return nil, connectError(connect.CodeInternal, errors.New("credential rotation failed"))
 	}
 
 	creds := &enrollmentv1.AgentCredentials{
@@ -162,30 +186,26 @@ func (s *enrollmentService) RefreshCredentials(ctx context.Context, req *connect
 		Scopes:                issued.Scopes,
 	}
 
-	// Sign the response so the Agent can verify it really came from this panel
-	// rather than from something positioned between them. The payload is the
-	// agent ID plus the new access token, which is enough to bind the signature
-	// to this specific rotation without re-serializing the whole credentials
-	// struct across versions.
+	// V2 signs the complete deterministic credential message and binds it to
+	// the request ID and generation. Legacy Agents retain their existing payload.
 	response := &enrollmentv1.RefreshCredentialsResponse{Credentials: creds}
 	payload := []byte(issued.AgentID + "\n" + issued.AccessToken)
-	keyID, algorithm, sig, signErr := enrollment.Sign(payload)
-	if signErr == nil {
-		response.Proof = &securityv1.SignedEnvelope{
-			Payload: payload,
-			Signatures: []*securityv1.Signature{{
-				Algorithm: securityv1.SignatureAlgorithm(algorithm),
-				Value:     sig,
-				KeyId:     keyID,
-			}},
+	if protocol == 2 {
+		body, err := proto.MarshalOptions{Deterministic: true}.Marshal(creds)
+		if err != nil {
+			return nil, connectError(connect.CodeInternal, errors.New("credential response encoding failed"))
+		}
+		digest := sha256.Sum256(body)
+		payload, err = json.Marshal(refreshV2Response{Protocol: 2, AgentID: issued.AgentID, RequestID: issued.RequestID, Generation: issued.Generation, CredentialsSHA256: hex.EncodeToString(digest[:])})
+		if err != nil {
+			return nil, connectError(connect.CodeInternal, err)
 		}
 	}
-	// A signing failure is not fatal: the agent accepts an absent proof for
-	// backward compatibility. Log it so an operator can diagnose a key-store
-	// problem, but do not break an otherwise valid rotation.
+	keyID, algorithm, sig, signErr := enrollment.Sign(payload)
 	if signErr != nil {
-		_ = fmt.Errorf("refresh response signing failed (non-fatal): %w", signErr)
+		return nil, connectError(connect.CodeInternal, errors.New("credential response signing unavailable; retry same request"))
 	}
+	response.Proof = &securityv1.SignedEnvelope{Payload: payload, Signatures: []*securityv1.Signature{{Algorithm: securityv1.SignatureAlgorithm(algorithm), Value: sig, KeyId: keyID}}}
 
 	return connect.NewResponse(response), nil
 }

@@ -3,10 +3,9 @@
 //
 // Two decisions shape this package.
 //
-// Tokens are stored hashed. The server only ever needs to check a token it was
-// handed, never to reproduce one, so keeping the plaintext would add nothing
-// except a database leak that hands over working credentials for every
-// machine at once.
+// Tokens are stored hashed. Request-bound response recovery uses a short-lived
+// encrypted copy protected by the separate panel secret, with no plaintext
+// tokens in database columns or audit logs.
 //
 // An unapproved attempt creates nothing. Rows live in their own table and
 // expire, so a machine that was never approved leaves no half-real client
@@ -14,6 +13,7 @@
 package enrollment
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -91,9 +91,11 @@ type Attempt struct {
 	CreatedAt       time.Time
 }
 
-// Issued is a freshly minted credential pair. The plaintext tokens exist only
-// in this value, on the way to the Agent that asked for them.
+// Issued is a freshly minted credential pair. Recovery serializes this value
+// only inside an authenticated encryption envelope.
 type Issued struct {
+	Generation            uint64
+	RequestID             string
 	AgentID               string
 	AccessToken           string
 	AccessTokenExpiresAt  time.Time
@@ -360,23 +362,21 @@ func ValidateRefreshToken(refreshToken string) (models.AgentCredential, error) {
 }
 
 // RotateCredential rotates the credentials in database after proof has been verified.
+// RotateCredential is kept for internal callers that already verified a proof.
+// A stale snapshot must never overwrite a newer credential generation.
 func RotateCredential(record models.AgentCredential) (Issued, error) {
 	var issued Issued
-	now := time.Now().UTC()
 	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
-		var cur models.AgentCredential
-		if err := tx.Where("client = ?", record.Client).First(&cur).Error; err != nil {
+		var current models.AgentCredential
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("client = ?", record.Client).First(&current).Error; err != nil {
 			return err
 		}
-		if cur.RevokedAt != nil {
-			return errors.New("these credentials were revoked")
+		if current.RevokedAt != nil || current.RefreshProtocol >= 2 || current.RefreshTokenHash != record.RefreshTokenHash || current.Generation != record.Generation {
+			return ErrRefreshConflict
 		}
-		credentials, err := issueLocked(tx, cur.Client, cur.AgentPublicKey, cur.AgentKeyID, cur.KeyAlgorithm, decodeScopes(cur.Scopes), now)
-		if err != nil {
-			return err
-		}
-		issued = credentials
-		return nil
+		next, err := issueLocked(tx, current.Client, current.AgentPublicKey, current.AgentKeyID, current.KeyAlgorithm, decodeScopes(current.Scopes), time.Now().UTC())
+		issued = next
+		return err
 	})
 	return issued, err
 }
@@ -391,7 +391,7 @@ func Refresh(refreshToken string) (Issued, models.AgentCredential, error) {
 	if err != nil {
 		return Issued{}, models.AgentCredential{}, err
 	}
-	issued, err := RotateCredential(record)
+	issued, err := RotateVerified(context.Background(), record, refreshToken, "legacy:"+refreshToken, nil, 1)
 	return issued, record, err
 }
 
@@ -412,13 +412,14 @@ func ResolveAccessToken(accessToken string) (string, error) {
 		return "", errors.New("an access token is required")
 	}
 	var row models.AgentCredential
-	if err := dbcore.GetDBInstance().Where("access_token_hash = ?", digest).First(&row).Error; err != nil {
+	now := time.Now().UTC()
+	if err := dbcore.GetDBInstance().Where("access_token_hash = ? OR (previous_access_hash = ? AND previous_access_expires > ?)", digest, digest, now).First(&row).Error; err != nil {
 		return "", err
 	}
 	if row.RevokedAt != nil {
 		return "", errors.New("these credentials were revoked")
 	}
-	if time.Now().UTC().After(row.AccessExpiresAt) {
+	if !now.Before(row.AccessExpiresAt) {
 		return "", errors.New("the access token has expired")
 	}
 	return row.Client, nil
@@ -464,6 +465,9 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 			return Issued{}, errors.New("cannot issue credentials for a revoked agent")
 		}
 		updates := map[string]any{
+			"generation":              existing.Generation + 1,
+			"refresh_recovery_sealed": "", "refresh_recovery_request": "", "refresh_recovery_until": nil,
+			"previous_access_hash": "", "previous_access_expires": nil,
 			"access_token_hash":        hashToken(accessToken),
 			"refresh_token_hash":       hashToken(refreshToken),
 			"previous_refresh_hash":    existing.RefreshTokenHash,
