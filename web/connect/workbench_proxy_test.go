@@ -57,11 +57,7 @@ func TestWorkbenchNginxFileLeaseAndDuplexAttach(t *testing.T) {
 	}), &http2.Server{}))
 	defer upstream.Close()
 	endpoint := startWorkbenchNginx(t, nginx, strings.TrimPrefix(upstream.URL, "http://"))
-	transport := &http2.Transport{AllowHTTP: true, DialTLSContext: func(ctx context.Context, network, address string, _ *tls.Config) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, network, address)
-	}}
-	defer transport.CloseIdleConnections()
-	client := filev1connect.NewFileServiceClient(&http.Client{Transport: transport}, endpoint)
+	client := filev1connect.NewFileServiceClient(workbenchHTTP2Client(t), endpoint)
 	leaseResult := make(chan *filev1.FileAssignment, 1)
 	leaseError := make(chan error, 1)
 	go func() {
@@ -154,6 +150,15 @@ func TestWorkbenchNginxFileLeaseAndDuplexAttach(t *testing.T) {
 		t.Fatalf("attach completion: %v", err)
 	}
 	t.Log("small file lease and account-bound duplex result completed through checked-in Nginx routes")
+}
+
+func workbenchHTTP2Client(t *testing.T) *http.Client {
+	t.Helper()
+	transport := &http2.Transport{AllowHTTP: true, DialTLSContext: func(ctx context.Context, network, address string, _ *tls.Config) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}}
+	t.Cleanup(transport.CloseIdleConnections)
+	return &http.Client{Transport: transport}
 }
 
 func startWorkbenchNginx(t *testing.T, nginx, upstream string, defaults ...string) string {

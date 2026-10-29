@@ -132,7 +132,7 @@ func TestRescueWatchNginxSurvivesThirtySecondsAndRevokes(t *testing.T) {
 		"proxy_read_timeout 500ms; proxy_buffering on; send_timeout 1s;")
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
-	client := configconnect.NewPrivilegedDeliveryServiceClient(&http.Client{}, endpoint)
+	client := configconnect.NewPrivilegedDeliveryServiceClient(workbenchHTTP2Client(t), endpoint)
 	req := connect.NewRequest(&configv1.WatchPrivilegedDeliveryRequest{AgentId: id, ProtocolVersion: 2})
 	req.Header().Set("Authorization", "Bearer "+token)
 	req.Header().Set(rescueWatchHeader, "v1")
