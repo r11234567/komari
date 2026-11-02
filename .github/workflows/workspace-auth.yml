@@ -76,7 +76,7 @@ jobs:
         run: bash scripts/ci/run-audit-check.sh quota-audit python3 -m unittest discover -s scripts/tests -p test_audit_traffic_limits.py -v
       - name: Native proof binding, HTTP token isolation and actual quiet terminal streams
         if: ${{ !cancelled() }}
-        run: bash scripts/ci/run-audit-check.sh api-connect bash scripts/ci/run-go-tests.sh -race -run 'Test(ApiToken|ApiKey|ApiAuthentication|WebSSHCold|Workspace|TrustedAction|ConnectMetricQuery)' ./web/connect
+        run: bash scripts/ci/run-audit-check.sh api-connect bash scripts/ci/run-go-tests.sh -race -run 'Test(Policy|ApiToken|ApiKey|ApiAuthentication|WebSSHCold|Workspace|TrustedAction|ConnectMetricQuery)' ./web/connect
       - name: Legacy RPC and sensitive principal regressions
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh api-gateway bash scripts/ci/run-go-tests.sh ./web/api ./web/rpc/jsonrpc ./web/remotemanagement

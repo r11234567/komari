@@ -1,6 +1,7 @@
 package connectapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -66,6 +67,21 @@ func TestApiTokenCreationFreshProofCannotBeReplayedOrBroadened(t *testing.T) {
 			require.NotContains(t, string(serialized), result.Msg.Secret)
 			require.NotContains(t, string(serialized), "secret_hash")
 		})
+	}
+}
+
+func TestApiTokenManagementRejectsNoninteractivePrincipals(t *testing.T) {
+	for _, principal := range []*rpc.Principal{rpc.NewAnonymousPrincipal(), rpc.NewAgentPrincipal("node"), rpc.NewAPIKeyPrincipal(), rpc.PrincipalFromRole(rpc.RoleAdmin)} {
+		ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: principal})
+		service := &apiTokenService{}
+		_, err := service.ListApiTokens(ctx, connect.NewRequest(&adminv1.ListApiTokensRequest{}))
+		require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+		_, err = service.CreateApiToken(ctx, connect.NewRequest(&adminv1.CreateApiTokenRequest{}))
+		require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+		_, err = service.RevokeApiToken(ctx, connect.NewRequest(&adminv1.RevokeApiTokenRequest{}))
+		require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+		_, err = service.DisableLegacyApiKey(ctx, connect.NewRequest(&adminv1.DisableLegacyApiKeyRequest{}))
+		require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
 	}
 }
 
