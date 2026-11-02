@@ -195,6 +195,9 @@ func connectMetricQueryKey(ctx context.Context, request *metricsv1.QueryMetricsR
 	scope := "guest"
 	if meta != nil && meta.Principal != nil {
 		scope = strconv.Itoa(int(meta.Principal.Type)) + ":" + meta.Principal.UserUUID + ":" + meta.Principal.ClientUUID
+		if token := meta.Principal.APIToken; token != nil {
+			scope += ":token:" + token.ID
+		}
 	}
 	digest := sha256.Sum256(append([]byte(scope+"\x00"), encoded...))
 	return hex.EncodeToString(digest[:])
@@ -511,10 +514,20 @@ func connectVisibleAgentIDs(ctx context.Context, requested []string) ([]string, 
 		return nil, connectError(connect.CodeInternal, err)
 	}
 	meta := rpc.MetaFromContext(ctx)
-	isAdmin := meta != nil && meta.Principal != nil && meta.Principal.HasRole(rpc.RoleAdmin)
+	if meta != nil {
+		for _, id := range requested {
+			if !meta.Principal.AllowsAgent(id) {
+				return nil, connectError(connect.CodePermissionDenied, errors.New("node is outside API token scope"))
+			}
+		}
+	}
+	isAdmin := meta != nil && meta.Principal != nil && (meta.Principal.HasRole(rpc.RoleAdmin) || meta.Principal.APIToken != nil)
 	wanted := stringSet(requested)
 	result := make([]string, 0, len(all))
 	for _, client := range all {
+		if meta != nil && !meta.Principal.AllowsAgent(client.UUID) {
+			continue
+		}
 		if client.Hidden && !isAdmin || len(wanted) > 0 && !wanted[client.UUID] {
 			continue
 		}

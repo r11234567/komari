@@ -1,13 +1,26 @@
 package connectapi
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/komari-monitor/komari/pkg/rpc"
 	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
 )
+
+func TestConnectMetricQueryCacheSeparatesScopedTokens(t *testing.T) {
+	key := func(id string) string {
+		p := &rpc.Principal{Type: rpc.PrincipalAPIKey, IsAPIKey: true, APIToken: &rpc.APITokenPolicy{ID: id, AgentIDs: []string{id}, ExpiresAt: time.Now().Add(time.Hour)}}
+		ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: p})
+		return connectMetricQueryKey(ctx, &metricsv1.QueryMetricsRequest{})
+	}
+	if key("token-a") == key("token-b") {
+		t.Fatal("different resource scopes share a cached response")
+	}
+}
 
 func resetMetricQueryCache(t *testing.T) {
 	t.Helper()

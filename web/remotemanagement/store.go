@@ -265,6 +265,13 @@ func (s *Session) Detach() {
 	sessions.Unlock()
 }
 
+// AgentAttached is an observation, not an authorization or output cursor.
+func (s *Session) AgentAttached() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attached && s.closed == nil
+}
+
 func (s *Session) EnqueueCommand(sequence uint64, command Command) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -2,10 +2,16 @@ name: Workspace authorization checkpoint
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      focused_security:
+        description: Run scoped API token, quota and WebSSH startup regression checks
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
   authorization:
+    if: ${{ inputs.focused_security != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -52,3 +58,37 @@ jobs:
           name: workspace-auth-${{ github.run_id }}-${{ github.run_attempt }}
           path: ci-artifacts/
           retention-days: 30
+  scoped-api-security:
+    if: ${{ github.event_name == 'pull_request' || inputs.focused_security == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Token verifier, policy, real SQLite pollution and existing security boundaries
+        run: bash scripts/ci/run-audit-check.sh api-security bash scripts/ci/run-go-tests.sh -race ./database/apitokens ./database/clients ./database/accounts ./web/security ./pkg/rpc
+      - name: Native proof binding, HTTP token isolation and actual quiet terminal streams
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh api-connect bash scripts/ci/run-go-tests.sh -race -run 'Test(ApiToken|ApiKey|ApiAuthentication|WebSSHCold|Workspace|TrustedAction|ConnectMetricQuery)' ./web/connect
+      - name: Legacy RPC and sensitive principal regressions
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh api-gateway bash scripts/ci/run-go-tests.sh ./web/api ./web/rpc/jsonrpc ./web/remotemanagement
+      - name: Install Nginx for the isolated cold-start component check
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh startup-nginx-install bash -c 'sudo apt-get update && sudo apt-get install -y nginx'
+      - name: Real quiet WebSSH streams and revocation through checked-in Nginx routes
+        if: ${{ !cancelled() }}
+        env:
+          KOMARI_NGINX_COMPONENT_TEST: '1'
+        run: bash scripts/ci/run-audit-check.sh startup-nginx bash scripts/ci/run-go-tests.sh -race -run '^TestWebSSHColdStartupNginx$' ./web/connect
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scoped-api-security-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+          if-no-files-found: error

@@ -22,6 +22,7 @@ func newPolicyInterceptor() *policyInterceptor {
 	const (
 		dashboard        = "/komari.admin.v1.DashboardService/"
 		maintenance      = "/komari.admin.v1.MaintenanceService/"
+		apiToken         = "/komari.admin.v1.ApiTokenService/"
 		pingTask         = "/komari.admin.v1.PingTaskService/"
 		terminalSettings = "/komari.admin.v1.TerminalSettingsService/"
 		fileService      = "/komari.file.v1.FileService/"
@@ -48,6 +49,7 @@ func newPolicyInterceptor() *policyInterceptor {
 		}
 	}
 	add("/komari.workspace.v1.WorkspaceService/", rpc.RoleAdmin, 30*time.Second, "UnlockWorkspace", "GetWorkspace", "TouchWorkspace", "LockWorkspace")
+	add(apiToken, rpc.RoleAdmin, 30*time.Second, "ListApiTokens", "CreateApiToken", "RevokeApiToken", "DisableLegacyApiKey")
 	add("/komari.credential.v1.TrustedCredentialService/", rpc.RoleAdmin, 30*time.Second, "ListTrustedCredentialProviders", "BeginVerification", "CompleteVerification", "CancelVerification", "GetCredentialContacts", "BeginContactBinding", "SaveCredentialContact", "DeleteCredentialContact")
 	add("/komari.credential.v1.PasswordLoginService/", rpc.RoleGuest, 30*time.Second, "BeginPasswordLogin", "BeginLoginVerification", "CompletePasswordLogin", "CancelPasswordLogin")
 	add(dashboard, rpc.RoleAdmin, 30*time.Second, "GetDashboardSummary", "GetDashboardCharts", "ListDashboardAlertItems")
@@ -117,6 +119,9 @@ func (i *policyInterceptor) authorize(ctx context.Context, procedure string) (co
 	meta := rpc.MetaFromContext(ctx)
 	if meta == nil || meta.Principal == nil {
 		return ctx, func() {}, connect.NewError(connect.CodeUnauthenticated, errors.New("authentication context is missing"))
+	}
+	if !meta.Principal.AllowsAPIProcedure(procedure) {
+		return ctx, func() {}, connect.NewError(connect.CodePermissionDenied, errors.New("API token lacks permission for this procedure"))
 	}
 	if policy.role != rpc.RoleGuest && !meta.Principal.HasRole(policy.role) {
 		return ctx, func() {}, connect.NewError(connect.CodePermissionDenied, errors.New("permission denied"))

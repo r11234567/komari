@@ -203,6 +203,20 @@ func WrapHandler(next http.Handler) http.Handler {
 	return global.wrapHandler(next)
 }
 
+// OwnsHTTPRoute identifies an actual plugin-owned Gin slot, including slots
+// retained after unload. It does not grant a Komari principal or permission.
+func OwnsHTTPRoute(method, pattern string) bool {
+	global.mu.RLock()
+	defer global.mu.RUnlock()
+	key := method + " " + pattern
+	for _, routes := range global.routes {
+		if routes[key] {
+			return true
+		}
+	}
+	return false
+}
+
 // HTMLInjectHandler installs plugin HTML injection around the application
 // handler. Every text/html response is buffered and gets the fragments
 // registered through server.injectHTML inserted before </head> and </body>;
