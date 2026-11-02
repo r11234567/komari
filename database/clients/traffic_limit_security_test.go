@@ -45,7 +45,19 @@ func TestTrafficLimitNormalizesSupportedNumericCallers(t *testing.T) {
 			require.NoError(t, db.Create(&models.Client{UUID: "quota-node", TrafficLimitType: "sum"}).Error)
 			updates := map[string]any{"uuid": "quota-node", "traffic_limit": value}
 			require.NoError(t, saveClient(db, updates))
-			require.IsType(t, int64(0), updates["traffic_limit"])
+			// saveClient intentionally clones the caller's map. Verify the
+			// durable value and SQLite storage class rather than map mutation.
+			var stored struct {
+				Value   int64
+				Storage string
+			}
+			require.NoError(t, db.Raw("SELECT traffic_limit AS value, typeof(traffic_limit) AS storage FROM clients WHERE uuid = ?", "quota-node").Scan(&stored).Error)
+			want := int64(1000)
+			if value == 0 {
+				want = 0
+			}
+			require.Equal(t, want, stored.Value)
+			require.Equal(t, "integer", stored.Storage)
 		})
 	}
 }

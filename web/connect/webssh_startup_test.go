@@ -101,7 +101,15 @@ func runWebSSHColdStartup(t *testing.T, throughNginx bool) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), accepted)
 	require.NoError(t, workspace.Default.Lock(token, user, login))
+	lockedAt := time.Now()
 	for stream.Receive() {
+		if stream.Msg().Event != nil {
+			require.Empty(t, stream.Msg().Event.GetOutput(), "revoked grant emitted more output")
+		}
 	}
-	require.NotNil(t, stream.Err(), "grant revocation must end the watch; heartbeats cannot keep authorization alive")
+	// Either a clean close or an authentication error is a valid end. What
+	// matters is prompt closure, before the long request deadline, without
+	// heartbeat activity extending the revoked authorization.
+	require.Less(t, time.Since(lockedAt), time.Second)
+	require.NoError(t, streamCtx.Err(), "watch ended only because its outer deadline elapsed")
 }

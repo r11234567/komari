@@ -1,1 +1,0 @@
-import{a as e,i as t,l as n,o as r,u as i}from"./chunk-chart-DhoKliGe.js";var a=t({chartName:`BarChart`,GraphicalChild:i,defaultTooltipEventType:`axis`,validateTooltipEventTypes:[`axis`,`item`],axisComponents:[{axisType:`xAxis`,AxisComp:r},{axisType:`yAxis`,AxisComp:e}],formatAxisMap:n});export{a as t};
