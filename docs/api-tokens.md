@@ -74,3 +74,15 @@ Komari's restrictions there.
 
 The new token table is additive. No production credentials are rotated or
 revoked by the schema migration itself.
+
+## Existing quota data
+
+`traffic_limit` writes now require a non-negative int64 at the shared save
+boundary. To inspect older data, run
+`python3 scripts/audit-traffic-limits.py /path/to/komari.db` against the existing
+database or a consistent backup. It opens SQLite in read-only/query-only mode,
+reports node IDs and storage classes, and does not print stored payloads. Exit
+codes are 0 for no anomalies, 1 for anomalies, and 2 for an inspection error.
+Non-integer/NULL values are review candidates, not proof of an attack. Corrections
+require a separately reviewed value from a backup/provider record; this tool
+does not silently replace quotas with zero.
