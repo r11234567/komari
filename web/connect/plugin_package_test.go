@@ -110,6 +110,59 @@ func TestPluginPackageApprovalRejectsTokenAgentAndPluginPrincipals(t *testing.T)
 	}
 }
 
+func TestPluginPackageExistingGrantAllowsSwitchAndUpdateButNotExpansion(t *testing.T) {
+	ctx, _, _ := actionFixture(t)
+	row := pluginApprovalFixture(t)
+	service := &pluginService{}
+	// Initial grants are covered by the fresh-2FA matrix above. Prepare one
+	// here so expansion uses the first native TOTP, without defeating replay
+	// protection by reusing the same code twice within a 30-second window.
+	err := pluginapp.DecidePackage("proof", row.Digest, "", "activate", "test-setup", func(pluginapp.PackageReview) error { return nil })
+	require.NoError(t, err)
+	require.NoError(t, plugingateway.SetEnabled(ctx, "proof", false, false))
+	require.NoError(t, plugingateway.SetEnabled(ctx, "proof", true, false))
+	stage := func(version, permissions string) pluginapp.PackageReview {
+		path := filepath.Join(t.TempDir(), "update.zip")
+		f, err := os.Create(path)
+		require.NoError(t, err)
+		w := zip.NewWriter(f)
+		for name, body := range map[string]string{"komari-plugin.json": `{"short":"proof","name":"Update fixture","version":"` + version + `","permissions":` + permissions + `}`, "script.js": "function load(){}"} {
+			entry, err := w.Create(name)
+			require.NoError(t, err)
+			_, err = entry.Write([]byte(body))
+			require.NoError(t, err)
+		}
+		require.NoError(t, w.Close())
+		require.NoError(t, f.Close())
+		_, err = pluginapp.StageZip(path, "Synthetic update", "proof", version)
+		require.NoError(t, err)
+		rows, err := pluginapp.ListPackages()
+		require.NoError(t, err)
+		for _, candidate := range rows {
+			if candidate.Plugin.Version == version {
+				return candidate
+			}
+		}
+		t.Fatal("update review missing")
+		return pluginapp.PackageReview{}
+	}
+	next := stage("2", `{"node":true,"timeout":30}`)
+	require.False(t, next.RequiresApproval)
+	_, err = service.DecidePluginPackage(ctx, connect.NewRequest(&pluginv1.DecidePluginPackageRequest{ShortName: "proof", Digest: next.Digest, ExpectedCurrentDigest: next.CurrentDigest, Action: "activate"}))
+	require.NoError(t, err)
+	require.Equal(t, "2", pluginapp.List()[0].Version)
+	expanded := stage("3", `{"allowExec":true}`)
+	require.True(t, expanded.RequiresApproval)
+	request := &pluginv1.DecidePluginPackageRequest{ShortName: "proof", Digest: expanded.Digest, ExpectedCurrentDigest: expanded.CurrentDigest, Action: "activate"}
+	_, err = service.DecidePluginPackage(ctx, connect.NewRequest(request))
+	require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
+	require.Equal(t, "2", pluginapp.List()[0].Version)
+	request.TwoFactor = &commonv1.TwoFactorProof{AuthorizationToken: actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("plugin-package:activate", expanded.Targets()...))}
+	_, err = service.DecidePluginPackage(ctx, connect.NewRequest(request))
+	require.NoError(t, err)
+	require.Equal(t, "3", pluginapp.List()[0].Version)
+}
+
 func TestPluginPackageApprovalPreservesExistingConfigurationCapability(t *testing.T) {
 	ctx, _, _ := actionFixture(t)
 	row := pluginApprovalFixture(t)

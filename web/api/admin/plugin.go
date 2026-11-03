@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/internal/plugin"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
@@ -38,12 +39,28 @@ func UploadPlugin(c *gin.Context) {
 		return
 	}
 
-	info, err := plugin.StageZip(tempPath, "Direct upload", "", "")
+	info, err := plugin.InstallOrStageZip(tempPath, "Direct upload", "", "", api.GetPrincipal(c).UserUUID)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	api.RespondSuccessMessage(c, "Plugin staged; review and 2FA approval required", info)
+	auditPluginInstall(c.ClientIP(), api.GetPrincipal(c).UserUUID, info)
+	api.RespondSuccessMessage(c, pluginInstallMessage(info), info)
+}
+
+func pluginInstallMessage(info plugin.PackageInstallResult) string {
+	if info.RequiresApproval {
+		return "Plugin staged; review and 2FA approval required"
+	}
+	return "Plugin updated with existing permissions"
+}
+
+func auditPluginInstall(ip, actor string, info plugin.PackageInstallResult) {
+	action := "update plugin with existing grant:"
+	if info.RequiresApproval {
+		action = "stage plugin for approval:"
+	}
+	auditlog.Log(ip, actor, action+info.Short+":"+info.Digest, "info")
 }
 
 func requirePluginAdministrator(c *gin.Context) bool {

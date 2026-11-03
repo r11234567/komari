@@ -31,16 +31,17 @@ const maxPackageStoreBytes int64 = 512 << 20
 const maxStoredPackages = 64
 
 type PackageReview struct {
-	Plugin          models.Plugin `json:"plugin"`
-	Digest          string        `json:"digest"`
-	Source          string        `json:"source"`
-	PermissionsHash string        `json:"permissions_hash"`
-	CreatedAt       time.Time     `json:"created_at"`
-	ApprovedAt      *time.Time    `json:"approved_at,omitempty"`
-	ApprovedBy      string        `json:"approved_by,omitempty"`
-	Revoked         bool          `json:"revoked"`
-	Status          string        `json:"status"`
-	CurrentDigest   string        `json:"current_digest"`
+	Plugin           models.Plugin `json:"plugin"`
+	Digest           string        `json:"digest"`
+	Source           string        `json:"source"`
+	PermissionsHash  string        `json:"permissions_hash"`
+	CreatedAt        time.Time     `json:"created_at"`
+	ApprovedAt       *time.Time    `json:"approved_at,omitempty"`
+	ApprovedBy       string        `json:"approved_by,omitempty"`
+	Revoked          bool          `json:"revoked"`
+	Status           string        `json:"status"`
+	CurrentDigest    string        `json:"current_digest"`
+	RequiresApproval bool          `json:"requires_approval"`
 }
 
 func (p PackageReview) Targets() []string {
@@ -254,26 +255,27 @@ func unpackPackage(path string) (models.Plugin, string, error) {
 func StageZip(path, source, expectedShort, expectedVersion string) (models.Plugin, error) {
 	packageMu.Lock()
 	defer packageMu.Unlock()
-	return stageZip(path, source, expectedShort, expectedVersion)
+	info, _, err := stageZip(path, source, expectedShort, expectedVersion)
+	return info, err
 }
-func stageZip(path, source, expectedShort, expectedVersion string) (models.Plugin, error) {
+func stageZip(path, source, expectedShort, expectedVersion string) (models.Plugin, string, error) {
 	var empty models.Plugin
 	if len(source) > 8192 {
-		return empty, errors.New("package source too long")
+		return empty, "", errors.New("package source too long")
 	}
 	if e := os.MkdirAll(packageDir(), 0700); e != nil {
-		return empty, e
+		return empty, "", e
 	}
 	// Hash the retained copy, never an attacker-changeable source after review.
 	f, e := os.CreateTemp(packageDir(), ".incoming-")
 	if e != nil {
-		return empty, e
+		return empty, "", e
 	}
 	defer os.Remove(f.Name())
 	src, e := os.Open(path)
 	if e != nil {
 		f.Close()
-		return empty, e
+		return empty, "", e
 	}
 	n, e := io.Copy(f, io.LimitReader(src, maxPackageBytes+1))
 	_ = src.Close()
@@ -282,31 +284,31 @@ func stageZip(path, source, expectedShort, expectedVersion string) (models.Plugi
 		e = ce
 	}
 	if e != nil {
-		return empty, e
+		return empty, "", e
 	}
 	if n > maxPackageBytes {
-		return empty, errors.New("plugin package exceeds 100 MiB")
+		return empty, "", errors.New("plugin package exceeds 100 MiB")
 	}
 	digest, e := digestFile(f.Name())
 	if e != nil {
-		return empty, e
+		return empty, "", e
 	}
 	info, dir, e := unpackPackage(f.Name())
 	if e != nil {
-		return empty, e
+		return empty, "", e
 	}
 	defer os.RemoveAll(dir)
 	if (expectedShort != "" && info.Short != expectedShort) || (expectedVersion != "" && info.Version != expectedVersion) {
-		return empty, errors.New("plugin manifest does not match the selected catalog identity")
+		return empty, "", errors.New("plugin manifest does not match the selected catalog identity")
 	}
 	if existing, err := readPackage(digest); err == nil {
-		return existing.Plugin, nil
+		return existing.Plugin, digest, nil
 	} else if !os.IsNotExist(err) {
-		return empty, err
+		return empty, "", err
 	}
 	entries, e := os.ReadDir(packageDir())
 	if e != nil {
-		return empty, e
+		return empty, "", e
 	}
 	count := 0
 	var used int64
@@ -314,24 +316,24 @@ func stageZip(path, source, expectedShort, expectedVersion string) (models.Plugi
 		if strings.HasSuffix(entry.Name(), ".zip") {
 			st, err := entry.Info()
 			if err != nil {
-				return empty, err
+				return empty, "", err
 			}
 			count++
 			used += st.Size()
 		}
 	}
 	if count >= maxStoredPackages || used+n > maxPackageStoreBytes {
-		return empty, errors.New("plugin package storage limit reached; discard unused packages first")
+		return empty, "", errors.New("plugin package storage limit reached; discard unused packages first")
 	}
 	if e = os.Rename(f.Name(), packagePath(digest, ".zip")); e != nil {
-		return empty, e
+		return empty, "", e
 	}
 	review := PackageReview{Plugin: info, Digest: digest, Source: source, PermissionsHash: packagePermissions(info.Permissions), CreatedAt: time.Now().UTC()}
 	if e = savePackage(review); e != nil {
 		_ = os.Remove(packagePath(digest, ".zip"))
-		return empty, e
+		return empty, "", e
 	}
-	return info, nil
+	return info, digest, nil
 }
 
 // Existing installations are snapshotted once for explicit migration review.
@@ -398,7 +400,7 @@ func snapshotInstalled(short string) error {
 	if fileErr != nil {
 		return fileErr
 	}
-	_, e = stageZip(temp.Name(), "Existing installation snapshot", short, "")
+	_, _, e = stageZip(temp.Name(), "Existing installation snapshot", short, "")
 	return e
 }
 
@@ -421,6 +423,62 @@ func writeReceipt(dir, digest string) error {
 }
 func packageApproved(short string, st PluginState) bool {
 	return st.ApprovedPackageDigest != "" && receiptDigest(short) == st.ApprovedPackageDigest
+}
+
+// Reuse only the live grant of this installed identity, never a historical or
+// revoked package. Runtime settings are separate from special capabilities.
+func canReusePackageApproval(candidate PackageReview) bool {
+	if candidate.Revoked {
+		return false
+	}
+	short := candidate.Plugin.Short
+	st := global.stateStore().get(short)
+	if !packageApproved(short, st) {
+		return false
+	}
+	approved, err := readPackage(st.ApprovedPackageDigest)
+	if err != nil || approved.Revoked || approved.ApprovedAt == nil || approved.Plugin.Short != short {
+		return false
+	}
+	installed, err := readManifest(short)
+	if err != nil || st.ApprovedPermissionsHash != approvalPermissionsHash(installed.Permissions) {
+		return false
+	}
+	return !permissionsExpand(installed.Permissions, candidate.Plugin.Permissions)
+}
+
+type PackageInstallResult struct {
+	models.Plugin
+	Digest           string `json:"digest"`
+	RequiresApproval bool   `json:"requires_approval"`
+}
+
+// InstallOrStageZip is for authenticated human upload/catalog operations. A
+// normal update reuses the current grant; first installs and expansions stage
+// without execution. Both paths retain authoritative archive validation.
+func InstallOrStageZip(path, source, expectedShort, expectedVersion, actor string) (PackageInstallResult, error) {
+	packageMu.Lock()
+	defer packageMu.Unlock()
+	var result PackageInstallResult
+	if actor == "" {
+		return result, errors.New("interactive administrator required")
+	}
+	info, digest, err := stageZip(path, source, expectedShort, expectedVersion)
+	if err != nil {
+		return result, err
+	}
+	result = PackageInstallResult{Plugin: info, Digest: digest, RequiresApproval: true}
+	err = decidePackage(info.Short, digest, receiptDigest(info.Short), "activate", actor, func(p PackageReview) error {
+		if p.RequiresApproval {
+			return ErrPermissionApprovalRequired
+		}
+		return nil
+	})
+	if errors.Is(err, ErrPermissionApprovalRequired) {
+		return result, nil
+	}
+	result.RequiresApproval = false
+	return result, err
 }
 
 // Explicitly trusted Go callers may approve existing directories. No transport
@@ -506,6 +564,10 @@ func ListPackages() ([]PackageReview, error) {
 		if p.Revoked {
 			p.Status = "revoked"
 		}
+		p.RequiresApproval = !canReusePackageApproval(p)
+		if (p.Status == "pending" || p.Status == "retained") && !p.RequiresApproval {
+			p.Status = "ready"
+		}
 		result = append(result, p)
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -522,6 +584,10 @@ func ListPackages() ([]PackageReview, error) {
 func DecidePackage(short, digest, current, action, actor string, verify func(PackageReview) error) error {
 	packageMu.Lock()
 	defer packageMu.Unlock()
+	return decidePackage(short, digest, current, action, actor, verify)
+}
+
+func decidePackage(short, digest, current, action, actor string, verify func(PackageReview) error) error {
 	if !validShort(short) || actor == "" || verify == nil {
 		return errors.New("human package approval is required")
 	}
@@ -565,6 +631,7 @@ func DecidePackage(short, digest, current, action, actor string, verify func(Pac
 	if action == "discard" && p.CurrentDigest == digest {
 		return errors.New("cannot discard an installed package")
 	}
+	p.RequiresApproval = action != "activate" || !canReusePackageApproval(p)
 	if e = verify(p); e != nil {
 		return e
 	}
@@ -599,7 +666,10 @@ func DecidePackage(short, digest, current, action, actor string, verify func(Pac
 		if err := savePackage(p); err != nil {
 			return err
 		}
-		return global.setEnabled(short, true, false)
+		if p.RequiresApproval || old.Enabled {
+			return global.setEnabled(short, true, false)
+		}
+		return nil
 	}
 	if e = writeReceipt(prepared, digest); e != nil {
 		return e
@@ -610,7 +680,7 @@ func DecidePackage(short, digest, current, action, actor string, verify func(Pac
 	if e = savePackage(p); e != nil {
 		return e
 	}
-	return activatePrepared(short, digest, prepared, old)
+	return activatePrepared(short, digest, prepared, old, p.RequiresApproval || old.Enabled)
 }
 
 type packageJournal struct {
@@ -620,7 +690,7 @@ type packageJournal struct {
 }
 
 func journalPath(short string) string { return filepath.Join(packageDir(), "journal-"+short+".json") }
-func activatePrepared(short, digest, prepared string, old PluginState) error {
+func activatePrepared(short, digest, prepared string, old PluginState, enabled bool) error {
 	active := filepath.Join(DataDir, short)
 	backup, e := os.MkdirTemp(DataDir, ".rollback-")
 	if e != nil {
@@ -684,8 +754,10 @@ func activatePrepared(short, digest, prepared string, old PluginState) error {
 	if e = global.stateStore().set(short, st); e != nil {
 		return restore(e)
 	}
-	if e = global.setEnabled(short, true, false); e != nil {
-		return restore(e)
+	if enabled {
+		if e = global.setEnabled(short, true, false); e != nil {
+			return restore(e)
+		}
 	}
 	if e = os.Remove(journalPath(short)); e != nil {
 		return restore(e)

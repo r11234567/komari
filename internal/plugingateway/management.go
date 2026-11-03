@@ -55,12 +55,9 @@ func SetEnabled(ctx context.Context, short string, enabled, approved bool) error
 	if meta.Principal.Type != rpc.PrincipalUser || meta.Principal.UserUUID == "" || meta.Principal.IsAPIKey {
 		return ErrPermissionDenied
 	}
-	// A legacy caller-controlled bool cannot grant package execution. The
-	// typed package decision requires a scoped, single-use human 2FA proof.
-	if enabled {
-		return plugin.ErrPermissionApprovalRequired
-	}
-	return plugin.SetEnabled(short, false, false)
+	// Ignore caller-controlled approval flags. Existing live grants permit a
+	// normal switch; missing or changed grants go through scoped human 2FA.
+	return plugin.SetEnabled(short, enabled, false)
 }
 
 func Logs(ctx context.Context, short string) (string, error) {

@@ -869,6 +869,16 @@ func permissionsRequireApproval(p models.PluginPermissions) bool {
 		p.AllowExec || p.AllowListen || p.AllowAllFileAccess
 }
 
+func permissionsExpand(before, after models.PluginPermissions) bool {
+	return (after.AllowSystemRPC && !before.AllowSystemRPC) ||
+		(after.AllowRoutes && !before.AllowRoutes) ||
+		(after.AllowHooks && !before.AllowHooks) ||
+		(after.AllowHTMLInject && !before.AllowHTMLInject) ||
+		(after.AllowExec && !before.AllowExec) ||
+		(after.AllowListen && !before.AllowListen) ||
+		(after.AllowAllFileAccess && !before.AllowAllFileAccess)
+}
+
 // approvalPermissionsHash canonicalizes the approval-relevant permissions so
 // approval can be compared across plugin upgrades. Runtime settings such as
 // node modules, resource limits and the execution timeout are granted by

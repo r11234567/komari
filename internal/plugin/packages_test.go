@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,7 +56,7 @@ func assertReviewRoute(t *testing.T, engine *gin.Engine, status int, body string
 	}
 }
 
-func TestPackageAdmissionKeepsOldVersionAndRequiresNewApprovalForSamePermissions(t *testing.T) {
+func TestPackageAdmissionKeepsOldVersionUntilExplicitUpdateWithReusableGrant(t *testing.T) {
 	withTempDataDir(t)
 	engine := gin.New()
 	Init(engine)
@@ -70,10 +71,12 @@ func TestPackageAdmissionKeepsOldVersionAndRequiresNewApprovalForSamePermissions
 	require.NoError(t, os.WriteFile(filepath.Join(DataDir, "review", "runtime-generated.json"), []byte(`{"compatible":true}`), 0600))
 	require.NoError(t, Reload("review"))
 	assertReviewRoute(t, engine, 200, "old")
-	// Same version and permissions, different code: approval cannot carry over.
+	// Staging stays non-executing; a same-permission update can reuse the grant.
 	next := stageReviewFixture(t, "1.0.0", reviewScript("new"))
 	require.NotEqual(t, old.Digest, next.Digest)
 	require.Equal(t, old.PermissionsHash, next.PermissionsHash)
+	require.False(t, next.RequiresApproval)
+	require.Equal(t, "ready", next.Status)
 	assertReviewRoute(t, engine, 200, "old")
 	denied := errors.New("fresh 2FA missing")
 	require.ErrorIs(t, DecidePackage("review", next.Digest, old.Digest, "activate", "human", func(PackageReview) error { return denied }), denied)
@@ -86,7 +89,7 @@ func TestPackageAdmissionKeepsOldVersionAndRequiresNewApprovalForSamePermissions
 	config, err := GetConfiguration("review")
 	require.NoError(t, err)
 	require.Equal(t, "configuration", config["kept"])
-	// Rollback is another explicit approval of exact retained bytes.
+	// Rollback also checks the current grant against exact retained bytes.
 	decideFixture(t, old, "activate")
 	assertReviewRoute(t, engine, 200, "old")
 	decideFixture(t, old, "revoke")
@@ -102,6 +105,101 @@ func TestPackageAdmissionKeepsOldVersionAndRequiresNewApprovalForSamePermissions
 			require.Equal(t, "revoked", row.Status)
 		}
 	}
+}
+
+func TestPackageHumanUpdateReusesGrantAndPreservesDisabledState(t *testing.T) {
+	withTempDataDir(t)
+	engine := gin.New()
+	Init(engine)
+	old := stageReviewFixture(t, "1", reviewScript("old"))
+	decideFixture(t, old, "activate")
+	require.NoError(t, SetEnabled("review", false, false))
+	require.NoError(t, SetEnabled("review", true, false))
+	assertReviewRoute(t, engine, 200, "old")
+	archives := map[string]string{}
+	update := func(version string) PackageInstallResult {
+		path := archives[version]
+		if path == "" {
+			path = writePluginZip(t, map[string]string{
+				"komari-plugin.json": fmt.Sprintf(`{"short":"review","name":"Update fixture","version":%q,"permissions":{"allowRoutes":true,"allowHTMLInject":true,"node":true,"timeout":30}}`, version),
+				"script.js":          reviewScript(version),
+			})
+			archives[version] = path
+		}
+		result, err := InstallOrStageZip(path, "human upload", "review", version, "human")
+		require.NoError(t, err)
+		require.False(t, result.RequiresApproval)
+		return result
+	}
+	first := update("2")
+	assertReviewRoute(t, engine, 200, "2")
+	require.Equal(t, first.Digest, receiptDigest("review"))
+	require.NoError(t, SetEnabled("review", false, false))
+	second := update("3")
+	require.False(t, global.stateStore().get("review").Enabled)
+	require.Nil(t, global.instanceFor("review"))
+	update("3") // Identical-archive retries must not enable a disabled plugin.
+	require.False(t, global.stateStore().get("review").Enabled)
+	require.NoError(t, SetEnabled("review", true, false))
+	assertReviewRoute(t, engine, 200, "3")
+	require.NoError(t, CloseAll())
+	require.NoError(t, LoadAll())
+	assertReviewRoute(t, engine, 200, "3")
+	require.Equal(t, second.Digest, receiptDigest("review"))
+}
+
+func TestPackageUpdateExpansionRevocationAndFirstInstallStillRequire2FA(t *testing.T) {
+	withTempDataDir(t)
+	engine := gin.New()
+	Init(engine)
+	archive := func(permissions string, version string) string {
+		return writePluginZip(t, map[string]string{
+			"komari-plugin.json": fmt.Sprintf(`{"short":"review","name":"Grant fixture","version":%q,"permissions":%s}`, version, permissions),
+			"script.js":          "function load(){}",
+		})
+	}
+	path := archive(`{}`, "1")
+	_, err := InstallOrStageZip(path, "upload", "", "", "")
+	require.Error(t, err)
+	first, err := InstallOrStageZip(path, "upload", "", "", "human")
+	require.NoError(t, err)
+	require.True(t, first.RequiresApproval)
+	require.Nil(t, global.instanceFor("review"))
+	rows, err := ListPackages()
+	require.NoError(t, err)
+	decideFixture(t, rows[0], "activate")
+	expanded, err := InstallOrStageZip(archive(`{"allowExec":true}`, "2"), "upload", "", "", "human")
+	require.NoError(t, err)
+	require.True(t, expanded.RequiresApproval)
+	require.Equal(t, first.Digest, receiptDigest("review"))
+	active, err := readPackage(first.Digest)
+	require.NoError(t, err)
+	decideFixture(t, active, "revoke")
+	reinstalled, err := InstallOrStageZip(path, "upload", "", "", "human")
+	require.NoError(t, err)
+	require.True(t, reinstalled.RequiresApproval)
+	require.Nil(t, global.instanceFor("review"))
+}
+
+func TestPermissionReuseCoversEverySpecialCapabilityAndIgnoresRuntimeSettings(t *testing.T) {
+	permissions := []func(*models.PluginPermissions){
+		func(p *models.PluginPermissions) { p.AllowSystemRPC = true },
+		func(p *models.PluginPermissions) { p.AllowRoutes = true },
+		func(p *models.PluginPermissions) { p.AllowHooks = true },
+		func(p *models.PluginPermissions) { p.AllowHTMLInject = true },
+		func(p *models.PluginPermissions) { p.AllowExec = true },
+		func(p *models.PluginPermissions) { p.AllowListen = true },
+		func(p *models.PluginPermissions) { p.AllowAllFileAccess = true },
+	}
+	for _, grant := range permissions {
+		before := models.PluginPermissions{}
+		after := before
+		grant(&after)
+		require.True(t, permissionsExpand(before, after))
+		require.False(t, permissionsExpand(after, after))
+		require.False(t, permissionsExpand(after, before))
+	}
+	require.False(t, permissionsExpand(models.PluginPermissions{}, models.PluginPermissions{Node: true, TimeoutSeconds: 60, MaxHTTPBodyBytes: 1000, MaxChildOutputBytes: 500}))
 }
 
 func TestPackageFailedActivationRestoresApprovedRuntimeAndData(t *testing.T) {

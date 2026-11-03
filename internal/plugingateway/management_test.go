@@ -3,7 +3,6 @@ package plugingateway
 import (
 	"context"
 	"errors"
-	"github.com/komari-monitor/komari/internal/plugin"
 	"testing"
 
 	"github.com/komari-monitor/komari/pkg/rpc"
@@ -50,7 +49,7 @@ func TestManagementValidatesNamesAndCancellation(t *testing.T) {
 
 func TestPluginLifecycleCannotGrantExecutionWithLegacyBooleanOrMachineIdentity(t *testing.T) {
 	ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: rpc.NewUserPrincipal("human")})
-	if err := SetEnabled(ctx, "not-installed", true, true); !errors.Is(err, plugin.ErrPermissionApprovalRequired) {
+	if err := SetEnabled(ctx, "not-installed", true, true); err == nil {
 		t.Fatalf("legacy approval flag granted code execution: %v", err)
 	}
 	for _, principal := range []*rpc.Principal{rpc.NewAPIKeyPrincipal(), rpc.PrincipalFromRole(rpc.RoleAdmin)} {

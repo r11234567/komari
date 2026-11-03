@@ -337,7 +337,7 @@ func InstallPluginFromMarket(c *gin.Context) {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save temporary plugin file")
 		return
 	}
-	installed, err := plugin.StageZip(tempPath, source.URL+"\n"+selected.Download, selected.Short, selected.Version)
+	installed, err := plugin.InstallOrStageZip(tempPath, source.URL+"\n"+selected.Download, selected.Short, selected.Version, api.GetPrincipal(c).UserUUID)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -346,7 +346,8 @@ func InstallPluginFromMarket(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "Plugin manifest does not match the market catalog")
 		return
 	}
-	api.RespondSuccessMessage(c, "Plugin staged from market; review and 2FA approval required", installed)
+	auditPluginInstall(c.ClientIP(), api.GetPrincipal(c).UserUUID, installed)
+	api.RespondSuccessMessage(c, pluginInstallMessage(installed), installed)
 }
 
 func fetchPluginMarketCatalog(source PluginMarketSource, force bool) ([]PluginMarketPlugin, error) {

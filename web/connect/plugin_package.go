@@ -57,16 +57,22 @@ func (s *pluginService) DecidePluginPackage(ctx context.Context, req *connect.Re
 	if err != nil {
 		return nil, err
 	}
-	// No nil-proof or "2FA not configured" success path. The ceremony must
-	// produce a native, fresh, single-use authorization for this exact package.
+	// The package transaction decides whether the current grant covers this
+	// activation. Fresh grants always need scoped 2FA, including zero-capability
+	// first installs. Reuse is checked against authoritative bytes under lock.
 	token := req.Msg.TwoFactor.GetAuthorizationToken()
-	if token == "" {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("fresh scoped 2FA authorization is required; configure a trusted credential first"))
-	}
 	authorized := false
 	err = pluginapp.DecidePackage(req.Msg.ShortName, req.Msg.Digest, req.Msg.ExpectedCurrentDigest, req.Msg.Action, owner, func(review pluginapp.PackageReview) error {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if token == "" {
+			if review.RequiresApproval {
+				return connect.NewError(connect.CodeUnauthenticated, errors.New("fresh scoped 2FA authorization is required for a new or expanded grant"))
+			}
+			authorized = true
+			auditlog.Log(rpc.MetaFromContext(ctx).RemoteIP, owner, "reuse plugin grant:"+review.Plugin.Short+":"+review.Digest+" previous:"+review.CurrentDigest, "info")
+			return nil
 		}
 		_, err := credentialgateway.Default.Consume(ctx, token, credential.SensitiveOperation, credentialaction.ScopedResource("plugin-package:"+req.Msg.Action, review.Targets()...))
 		if err != nil {

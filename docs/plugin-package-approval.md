@@ -1,35 +1,46 @@
-# Plugin package admission with mandatory 2FA
+# Plugin permission grants and package admission
 
 Implemented 2026-11-03. This replaces the earlier content-approval proposal and
 preserves official plugin runtime interfaces.
 
-Direct uploads, chunked uploads and catalog installs only stage packages. No
-JavaScript runs, no hooks/routes are registered, no pending static files are
-served, and the approved active installation stays untouched. Catalog identity,
+Direct uploads, chunked uploads and catalog installs stage first installs and
+permission expansions without executing code. Ordinary updates of an already
+approved plugin reuse its live grant when special permissions are unchanged or
+reduced; a disabled plugin stays disabled after an update. Pending packages do
+not replace the approved active installation. Catalog identity,
 version and checksum are validated before retention; the backend independently
 hashes the retained ZIP bytes with SHA-256.
 
 The review shows source, version, package fingerprint, prior version, all
-capabilities/runtime-limit differences, and approving user/time. Matching
-versions or permissions never transfer approval to different bytes. Even a
-package with no special capabilities requires approval of its executable code.
+capabilities/runtime-limit differences, and the approving/updating user/time.
+Initial approval, added special capabilities and reauthorization after revocation
+require fresh scoped 2FA. Package byte or version changes alone do not require
+reapproval. A zero-capability first installation still requires initial approval.
+Runtime compatibility settings and limits are not special permission grants.
 
 ## Mandatory authorization
 
 `PluginService/DecidePluginPackage` supports activation (including explicit
-rollback), revocation and discard. Every decision requires a live human admin
-and a fresh, single-use authorization from the existing trusted credential
+rollback), revocation and discard. Every decision requires a live human admin.
+New or expanded grants, revocation and discard require a fresh, single-use
+authorization from the existing trusted credential
 ceremony: TOTP, native notification OTP, or the trusted Passkey adapter.
 The resource is `ScopedResource("plugin-package:" + action, short, packageDigest,
 version, fullPermissionsHash, expectedCurrentDigest)`. Proofs expire and bind
 user/session/security state. The server rebuilds the authoritative activation
 target from the actual archive before consuming a proof.
 
-There is no raw-code, empty-proof or unconfigured-2FA success path. Legacy
+There is no raw-code, empty-proof or unconfigured-2FA path for new grants. A
+proof-free activation must be covered by the installed plugin identity’s live,
+non-revoked package/permission grant, checked after rebuilding the actual
+archive under the serialized transaction lock. Historical grants and grants for
+other identities cannot authorize an update. Explicitly supplied proofs are
+still consumed and must be valid even if the current grant could cover it. Legacy
 `approved=true` / `permissions_approved=true` cannot grant execution. Tokens,
-Agents and role-only plugin identities cannot approve packages. Re-enabling an
-approved package also requires fresh 2FA; disabling reduces authority and remains
-available to a human administrator without a new grant.
+Agents and role-only plugin identities cannot approve or manage plugins.
+Switching an already approved plugin off/on reuses its current grant without
+2FA; caller-controlled approval flags cannot grant missing permissions.
+Revocation clears the grant, so enabling afterward requires approval again.
 
 ## Transactions and compatibility
 
@@ -41,7 +52,8 @@ are atomic; Unix directory synchronization persists journal/state renames.
 The reserved `.komari-package.json` installed receipt must match the persisted
 approved digest on enable, restart and reload paths.
 
-Rollback uses retained exact archive bytes and a new 2FA proof. Revocation clears
+Rollback uses retained exact archive bytes and follows the same live permission
+grant check; a revoked package or expanded capabilities need fresh 2FA. Revocation clears
 the persisted grant and unloads the runtime, hooks, injected fragments, RPC and
 scheduled runtime jobs. Missing/damaged retained ZIPs do not prevent revocation.
 Discard removes inactive packages; uninstall removes retained artifacts too.
@@ -86,7 +98,13 @@ explicitly.
 [Focused Linux validation](https://github.com/r11234567/komari/actions/runs/41581713320)
 passed race-enabled plugin/gateway/archive suites and real native-TOTP package
 and policy tests. Coverage includes missing/unconfigured 2FA, altered targets,
-wrong action/session, replay, same-permission updates, startup rollback,
+wrong action/session, replay, first-install/expanded-grant denial, ordinary
+update and switch reuse, disabled-state preservation, startup rollback,
 interrupted recovery, state-write failure, missing-ZIP revocation, and staging
 without execution. Final PR-head checks and embedded UI provenance are recorded
 in the PR; these are separate from production validation.
+
+The Web UI keeps approval/history in an on-demand toolbar dialog, rather than a
+permanent package panel. Installs needing a grant open their review dialog;
+ordinary updates complete without a permission prompt. API Tokens use a compact
+multi-select node dropdown and describe only the available read scopes.
