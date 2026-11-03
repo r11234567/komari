@@ -48,20 +48,22 @@ var (
 			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: 15 * time.Second,
 		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return errors.New("too many redirects")
-			}
-			if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
-				return errors.New("redirected to an unsupported URL scheme")
-			}
-			if isPrivateIP(req.URL.Hostname()) {
-				return errors.New("redirected to a private/internal address")
-			}
-			return nil
-		},
+		CheckRedirect: validateThemeRedirect,
 	}
 )
+
+func validateThemeRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("too many redirects")
+	}
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		return errors.New("redirected to an unsupported URL scheme")
+	}
+	if isPrivateIPContext(req.Context(), req.URL.Hostname()) {
+		return errors.New("redirected to a private/internal address")
+	}
+	return nil
+}
 
 func temporaryThemeArchive(data []byte, prefix string) (string, error) {
 	file, err := os.CreateTemp("", prefix+"-*.zip")
@@ -558,7 +560,13 @@ func isThemeShort(short string) bool {
 // downloadThemeFromURL 从URL下载主题文件
 // isPrivateIP checks if the resolved IP addresses are private/internal
 func isPrivateIP(host string) bool {
-	ips, err := net.DefaultResolver.LookupIPAddr(context.Background(), host)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return isPrivateIPContext(ctx, host)
+}
+
+func isPrivateIPContext(ctx context.Context, host string) bool {
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		return true // fail closed
 	}
@@ -620,21 +628,28 @@ func blockedThemeAddress(ip net.IP) bool {
 // dialPublicAddress validates the address returned at connection time, closing
 // DNS rebinding and redirect races left by URL-only validation.
 func dialPublicAddress(ctx context.Context, network, address string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	return dialPublicAddressWith(ctx, network, address, net.DefaultResolver.LookupIPAddr, dialer.DialContext)
+}
+
+func dialPublicAddressWith(ctx context.Context, network, address string, lookup func(context.Context, string) ([]net.IPAddr, error), dial func(context.Context, string, string) (net.Conn, error)) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
 	}
-	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	addresses, err := lookup(ctx, host)
 	if err != nil {
 		return nil, err
 	}
-	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	var lastErr error
 	for _, candidate := range addresses {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if blockedThemeAddress(candidate.IP) {
 			continue
 		}
-		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
+		conn, dialErr := dial(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
 		if dialErr == nil {
 			return conn, nil
 		}

@@ -74,6 +74,11 @@ jobs:
       - name: Read-only inspection of pre-existing quota pollution
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh quota-audit python3 -m unittest discover -s scripts/tests -p test_audit_traffic_limits.py -v
+      - name: Consolidated seven-advisory matrix (missing and skipped tests fail)
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_security_advisory_matrix.py -v
+          python3 scripts/ci/run-security-advisories.py ci-artifacts/security-advisories
       - name: Native proof binding, HTTP token isolation and actual quiet terminal streams
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh api-connect bash scripts/ci/run-go-tests.sh -race -run 'Test(Policy|ApiToken|ApiKey|ApiAuthentication|WebSSHCold|Workspace|TrustedAction|ConnectMetricQuery)' ./web/connect

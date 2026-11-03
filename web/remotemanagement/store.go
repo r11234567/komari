@@ -9,16 +9,20 @@ import (
 	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/web/workspace"
 	websshv1 "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
-	leaseDuration       = 30 * time.Second
-	maxSessionDuration  = 2 * time.Hour
-	closedRetention     = 5 * time.Minute
-	maxBufferedOutput   = 8 << 20
-	maxActiveSessions   = 64
-	maxBufferedCommands = 1024
+	leaseDuration           = 30 * time.Second
+	maxSessionDuration      = 2 * time.Hour
+	closedRetention         = 5 * time.Minute
+	maxBufferedOutput       = 8 << 20
+	maxActiveSessions       = 64
+	maxBufferedCommands     = 1024
+	maxBufferedCommandBytes = 2 << 20
+	maxBufferedEvents       = 8192
+	maxBufferedEventBytes   = 16 << 20
 )
 
 var (
@@ -46,18 +50,20 @@ type Session struct {
 	WorkingDirectory string
 	Size             *websshv1.TerminalSize
 
-	attached         bool
-	closed           *websshv1.SessionClosed
-	commandSeq       uint64
-	agentSeq         uint64
-	commands         []*websshv1.AttachSessionResponse
-	events           []*websshv1.SessionEvent
-	bufferedOutput   uint64
-	commandNotify    chan struct{}
-	eventNotify      chan struct{}
-	grantStop        func() bool
-	browserConsumers int
-	browserDeadline  time.Time
+	attached             bool
+	closed               *websshv1.SessionClosed
+	commandSeq           uint64
+	agentSeq             uint64
+	commands             []*websshv1.AttachSessionResponse
+	events               []*websshv1.SessionEvent
+	bufferedOutput       uint64
+	bufferedCommandBytes int
+	bufferedEventBytes   int
+	commandNotify        chan struct{}
+	eventNotify          chan struct{}
+	grantStop            func() bool
+	browserConsumers     int
+	browserDeadline      time.Time
 }
 
 const BrowserDisconnectGrace = time.Minute
@@ -287,26 +293,35 @@ func (s *Session) EnqueueCommand(sequence uint64, command Command) (uint64, erro
 	if len(s.commands) >= maxBufferedCommands {
 		return s.commandSeq, ErrCommandBacklog
 	}
+	response := command.Response(sequence)
+	size := proto.Size(response)
+	if size > maxBufferedCommandBytes-s.bufferedCommandBytes {
+		return s.commandSeq, ErrCommandBacklog
+	}
 	s.commandSeq = sequence
-	s.commands = append(s.commands, command.Response(sequence))
+	s.commands = append(s.commands, response)
+	s.bufferedCommandBytes += size
 	s.signalCommands()
 	return s.commandSeq, nil
 }
 
 func (s *Session) NextCommand(ctx context.Context, after uint64) (*websshv1.AttachSessionResponse, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		s.mu.Lock()
+		if s.closed != nil {
+			closed := &websshv1.AttachSessionResponse{Sequence: s.commandSeq + 1, Command: &websshv1.AttachSessionResponse_CloseReason{CloseReason: s.closed.Reason.String()}}
+			s.mu.Unlock()
+			return closed, nil
+		}
 		for _, command := range s.commands {
 			if command.Sequence > after {
 				result := command
 				s.mu.Unlock()
 				return result, nil
 			}
-		}
-		if s.closed != nil {
-			closed := &websshv1.AttachSessionResponse{Sequence: s.commandSeq + 1, Command: &websshv1.AttachSessionResponse_CloseReason{CloseReason: s.closed.Reason.String()}}
-			s.mu.Unlock()
-			return closed, nil
 		}
 		signal := s.commandNotify
 		s.mu.Unlock()
@@ -332,9 +347,15 @@ func (s *Session) AppendAgentEvent(event *websshv1.AgentSessionEvent) (uint64, e
 		for _, command := range s.commands {
 			if command.Sequence > event.AcceptedCommandSequence {
 				commands = append(commands, command)
+			} else {
+				s.bufferedCommandBytes -= proto.Size(command)
 			}
 		}
+		clear(s.commands[len(commands):])
 		s.commands = commands
+	}
+	if s.closed != nil {
+		return s.agentSeq, ErrClosed
 	}
 	if event.Sequence == 0 && event.Event == nil {
 		return s.agentSeq, nil
@@ -349,10 +370,6 @@ func (s *Session) AppendAgentEvent(event *websshv1.AgentSessionEvent) (uint64, e
 	if file := event.GetFile(); file != nil {
 		buffered += uint64(len(file.Data))
 	}
-	if buffered+s.bufferedOutput > maxBufferedOutput {
-		return s.agentSeq, ErrOutputLimit
-	}
-	s.bufferedOutput += buffered
 	occurredAt := event.OccurredAt
 	if occurredAt == nil || !occurredAt.IsValid() {
 		occurredAt = timestamppb.Now()
@@ -364,10 +381,35 @@ func (s *Session) AppendAgentEvent(event *websshv1.AgentSessionEvent) (uint64, e
 	case *websshv1.AgentSessionEvent_File:
 		stored.Event = &websshv1.SessionEvent_File{File: value.File}
 	case *websshv1.AgentSessionEvent_Closed:
+		if value.Closed == nil {
+			return s.agentSeq, errors.New("agent session close is empty")
+		}
 		stored.Event = &websshv1.SessionEvent_Closed{Closed: value.Closed}
-		s.closed = value.Closed
 	default:
 		return s.agentSeq, errors.New("agent session event is empty")
+	}
+	size := proto.Size(stored)
+	if buffered > maxBufferedOutput-s.bufferedOutput || len(s.events) >= maxBufferedEvents || size > maxBufferedEventBytes-s.bufferedEventBytes {
+		// A non-reading browser must neither allocate forever nor leave a live
+		// shell behind a permanently full replay buffer. Report a failed close.
+		closed := s.closeLocked(websshv1.CloseReason_CLOSE_REASON_FAILED)
+		s.agentSeq++
+		failed := &websshv1.SessionEvent{SessionId: s.ID, Sequence: s.agentSeq, OccurredAt: timestamppb.Now(), Event: &websshv1.SessionEvent_Closed{Closed: closed}}
+		s.events = []*websshv1.SessionEvent{failed}
+		s.bufferedEventBytes = proto.Size(failed)
+		return s.agentSeq, ErrOutputLimit
+	}
+	s.bufferedOutput += buffered
+	s.bufferedEventBytes += size
+	if value, ok := event.Event.(*websshv1.AgentSessionEvent_Closed); ok {
+		s.closed = value.Closed
+		if s.grantStop != nil {
+			s.grantStop()
+			s.grantStop = nil
+		}
+		s.commands = nil
+		s.bufferedCommandBytes = 0
+		s.signalCommands()
 	}
 	s.agentSeq = event.Sequence
 	s.events = append(s.events, stored)
@@ -396,13 +438,18 @@ func (s *Session) AcknowledgeEvents(sequence uint64) (uint64, error) {
 		} else {
 			s.bufferedOutput -= released
 		}
+		s.bufferedEventBytes -= proto.Size(event)
 	}
+	clear(s.events[len(kept):])
 	s.events = kept
 	return sequence, nil
 }
 
 func (s *Session) NextEvent(ctx context.Context, after uint64) (*websshv1.SessionEvent, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		s.mu.Lock()
 		for _, event := range s.events {
 			if event.Sequence > after {
@@ -438,8 +485,10 @@ func (s *Session) closeLocked(reason websshv1.CloseReason) *websshv1.SessionClos
 		}
 		s.closed = &websshv1.SessionClosed{SessionId: s.ID, Reason: reason, ClosedAt: timestamppb.Now()}
 		s.commands = nil
+		s.bufferedCommandBytes = 0
 		s.events = nil
 		s.bufferedOutput = 0
+		s.bufferedEventBytes = 0
 		s.signalCommands()
 		s.signalEvents()
 	}

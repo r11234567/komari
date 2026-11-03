@@ -51,6 +51,7 @@ var connectMetricQueryFlight singleflight.Group
 var connectMetricQueryCache struct {
 	sync.Mutex
 	items map[string]metricQueryCacheEntry
+	bytes int
 }
 
 // metricQueryCacheEntry holds the response message rather than the
@@ -63,6 +64,7 @@ var connectMetricQueryCache struct {
 type metricQueryCacheEntry struct {
 	expiresAt time.Time
 	message   *metricsv1.QueryMetricsResponse
+	size      int
 }
 
 // acquireMetricReadSlot schedules public history scans instead of letting a
@@ -110,6 +112,9 @@ var connectDerivedMetricDefinitions = []metric.Definition{
 // QueryMetrics is the canonical public historical-read path. It intentionally
 // reads the metric store directly rather than calling the JSON-RPC adapter.
 func (s *metricsService) QueryMetrics(ctx context.Context, req *connect.Request[metricsv1.QueryMetricsRequest]) (*connect.Response[metricsv1.QueryMetricsResponse], error) {
+	if err := ctx.Err(); err != nil {
+		return nil, connectMetricStoreError(err)
+	}
 	// Dashboard refreshes from several browser tabs commonly ask for the exact
 	// same window. Share an in-flight read so the request fan-out cannot multiply
 	// SQLite work; the key includes the caller scope because visibility differs.
@@ -117,51 +122,80 @@ func (s *metricsService) QueryMetrics(ctx context.Context, req *connect.Request[
 	if cached, ok := cachedMetricQueryMessage(key, time.Now()); ok {
 		return connect.NewResponse(cached), nil
 	}
-	value, err, _ := connectMetricQueryFlight.Do(key, func() (any, error) {
+	flight := connectMetricQueryFlight.DoChan(key, func() (any, error) {
 		result, queryErr := s.queryMetrics(ctx, req)
 		if queryErr != nil {
 			return nil, queryErr
 		}
-		storeMetricQueryMessage(key, result.Msg, time.Now())
+		if ctx.Err() == nil {
+			storeMetricQueryMessage(key, result.Msg, time.Now())
+		}
 		return result.Msg, nil
 	})
-	if err != nil {
-		return nil, err
+	select {
+	case <-ctx.Done():
+		return nil, connectMetricStoreError(ctx.Err())
+	case result := <-flight:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		// Each caller owns its headers/trailers; only immutable messages are shared.
+		return connect.NewResponse(result.Val.(*metricsv1.QueryMetricsResponse)), nil
 	}
-	// Every caller - cache hit or singleflight follower - gets its own wrapper so
-	// the shared message is the only thing they have in common.
-	return connect.NewResponse(value.(*metricsv1.QueryMetricsResponse)), nil
 }
 
-const connectMetricQueryCacheLimit = 512
+const (
+	connectMetricQueryCacheLimit      = 512
+	connectMetricQueryCacheBytes      = 32 << 20
+	connectMetricQueryCacheEntryBytes = 4 << 20
+)
 
 func cachedMetricQueryMessage(key string, at time.Time) (*metricsv1.QueryMetricsResponse, bool) {
 	connectMetricQueryCache.Lock()
 	defer connectMetricQueryCache.Unlock()
 	cached, ok := connectMetricQueryCache.items[key]
 	if !ok || cached.message == nil || !at.Before(cached.expiresAt) {
+		if ok {
+			delete(connectMetricQueryCache.items, key)
+			connectMetricQueryCache.bytes -= cached.size
+		}
 		return nil, false
 	}
 	return cached.message, true
 }
 
 func storeMetricQueryMessage(key string, message *metricsv1.QueryMetricsResponse, at time.Time) {
+	if message == nil {
+		return
+	}
+	size := proto.Size(message)
+	if size > connectMetricQueryCacheEntryBytes {
+		return
+	}
 	connectMetricQueryCache.Lock()
 	defer connectMetricQueryCache.Unlock()
 	if connectMetricQueryCache.items == nil {
 		connectMetricQueryCache.items = make(map[string]metricQueryCacheEntry)
+		connectMetricQueryCache.bytes = 0
 	}
-	if len(connectMetricQueryCache.items) >= connectMetricQueryCacheLimit {
+	if previous, ok := connectMetricQueryCache.items[key]; ok {
+		connectMetricQueryCache.bytes -= previous.size
+		delete(connectMetricQueryCache.items, key)
+	}
+	if len(connectMetricQueryCache.items) >= connectMetricQueryCacheLimit || connectMetricQueryCache.bytes+size > connectMetricQueryCacheBytes {
 		for cachedKey, cached := range connectMetricQueryCache.items {
-			if at.After(cached.expiresAt) {
+			if !at.Before(cached.expiresAt) {
 				delete(connectMetricQueryCache.items, cachedKey)
+				connectMetricQueryCache.bytes -= cached.size
 			}
 		}
-		if len(connectMetricQueryCache.items) >= connectMetricQueryCacheLimit {
+		if len(connectMetricQueryCache.items) >= connectMetricQueryCacheLimit || connectMetricQueryCache.bytes+size > connectMetricQueryCacheBytes {
 			connectMetricQueryCache.items = make(map[string]metricQueryCacheEntry)
+			connectMetricQueryCache.bytes = 0
 		}
 	}
-	connectMetricQueryCache.items[key] = metricQueryCacheEntry{expiresAt: at.Add(connectMetricCacheTTL), message: message}
+	connectMetricQueryCache.items[key] = metricQueryCacheEntry{expiresAt: at.Add(connectMetricCacheTTL), message: message, size: size}
+	connectMetricQueryCache.bytes += size
 }
 
 func connectMetricQueryKey(ctx context.Context, request *metricsv1.QueryMetricsRequest) string {
@@ -323,13 +357,17 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		if queryErr != nil {
 			return nil, connectMetricStoreError(queryErr)
 		}
+		grouped := make([]map[string][]int, len(batch))
 		for _, item := range pendingDownsample {
 			if item.queryIndex >= len(batch) {
 				continue
 			}
-			points := connectAggregatePointsForEntity(batch[item.queryIndex], item.agentID)
+			if grouped[item.queryIndex] == nil {
+				grouped[item.queryIndex] = connectAggregatePointIndices(batch[item.queryIndex], entityIDs...)
+			}
+			points := grouped[item.queryIndex][item.agentID]
 			if len(points) > 0 {
-				resultParts[item.index] = connectAggregateSeries(item.metricName, item.agentID, item.definition, aggregation, item.interval, req.Msg.FillEmpty, start, end, points)
+				resultParts[item.index] = connectAggregateSeries(item.metricName, item.agentID, item.definition, aggregation, item.interval, req.Msg.FillEmpty, start, end, batch[item.queryIndex], points)
 			}
 		}
 	}
@@ -338,11 +376,15 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		if queryErr != nil {
 			return nil, connectMetricStoreError(queryErr)
 		}
+		grouped := make([]map[string][]int, len(batch))
 		for _, item := range pendingRaw {
 			if item.queryIndex >= len(batch) {
 				continue
 			}
-			resultParts[item.index] = connectRawSeries(item.metricName, item.agentID, item.definition, connectRawPointsForEntity(batch[item.queryIndex], item.agentID))
+			if grouped[item.queryIndex] == nil {
+				grouped[item.queryIndex] = connectRawPointIndices(batch[item.queryIndex], entityIDs...)
+			}
+			resultParts[item.index] = connectRawSeries(item.metricName, item.agentID, item.definition, batch[item.queryIndex], grouped[item.queryIndex][item.agentID])
 		}
 	}
 	result := make([]*metricsv1.MetricsSeries, 0, len(resultParts))
@@ -352,21 +394,31 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 	return connect.NewResponse(&metricsv1.QueryMetricsResponse{Series: result}), nil
 }
 
-func connectAggregatePointsForEntity(points []metric.AggregatePoint, entityID string) []metric.AggregatePoint {
-	result := make([]metric.AggregatePoint, 0, len(points))
-	for _, point := range points {
-		if point.EntityID == entityID {
-			result = append(result, point)
+// Store results stay immutable. Index only visible entities without allocating
+// another full Point/AggregatePoint slice for each node.
+func connectAggregatePointIndices(points []metric.AggregatePoint, wanted ...string) map[string][]int {
+	result := make(map[string][]int, len(wanted))
+	for _, id := range wanted {
+		result[id] = nil
+	}
+	for index := range points {
+		id := points[index].EntityID
+		if indices, ok := result[id]; len(wanted) == 0 || ok {
+			result[id] = append(indices, index)
 		}
 	}
 	return result
 }
 
-func connectRawPointsForEntity(points []metric.Point, entityID string) []metric.Point {
-	result := make([]metric.Point, 0, len(points))
-	for _, point := range points {
-		if point.EntityID == entityID {
-			result = append(result, point)
+func connectRawPointIndices(points []metric.Point, wanted ...string) map[string][]int {
+	result := make(map[string][]int, len(wanted))
+	for _, id := range wanted {
+		result[id] = nil
+	}
+	for index := range points {
+		id := points[index].EntityID
+		if indices, ok := result[id]; len(wanted) == 0 || ok {
+			result[id] = append(indices, index)
 		}
 	}
 	return result
@@ -536,9 +588,18 @@ func connectVisibleAgentIDs(ctx context.Context, requested []string) ([]string, 
 	return result, nil
 }
 
-func connectAggregateSeries(metricName, agentID string, definition metric.Definition, aggregation metric.Aggregation, interval time.Duration, fillEmpty bool, start, end time.Time, points []metric.AggregatePoint) []*metricsv1.MetricsSeries {
+func connectAggregateSeries(metricName, agentID string, definition metric.Definition, aggregation metric.Aggregation, interval time.Duration, fillEmpty bool, start, end time.Time, points []metric.AggregatePoint, selected ...[]int) []*metricsv1.MetricsSeries {
 	groups := make(map[string]*metricsv1.MetricsSeries)
-	for _, point := range points {
+	count := len(points)
+	if len(selected) > 0 {
+		count = len(selected[0])
+	}
+	for index := 0; index < count; index++ {
+		physicalIndex := index
+		if len(selected) > 0 {
+			physicalIndex = selected[0][index]
+		}
+		point := &points[physicalIndex]
 		key := metricTagsKey(point.Tags)
 		series := groups[key]
 		if series == nil {
@@ -562,9 +623,18 @@ func connectAggregateSeries(metricName, agentID string, definition metric.Defini
 	return result
 }
 
-func connectRawSeries(metricName, agentID string, definition metric.Definition, points []metric.Point) []*metricsv1.MetricsSeries {
+func connectRawSeries(metricName, agentID string, definition metric.Definition, points []metric.Point, selected ...[]int) []*metricsv1.MetricsSeries {
 	groups := make(map[string]*metricsv1.MetricsSeries)
-	for _, point := range points {
+	count := len(points)
+	if len(selected) > 0 {
+		count = len(selected[0])
+	}
+	for index := 0; index < count; index++ {
+		physicalIndex := index
+		if len(selected) > 0 {
+			physicalIndex = selected[0][index]
+		}
+		point := &points[physicalIndex]
 		key := metricTagsKey(point.Tags)
 		series := groups[key]
 		if series == nil {
