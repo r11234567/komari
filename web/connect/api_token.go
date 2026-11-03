@@ -37,7 +37,7 @@ func apiTokenView(row models.APIToken) *adminv1.ApiToken {
 }
 
 func (s *apiTokenService) ListApiTokens(ctx context.Context, req *connect.Request[adminv1.ListApiTokensRequest]) (*connect.Response[adminv1.ListApiTokensResponse], error) {
-	owner, err := requireAdminUser(rpc.MetaFromContext(ctx))
+	owner, err := requireInteractiveAdministrator(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +72,7 @@ func apiTokenCreateTargets(req *adminv1.CreateApiTokenRequest) []string {
 }
 
 func (s *apiTokenService) CreateApiToken(ctx context.Context, req *connect.Request[adminv1.CreateApiTokenRequest]) (*connect.Response[adminv1.CreateApiTokenResponse], error) {
-	owner, err := requireAdminUser(rpc.MetaFromContext(ctx))
+	owner, err := requireInteractiveAdministrator(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -98,15 +98,12 @@ func (s *apiTokenService) CreateApiToken(ctx context.Context, req *connect.Reque
 }
 
 func (s *apiTokenService) RevokeApiToken(ctx context.Context, req *connect.Request[adminv1.RevokeApiTokenRequest]) (*connect.Response[adminv1.RevokeApiTokenResponse], error) {
-	owner, err := requireAdminUser(rpc.MetaFromContext(ctx))
+	owner, err := requireInteractiveAdministrator(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if req.Msg.Id == "" {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("token ID is required"))
-	}
-	if err := verifyConnectCredential(ctx, req.Msg.TwoFactor, "api-token:revoke", req.Msg.Id); err != nil {
-		return nil, err
 	}
 	if err := apitokens.Revoke(ctx, owner, req.Msg.Id); err != nil {
 		return nil, connectError(connect.CodeNotFound, err)
@@ -115,12 +112,9 @@ func (s *apiTokenService) RevokeApiToken(ctx context.Context, req *connect.Reque
 	return connect.NewResponse(&adminv1.RevokeApiTokenResponse{}), nil
 }
 
-func (s *apiTokenService) DisableLegacyApiKey(ctx context.Context, req *connect.Request[adminv1.DisableLegacyApiKeyRequest]) (*connect.Response[adminv1.DisableLegacyApiKeyResponse], error) {
-	owner, err := requireAdminUser(rpc.MetaFromContext(ctx))
+func (s *apiTokenService) DisableLegacyApiKey(ctx context.Context, _ *connect.Request[adminv1.DisableLegacyApiKeyRequest]) (*connect.Response[adminv1.DisableLegacyApiKeyResponse], error) {
+	owner, err := requireInteractiveAdministrator(ctx)
 	if err != nil {
-		return nil, err
-	}
-	if err := verifyConnectCredential(ctx, req.Msg.TwoFactor, "api-token:disable-legacy"); err != nil {
 		return nil, err
 	}
 	if err := config.Set(config.ApiKeyKey, ""); err != nil {

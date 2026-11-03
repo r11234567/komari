@@ -16,6 +16,10 @@ import (
 )
 
 func pluginHuman(ctx context.Context) (string, error) {
+	return requireInteractiveAdministrator(ctx)
+}
+
+func requireInteractiveAdministrator(ctx context.Context) (string, error) {
 	meta := rpc.MetaFromContext(ctx)
 	user, err := requireAdminUser(meta)
 	if err != nil {
@@ -65,6 +69,11 @@ func (s *pluginService) DecidePluginPackage(ctx context.Context, req *connect.Re
 	err = pluginapp.DecidePackage(req.Msg.ShortName, req.Msg.Digest, req.Msg.ExpectedCurrentDigest, req.Msg.Action, owner, func(review pluginapp.PackageReview) error {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if req.Msg.Action == "revoke" || req.Msg.Action == "discard" {
+			authorized = true
+			auditlog.Log(rpc.MetaFromContext(ctx).RemoteIP, owner, "authorize plugin reduction:"+req.Msg.Action+":"+review.Plugin.Short+":"+review.Digest, "info")
+			return nil
 		}
 		if token == "" {
 			if review.RequiresApproval {

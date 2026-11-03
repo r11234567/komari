@@ -110,6 +110,33 @@ func TestPluginPackageApprovalRejectsTokenAgentAndPluginPrincipals(t *testing.T)
 	}
 }
 
+func TestPluginPackageReductionsDoNotNeedConfigured2FA(t *testing.T) {
+	for _, action := range []string{"revoke", "discard"} {
+		t.Run(action, func(t *testing.T) {
+			ctx, owner, _ := actionFixture(t)
+			row := pluginApprovalFixture(t)
+			if action == "revoke" {
+				require.NoError(t, pluginapp.DecidePackage("proof", row.Digest, "", "activate", "test-setup", func(pluginapp.PackageReview) error { return nil }))
+				row.CurrentDigest = row.Digest
+			}
+			require.NoError(t, dbcore.GetDBInstance().Model(&models.User{}).Where("uuid = ?", owner).Update("two_factor", "").Error)
+			service := &pluginService{}
+			_, err := service.DecidePluginPackage(ctx, connect.NewRequest(&pluginv1.DecidePluginPackageRequest{ShortName: "proof", Digest: row.Digest, ExpectedCurrentDigest: row.CurrentDigest, Action: action}))
+			require.NoError(t, err)
+			rows, err := pluginapp.ListPackages()
+			require.NoError(t, err)
+			if action == "discard" {
+				require.Empty(t, rows)
+				return
+			}
+			require.False(t, pluginapp.List()[0].Running)
+			require.Error(t, plugingateway.SetEnabled(ctx, "proof", true, false))
+			_, err = service.DecidePluginPackage(ctx, connect.NewRequest(&pluginv1.DecidePluginPackageRequest{ShortName: "proof", Digest: row.Digest, ExpectedCurrentDigest: row.Digest, Action: "activate"}))
+			require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
+		})
+	}
+}
+
 func TestPluginPackageExistingGrantAllowsSwitchAndUpdateButNotExpansion(t *testing.T) {
 	ctx, _, _ := actionFixture(t)
 	row := pluginApprovalFixture(t)

@@ -14,6 +14,7 @@ import (
 	"github.com/komari-monitor/komari/database/apitokens"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/credentialaction"
 	credential "github.com/komari-monitor/komari/internal/trustedcredential"
 	"github.com/komari-monitor/komari/pkg/config"
@@ -71,7 +72,7 @@ func TestApiTokenCreationFreshProofCannotBeReplayedOrBroadened(t *testing.T) {
 }
 
 func TestApiTokenManagementRejectsNoninteractivePrincipals(t *testing.T) {
-	for _, principal := range []*rpc.Principal{rpc.NewAnonymousPrincipal(), rpc.NewAgentPrincipal("node"), rpc.NewAPIKeyPrincipal(), rpc.PrincipalFromRole(rpc.RoleAdmin)} {
+	for _, principal := range []*rpc.Principal{rpc.NewAnonymousPrincipal(), rpc.NewAgentPrincipal("node"), rpc.NewAPIKeyPrincipal(), rpc.PrincipalFromRole(rpc.RoleAdmin), rpc.NewUserPrincipal("no-session")} {
 		ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: principal})
 		service := &apiTokenService{}
 		_, err := service.ListApiTokens(ctx, connect.NewRequest(&adminv1.ListApiTokensRequest{}))
@@ -125,13 +126,50 @@ func TestApiTokenHTTPResourceScopeAndRevocationCannotFallBackToCookie(t *testing
 	}
 	// Both native revoke and HTTP authentication use the durable row, not a
 	// cache which would keep an old key alive after a successful revocation.
-	proof := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("api-token:revoke", principal.APIToken.ID))
-	_, err = (&apiTokenService{}).RevokeApiToken(ctx, connect.NewRequest(&adminv1.RevokeApiTokenRequest{Id: principal.APIToken.ID, TwoFactor: &commonv1.TwoFactorProof{AuthorizationToken: proof}}))
+	_, err = (&apiTokenService{}).RevokeApiToken(ctx, connect.NewRequest(&adminv1.RevokeApiTokenRequest{Id: principal.APIToken.ID}))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusUnauthorized, invoke("/komari.browser.v1.BrowserService/ListAgents", "{}").Code)
 	var revoked int64
 	require.NoError(t, dbcore.GetDBInstance().Table("api_tokens").Where("id = ? AND revoked_at IS NOT NULL", principal.APIToken.ID).Count(&revoked).Error)
 	require.Equal(t, int64(1), revoked)
+}
+
+func TestApiTokenReductionsNeedHumanSessionAndOwnershipButNoSecondFactor(t *testing.T) {
+	ctx, owner, session := actionFixture(t)
+	otherCtx, _, _ := actionFixture(t)
+	require.NoError(t, dbcore.GetDBInstance().Model(&models.User{}).Where("uuid = ?", owner).Update("two_factor", "").Error)
+	row, secret, err := apitokens.Create(ctx, owner, apitokens.Policy{Name: "revoke-without-factor", Scopes: []string{rpc.ScopeNodesRead}, AllAgents: true, ExpiresAt: time.Now().Add(time.Hour)}, "")
+	require.NoError(t, err)
+	service := &apiTokenService{}
+	_, err = service.RevokeApiToken(otherCtx, connect.NewRequest(&adminv1.RevokeApiTokenRequest{Id: row.ID}))
+	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+	_, err = apitokens.Authenticate(ctx, secret, "192.0.2.8")
+	require.NoError(t, err)
+	// Removing second-factor friction must not bypass cookie-origin protection.
+	router := gin.New()
+	router.Use(api.APIAuthenticationMiddleware(), security.NewCorsController(true, "").Middleware(), api.IdentityMiddleware(), api.PrivateSiteMiddleware())
+	Register(router)
+	request := httptest.NewRequest(http.MethodPost, "http://panel.example/komari.admin.v1.ApiTokenService/RevokeApiToken", strings.NewReader(`{"id":"`+row.ID+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Connect-Protocol-Version", "1")
+	request.Header.Set("Origin", "https://foreign.example")
+	request.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	require.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
+	_, err = apitokens.Authenticate(ctx, secret, "192.0.2.8")
+	require.NoError(t, err)
+	_, err = service.RevokeApiToken(ctx, connect.NewRequest(&adminv1.RevokeApiTokenRequest{Id: row.ID}))
+	require.NoError(t, err)
+	_, err = apitokens.Authenticate(ctx, secret, "192.0.2.8")
+	require.Error(t, err)
+	require.NoError(t, config.Set(config.ApiKeyKey, "synthetic-global-key-to-disable"))
+	t.Cleanup(func() { _ = config.Set(config.ApiKeyKey, "") })
+	_, err = service.DisableLegacyApiKey(ctx, connect.NewRequest(&adminv1.DisableLegacyApiKeyRequest{}))
+	require.NoError(t, err)
+	key, err := config.GetAs[string](config.ApiKeyKey, "")
+	require.NoError(t, err)
+	require.Empty(t, key)
 }
 
 func TestApiKeyFailuresDoNotLockOutEnrolledDevice(t *testing.T) {

@@ -22,8 +22,7 @@ Runtime compatibility settings and limits are not special permission grants.
 
 `PluginService/DecidePluginPackage` supports activation (including explicit
 rollback), revocation and discard. Every decision requires a live human admin.
-New or expanded grants, revocation and discard require a fresh, single-use
-authorization from the existing trusted credential
+New or expanded grants require a fresh, single-use authorization from the existing trusted credential
 ceremony: TOTP, native notification OTP, or the trusted Passkey adapter.
 The resource is `ScopedResource("plugin-package:" + action, short, packageDigest,
 version, fullPermissionsHash, expectedCurrentDigest)`. Proofs expire and bind
@@ -35,12 +34,17 @@ proof-free activation must be covered by the installed plugin identity’s live,
 non-revoked package/permission grant, checked after rebuilding the actual
 archive under the serialized transaction lock. Historical grants and grants for
 other identities cannot authorize an update. Explicitly supplied proofs are
-still consumed and must be valid even if the current grant could cover it. Legacy
+still consumed for activation and must be valid even if the current grant could cover it. Legacy
 `approved=true` / `permissions_approved=true` cannot grant execution. Tokens,
 Agents and role-only plugin identities cannot approve or manage plugins.
 Switching an already approved plugin off/on reuses its current grant without
 2FA; caller-controlled approval flags cannot grant missing permissions.
 Revocation clears the grant, so enabling afterward requires approval again.
+Revocation and inactive-package discard reduce authority: an interactive human
+administrator can perform them without 2FA, including when no second factor is
+configured. They retain revision checks and auditing; optional old proof fields
+do not block them. API-token revocation and legacy-key shutdown follow the same
+rule, retaining owner/session checks and the existing Origin protection.
 
 ## Transactions and compatibility
 
@@ -104,7 +108,10 @@ interrupted recovery, state-write failure, missing-ZIP revocation, and staging
 without execution. Final PR-head checks and embedded UI provenance are recorded
 in the PR; these are separate from production validation.
 
-The Web UI keeps approval/history in an on-demand toolbar dialog, rather than a
-permanent package panel. Installs needing a grant open their review dialog;
+The Web UI keeps approval/history in a compact on-demand dialog with one title
+and description. Source, hash, actor and permission details are collapsed, and
+statuses/source descriptions/permission labels follow the current locale.
+Reductions use an ordinary confirmation without a verification ceremony.
+Installs needing a grant open their review dialog;
 ordinary updates complete without a permission prompt. API Tokens use a compact
 multi-select node dropdown and describe only the available read scopes.

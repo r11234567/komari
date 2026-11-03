@@ -631,7 +631,9 @@ func decidePackage(short, digest, current, action, actor string, verify func(Pac
 	if action == "discard" && p.CurrentDigest == digest {
 		return errors.New("cannot discard an installed package")
 	}
-	p.RequiresApproval = action != "activate" || !canReusePackageApproval(p)
+	// Only granting execution can expand authority. Revoking and discarding
+	// must remain available without a second factor.
+	p.RequiresApproval = action == "activate" && !canReusePackageApproval(p)
 	if e = verify(p); e != nil {
 		return e
 	}
