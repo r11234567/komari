@@ -6,6 +6,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/credentialaction"
 	"github.com/komari-monitor/komari/internal/credentialgateway"
 	pluginapp "github.com/komari-monitor/komari/internal/plugin"
@@ -36,7 +37,11 @@ func (s *pluginService) ListPluginPackages(ctx context.Context, _ *connect.Reque
 	}
 	response := &pluginv1.ListPluginPackagesResponse{}
 	for _, row := range rows {
-		item := &pluginv1.PluginPackage{Plugin: pluginInfoToProto(pluginapp.Info{Plugin: row.Plugin}), Digest: row.Digest, Source: row.Source, PermissionsHash: row.PermissionsHash, CreatedAtUnix: row.CreatedAt.Unix(), ApprovedBy: row.ApprovedBy, Revoked: row.Revoked, Status: row.Status, CurrentDigest: row.CurrentDigest}
+		// Review needs identity and permissions, not arbitrary configuration,
+		// pages or localized metadata from every unapproved package. Keep the
+		// bounded 64-package response small even for 1 MiB manifests.
+		summary := models.Plugin{Short: row.Plugin.Short, Version: row.Plugin.Version, Permissions: row.Plugin.Permissions}
+		item := &pluginv1.PluginPackage{Plugin: pluginInfoToProto(pluginapp.Info{Plugin: summary}), Digest: row.Digest, Source: row.Source, PermissionsHash: row.PermissionsHash, CreatedAtUnix: row.CreatedAt.Unix(), ApprovedBy: row.ApprovedBy, Revoked: row.Revoked, Status: row.Status, CurrentDigest: row.CurrentDigest}
 		if row.ApprovedAt != nil {
 			item.ApprovedAtUnix = row.ApprovedAt.Unix()
 		}

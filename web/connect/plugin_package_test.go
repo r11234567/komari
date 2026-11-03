@@ -35,7 +35,7 @@ func pluginApprovalFixture(t *testing.T) pluginapp.PackageReview {
 	f, err := os.Create(path)
 	require.NoError(t, err)
 	w := zip.NewWriter(f)
-	for name, body := range map[string]string{"komari-plugin.json": `{"short":"proof","name":"2FA fixture","version":"1"}`, "script.js": "function load(){}"} {
+	for name, body := range map[string]string{"komari-plugin.json": `{"short":"proof","name":"2FA fixture","version":"1","configuration":{"type":"managed","data":[{"key":"fixture","type":"string","default":"manifest-default-sentinel"}]}}`, "script.js": "function load(){}"} {
 		entry, err := w.Create(name)
 		require.NoError(t, err)
 		_, err = entry.Write([]byte(body))
@@ -144,4 +144,19 @@ func TestPluginPackageApprovalConsumesProofWhenRevisionDoesNotChange(t *testing.
 	_, err = (&pluginService{}).DecidePluginPackage(ctx, connect.NewRequest(req))
 	require.Error(t, err)
 	require.Equal(t, generation, pluginapp.RuntimeGeneration("proof"))
+}
+
+func TestPluginPackageReviewDoesNotExpandUnapprovedConfigurationOrPages(t *testing.T) {
+	ctx, _, _ := actionFixture(t)
+	row := pluginApprovalFixture(t)
+	response, err := (&pluginService{}).ListPluginPackages(ctx, connect.NewRequest(&pluginv1.ListPluginPackagesRequest{}))
+	require.NoError(t, err)
+	require.Len(t, response.Msg.Packages, 1)
+	view := response.Msg.Packages[0]
+	require.Equal(t, row.Digest, view.Digest)
+	require.Equal(t, row.PermissionsHash, view.PermissionsHash)
+	require.Equal(t, "proof", view.Plugin.ShortName)
+	require.Empty(t, view.Plugin.Configuration.Items)
+	require.Empty(t, view.Plugin.Pages)
+	require.Equal(t, "no-store", response.Header().Get("Cache-Control"))
 }

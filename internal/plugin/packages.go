@@ -208,6 +208,9 @@ func unpackPackage(path string) (models.Plugin, string, error) {
 	if e = validateManifest(&info); e != nil {
 		return info, "", e
 	}
+	if len(info.Short) > 128 || len(info.Version) > 256 {
+		return info, "", errors.New("plugin identity/version exceeds review limits")
+	}
 	if e = CheckKomariVersion(info.Komari); e != nil {
 		return info, "", e
 	}
