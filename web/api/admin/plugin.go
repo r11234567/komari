@@ -9,12 +9,16 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/internal/plugin"
+	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
 )
 
 // UploadPlugin installs a plugin ZIP package. The request body is the raw
 // ZIP, mirroring UploadTheme.
 func UploadPlugin(c *gin.Context) {
+	if !requirePluginAdministrator(c) {
+		return
+	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, pluginMarketPackageMaxSize)
 
 	tempFile, err := os.CreateTemp("", "komari-plugin-*.zip")
@@ -34,12 +38,21 @@ func UploadPlugin(c *gin.Context) {
 		return
 	}
 
-	info, err := plugin.InstallZip(tempPath)
+	info, err := plugin.StageZip(tempPath, "Direct upload", "", "")
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	api.RespondSuccessMessage(c, "插件上传成功", info)
+	api.RespondSuccessMessage(c, "Plugin staged; review and 2FA approval required", info)
+}
+
+func requirePluginAdministrator(c *gin.Context) bool {
+	p := api.GetPrincipal(c)
+	if p == nil || p.Type != rpc.PrincipalUser || p.UserUUID == "" || p.IsAPIKey || !p.HasRole(rpc.RoleAdmin) {
+		api.RespondError(c, http.StatusUnauthorized, "interactive administrator required")
+		return false
+	}
+	return true
 }
 
 // ServePluginFile serves a static file from an installed plugin directory,

@@ -51,7 +51,16 @@ func SetEnabled(ctx context.Context, short string, enabled, approved bool) error
 	if err != nil {
 		return err
 	}
-	return plugin.SetEnabled(short, enabled, approved)
+	meta := rpc.MetaFromContext(ctx)
+	if meta.Principal.Type != rpc.PrincipalUser || meta.Principal.UserUUID == "" || meta.Principal.IsAPIKey {
+		return ErrPermissionDenied
+	}
+	// A legacy caller-controlled bool cannot grant package execution. The
+	// typed package decision requires a scoped, single-use human 2FA proof.
+	if enabled {
+		return plugin.ErrPermissionApprovalRequired
+	}
+	return plugin.SetEnabled(short, false, false)
 }
 
 func Logs(ctx context.Context, short string) (string, error) {
@@ -66,6 +75,10 @@ func Delete(ctx context.Context, short string) error {
 	short, err := authorize(ctx, short, true)
 	if err != nil {
 		return err
+	}
+	meta := rpc.MetaFromContext(ctx)
+	if meta.Principal.Type != rpc.PrincipalUser || meta.Principal.UserUUID == "" || meta.Principal.IsAPIKey {
+		return ErrPermissionDenied
 	}
 	return plugin.Delete(short)
 }
@@ -87,6 +100,10 @@ func SaveConfiguration(ctx context.Context, short string, values map[string]any)
 	short, err := authorize(ctx, short, true)
 	if err != nil {
 		return err
+	}
+	meta := rpc.MetaFromContext(ctx)
+	if meta.Principal.Type != rpc.PrincipalUser || meta.Principal.UserUUID == "" || meta.Principal.IsAPIKey {
+		return ErrPermissionDenied
 	}
 	return plugin.SaveConfiguration(short, values)
 }

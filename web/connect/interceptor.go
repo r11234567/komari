@@ -88,7 +88,7 @@ func newPolicyInterceptor() *policyInterceptor {
 	add(metrics, rpc.RoleGuest, 30*time.Second, "QueryMetrics", "ListMetricDefinitions", "ListPingTasks", "GetPingStats")
 	add(metrics, rpc.RoleAdmin, 30*time.Minute, "WatchMetrics")
 	add(metrics, rpc.RoleAdmin, 30*time.Second, "UpdateMetricDefinition", "GetDownsamplingPolicy", "SetDownsamplingPolicy", "GetMetricMigrationStatus", "StartMetricMigration", "CancelMetricMigration")
-	add(plugin, rpc.RoleAdmin, 30*time.Second, "ListPlugins", "SetPluginEnabled", "GetPluginLogs", "DeletePlugin", "GetPluginConfiguration", "SetPluginConfiguration")
+	add(plugin, rpc.RoleAdmin, 30*time.Second, "ListPlugins", "SetPluginEnabled", "GetPluginLogs", "DeletePlugin", "GetPluginConfiguration", "SetPluginConfiguration", "ListPluginPackages", "DecidePluginPackage")
 	add(network, rpc.RoleClient, 30*time.Second, "LeasePingProbe", "SubmitPingProbeResult", "LeaseReturnRouteProbe", "SubmitReturnRouteProbeResult")
 	add(exec, rpc.RoleAdmin, 30*time.Second, "CreateExecution", "CancelExecution", "GetExecution")
 	add(exec, rpc.RoleAdmin, 30*time.Minute, "WatchExecution")

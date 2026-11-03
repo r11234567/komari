@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      package_security_only:
+        description: Run focused package admission, native 2FA and archive regressions
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -21,7 +26,13 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Plugin subsystem, JS runtime, notifications and RPC gateway regression
+        if: ${{ inputs.package_security_only != true }}
         run: scripts/ci/run-go-tests.sh ./internal/plugin ./internal/plugingateway ./web/connect ./pkg/jsruntime ./utils/messageSender ./web/rpc/jsonrpc
+      - name: Focused package admission and real native 2FA regressions
+        if: ${{ inputs.package_security_only == true }}
+        run: |
+          scripts/ci/run-go-tests.sh -race ./internal/plugin ./internal/plugingateway ./web/api/admin
+          scripts/ci/run-go-tests.sh -race -run 'Test(PluginPackage|Policy)' ./web/connect
       - name: Preserve complete logs, including compiler failures
         if: always()
         uses: actions/upload-artifact@v4

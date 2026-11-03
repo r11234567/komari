@@ -111,6 +111,8 @@ func TestPolicyDeclaresEveryGeneratedProcedure(t *testing.T) {
 		"/komari.plugin.v1.PluginService/DeletePlugin",
 		"/komari.plugin.v1.PluginService/GetPluginConfiguration",
 		"/komari.plugin.v1.PluginService/SetPluginConfiguration",
+		"/komari.plugin.v1.PluginService/ListPluginPackages",
+		"/komari.plugin.v1.PluginService/DecidePluginPackage",
 		networkv1connect.NetworkProbeServiceLeasePingProbeProcedure,
 		networkv1connect.NetworkProbeServiceSubmitPingProbeResultProcedure,
 		networkv1connect.NetworkProbeServiceLeaseReturnRouteProbeProcedure,

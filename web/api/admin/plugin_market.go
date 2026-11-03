@@ -264,6 +264,9 @@ func ListPluginMarketCatalog(c *gin.Context) {
 }
 
 func InstallPluginFromMarket(c *gin.Context) {
+	if !requirePluginAdministrator(c) {
+		return
+	}
 	var req struct {
 		SourceID string `json:"source_id" binding:"required"`
 		Short    string `json:"short" binding:"required"`
@@ -334,7 +337,7 @@ func InstallPluginFromMarket(c *gin.Context) {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save temporary plugin file")
 		return
 	}
-	installed, err := plugin.InstallZip(tempPath)
+	installed, err := plugin.StageZip(tempPath, source.URL, selected.Short, selected.Version)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -343,7 +346,7 @@ func InstallPluginFromMarket(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "Plugin manifest does not match the market catalog")
 		return
 	}
-	api.RespondSuccessMessage(c, "Plugin installed from market", installed)
+	api.RespondSuccessMessage(c, "Plugin staged from market; review and 2FA approval required", installed)
 }
 
 func fetchPluginMarketCatalog(source PluginMarketSource, force bool) ([]PluginMarketPlugin, error) {

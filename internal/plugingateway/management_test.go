@@ -3,6 +3,7 @@ package plugingateway
 import (
 	"context"
 	"errors"
+	"github.com/komari-monitor/komari/internal/plugin"
 	"testing"
 
 	"github.com/komari-monitor/komari/pkg/rpc"
@@ -44,6 +45,25 @@ func TestManagementValidatesNamesAndCancellation(t *testing.T) {
 	cancel()
 	if err := Delete(canceled, "example"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled delete: %v", err)
+	}
+}
+
+func TestPluginLifecycleCannotGrantExecutionWithLegacyBooleanOrMachineIdentity(t *testing.T) {
+	ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: rpc.NewUserPrincipal("human")})
+	if err := SetEnabled(ctx, "not-installed", true, true); !errors.Is(err, plugin.ErrPermissionApprovalRequired) {
+		t.Fatalf("legacy approval flag granted code execution: %v", err)
+	}
+	for _, principal := range []*rpc.Principal{rpc.NewAPIKeyPrincipal(), rpc.PrincipalFromRole(rpc.RoleAdmin)} {
+		ctx = rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: principal})
+		if err := SetEnabled(ctx, "target", true, true); !errors.Is(err, ErrPermissionDenied) {
+			t.Fatalf("machine/plugin enable: %v", err)
+		}
+		if err := Delete(ctx, "target"); !errors.Is(err, ErrPermissionDenied) {
+			t.Fatalf("machine/plugin delete: %v", err)
+		}
+		if err := SaveConfiguration(ctx, "target", nil); !errors.Is(err, ErrPermissionDenied) {
+			t.Fatalf("machine/plugin config: %v", err)
+		}
 	}
 }
 
