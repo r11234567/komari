@@ -61,9 +61,6 @@ func TestPluginLifecycleCannotGrantExecutionWithLegacyBooleanOrMachineIdentity(t
 		if err := Delete(ctx, "target"); !errors.Is(err, ErrPermissionDenied) {
 			t.Fatalf("machine/plugin delete: %v", err)
 		}
-		if err := SaveConfiguration(ctx, "target", nil); !errors.Is(err, ErrPermissionDenied) {
-			t.Fatalf("machine/plugin config: %v", err)
-		}
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/credentialaction"
 	pluginapp "github.com/komari-monitor/komari/internal/plugin"
+	"github.com/komari-monitor/komari/internal/plugingateway"
 	credential "github.com/komari-monitor/komari/internal/trustedcredential"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
@@ -107,4 +108,22 @@ func TestPluginPackageApprovalRejectsTokenAgentAndPluginPrincipals(t *testing.T)
 		_, err = service.DecidePluginPackage(ctx, connect.NewRequest(&pluginv1.DecidePluginPackageRequest{Action: "activate", TwoFactor: &commonv1.TwoFactorProof{AuthorizationToken: "not-an-approval"}}))
 		require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
 	}
+}
+
+func TestPluginPackageApprovalPreservesExistingConfigurationCapability(t *testing.T) {
+	ctx, _, _ := actionFixture(t)
+	row := pluginApprovalFixture(t)
+	proof := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("plugin-package:activate", row.Targets()...))
+	_, err := (&pluginService{}).DecidePluginPackage(ctx, connect.NewRequest(&pluginv1.DecidePluginPackageRequest{ShortName: "proof", Digest: row.Digest, Action: "activate", TwoFactor: &commonv1.TwoFactorProof{AuthorizationToken: proof}}))
+	require.NoError(t, err)
+	// The runtime checks allowSystemRPC before supplying this role-only
+	// context. Keep configuration access compatible without giving it a grant.
+	pluginCtx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: rpc.PrincipalFromRole(rpc.RoleAdmin)})
+	require.NoError(t, plugingateway.SaveConfiguration(pluginCtx, "proof", map[string]any{"fixture": "saved"}))
+	values, err := pluginapp.GetConfiguration("proof")
+	require.NoError(t, err)
+	require.Equal(t, "saved", values["fixture"])
+	require.ErrorIs(t, plugingateway.SetEnabled(pluginCtx, "proof", true, true), plugingateway.ErrPermissionDenied)
+	require.Len(t, pluginapp.List(), 1)
+	require.True(t, pluginapp.List()[0].Running)
 }

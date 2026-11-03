@@ -51,8 +51,9 @@ previous revision. A consumed proof cannot be reused after failed activation.
 Official HTML injection, HTTP hooks, routes/WebSockets, notification channels
 and normal runtime APIs remain. Plugin-owned foreign Bearer authentication
 stays separate from Komari token restrictions. A plugin cannot use system RPC
-to administer its own/another plugin's lifecycle or configuration; these
-management mutations require a human identity.
+to administer its own/another plugin's lifecycle; these management mutations
+require a human identity. Existing configuration access keeps its original
+capability checks and does not become an unrelated package approval prompt.
 
 Saved configuration and `__storageDir__` survive updates. Runtime writes in the
 plugin directory remain allowed and do not trigger continuous reapproval. As

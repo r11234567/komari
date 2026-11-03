@@ -101,9 +101,7 @@ func SaveConfiguration(ctx context.Context, short string, values map[string]any)
 	if err != nil {
 		return err
 	}
-	meta := rpc.MetaFromContext(ctx)
-	if meta.Principal.Type != rpc.PrincipalUser || meta.Principal.UserUUID == "" || meta.Principal.IsAPIKey {
-		return ErrPermissionDenied
-	}
+	// Preserve the existing system-RPC/configuration capability contract.
+	// Configuration data is not the package receipt or an execution grant.
 	return plugin.SaveConfiguration(short, values)
 }
