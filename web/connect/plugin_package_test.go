@@ -127,3 +127,21 @@ func TestPluginPackageApprovalPreservesExistingConfigurationCapability(t *testin
 	require.Len(t, pluginapp.List(), 1)
 	require.True(t, pluginapp.List()[0].Running)
 }
+
+func TestPluginPackageApprovalConsumesProofWhenRevisionDoesNotChange(t *testing.T) {
+	ctx, _, _ := actionFixture(t)
+	row := pluginApprovalFixture(t)
+	// Prepare an already-approved runtime using a trusted Go test fixture.
+	// Both real service calls below then have identical targets/current digest,
+	// so a stale-revision check alone cannot make the replay assertion pass.
+	require.NoError(t, pluginapp.DecidePackage("proof", row.Digest, "", "activate", "test-setup", func(pluginapp.PackageReview) error { return nil }))
+	row.CurrentDigest = row.Digest
+	proof := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("plugin-package:activate", row.Targets()...))
+	req := &pluginv1.DecidePluginPackageRequest{ShortName: "proof", Digest: row.Digest, ExpectedCurrentDigest: row.Digest, Action: "activate", TwoFactor: &commonv1.TwoFactorProof{AuthorizationToken: proof}}
+	generation := pluginapp.RuntimeGeneration("proof")
+	_, err := (&pluginService{}).DecidePluginPackage(ctx, connect.NewRequest(req))
+	require.NoError(t, err)
+	_, err = (&pluginService{}).DecidePluginPackage(ctx, connect.NewRequest(req))
+	require.Error(t, err)
+	require.Equal(t, generation, pluginapp.RuntimeGeneration("proof"))
+}
