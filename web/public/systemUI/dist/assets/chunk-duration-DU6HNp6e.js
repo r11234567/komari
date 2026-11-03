@@ -1,0 +1,1 @@
+import{G as e,V as t,W as n}from"./chunk-client-C0Ft3S2p.js";function r(r){let i=r<0?-1:1,a=Math.abs(r),o=Math.floor(a/1e3),s=(a-o*1e3)*1e6;return n(t,{seconds:e.parse(o*i),nanos:s===0?0:s*i})}export{r as t};

@@ -58,6 +58,7 @@ func (s *pluginService) DecidePluginPackage(ctx context.Context, req *connect.Re
 	if token == "" {
 		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("fresh scoped 2FA authorization is required; configure a trusted credential first"))
 	}
+	authorized := false
 	err = pluginapp.DecidePackage(req.Msg.ShortName, req.Msg.Digest, req.Msg.ExpectedCurrentDigest, req.Msg.Action, owner, func(review pluginapp.PackageReview) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -66,12 +67,16 @@ func (s *pluginService) DecidePluginPackage(ctx context.Context, req *connect.Re
 		if err != nil {
 			return credentialConnectError(err)
 		}
+		authorized = true
 		// Persist an audit of the authorization attempt before code can execute;
 		// package state also retains the approving user/time for successful grants.
 		auditlog.Log(rpc.MetaFromContext(ctx).RemoteIP, owner, "authorize plugin package:"+req.Msg.Action+":"+review.Plugin.Short+":"+review.Digest+" previous:"+review.CurrentDigest, "warn")
 		return nil
 	})
 	if err != nil {
+		if authorized {
+			auditlog.Log(rpc.MetaFromContext(ctx).RemoteIP, owner, "failed plugin package:"+req.Msg.Action+":"+req.Msg.ShortName+":"+req.Msg.Digest, "warn")
+		}
 		var ce *connect.Error
 		if errors.As(err, &ce) {
 			return nil, ce
