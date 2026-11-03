@@ -337,7 +337,7 @@ func InstallPluginFromMarket(c *gin.Context) {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save temporary plugin file")
 		return
 	}
-	installed, err := plugin.StageZip(tempPath, source.URL, selected.Short, selected.Version)
+	installed, err := plugin.StageZip(tempPath, source.URL+"\n"+selected.Download, selected.Short, selected.Version)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return

@@ -255,7 +255,7 @@ func StageZip(path, source, expectedShort, expectedVersion string) (models.Plugi
 }
 func stageZip(path, source, expectedShort, expectedVersion string) (models.Plugin, error) {
 	var empty models.Plugin
-	if len(source) > 2048 {
+	if len(source) > 8192 {
 		return empty, errors.New("package source too long")
 	}
 	if e := os.MkdirAll(packageDir(), 0700); e != nil {

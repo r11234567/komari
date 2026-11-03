@@ -55,7 +55,7 @@ func finalizeBackupUpload(session upload.Session) (upload.Result, error) {
 }
 
 func finalizePluginUpload(session upload.Session) (upload.Result, error) {
-	info, err := plugin.StageZip(session.ArchivePath, "Chunked upload", "", "")
+	info, err := plugin.StageZip(session.ArchivePath, "Chunked upload: "+session.Metadata.Filename, "", "")
 	if err != nil {
 		return upload.Result{}, err
 	}

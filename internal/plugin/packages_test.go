@@ -67,6 +67,9 @@ func TestPackageAdmissionKeepsOldVersionAndRequiresNewApprovalForSamePermissions
 	assertReviewRoute(t, engine, 200, "old")
 	require.NoError(t, os.WriteFile(filepath.Join(StorageDir, "review", "keep.txt"), []byte("persistent"), 0600))
 	require.NoError(t, SaveConfiguration("review", map[string]any{"kept": "configuration"}))
+	require.NoError(t, os.WriteFile(filepath.Join(DataDir, "review", "runtime-generated.json"), []byte(`{"compatible":true}`), 0600))
+	require.NoError(t, Reload("review"))
+	assertReviewRoute(t, engine, 200, "old")
 	// Same version and permissions, different code: approval cannot carry over.
 	next := stageReviewFixture(t, "1.0.0", reviewScript("new"))
 	require.NotEqual(t, old.Digest, next.Digest)

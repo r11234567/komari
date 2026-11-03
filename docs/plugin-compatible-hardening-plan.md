@@ -1,24 +1,3 @@
-# 保留官方插件兼容性的加固方案
+# Plugin-compatible package hardening
 
-状态：2026-11-02 的替代设计，尚未实施新的插件内容审批机制。本批没有移除
-官方插件的 HTML 注入、HTTP hooks、插件路由、WebSocket、通知渠道或运行时 API。
-
-原先“禁止插件触碰管理页面”的方案会影响依赖这些能力的插件，撤回该方案。
-后续采用安装/升级供应链审批来控制信任扩张：
-
-1. 由后端计算安装包内容摘要，并展示来源、版本、声明权限与变更摘要。
-2. 审批绑定插件标识、具体安装包摘要和权限；新版本即使权限列表相同，也不能
-   自动继承旧版本的内容信任。审批要求真实管理员的新鲜、一次性验证。
-3. 显式批准后按现有官方接口运行。保留插件当前的持久化数据和运行期文件行为，
-   避免因运行目录变化或动态文件生成而不断要求重新审批。
-4. 新包等待审批时，保留可用的旧版本；审批、启用、回滚和撤销有可核对的记录。
-   API Token 和插件自身不能为新包完成人工批准。
-
-这控制的是新安装/升级产物进入受信执行环境的过程。获批、可向同源管理页执行
-脚本的插件仍是受信代码；该方案不能宣称能隔离一个已获批的恶意插件，权限
-审批哈希也不是浏览器沙箱。需要对这类插件提供强隔离时，仍需独立安全边界，
-不能同时承诺任意同源脚本行为完全兼容且完全不受信任。
-
-本批实际已补的兼容保护：认证中间件识别真正的插件路由，允许插件继续处理
-自己的第三方 Bearer 凭据；新 Komari Token 在这些路径上仍受自身权限限制。
-现有插件 RPC/工作区主体隔离和人工验证边界继续生效。
+The package admission and mandatory 2FA proposal is now implemented. See [Plugin package approval](plugin-package-approval.md) for the authorization contract, migration prerequisites, compatibility boundaries, storage limits and validation.

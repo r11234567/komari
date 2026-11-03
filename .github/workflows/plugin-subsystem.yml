@@ -31,8 +31,8 @@ jobs:
       - name: Focused package admission and real native 2FA regressions
         if: ${{ inputs.package_security_only == true }}
         run: |
-          scripts/ci/run-go-tests.sh -race ./internal/plugin ./internal/plugingateway ./web/api/admin
-          scripts/ci/run-go-tests.sh -race -run 'Test(PluginPackage|Policy)' ./web/connect
+          KOMARI_TEST_LOG_DIR=ci-artifacts/package-runtime scripts/ci/run-go-tests.sh -race ./internal/plugin ./internal/plugingateway ./web/api/admin
+          KOMARI_TEST_LOG_DIR=ci-artifacts/package-proof scripts/ci/run-go-tests.sh -race -run 'Test(PluginPackage|Policy)' ./web/connect
       - name: Preserve complete logs, including compiler failures
         if: always()
         uses: actions/upload-artifact@v4
