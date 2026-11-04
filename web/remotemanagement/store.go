@@ -33,6 +33,7 @@ var (
 	ErrOutputLimit    = errors.New("remote session output limit exceeded")
 	ErrSessionLimit   = errors.New("too many active remote sessions")
 	ErrInvalidLease   = errors.New("remote session lease is unknown or expired")
+	ErrTransportBusy  = errors.New("previous terminal transport is still detaching")
 	ErrCommandBacklog = errors.New("remote session command backlog is full")
 )
 
@@ -51,6 +52,9 @@ type Session struct {
 	Size             *websshv1.TerminalSize
 
 	attached             bool
+	everAttached         bool
+	resumable            bool
+	resumeUntil          time.Time
 	closed               *websshv1.SessionClosed
 	commandSeq           uint64
 	agentSeq             uint64
@@ -103,6 +107,9 @@ func SweepBrowserConsumers(now time.Time) {
 	defer sessions.Unlock()
 	for _, s := range sessions.values {
 		s.mu.Lock()
+		if s.closed == nil && s.everAttached && !s.attached && (!s.resumable || !now.Before(s.resumeUntil)) {
+			s.failTransportLocked()
+		}
 		if s.closed == nil && s.browserConsumers == 0 && !s.browserDeadline.IsZero() && !now.Before(s.browserDeadline) {
 			s.closeLocked(websshv1.CloseReason_CLOSE_REASON_CANCELLED)
 		}
@@ -194,9 +201,12 @@ func Lease(ctx context.Context, agentID string) (*websshv1.SessionAssignment, er
 				continue
 			}
 			session.mu.Lock()
-			available := session.closed == nil && !session.attached && !session.LeaseExpiresAt.After(now)
+			available := session.closed == nil && !session.everAttached && !session.attached && !session.LeaseExpiresAt.After(now)
 			if available {
 				session.LeaseExpiresAt = now.Add(leaseDuration)
+				if session.Grant != nil {
+					session.LeaseExpiresAt = session.Grant.TransportDeadline(session.LeaseExpiresAt)
+				}
 				assignment := session.assignment()
 				session.mu.Unlock()
 				sessions.Unlock()
@@ -234,7 +244,7 @@ func Lease(ctx context.Context, agentID string) (*websshv1.SessionAssignment, er
 	}
 }
 
-func Attach(agentID, assignmentID, sessionID string) (*Session, error) {
+func Attach(agentID, assignmentID, sessionID string, resume ...bool) (*Session, error) {
 	sessions.Lock()
 	session := sessions.values[sessionID]
 	sessions.Unlock()
@@ -243,24 +253,42 @@ func Attach(agentID, assignmentID, sessionID string) (*Session, error) {
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	if session.AgentID != agentID || session.AssignmentID != assignmentID || !session.LeaseExpiresAt.After(time.Now().UTC()) {
+	resumable := len(resume) > 0 && resume[0]
+	validLease := session.LeaseExpiresAt.After(time.Now().UTC())
+	if session.everAttached {
+		validLease = resumable && session.resumable && time.Now().Before(session.resumeUntil)
+	}
+	if session.AgentID != agentID || session.AssignmentID != assignmentID || !validLease {
 		return nil, ErrInvalidLease
 	}
 	if session.closed != nil {
 		return nil, ErrClosed
 	}
 	if session.attached {
+		if resumable && session.resumable {
+			return nil, ErrTransportBusy
+		}
 		return nil, ErrInvalidLease
 	}
 	session.attached = true
+	session.everAttached = true
+	session.resumable = resumable
 	return session, nil
+}
+
+func (s *Session) ValidCommandCursor(sequence uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return sequence <= s.commandSeq
 }
 
 func (s *Session) Detach() {
 	s.mu.Lock()
 	if s.closed == nil {
 		s.attached = false
-		s.LeaseExpiresAt = time.Time{}
+		if !s.resumable {
+			s.failTransportLocked()
+		}
 	}
 	s.mu.Unlock()
 	sessions.Lock()
@@ -269,6 +297,65 @@ func (s *Session) Detach() {
 		delete(sessions.notify, s.AgentID)
 	}
 	sessions.Unlock()
+}
+
+func (s *Session) failTransportLocked() {
+	closed := s.closeLocked(websshv1.CloseReason_CLOSE_REASON_FAILED)
+	s.agentSeq++
+	event := &websshv1.SessionEvent{SessionId: s.ID, Sequence: s.agentSeq, OccurredAt: timestamppb.Now(), Event: &websshv1.SessionEvent_Closed{Closed: closed}}
+	s.events = []*websshv1.SessionEvent{event}
+	s.bufferedEventBytes = proto.Size(event)
+}
+
+// Resumption never leases a second PTY. This metadata checkpoints the existing
+// Agent's replay and bounds how long that PTY may survive an offline panel.
+func (s *Session) TransportFrame(command *websshv1.AttachSessionResponse) *websshv1.AttachSessionResponse {
+	until := time.Now().Add(leaseDuration)
+	if s.Grant != nil {
+		until = s.Grant.TransportDeadline(until)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	frame := &websshv1.AttachSessionResponse{}
+	if command != nil {
+		frame = proto.Clone(command).(*websshv1.AttachSessionResponse)
+	}
+	frame.AcceptedEventSequence = s.agentSeq
+	frame.ResumeUntil = timestamppb.New(until)
+	s.resumeUntil = until
+	return frame
+}
+
+func (s *Session) NextResumableFrame(ctx context.Context, afterCommand, afterEvent uint64) (*websshv1.AttachSessionResponse, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		if s.closed != nil {
+			frame := &websshv1.AttachSessionResponse{Sequence: s.commandSeq + 1, Command: &websshv1.AttachSessionResponse_CloseReason{CloseReason: s.closed.Reason.String()}}
+			s.mu.Unlock()
+			return frame, nil
+		}
+		for _, command := range s.commands {
+			if command.Sequence > afterCommand {
+				s.mu.Unlock()
+				return command, nil
+			}
+		}
+		if s.agentSeq > afterEvent {
+			s.mu.Unlock()
+			return &websshv1.AttachSessionResponse{}, nil
+		}
+		commandSignal, eventSignal := s.commandNotify, s.eventNotify
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-commandSignal:
+		case <-eventSignal:
+		}
+	}
 }
 
 // AgentAttached is an observation, not an authorization or output cursor.

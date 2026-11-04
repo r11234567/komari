@@ -1,8 +1,8 @@
 {
   "source_repository": "r11234567/komari-web",
-  "source_commit": "941fbba5583e2e8d56c95daf78a2e3d11b7f7780",
-  "source_head_commit": "941fbba5583e2e8d56c95daf78a2e3d11b7f7780",
-  "proto_commit": "32982e370034bcaba11c112a2a5262009fb1a0e0",
-  "ci_run": "https://github.com/r11234567/komari-web/actions/runs/41617821148",
+  "source_commit": "2e8c14f42a756d258468a8ee583f38535e69f3a3",
+  "source_head_commit": "2e8c14f42a756d258468a8ee583f38535e69f3a3",
+  "proto_commit": "e0c08a1ef9cd30e65071e9941a134a55cb42dddc",
+  "ci_run": "https://github.com/r11234567/komari-web/actions/runs/41816218966",
   "lockfile_sha256": "f362ff884ad3d404cc3d40ebbbc11130b3ae4d09c7ff1273379777a10f3f224d"
 }
