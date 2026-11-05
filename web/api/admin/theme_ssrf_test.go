@@ -61,7 +61,7 @@ func TestThemeRedirectBlocksPrivateIPv4IPv6AndUnsupportedSchemes(t *testing.T) {
 	for _, target := range []string{"http://127.0.0.1/secret", "http://169.254.169.254/metadata", "https://[::1]/", "https://[::ffff:10.0.0.1]/", "https://[fd00::1]/", "ftp://1.1.1.1/file"} {
 		t.Run(target, func(t *testing.T) {
 			requests := 0
-			client := &http.Client{CheckRedirect: validateThemeRedirect, Transport: themeRedirectTransport(func(r *http.Request) (*http.Response, error) {
+			client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return validateMarketRedirect(req, via, true) }, Transport: themeRedirectTransport(func(r *http.Request) (*http.Response, error) {
 				requests++
 				return &http.Response{StatusCode: 302, Header: http.Header{"Location": []string{target}}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
 			})}
@@ -75,7 +75,7 @@ func TestThemeRedirectBlocksPrivateIPv4IPv6AndUnsupportedSchemes(t *testing.T) {
 		})
 	}
 	u, _ := url.Parse("https://1.1.1.1/")
-	if err := validateThemeRedirect(&http.Request{URL: u}, make([]*http.Request, 10)); err == nil {
+	if err := validateMarketRedirect(&http.Request{URL: u}, make([]*http.Request, 10), true); err == nil {
 		t.Fatal("redirect chain unbounded")
 	}
 }
@@ -89,6 +89,7 @@ func TestBlockedThemeAddressRejectsNonPublicRanges(t *testing.T) {
 		"127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1",
 		"169.254.169.254", // cloud metadata
 		"0.0.0.0", "224.0.0.1",
+		"0.1.2.3", "64:ff9b:1::a00:1", "2002:0a00:1::", "2001::1",
 		"100.64.0.1", "100.127.255.254", // CGNAT
 		"192.0.0.1", "192.0.2.5", "198.18.0.1", "198.51.100.7", "203.0.113.9",
 		"240.0.0.1", "255.255.255.255",

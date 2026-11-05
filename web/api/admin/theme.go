@@ -39,31 +39,7 @@ const (
 var (
 	themeMutationMu         sync.Mutex
 	errThemeArchiveTooLarge = errors.New("theme archive too large")
-	themeHTTPClient         = &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			DialContext:           dialPublicAddress,
-			ForceAttemptHTTP2:     true,
-			IdleConnTimeout:       30 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 15 * time.Second,
-		},
-		CheckRedirect: validateThemeRedirect,
-	}
 )
-
-func validateThemeRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= 10 {
-		return errors.New("too many redirects")
-	}
-	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
-		return errors.New("redirected to an unsupported URL scheme")
-	}
-	if isPrivateIPContext(req.Context(), req.URL.Hostname()) {
-		return errors.New("redirected to a private/internal address")
-	}
-	return nil
-}
 
 func temporaryThemeArchive(data []byte, prefix string) (string, error) {
 	file, err := os.CreateTemp("", prefix+"-*.zip")
@@ -557,14 +533,6 @@ func isThemeShort(short string) bool {
 	return short == public.DefaultTheme || isValidThemeShort(short)
 }
 
-// downloadThemeFromURL 从URL下载主题文件
-// isPrivateIP checks if the resolved IP addresses are private/internal
-func isPrivateIP(host string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return isPrivateIPContext(ctx, host)
-}
-
 func isPrivateIPContext(ctx context.Context, host string) bool {
 	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
@@ -587,6 +555,7 @@ func isPrivateIPContext(ctx context.Context, host string) bool {
 // put internal endpoints, so it has to be refused explicitly.
 var blockedNonPublicRanges = func() []*net.IPNet {
 	prefixes := []string{
+		"0.0.0.0/8",       // this network
 		"100.64.0.0/10",   // RFC 6598 CGNAT
 		"192.0.0.0/24",    // RFC 6890 IETF protocol assignments
 		"192.0.2.0/24",    // TEST-NET-1
@@ -597,6 +566,9 @@ var blockedNonPublicRanges = func() []*net.IPNet {
 		"fec0::/10",       // deprecated site-local
 		"2001:db8::/32",   // documentation
 		"64:ff9b::/96",    // NAT64, can map onto private IPv4
+		"64:ff9b:1::/48",  // local-use NAT64
+		"2002::/16",       // 6to4 embeds an IPv4 destination
+		"2001::/32",       // Teredo embeds IPv4 relay/client addresses
 	}
 	nets := make([]*net.IPNet, 0, len(prefixes))
 	for _, prefix := range prefixes {
@@ -613,8 +585,7 @@ func blockedThemeAddress(ip net.IP) bool {
 		return true
 	}
 	if v4 := ip.To4(); v4 != nil {
-		// An IPv4-mapped or 6to4/Teredo-embedded address must be judged on the
-		// IPv4 address it actually reaches.
+		// Judge IPv4-mapped addresses on their underlying IPv4 destination.
 		ip = v4
 	}
 	for _, network := range blockedNonPublicRanges {
@@ -662,54 +633,11 @@ func dialPublicAddressWith(ctx context.Context, network, address string, lookup 
 }
 
 func downloadThemeFromURL(rawURL string) ([]byte, error) {
-	// SSRF protection: block requests to private/internal IPs
-	parsedURL, err := url.Parse(rawURL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid URL: %v", err)
+	data, err := downloadMarketURL(rawURL, maxThemeArchiveSize, 30*time.Second)
+	if errors.Is(err, errMarketDownloadTooLarge) {
+		return nil, fmt.Errorf("%w: %d bytes", errThemeArchiveTooLarge, maxThemeArchiveSize)
 	}
-	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		return nil, fmt.Errorf("only http and https schemes are allowed")
-	}
-	if isPrivateIP(parsedURL.Hostname()) {
-		return nil, fmt.Errorf("requests to private/internal addresses are not allowed")
-	}
-
-	// 发送HTTP GET请求
-	request, err := http.NewRequest(http.MethodGet, parsedURL.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("创建主题下载请求失败: %v", err)
-	}
-	// lgtm[go/request-forgery] The custom transport validates the actual dial IP
-	// for the initial request and every redirect, preventing DNS rebinding.
-	resp, err := themeHTTPClient.Do(request)
-	if err != nil {
-		return nil, fmt.Errorf("下载主题文件失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// 检查响应状态码
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("下载主题文件失败，HTTP状态码: %d", resp.StatusCode)
-	}
-	if resp.ContentLength > maxThemeArchiveSize {
-		return nil, fmt.Errorf("%w: 主题压缩包超过 %d 字节限制", errThemeArchiveTooLarge, maxThemeArchiveSize)
-	}
-
-	// 读取响应内容
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxThemeArchiveSize+1))
-	if err != nil {
-		return nil, fmt.Errorf("读取主题文件内容失败: %v", err)
-	}
-	if len(data) > maxThemeArchiveSize {
-		return nil, fmt.Errorf("%w: 主题压缩包超过 %d 字节限制", errThemeArchiveTooLarge, maxThemeArchiveSize)
-	}
-
-	// 检查文件大小
-	if len(data) == 0 {
-		return nil, errors.New("下载的主题文件为空")
-	}
-
-	return data, nil
+	return data, err
 }
 
 // getGitHubReleaseDownloadURL 从GitHub API获取最新release的下载链接
@@ -731,16 +659,9 @@ func getGitHubReleaseDownloadURL(owner, repo string) (string, error) {
 	// 使用GitHub API获取最新release信息
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
 
-	// 发送HTTP GET请求
-	resp, err := themeHTTPClient.Get(apiURL)
+	data, err := downloadMarketURL(apiURL, marketCatalogMaxSize, 30*time.Second)
 	if err != nil {
-		return "", fmt.Errorf("获取GitHub release信息失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// 检查响应状态码
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("获取GitHub release信息失败，HTTP状态码: %d", resp.StatusCode)
+		return "", fmt.Errorf("获取GitHub release信息失败: %w", err)
 	}
 
 	// 解析JSON响应
@@ -751,7 +672,7 @@ func getGitHubReleaseDownloadURL(owner, repo string) (string, error) {
 		} `json:"assets"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&releaseInfo); err != nil {
+	if err := json.Unmarshal(data, &releaseInfo); err != nil {
 		return "", fmt.Errorf("解析GitHub API响应失败: %v", err)
 	}
 
