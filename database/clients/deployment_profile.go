@@ -66,6 +66,7 @@ type DeploymentProfile struct {
 	GetIPAddrFromNIC         bool    `json:"get_ip_addr_from_nic"`
 	MemoryIncludeCache       bool    `json:"memory_include_cache"`
 	EnableGPU                bool    `json:"enable_gpu"`
+	WindowsGPUEnabled        *bool   `json:"windows_gpu_enabled,omitempty"`
 	DetailedGPU              bool    `json:"detailed_gpu"`
 	RemoteControlEnabled     bool    `json:"remote_control_enabled"`
 	EnableGHProxy            bool    `json:"enable_ghproxy"`
@@ -485,6 +486,7 @@ func copyDeploymentRuntime(target *DeploymentProfile, source DeploymentProfile) 
 	target.IncludeMountpoints = source.IncludeMountpoints
 	target.MemoryIncludeCache = source.MemoryIncludeCache
 	target.DetailedGPU = source.DetailedGPU
+	target.WindowsGPUEnabled = source.WindowsGPUEnabled
 	target.GetIPAddrFromNIC = source.GetIPAddrFromNIC
 }
 
@@ -747,6 +749,10 @@ func (profile DeploymentProfile) RuntimeConfig() v2.ConfigParams {
 	}
 	memoryIncludeCache := profile.MemoryIncludeCache
 	detailedGPU := profile.DetailedGPU
+	var windowsGPU *bool
+	if profile.Platform == "windows" {
+		windowsGPU = profile.WindowsGPUEnabled
+	}
 	return v2.ConfigParams{
 		MonthRotate:        &monthRotate,
 		Interval:           &interval,
@@ -755,6 +761,7 @@ func (profile DeploymentProfile) RuntimeConfig() v2.ConfigParams {
 		IncludeMountpoints: &includeMountpoints,
 		MemoryIncludeCache: &memoryIncludeCache,
 		DetailedGPU:        &detailedGPU,
+		EnableGPU:          windowsGPU,
 	}
 }
 
@@ -797,6 +804,10 @@ func deploymentProfileFromRuntime(platform string, config v2.ConfigParams) (Depl
 	// for display only and are never returned by RuntimeConfig for online apply.
 	if config.EnableGPU != nil {
 		profile.EnableGPU = *config.EnableGPU
+		if profile.Platform == "windows" {
+			enabled := *config.EnableGPU
+			profile.WindowsGPUEnabled = &enabled
+		}
 	}
 	if config.DetailedGPU != nil {
 		profile.DetailedGPU = *config.DetailedGPU
