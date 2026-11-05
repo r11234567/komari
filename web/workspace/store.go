@@ -85,6 +85,9 @@ var Default = NewStore(time.Now, func(b Binding) bool {
 		return false
 	}
 	allowed, err := clients.PrivilegedCapabilityAllowed(b.AgentID, "webssh")
+	if err == nil && allowed && b.SystemUser == "root" {
+		allowed, err = clients.PrivilegedCapabilityAllowed(b.AgentID, "root")
+	}
 	return err == nil && allowed
 })
 
