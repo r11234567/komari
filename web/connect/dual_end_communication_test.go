@@ -651,7 +651,7 @@ func TestDualEnd_Execution_SignedEnvelopeLease(t *testing.T) {
 	if inst.GetAgentId() != testClientUUID {
 		t.Fatalf("agent ID mismatch: expected %q, got %q", testClientUUID, inst.GetAgentId())
 	}
-	if inst.GetInstructionType() != "exec:v1" {
+	if inst.GetInstructionType() != "exec:identity:v1" {
 		t.Fatalf("instruction type mismatch: %q", inst.GetInstructionType())
 	}
 
@@ -662,6 +662,9 @@ func TestDualEnd_Execution_SignedEnvelopeLease(t *testing.T) {
 	}
 	if spec.GetCommand() != "uname -a" {
 		t.Fatalf("command mismatch: %q", spec.GetCommand())
+	}
+	if spec.GetRunAsRoot() {
+		t.Fatal("execution unexpectedly defaulted to root")
 	}
 	t.Log("Execution SignedEnvelope leasing and cryptographic unpacking verified successfully")
 }

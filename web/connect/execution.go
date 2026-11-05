@@ -61,18 +61,29 @@ func (s *executionService) CreateExecution(ctx context.Context, req *connect.Req
 		if !allowed {
 			return nil, connectError(connect.CodePermissionDenied, errors.New("remote control is disabled for agent: "+agentID))
 		}
+		if req.Msg.RunAsRoot {
+			rootAllowed, err := clients.PrivilegedCapabilityAllowed(agentID, "root")
+			if err != nil || !rootAllowed {
+				return nil, connectError(connect.CodePermissionDenied, errors.New("root execution is not approved for agent: "+agentID))
+			}
+		}
 		if !agentRuntime.IsAgentOnline(agentID) || !agentRuntime.SupportsExecution(agentID) {
 			return nil, connectError(connect.CodeFailedPrecondition, errors.New("agent is offline or does not support Connect execution: "+agentID))
 		}
 	}
 	if req.Msg.TwoFactor.GetAuthorizationToken() != "" {
-		if err := verifyConnectCredential(ctx, req.Msg.TwoFactor, "execution:create", agentIDs...); err != nil {
+		proofTargets := append([]string(nil), agentIDs...)
+		if req.Msg.RunAsRoot {
+			proofTargets = append(proofTargets, "run-as:root")
+		}
+		if err := verifyConnectCredential(ctx, req.Msg.TwoFactor, "execution:create", proofTargets...); err != nil {
 			return nil, err
 		}
 	}
 	executions, err := executionapp.CreateBatch(agentIDs, ownerID, req.Msg.IdempotencyKey, &execv1.ExecutionSpec{
 		Command: req.Msg.Command, Arguments: req.Msg.Arguments, Environment: req.Msg.Environment,
 		WorkingDirectory: req.Msg.WorkingDirectory, Timeout: req.Msg.Timeout, MaxOutputBytes: req.Msg.MaxOutputBytes,
+		RunAsRoot: req.Msg.RunAsRoot,
 	})
 	if err != nil {
 		return nil, executionError(err)
@@ -159,6 +170,12 @@ func (s *executionService) LeaseExecution(ctx context.Context, req *connect.Requ
 			}
 			if !allowed {
 				return connectError(connect.CodePermissionDenied, errors.New("execution authorization was revoked"))
+			}
+			if dispatch.Assignment.Spec.GetRunAsRoot() {
+				rootAllowed, err := clients.PrivilegedCapabilityAllowed(agentID, "root")
+				if err != nil || !rootAllowed {
+					return connectError(connect.CodePermissionDenied, errors.New("root execution authorization was revoked"))
+				}
 			}
 		}
 		if err := stream.Send(&execv1.LeaseExecutionResponse{Assignment: dispatch.Assignment, Cancellation: dispatch.Cancellation}); err != nil {

@@ -945,6 +945,9 @@ func PrivilegedCapabilityAllowedWithDB(db *gorm.DB, clientUUID, feature string) 
 	var state models.ClientPrivilegedState
 	err := db.First(&state, "client = ?", clientUUID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) || err == nil && state.ProtocolVersion != 2 {
+		if feature == "root" {
+			return false, nil
+		}
 		profile, saved, e := getDeploymentProfile(db, clientUUID)
 		if feature == "rescue" {
 			return saved && profile.RescueEnabled, e
@@ -961,6 +964,7 @@ func PrivilegedCapabilityAllowedWithDB(db *gorm.DB, clientUUID, feature string) 
 		Remote    bool `json:"remote_control_enabled"`
 		WebSSH    bool `json:"webssh_enabled"`
 		Execution bool `json:"execution_enabled"`
+		Root      bool `json:"root_execution_allowed"`
 		Rescue    bool `json:"rescue_helper_enabled"`
 	}
 	allows := func(revision uint64) (bool, error) {
@@ -984,6 +988,8 @@ func PrivilegedCapabilityAllowedWithDB(db *gorm.DB, clientUUID, feature string) 
 			return s.Remote && s.WebSSH, nil
 		case "execution":
 			return s.Remote && s.Execution, nil
+		case "root":
+			return s.Remote && s.Root, nil
 		case "rescue":
 			return s.Rescue, nil
 		default:

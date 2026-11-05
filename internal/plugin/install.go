@@ -20,6 +20,10 @@ import (
 // unloads it first and restores it to its persisted enabled state when the
 // extraction succeeds.
 func InstallZip(zipPath string) (models.Plugin, error) {
+	// Trusted Go bootstrap/test API only. HTTP uploads and catalogs use
+	// StageZip, followed by a human proof at DecidePackage, never this API.
+	packageMu.Lock()
+	defer packageMu.Unlock()
 	var info models.Plugin
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
@@ -89,7 +93,19 @@ func InstallZip(zipPath string) (models.Plugin, error) {
 			return info, fmt.Errorf("plugin page %s does not exist", page.File)
 		}
 	}
-	if global.stateStore().get(info.Short).Enabled {
+	digest, err := digestFile(zipPath)
+	if err != nil {
+		return info, err
+	}
+	if err = writeReceipt(dir, digest); err != nil {
+		return info, err
+	}
+	st := global.stateStore().get(info.Short)
+	st.ApprovedPackageDigest = digest
+	if err = global.stateStore().set(info.Short, st); err != nil {
+		return info, err
+	}
+	if st.Enabled {
 		if err := global.restartPlugin(info.Short); err != nil {
 			return info, fmt.Errorf("plugin reinstalled but reload failed: %w", err)
 		}
@@ -102,7 +118,13 @@ func validatePluginArchive(files []*zip.File) error {
 		return fmt.Errorf("plugin archive has more than %d files", maxPluginArchiveFiles)
 	}
 	var total uint64
+	seen := make(map[string]bool)
 	for _, file := range files {
+		name := filepath.Clean(file.Name)
+		if !filepath.IsLocal(name) || strings.Contains(file.Name, "\\") || name == packageReceipt || seen[name] || file.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("invalid or duplicate plugin archive path %q", file.Name)
+		}
+		seen[name] = true
 		if file.FileInfo().IsDir() {
 			continue
 		}
@@ -141,9 +163,15 @@ func extractPluginArchive(files []*zip.File, dir string) error {
 			_ = rc.Close()
 			return fmt.Errorf("failed to create file: %v", err)
 		}
-		_, copyErr := io.Copy(outFile, rc)
-		_ = outFile.Close()
+		n, copyErr := io.Copy(outFile, io.LimitReader(rc, maxPluginFileSize+1))
+		closeErr := outFile.Close()
 		_ = rc.Close()
+		if copyErr == nil {
+			copyErr = closeErr
+		}
+		if n > maxPluginFileSize {
+			copyErr = fmt.Errorf("plugin file exceeds size limit")
+		}
 		if copyErr != nil {
 			return fmt.Errorf("failed to extract file: %v", copyErr)
 		}

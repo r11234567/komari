@@ -534,6 +534,7 @@ func doInitialize() error {
 		!instance.Migrator().HasColumn("return_route_tasks", "notify_recovery")
 	err = instance.AutoMigrate(
 		&models.User{},
+		&models.APIToken{},
 		&models.CredentialContact{},
 		&models.PasskeyCounter{},
 		&models.Client{},

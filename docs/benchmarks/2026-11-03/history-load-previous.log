@@ -1,0 +1,9 @@
+2026/11/03 14:23:05 INFO Metric store initialized successfully (driver=sqlite) component=metricstore
+=== RUN   TestHistoryConcurrentReadAndIngestionExperiment
+2026/11/03 14:23:05 metric: migrating SQLite metric storage to V4
+2026/11/03 14:23:05 metric: migrated SQLite metric storage to V4 (0 raw points and 0 rollups preserved bit-for-bit)
+    metrics_history_load_test.go:143: mode=previous readers=2 queries=12 writes=98 query-p50=221.243351ms query-p95=246.955353ms ingest-p50=322.625µs ingest-p95=611.414µs peak-go-heap=14158504 baseline-go-heap=4094072
+    metrics_history_load_test.go:147: process RSS high water (includes fixture setup): VmHWM:	   71372 kB
+--- PASS: TestHistoryConcurrentReadAndIngestionExperiment (1.78s)
+PASS
+ok  	github.com/komari-monitor/komari/web/connect	2.220s

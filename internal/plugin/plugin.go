@@ -160,12 +160,19 @@ func Init(engine *gin.Engine) {
 // approved. A failed load auto-disables the plugin, persists last_error and
 // is returned joined so callers can log it without stopping startup.
 func LoadAll() error {
+	packageMu.Lock()
+	defer packageMu.Unlock()
+	if err := recoverPackageTransactions(); err != nil {
+		return err
+	}
 	return global.loadAll()
 }
 
 // SetEnabled is the single switch entry point. Enabling a plugin whose
 // declared permissions differ from the approved hash requires approved=true.
 func SetEnabled(short string, enabled, approved bool) error {
+	packageMu.Lock()
+	defer packageMu.Unlock()
 	return global.setEnabled(short, enabled, approved)
 }
 
@@ -173,11 +180,15 @@ func SetEnabled(short string, enabled, approved bool) error {
 // this function returns; a failed load is persisted as the plugin's last
 // error and disables the plugin, matching the normal enable/startup path.
 func Reload(short string) error {
+	packageMu.Lock()
+	defer packageMu.Unlock()
 	return global.reload(short)
 }
 
 // CloseAll unloads every loaded plugin. Used during server shutdown.
 func CloseAll() error {
+	packageMu.Lock()
+	defer packageMu.Unlock()
 	return global.closeAll()
 }
 
@@ -193,7 +204,12 @@ func GetLogs(short string) string {
 
 // Delete removes an installed plugin and its persisted state.
 func Delete(short string) error {
-	return global.delete(short)
+	packageMu.Lock()
+	defer packageMu.Unlock()
+	if err := global.delete(short); err != nil {
+		return err
+	}
+	return deleteRetainedPackages(short)
 }
 
 // WrapHandler installs the plugin HTTP hook chain around the application
@@ -201,6 +217,20 @@ func Delete(short string) error {
 // response hooks run after the handler and may modify status/headers/body.
 func WrapHandler(next http.Handler) http.Handler {
 	return global.wrapHandler(next)
+}
+
+// OwnsHTTPRoute identifies an actual plugin-owned Gin slot, including slots
+// retained after unload. It does not grant a Komari principal or permission.
+func OwnsHTTPRoute(method, pattern string) bool {
+	global.mu.RLock()
+	defer global.mu.RUnlock()
+	key := method + " " + pattern
+	for _, routes := range global.routes {
+		if routes[key] {
+			return true
+		}
+	}
+	return false
 }
 
 // HTMLInjectHandler installs plugin HTML injection around the application
@@ -458,8 +488,19 @@ func (m *Manager) setEnabled(short string, enabled, approved bool) error {
 		if err := m.unload(short); err != nil && !errors.Is(err, errNotLoaded) {
 			st.LastError = err.Error()
 		}
-		m.stateStore().set(short, st)
-		return nil
+		return m.stateStore().set(short, st)
+	}
+	st := m.stateStore().get(short)
+	if !packageApproved(short, st) {
+		if !approved {
+			return ErrPermissionApprovalRequired
+		}
+		// This bool is a trusted Go-only installer API. Transports must never
+		// forward a caller's approval bool; they use DecidePackage and 2FA.
+		if err := approveTrustedDirectory(short); err != nil {
+			return err
+		}
+		st = m.stateStore().get(short)
 	}
 	if m.instanceFor(short) != nil {
 		// Already running: enabling is idempotent. Re-running load() would
@@ -467,18 +508,19 @@ func (m *Manager) setEnabled(short string, enabled, approved bool) error {
 		st := m.stateStore().get(short)
 		st.Enabled = true
 		st.LastError = ""
-		m.stateStore().set(short, st)
-		return nil
+		return m.stateStore().set(short, st)
 	}
 
 	hash := approvalPermissionsHash(info.Permissions)
-	st := m.stateStore().get(short)
+	st = m.stateStore().get(short)
 	if permissionsRequireApproval(info.Permissions) && st.ApprovedPermissionsHash != hash {
 		if !approved {
 			return ErrPermissionApprovalRequired
 		}
 		st.ApprovedPermissionsHash = hash
-		m.stateStore().set(short, st)
+		if err := m.stateStore().set(short, st); err != nil {
+			return err
+		}
 	}
 	if err := m.load(short); err != nil {
 		st.Enabled = false
@@ -488,7 +530,10 @@ func (m *Manager) setEnabled(short string, enabled, approved bool) error {
 	}
 	st.Enabled = true
 	st.LastError = ""
-	m.stateStore().set(short, st)
+	if err := m.stateStore().set(short, st); err != nil {
+		_ = m.unload(short)
+		return err
+	}
 	return nil
 }
 
@@ -508,6 +553,10 @@ func (m *Manager) loadAll() error {
 		short := entry.Name()
 		st := m.stateStore().get(short)
 		if !st.Enabled || m.instanceFor(short) != nil {
+			continue
+		}
+		if !packageApproved(short, st) {
+			errs = append(errs, m.disableWithError(short, st, ErrPermissionApprovalRequired))
 			continue
 		}
 		info, err := readManifest(short)
@@ -533,6 +582,9 @@ func (m *Manager) loadAll() error {
 // plugin and keeps the error visible, mirroring the startup load path.
 func (m *Manager) restartPlugin(short string) error {
 	st := m.stateStore().get(short)
+	if !packageApproved(short, st) {
+		return m.disableWithError(short, st, ErrPermissionApprovalRequired)
+	}
 	info, err := readManifest(short)
 	if err != nil {
 		return m.disableWithError(short, st, err)
@@ -815,6 +867,16 @@ func validShort(short string) bool {
 func permissionsRequireApproval(p models.PluginPermissions) bool {
 	return p.AllowSystemRPC || p.AllowRoutes || p.AllowHooks || p.AllowHTMLInject ||
 		p.AllowExec || p.AllowListen || p.AllowAllFileAccess
+}
+
+func permissionsExpand(before, after models.PluginPermissions) bool {
+	return (after.AllowSystemRPC && !before.AllowSystemRPC) ||
+		(after.AllowRoutes && !before.AllowRoutes) ||
+		(after.AllowHooks && !before.AllowHooks) ||
+		(after.AllowHTMLInject && !before.AllowHTMLInject) ||
+		(after.AllowExec && !before.AllowExec) ||
+		(after.AllowListen && !before.AllowListen) ||
+		(after.AllowAllFileAccess && !before.AllowAllFileAccess)
 }
 
 // approvalPermissionsHash canonicalizes the approval-relevant permissions so

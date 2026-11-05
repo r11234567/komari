@@ -387,6 +387,7 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
+	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 	r.Use(cors.Middleware())
 	r.Use(api.IdentityMiddleware())
 	r.Use(func(c *gin.Context) {

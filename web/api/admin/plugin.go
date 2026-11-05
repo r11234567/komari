@@ -8,13 +8,18 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/internal/plugin"
+	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
 )
 
 // UploadPlugin installs a plugin ZIP package. The request body is the raw
 // ZIP, mirroring UploadTheme.
 func UploadPlugin(c *gin.Context) {
+	if !requirePluginAdministrator(c) {
+		return
+	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, pluginMarketPackageMaxSize)
 
 	tempFile, err := os.CreateTemp("", "komari-plugin-*.zip")
@@ -34,12 +39,37 @@ func UploadPlugin(c *gin.Context) {
 		return
 	}
 
-	info, err := plugin.InstallZip(tempPath)
+	info, err := plugin.InstallOrStageZip(tempPath, "Direct upload", "", "", api.GetPrincipal(c).UserUUID)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	api.RespondSuccessMessage(c, "插件上传成功", info)
+	auditPluginInstall(c.ClientIP(), api.GetPrincipal(c).UserUUID, info)
+	api.RespondSuccessMessage(c, pluginInstallMessage(info), info)
+}
+
+func pluginInstallMessage(info plugin.PackageInstallResult) string {
+	if info.RequiresApproval {
+		return "Plugin staged; review and 2FA approval required"
+	}
+	return "Plugin updated with existing permissions"
+}
+
+func auditPluginInstall(ip, actor string, info plugin.PackageInstallResult) {
+	action := "update plugin with existing grant:"
+	if info.RequiresApproval {
+		action = "stage plugin for approval:"
+	}
+	auditlog.Log(ip, actor, action+info.Short+":"+info.Digest, "info")
+}
+
+func requirePluginAdministrator(c *gin.Context) bool {
+	p := api.GetPrincipal(c)
+	if p == nil || p.Type != rpc.PrincipalUser || p.UserUUID == "" || p.IsAPIKey || !p.HasRole(rpc.RoleAdmin) {
+		api.RespondError(c, http.StatusUnauthorized, "interactive administrator required")
+		return false
+	}
+	return true
 }
 
 // ServePluginFile serves a static file from an installed plugin directory,

@@ -78,12 +78,15 @@ func (s *browserService) ListAgents(ctx context.Context, req *connect.Request[br
 	cycleUsages, _ := trafficledger.CurrentCalibratedCycleUsages(ctx, dbcore.GetDBInstance(), now)
 	online := stringSet(agent_runtime.GetAllOnlineUUIDs())
 	meta := rpc.MetaFromContext(ctx)
-	isAdmin := meta != nil && meta.Principal != nil && meta.Principal.HasRole(rpc.RoleAdmin)
+	isAdmin := meta != nil && meta.Principal != nil && (meta.Principal.HasRole(rpc.RoleAdmin) || meta.Principal.APIToken != nil)
 	showGuestIP, _ := config.GetAs[bool](config.SendIpAddrToGuestKey, false)
 	filter := stringSet(req.Msg.AgentIds)
 	search := strings.ToLower(strings.TrimSpace(req.Msg.Search))
 	result := make([]*browserv1.AgentSummary, 0, len(list))
 	for _, item := range list {
+		if meta != nil && !meta.Principal.AllowsAgent(item.UUID) {
+			continue
+		}
 		if item.Hidden && !isAdmin {
 			continue
 		}
@@ -101,6 +104,9 @@ func (s *browserService) ListAgents(ctx context.Context, req *connect.Request[br
 }
 
 func (s *browserService) GetAgent(ctx context.Context, req *connect.Request[browserv1.GetAgentRequest]) (*connect.Response[browserv1.GetAgentResponse], error) {
+	if meta := rpc.MetaFromContext(ctx); meta != nil && !meta.Principal.AllowsAgent(req.Msg.AgentId) {
+		return nil, connectError(connect.CodePermissionDenied, errors.New("node is outside API token scope"))
+	}
 	if strings.TrimSpace(req.Msg.AgentId) == "" {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("agent ID is required"))
 	}
@@ -109,7 +115,7 @@ func (s *browserService) GetAgent(ctx context.Context, req *connect.Request[brow
 		return nil, connectError(connect.CodeNotFound, errors.New("agent not found"))
 	}
 	meta := rpc.MetaFromContext(ctx)
-	isAdmin := meta != nil && meta.Principal != nil && meta.Principal.HasRole(rpc.RoleAdmin)
+	isAdmin := meta != nil && meta.Principal != nil && (meta.Principal.HasRole(rpc.RoleAdmin) || meta.Principal.APIToken != nil)
 	showGuestIP, _ := config.GetAs[bool](config.SendIpAddrToGuestKey, false)
 	if item.Hidden && !isAdmin {
 		return nil, connectError(connect.CodeNotFound, errors.New("agent not found"))

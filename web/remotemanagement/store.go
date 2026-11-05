@@ -9,16 +9,20 @@ import (
 	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/web/workspace"
 	websshv1 "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
-	leaseDuration       = 30 * time.Second
-	maxSessionDuration  = 2 * time.Hour
-	closedRetention     = 5 * time.Minute
-	maxBufferedOutput   = 8 << 20
-	maxActiveSessions   = 64
-	maxBufferedCommands = 1024
+	leaseDuration           = 30 * time.Second
+	maxSessionDuration      = 2 * time.Hour
+	closedRetention         = 5 * time.Minute
+	maxBufferedOutput       = 8 << 20
+	maxActiveSessions       = 64
+	maxBufferedCommands     = 1024
+	maxBufferedCommandBytes = 2 << 20
+	maxBufferedEvents       = 8192
+	maxBufferedEventBytes   = 16 << 20
 )
 
 var (
@@ -29,6 +33,7 @@ var (
 	ErrOutputLimit    = errors.New("remote session output limit exceeded")
 	ErrSessionLimit   = errors.New("too many active remote sessions")
 	ErrInvalidLease   = errors.New("remote session lease is unknown or expired")
+	ErrTransportBusy  = errors.New("previous terminal transport is still detaching")
 	ErrCommandBacklog = errors.New("remote session command backlog is full")
 )
 
@@ -46,18 +51,23 @@ type Session struct {
 	WorkingDirectory string
 	Size             *websshv1.TerminalSize
 
-	attached         bool
-	closed           *websshv1.SessionClosed
-	commandSeq       uint64
-	agentSeq         uint64
-	commands         []*websshv1.AttachSessionResponse
-	events           []*websshv1.SessionEvent
-	bufferedOutput   uint64
-	commandNotify    chan struct{}
-	eventNotify      chan struct{}
-	grantStop        func() bool
-	browserConsumers int
-	browserDeadline  time.Time
+	attached             bool
+	everAttached         bool
+	resumable            bool
+	resumeUntil          time.Time
+	closed               *websshv1.SessionClosed
+	commandSeq           uint64
+	agentSeq             uint64
+	commands             []*websshv1.AttachSessionResponse
+	events               []*websshv1.SessionEvent
+	bufferedOutput       uint64
+	bufferedCommandBytes int
+	bufferedEventBytes   int
+	commandNotify        chan struct{}
+	eventNotify          chan struct{}
+	grantStop            func() bool
+	browserConsumers     int
+	browserDeadline      time.Time
 }
 
 const BrowserDisconnectGrace = time.Minute
@@ -97,6 +107,9 @@ func SweepBrowserConsumers(now time.Time) {
 	defer sessions.Unlock()
 	for _, s := range sessions.values {
 		s.mu.Lock()
+		if s.closed == nil && s.everAttached && !s.attached && (!s.resumable || !now.Before(s.resumeUntil)) {
+			s.failTransportLocked()
+		}
 		if s.closed == nil && s.browserConsumers == 0 && !s.browserDeadline.IsZero() && !now.Before(s.browserDeadline) {
 			s.closeLocked(websshv1.CloseReason_CLOSE_REASON_CANCELLED)
 		}
@@ -188,9 +201,12 @@ func Lease(ctx context.Context, agentID string) (*websshv1.SessionAssignment, er
 				continue
 			}
 			session.mu.Lock()
-			available := session.closed == nil && !session.attached && !session.LeaseExpiresAt.After(now)
+			available := session.closed == nil && !session.everAttached && !session.attached && !session.LeaseExpiresAt.After(now)
 			if available {
 				session.LeaseExpiresAt = now.Add(leaseDuration)
+				if session.Grant != nil {
+					session.LeaseExpiresAt = session.Grant.TransportDeadline(session.LeaseExpiresAt)
+				}
 				assignment := session.assignment()
 				session.mu.Unlock()
 				sessions.Unlock()
@@ -228,7 +244,7 @@ func Lease(ctx context.Context, agentID string) (*websshv1.SessionAssignment, er
 	}
 }
 
-func Attach(agentID, assignmentID, sessionID string) (*Session, error) {
+func Attach(agentID, assignmentID, sessionID string, resume ...bool) (*Session, error) {
 	sessions.Lock()
 	session := sessions.values[sessionID]
 	sessions.Unlock()
@@ -237,24 +253,42 @@ func Attach(agentID, assignmentID, sessionID string) (*Session, error) {
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	if session.AgentID != agentID || session.AssignmentID != assignmentID || !session.LeaseExpiresAt.After(time.Now().UTC()) {
+	resumable := len(resume) > 0 && resume[0]
+	validLease := session.LeaseExpiresAt.After(time.Now().UTC())
+	if session.everAttached {
+		validLease = resumable && session.resumable && time.Now().Before(session.resumeUntil)
+	}
+	if session.AgentID != agentID || session.AssignmentID != assignmentID || !validLease {
 		return nil, ErrInvalidLease
 	}
 	if session.closed != nil {
 		return nil, ErrClosed
 	}
 	if session.attached {
+		if resumable && session.resumable {
+			return nil, ErrTransportBusy
+		}
 		return nil, ErrInvalidLease
 	}
 	session.attached = true
+	session.everAttached = true
+	session.resumable = resumable
 	return session, nil
+}
+
+func (s *Session) ValidCommandCursor(sequence uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return sequence <= s.commandSeq
 }
 
 func (s *Session) Detach() {
 	s.mu.Lock()
 	if s.closed == nil {
 		s.attached = false
-		s.LeaseExpiresAt = time.Time{}
+		if !s.resumable {
+			s.failTransportLocked()
+		}
 	}
 	s.mu.Unlock()
 	sessions.Lock()
@@ -263,6 +297,72 @@ func (s *Session) Detach() {
 		delete(sessions.notify, s.AgentID)
 	}
 	sessions.Unlock()
+}
+
+func (s *Session) failTransportLocked() {
+	closed := s.closeLocked(websshv1.CloseReason_CLOSE_REASON_FAILED)
+	s.agentSeq++
+	event := &websshv1.SessionEvent{SessionId: s.ID, Sequence: s.agentSeq, OccurredAt: timestamppb.Now(), Event: &websshv1.SessionEvent_Closed{Closed: closed}}
+	s.events = []*websshv1.SessionEvent{event}
+	s.bufferedEventBytes = proto.Size(event)
+}
+
+// Resumption never leases a second PTY. This metadata checkpoints the existing
+// Agent's replay and bounds how long that PTY may survive an offline panel.
+func (s *Session) TransportFrame(command *websshv1.AttachSessionResponse) *websshv1.AttachSessionResponse {
+	until := time.Now().Add(leaseDuration)
+	if s.Grant != nil {
+		until = s.Grant.TransportDeadline(until)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	frame := &websshv1.AttachSessionResponse{}
+	if command != nil {
+		frame = proto.Clone(command).(*websshv1.AttachSessionResponse)
+	}
+	frame.AcceptedEventSequence = s.agentSeq
+	frame.ResumeUntil = timestamppb.New(until)
+	s.resumeUntil = until
+	return frame
+}
+
+func (s *Session) NextResumableFrame(ctx context.Context, afterCommand, afterEvent uint64) (*websshv1.AttachSessionResponse, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		if s.closed != nil {
+			frame := &websshv1.AttachSessionResponse{Sequence: s.commandSeq + 1, Command: &websshv1.AttachSessionResponse_CloseReason{CloseReason: s.closed.Reason.String()}}
+			s.mu.Unlock()
+			return frame, nil
+		}
+		for _, command := range s.commands {
+			if command.Sequence > afterCommand {
+				s.mu.Unlock()
+				return command, nil
+			}
+		}
+		if s.agentSeq > afterEvent {
+			s.mu.Unlock()
+			return &websshv1.AttachSessionResponse{}, nil
+		}
+		commandSignal, eventSignal := s.commandNotify, s.eventNotify
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-commandSignal:
+		case <-eventSignal:
+		}
+	}
+}
+
+// AgentAttached is an observation, not an authorization or output cursor.
+func (s *Session) AgentAttached() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attached && s.closed == nil
 }
 
 func (s *Session) EnqueueCommand(sequence uint64, command Command) (uint64, error) {
@@ -280,26 +380,35 @@ func (s *Session) EnqueueCommand(sequence uint64, command Command) (uint64, erro
 	if len(s.commands) >= maxBufferedCommands {
 		return s.commandSeq, ErrCommandBacklog
 	}
+	response := command.Response(sequence)
+	size := proto.Size(response)
+	if size > maxBufferedCommandBytes-s.bufferedCommandBytes {
+		return s.commandSeq, ErrCommandBacklog
+	}
 	s.commandSeq = sequence
-	s.commands = append(s.commands, command.Response(sequence))
+	s.commands = append(s.commands, response)
+	s.bufferedCommandBytes += size
 	s.signalCommands()
 	return s.commandSeq, nil
 }
 
 func (s *Session) NextCommand(ctx context.Context, after uint64) (*websshv1.AttachSessionResponse, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		s.mu.Lock()
+		if s.closed != nil {
+			closed := &websshv1.AttachSessionResponse{Sequence: s.commandSeq + 1, Command: &websshv1.AttachSessionResponse_CloseReason{CloseReason: s.closed.Reason.String()}}
+			s.mu.Unlock()
+			return closed, nil
+		}
 		for _, command := range s.commands {
 			if command.Sequence > after {
 				result := command
 				s.mu.Unlock()
 				return result, nil
 			}
-		}
-		if s.closed != nil {
-			closed := &websshv1.AttachSessionResponse{Sequence: s.commandSeq + 1, Command: &websshv1.AttachSessionResponse_CloseReason{CloseReason: s.closed.Reason.String()}}
-			s.mu.Unlock()
-			return closed, nil
 		}
 		signal := s.commandNotify
 		s.mu.Unlock()
@@ -325,9 +434,15 @@ func (s *Session) AppendAgentEvent(event *websshv1.AgentSessionEvent) (uint64, e
 		for _, command := range s.commands {
 			if command.Sequence > event.AcceptedCommandSequence {
 				commands = append(commands, command)
+			} else {
+				s.bufferedCommandBytes -= proto.Size(command)
 			}
 		}
+		clear(s.commands[len(commands):])
 		s.commands = commands
+	}
+	if s.closed != nil {
+		return s.agentSeq, ErrClosed
 	}
 	if event.Sequence == 0 && event.Event == nil {
 		return s.agentSeq, nil
@@ -342,10 +457,6 @@ func (s *Session) AppendAgentEvent(event *websshv1.AgentSessionEvent) (uint64, e
 	if file := event.GetFile(); file != nil {
 		buffered += uint64(len(file.Data))
 	}
-	if buffered+s.bufferedOutput > maxBufferedOutput {
-		return s.agentSeq, ErrOutputLimit
-	}
-	s.bufferedOutput += buffered
 	occurredAt := event.OccurredAt
 	if occurredAt == nil || !occurredAt.IsValid() {
 		occurredAt = timestamppb.Now()
@@ -357,10 +468,35 @@ func (s *Session) AppendAgentEvent(event *websshv1.AgentSessionEvent) (uint64, e
 	case *websshv1.AgentSessionEvent_File:
 		stored.Event = &websshv1.SessionEvent_File{File: value.File}
 	case *websshv1.AgentSessionEvent_Closed:
+		if value.Closed == nil {
+			return s.agentSeq, errors.New("agent session close is empty")
+		}
 		stored.Event = &websshv1.SessionEvent_Closed{Closed: value.Closed}
-		s.closed = value.Closed
 	default:
 		return s.agentSeq, errors.New("agent session event is empty")
+	}
+	size := proto.Size(stored)
+	if buffered > maxBufferedOutput-s.bufferedOutput || len(s.events) >= maxBufferedEvents || size > maxBufferedEventBytes-s.bufferedEventBytes {
+		// A non-reading browser must neither allocate forever nor leave a live
+		// shell behind a permanently full replay buffer. Report a failed close.
+		closed := s.closeLocked(websshv1.CloseReason_CLOSE_REASON_FAILED)
+		s.agentSeq++
+		failed := &websshv1.SessionEvent{SessionId: s.ID, Sequence: s.agentSeq, OccurredAt: timestamppb.Now(), Event: &websshv1.SessionEvent_Closed{Closed: closed}}
+		s.events = []*websshv1.SessionEvent{failed}
+		s.bufferedEventBytes = proto.Size(failed)
+		return s.agentSeq, ErrOutputLimit
+	}
+	s.bufferedOutput += buffered
+	s.bufferedEventBytes += size
+	if value, ok := event.Event.(*websshv1.AgentSessionEvent_Closed); ok {
+		s.closed = value.Closed
+		if s.grantStop != nil {
+			s.grantStop()
+			s.grantStop = nil
+		}
+		s.commands = nil
+		s.bufferedCommandBytes = 0
+		s.signalCommands()
 	}
 	s.agentSeq = event.Sequence
 	s.events = append(s.events, stored)
@@ -389,13 +525,18 @@ func (s *Session) AcknowledgeEvents(sequence uint64) (uint64, error) {
 		} else {
 			s.bufferedOutput -= released
 		}
+		s.bufferedEventBytes -= proto.Size(event)
 	}
+	clear(s.events[len(kept):])
 	s.events = kept
 	return sequence, nil
 }
 
 func (s *Session) NextEvent(ctx context.Context, after uint64) (*websshv1.SessionEvent, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		s.mu.Lock()
 		for _, event := range s.events {
 			if event.Sequence > after {
@@ -431,8 +572,10 @@ func (s *Session) closeLocked(reason websshv1.CloseReason) *websshv1.SessionClos
 		}
 		s.closed = &websshv1.SessionClosed{SessionId: s.ID, Reason: reason, ClosedAt: timestamppb.Now()}
 		s.commands = nil
+		s.bufferedCommandBytes = 0
 		s.events = nil
 		s.bufferedOutput = 0
+		s.bufferedEventBytes = 0
 		s.signalCommands()
 		s.signalEvents()
 	}

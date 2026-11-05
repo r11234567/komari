@@ -49,6 +49,7 @@ func Register(r *gin.Engine) {
 		newHandler(credentialv1connect.NewTrustedCredentialServiceHandler(&credentialService{}, connect.WithInterceptors(diagnostics.OutcomeInterceptor{}, policy), connect.WithReadMaxBytes(128<<10))),
 		newHandler(browserv1connect.NewBrowserServiceHandler(&browserService{}, opts...)),
 		newHandler(adminv1connect.NewDashboardServiceHandler(&dashboardService{}, opts...)),
+		newHandler(adminv1connect.NewApiTokenServiceHandler(&apiTokenService{}, opts...)),
 		newHandler(adminv1connect.NewMaintenanceServiceHandler(&maintenanceService{}, opts...)),
 		newHandler(adminv1connect.NewTerminalSettingsServiceHandler(&terminalSettingsService{}, opts...)),
 		newHandler(filev1connect.NewFileServiceHandler(newFileService(), opts...)),

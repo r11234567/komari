@@ -42,7 +42,7 @@ func IdentityMiddleware() gin.HandlerFunc {
 		case rpc.PrincipalAPIKey:
 			// 旧逻辑:API Key 时记录裸 key 与固定占位 uuid。
 			apiKey := c.GetHeader("Authorization")
-			c.Set("api_key", apiKey[len("Bearer "):])
+			c.Set("api_key", strings.TrimPrefix(apiKey, "Bearer "))
 			c.Set("uuid", "00000000-0000-0000-0000-000000000000")
 		case rpc.PrincipalUser:
 			if session, err := c.Cookie("session_token"); err == nil && session != "" {
@@ -104,6 +104,10 @@ var publicPaths = []string{
 // 依赖 IdentityMiddleware 已设置的 role，对未认证的访客在私有站点模式下进行拦截。
 func PrivateSiteMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if p := GetPrincipal(c); p != nil && p.APIToken != nil && p.AllowsAPIProcedure(c.Request.URL.Path) {
+			c.Next()
+			return
+		}
 		// 已认证用户直接放行
 		if GetRole(c) != RoleGuest {
 			c.Next()
@@ -252,5 +256,5 @@ func isApiKeyValid(apiKey string) bool {
 	if apiKeyConfig == "" || len(apiKeyConfig) < 12 {
 		return false
 	}
-	return apiKey == "Bearer "+apiKeyConfig
+	return security.APIKeyMatches(apiKey, apiKeyConfig)
 }

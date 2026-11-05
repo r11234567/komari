@@ -47,6 +47,22 @@ func TestManagementValidatesNamesAndCancellation(t *testing.T) {
 	}
 }
 
+func TestPluginLifecycleCannotGrantExecutionWithLegacyBooleanOrMachineIdentity(t *testing.T) {
+	ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: rpc.NewUserPrincipal("human")})
+	if err := SetEnabled(ctx, "not-installed", true, true); err == nil {
+		t.Fatalf("legacy approval flag granted code execution: %v", err)
+	}
+	for _, principal := range []*rpc.Principal{rpc.NewAPIKeyPrincipal(), rpc.PrincipalFromRole(rpc.RoleAdmin)} {
+		ctx = rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: principal})
+		if err := SetEnabled(ctx, "target", true, true); !errors.Is(err, ErrPermissionDenied) {
+			t.Fatalf("machine/plugin enable: %v", err)
+		}
+		if err := Delete(ctx, "target"); !errors.Is(err, ErrPermissionDenied) {
+			t.Fatalf("machine/plugin delete: %v", err)
+		}
+	}
+}
+
 func TestManifestLookupPreservesErrorClassification(t *testing.T) {
 	ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: rpc.NewUserPrincipal("user")})
 	_, _, err := Configuration(ctx, "../invalid-name")

@@ -1,13 +1,100 @@
 package connectapi
 
 import (
+	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/komari-monitor/komari/pkg/rpc"
 	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
 )
+
+func TestConnectMetricQueryCacheSeparatesScopedTokens(t *testing.T) {
+	key := func(id string) string {
+		p := &rpc.Principal{Type: rpc.PrincipalAPIKey, IsAPIKey: true, APIToken: &rpc.APITokenPolicy{ID: id, AgentIDs: []string{id}, ExpiresAt: time.Now().Add(time.Hour)}}
+		ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: p})
+		return connectMetricQueryKey(ctx, &metricsv1.QueryMetricsRequest{})
+	}
+	if key("token-a") == key("token-b") {
+		t.Fatal("different resource scopes share a cached response")
+	}
+}
+
+func TestMetricQueryCacheByteBudgetAndReplacement(t *testing.T) {
+	resetMetricQueryCache(t)
+	now := time.Now()
+	oversize := &metricsv1.QueryMetricsResponse{Series: []*metricsv1.MetricsSeries{{Metric: strings.Repeat("x", connectMetricQueryCacheEntryBytes+1)}}}
+	storeMetricQueryMessage("large", oversize, now)
+	if _, ok := cachedMetricQueryMessage("large", now); ok {
+		t.Fatal("oversized response cached")
+	}
+	message := &metricsv1.QueryMetricsResponse{Series: []*metricsv1.MetricsSeries{{Metric: strings.Repeat("x", 1<<20)}}}
+	for i := 0; i < 40; i++ {
+		storeMetricQueryMessage(fmt.Sprint(i), message, now)
+		connectMetricQueryCache.Lock()
+		size := connectMetricQueryCache.bytes
+		connectMetricQueryCache.Unlock()
+		if size > connectMetricQueryCacheBytes {
+			t.Fatalf("cache budget exceeded: %d", size)
+		}
+	}
+	storeMetricQueryMessage("replace", message, now)
+	storeMetricQueryMessage("replace", &metricsv1.QueryMetricsResponse{}, now)
+	connectMetricQueryCache.Lock()
+	var actual int
+	for _, entry := range connectMetricQueryCache.items {
+		actual += entry.size
+	}
+	if actual != connectMetricQueryCache.bytes {
+		t.Errorf("accounted=%d actual=%d", connectMetricQueryCache.bytes, actual)
+	}
+	connectMetricQueryCache.Unlock()
+	_, _ = cachedMetricQueryMessage("replace", now.Add(connectMetricCacheTTL))
+}
+
+func TestMetricQueryFollowerCanCancelWithoutWaitingForSharedRead(t *testing.T) {
+	resetMetricQueryCache(t)
+	parent, cancel := context.WithCancel(context.Background())
+	ctx := &metricCancellationContext{Context: parent, reached: make(chan struct{})}
+	defer cancel()
+	req := connect.NewRequest(&metricsv1.QueryMetricsRequest{})
+	key := connectMetricQueryKey(ctx, req.Msg)
+	started, release := make(chan struct{}), make(chan struct{})
+	leader := connectMetricQueryFlight.DoChan(key, func() (any, error) { close(started); <-release; return &metricsv1.QueryMetricsResponse{}, nil })
+	defer func() { close(release); <-leader }()
+	<-started
+	done := make(chan error, 1)
+	go func() { _, err := (&metricsService{}).QueryMetrics(ctx, req); done <- err }()
+	select {
+	case <-ctx.reached:
+	case <-time.After(time.Second):
+		t.Fatal("query did not join shared read")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if connect.CodeOf(err) != connect.CodeCanceled {
+			t.Fatalf("cancel result: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled follower waited for shared read")
+	}
+}
+
+type metricCancellationContext struct {
+	context.Context
+	reached chan struct{}
+	once    sync.Once
+}
+
+func (ctx *metricCancellationContext) Done() <-chan struct{} {
+	ctx.once.Do(func() { close(ctx.reached) })
+	return ctx.Context.Done()
+}
 
 func resetMetricQueryCache(t *testing.T) {
 	t.Helper()
