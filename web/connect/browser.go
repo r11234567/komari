@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -429,13 +430,47 @@ func legacyReportToProto(client models.Client, report *legacyv1.Report, includeP
 			TcpConnectionCount:   uint64(max(report.Connections.TCP, 0)),
 			UdpConnectionCount:   uint64(max(report.Connections.UDP, 0)),
 		},
-		Metadata: &reportv1.AgentMetadata{},
+		Metadata:          &reportv1.AgentMetadata{},
+		DiagnosticMessage: report.Message,
 	}
 	if includePrivate {
 		result.Metadata.Version = client.Version
 	}
 	if report.Ram.Total > 0 {
 		result.Resources.MemoryPercent = float64(report.Ram.Used) * 100 / float64(report.Ram.Total)
+	}
+	if report.GPU != nil && len(report.GPU.DetailedInfo) > 0 {
+		result.Resources.Gpus = make([]*reportv1.GpuUsage, 0, len(report.GPU.DetailedInfo))
+		for index, gpu := range report.GPU.DetailedInfo {
+			item := &reportv1.GpuUsage{
+				Id:   strconv.Itoa(index),
+				Name: gpu.Name,
+			}
+			utilization := gpu.Utilization
+			item.UtilizationPercent = &utilization
+			if gpu.MemoryUsed >= 0 {
+				memUsed := uint64(gpu.MemoryUsed)
+				item.MemoryUsedBytes = &memUsed
+			}
+			if gpu.MemoryTotal >= 0 {
+				memTotal := uint64(gpu.MemoryTotal)
+				item.MemoryTotalBytes = &memTotal
+			}
+			temp := float64(gpu.Temperature)
+			item.TemperatureCelsius = &temp
+			result.Resources.Gpus = append(result.Resources.Gpus, item)
+		}
+	} else if report.GPU != nil && (client.GpuName != "" || report.GPU.AverageUsage > 0) {
+		name := client.GpuName
+		if name == "" {
+			name = "GPU"
+		}
+		utilization := report.GPU.AverageUsage
+		result.Resources.Gpus = []*reportv1.GpuUsage{{
+			Id:                 "0",
+			Name:               name,
+			UtilizationPercent: &utilization,
+		}}
 	}
 	result.NetworkInterfaces = []*reportv1.NetworkInterface{{
 		Name:                   "aggregate",
