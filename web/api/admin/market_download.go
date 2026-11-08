@@ -8,13 +8,18 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"time"
 
 	"github.com/komari-monitor/komari/pkg/config"
 	"gorm.io/gorm"
 )
 
-var errMarketDownloadTooLarge = errors.New("market download exceeds size limit")
+var (
+	errMarketDownloadTooLarge = errors.New("market download exceeds size limit")
+	marketDownloadURLPattern  = regexp.MustCompile(`^https?://[a-zA-Z0-9.\-_~%\[\]:]+(?:[/?#][^\s]*)?$`)
+	validGitHubSlugPattern    = regexp.MustCompile(`^[a-zA-Z0-9.\-_]+$`)
+)
 
 // Separate pools prevent a connection opened while protection was disabled
 // from being reused after protection is enabled. Neither transport uses proxies.
@@ -45,6 +50,9 @@ func ssrfProtectionEnabled() (bool, error) {
 }
 
 func validateMarketDownloadURL(ctx context.Context, rawURL string, protected bool) error {
+	if !marketDownloadURLPattern.MatchString(rawURL) {
+		return errors.New("only HTTP and HTTPS URLs are allowed")
+	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil {
 		return errors.New("only HTTP and HTTPS URLs without embedded credentials are allowed")
@@ -59,10 +67,17 @@ func validateMarketRedirect(req *http.Request, via []*http.Request, protected bo
 	if len(via) >= 10 {
 		return errors.New("too many redirects")
 	}
-	return validateMarketDownloadURL(req.Context(), req.URL.String(), protected)
+	redirectURL := req.URL.String()
+	if !marketDownloadURLPattern.MatchString(redirectURL) {
+		return errors.New("only HTTP and HTTPS URLs are allowed")
+	}
+	return validateMarketDownloadURL(req.Context(), redirectURL, protected)
 }
 
 func downloadMarketURL(rawURL string, maxSize int64, timeout time.Duration) ([]byte, error) {
+	if !marketDownloadURLPattern.MatchString(rawURL) {
+		return nil, errors.New("invalid market download URL format")
+	}
 	protected, err := ssrfProtectionEnabled()
 	if err != nil {
 		return nil, fmt.Errorf("unable to read SSRF protection setting: %w", err)

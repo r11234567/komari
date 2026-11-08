@@ -75,3 +75,77 @@ func TestMarketDownloadSwitchControlsAllRemoteEntrypoints(t *testing.T) {
 		t.Fatal("unreadable setting failed open")
 	}
 }
+
+func TestMarketDownloadURLPatternValidation(t *testing.T) {
+	validURLs := []string{
+		"http://example.com",
+		"https://example.com/theme.zip",
+		"https://example.com:8080/path?query=val#hash",
+		"http://127.0.0.1:8080/test",
+		"https://[::1]:8443/archive",
+		"https://api.github.com/repos/owner/repo/releases/latest",
+		"https://github.com/owner/repo",
+		"https://raw.githubusercontent.com/owner/repo/main/v1.json",
+	}
+	for _, raw := range validURLs {
+		if !marketDownloadURLPattern.MatchString(raw) {
+			t.Errorf("marketDownloadURLPattern rejected valid URL: %s", raw)
+		}
+	}
+
+	invalidURLs := []string{
+		"",
+		"file:///etc/passwd",
+		"ftp://example.com/file",
+		"javascript:alert(1)",
+		"data:text/html,test",
+		"http://",
+		"https://",
+		"http://example.com/foo bar",
+		"http://example.com\r\nHost: evil.com",
+		"http://user:pass@example.com/",
+	}
+	for _, raw := range invalidURLs {
+		if marketDownloadURLPattern.MatchString(raw) {
+			t.Errorf("marketDownloadURLPattern accepted invalid URL: %s", raw)
+		}
+		if _, err := downloadMarketURL(raw, 1024, time.Second); err == nil {
+			t.Errorf("downloadMarketURL allowed invalid URL: %s", raw)
+		}
+		if _, err := downloadThemeFromURL(raw); err == nil {
+			t.Errorf("downloadThemeFromURL allowed invalid URL: %s", raw)
+		}
+	}
+}
+
+func TestGitHubSlugPatternValidation(t *testing.T) {
+	validSlugs := []string{
+		"owner",
+		"repo-name",
+		"repo.name",
+		"repo_name",
+		"12345",
+		"Komari-Monitor",
+	}
+	for _, slug := range validSlugs {
+		if !validGitHubSlugPattern.MatchString(slug) {
+			t.Errorf("validGitHubSlugPattern rejected valid slug: %s", slug)
+		}
+	}
+
+	invalidSlugs := []string{
+		"",
+		"../evil",
+		"owner/repo",
+		"owner\\repo",
+		"owner;reboot",
+		"owner$var",
+		"owner repo",
+		"owner\ntag",
+	}
+	for _, slug := range invalidSlugs {
+		if validGitHubSlugPattern.MatchString(slug) {
+			t.Errorf("validGitHubSlugPattern accepted invalid slug: %s", slug)
+		}
+	}
+}

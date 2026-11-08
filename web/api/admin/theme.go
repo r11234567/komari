@@ -633,6 +633,9 @@ func dialPublicAddressWith(ctx context.Context, network, address string, lookup 
 }
 
 func downloadThemeFromURL(rawURL string) ([]byte, error) {
+	if !marketDownloadURLPattern.MatchString(rawURL) {
+		return nil, errors.New("invalid theme download URL format")
+	}
 	data, err := downloadMarketURL(rawURL, maxThemeArchiveSize, 30*time.Second)
 	if errors.Is(err, errMarketDownloadTooLarge) {
 		return nil, fmt.Errorf("%w: %d bytes", errThemeArchiveTooLarge, maxThemeArchiveSize)
@@ -654,10 +657,16 @@ func getGitHubReleaseDownloadURL(owner, repo string) (string, error) {
 	if owner == "" || repo == "" {
 		return "", errors.New("GitHub仓库所有者和仓库名称不能为空")
 	}
+	if !validGitHubSlugPattern.MatchString(owner) || !validGitHubSlugPattern.MatchString(repo) {
+		return "", errors.New("无效的GitHub仓库所有者或仓库名称格式")
+	}
 
 	// 构建GitHub API URL
 	// 使用GitHub API获取最新release信息
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
+	if !marketDownloadURLPattern.MatchString(apiURL) {
+		return "", errors.New("无效的GitHub API URL格式")
+	}
 
 	data, err := downloadMarketURL(apiURL, marketCatalogMaxSize, 30*time.Second)
 	if err != nil {
@@ -681,9 +690,14 @@ func getGitHubReleaseDownloadURL(owner, repo string) (string, error) {
 		return "", errors.New("GitHub release中没有可下载的资源")
 	}
 
+	downloadURL := releaseInfo.Assets[0].BrowserDownloadURL
+	if !marketDownloadURLPattern.MatchString(downloadURL) {
+		return "", errors.New("GitHub release资源下载链接格式无效")
+	}
+
 	// 返回第一个资源的下载链接
 	// 相当于shell命令: curl -s https://api.github.com/repos/owner/repo/releases/latest | jq -r ".assets[0].browser_download_url"
-	return releaseInfo.Assets[0].BrowserDownloadURL, nil
+	return downloadURL, nil
 }
 
 // isGitHubRepoURL 检查URL是否是GitHub仓库地址
@@ -697,7 +711,7 @@ func getGitHubReleaseDownloadURL(owner, repo string) (string, error) {
 //   - 仓库所有者
 //   - 仓库名称
 func isGitHubRepoURL(urlStr string) (bool, string, string) {
-	if urlStr == "" {
+	if urlStr == "" || !marketDownloadURLPattern.MatchString(urlStr) {
 		return false, "", ""
 	}
 
@@ -733,6 +747,10 @@ func isGitHubRepoURL(urlStr string) (bool, string, string) {
 	// 如果repo以.git结尾，去掉这个后缀
 	repo = strings.TrimSuffix(repo, ".git")
 
+	if !validGitHubSlugPattern.MatchString(owner) || !validGitHubSlugPattern.MatchString(repo) {
+		return false, "", ""
+	}
+
 	return true, owner, repo
 }
 
@@ -758,6 +776,19 @@ func UpdateTheme(c *gin.Context) {
 	// 校验主题短名称，防止路径穿越（如 ../）访问工作目录外的文件
 	if !isValidThemeShort(req.Short) {
 		api.RespondError(c, http.StatusBadRequest, "无效的主题名称")
+		return
+	}
+
+	if req.URL != "" && !marketDownloadURLPattern.MatchString(req.URL) {
+		api.RespondError(c, http.StatusBadRequest, "无效的主题URL格式")
+		return
+	}
+	if req.GitOwner != "" && !validGitHubSlugPattern.MatchString(req.GitOwner) {
+		api.RespondError(c, http.StatusBadRequest, "无效的GitHub仓库所有者格式")
+		return
+	}
+	if req.GitRepo != "" && !validGitHubSlugPattern.MatchString(req.GitRepo) {
+		api.RespondError(c, http.StatusBadRequest, "无效的GitHub仓库名称格式")
 		return
 	}
 
@@ -1010,6 +1041,11 @@ func ImportTheme(c *gin.Context) {
 		return
 	}
 
+	if !marketDownloadURLPattern.MatchString(req.URL) {
+		api.RespondError(c, http.StatusBadRequest, "无效的主题下载URL格式")
+		return
+	}
+
 	// 解析下载链接
 	downloadURL := req.URL
 	isGitHub, owner, repo := isGitHubRepoURL(req.URL)
@@ -1020,6 +1056,11 @@ func ImportTheme(c *gin.Context) {
 			return
 		}
 		downloadURL = gitHubURL
+	}
+
+	if !marketDownloadURLPattern.MatchString(downloadURL) {
+		api.RespondError(c, http.StatusBadRequest, "无效的主题下载URL格式")
+		return
 	}
 
 	// 下载主题ZIP
