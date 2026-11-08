@@ -1,0 +1,1 @@
+import{a as e}from"./chunk-rolldown-runtime-BWaJ3C7D.js";import{n as t}from"./chunk-jsx-runtime-CB5401Qg.js";import{n}from"./chunk-as-child.prop-DphbOnWW.js";import{t as r}from"./chunk-base-button-CffcuvDn.js";var i=e(t()),a=e(n()),o=i.forwardRef(({className:e,...t},n)=>i.createElement(r,{...t,ref:n,className:(0,a.default)(`rt-Button`,e)}));o.displayName=`Button`;export{o as t};
