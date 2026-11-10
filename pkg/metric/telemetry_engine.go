@@ -246,7 +246,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	} else if err != nil {
 		return err
 	}
-	if version != 3 && version != 2 && version != 1 && version != -1 {
+	if version != 4 && version != 3 && version != 2 && version != 1 && version != -1 {
 		return fmt.Errorf("unsupported telemetry SQL schema version %d", version)
 	}
 	// Small integer/CHAR keys keep these DDLs portable across SQLite, MySQL and
@@ -265,6 +265,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS %serasures (series_id CHAR(64) PRIMARY KEY, through_id BIGINT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS %sidentity (slot INTEGER PRIMARY KEY, id CHAR(32) NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS %straffic_ingress (source VARCHAR(255) PRIMARY KEY, observed BIGINT NOT NULL, total_up BIGINT NOT NULL, total_down BIGINT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS %sgaps (segment_id CHAR(32) NOT NULL, series_id CHAR(64) NOT NULL, first_observed BIGINT NOT NULL, last_observed BIGINT NOT NULL, PRIMARY KEY(segment_id,series_id,first_observed))`,
 	}
 	prefix := t.s.cfg.TablePrefix + "telemetry_"
 	for _, q := range stmts {
@@ -290,6 +291,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 		{"summary_series", "summary", "series_id,resolution,bucket"},
 		{"receipt_age", "receipts", "received,ingest_id"},
 		{"members_series", "members", "series_id,first_observed,last_observed,segment_id"},
+		{"gaps_series", "gaps", "series_id,first_observed,last_observed"},
 	} {
 		q := fmt.Sprintf("CREATE INDEX %s ON %s (%s)", prefix+idx.name, t.table(idx.table), idx.cols)
 		if t.s.cfg.Driver != DriverMySQL {
@@ -333,7 +335,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	// Core schema v1/v2 was never an application format. Existing segments are
 	// indexed lazily from their owned hot rows or verified immutable archives;
 	// opening the store never performs a historical scan.
-	_, err = t.s.db.ExecContext(ctx, "UPDATE "+progressTable+" SET value=3 WHERE task='schema_version' AND value IN (-1,1,2)")
+	_, err = t.s.db.ExecContext(ctx, "UPDATE "+progressTable+" SET value=4 WHERE task='schema_version' AND value IN (-1,1,2,3)")
 	if err != nil {
 		return err
 	}

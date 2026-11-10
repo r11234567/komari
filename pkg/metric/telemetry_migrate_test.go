@@ -204,6 +204,9 @@ func TestTelemetryLegacySummaryOnlyMigration(t *testing.T) {
 	if err != nil || len(r.Points) != 1 || r.Points[0].Value != 15 || r.Points[0].Count != 5 {
 		t.Fatalf("summary-only migration %+v %v", r, err)
 	}
+	if _, err = s.Telemetry().ExportRawBatch(WithTelemetryEntities(ctx, []string{"node"}), []Query{{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(time.Hour)}}); !errors.Is(err, ErrTelemetryCoverage) {
+		t.Fatal("summary-only source returned a successful incomplete CSV", err)
+	}
 }
 
 func TestTelemetryLegacyCanonicalPromotionAtomic(t *testing.T) {

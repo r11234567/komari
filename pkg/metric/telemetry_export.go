@@ -77,7 +77,21 @@ func (t *Telemetry) ExportRawBatch(ctx context.Context, queries []Query) ([][]Po
 			release()
 			return nil, e
 		}
-		statement := "SELECT DISTINCT m.segment_id FROM " + t.table("members") + " m JOIN " + t.table("series") + " s ON s.id=m.series_id JOIN " + t.table("segments") + " a ON a.id=m.segment_id WHERE s.metric=? AND m.first_observed<=? AND m.last_observed>=? AND a.first_id<=? AND a.state NOT IN ('expired','legacy')" + filter + " LIMIT 2049"
+		// A summary-only import is useful for charts, but must never produce a
+		// successful CSV that silently omits the unrecoverable source raw.
+		var gap string
+		gapArgs := []any{physical.MetricName, q.End.UnixNano(), q.Start.UnixNano()}
+		gapArgs = append(gapArgs, args...)
+		e = tx.QueryRowContext(ctx, t.bind("SELECT g.segment_id FROM "+t.table("gaps")+" g JOIN "+t.table("series")+" s ON s.id=g.series_id JOIN "+t.table("segments")+" a ON a.id=g.segment_id LEFT JOIN "+t.table("erasures")+" e ON e.series_id=s.id WHERE s.metric=? AND g.first_observed<=? AND g.last_observed>=? AND (e.through_id IS NULL OR a.last_id>e.through_id)"+filter+" LIMIT 1"), gapArgs...).Scan(&gap)
+		if e == nil {
+			release()
+			return nil, fmt.Errorf("%w: legacy raw was already removed before migration", ErrTelemetryCoverage)
+		}
+		if !errors.Is(e, sql.ErrNoRows) {
+			release()
+			return nil, e
+		}
+		statement := "SELECT DISTINCT m.segment_id FROM " + t.table("members") + " m JOIN " + t.table("series") + " s ON s.id=m.series_id JOIN " + t.table("segments") + " a ON a.id=m.segment_id LEFT JOIN " + t.table("erasures") + " e ON e.series_id=s.id WHERE s.metric=? AND m.first_observed<=? AND m.last_observed>=? AND a.first_id<=? AND a.state<>'legacy' AND (e.through_id IS NULL OR a.last_id>e.through_id)" + filter + " LIMIT 2049"
 		values := []any{physical.MetricName, q.End.UnixNano(), q.Start.UnixNano(), watermark}
 		values = append(values, args...)
 		rows, e := tx.QueryContext(ctx, t.bind(statement), values...)

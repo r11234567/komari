@@ -87,6 +87,9 @@ func TestTelemetryBackupRestoreAndArchiveExpiration(t *testing.T) {
 	if err != nil || len(chart.Points) != 1 || chart.Points[0].Value != 10 {
 		t.Fatal(chart, err)
 	}
+	if _, err = e.ExportRawBatch(WithTelemetryEntities(ctx, []string{"node"}), []Query{q}); !errors.Is(err, ErrTelemetryCoverage) {
+		t.Fatal("expired raw returned a successful incomplete CSV", err)
+	}
 	// Corrupt copies are refused instead of creating a successful partial bundle.
 	file := filepath.Join(archive, manifest.Files[0].Path)
 	if err = os.WriteFile(file, []byte("truncated"), 0600); err != nil {

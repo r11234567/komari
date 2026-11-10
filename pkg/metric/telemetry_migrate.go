@@ -323,6 +323,7 @@ func (s *Store) migrateLegacyRawWindow(ctx context.Context, t *Telemetry, name, 
 		}
 	}
 	for _, c := range outside {
+		c.raw = c.stats
 		*cells = append(*cells, *c)
 	}
 	return total, nil
@@ -349,6 +350,11 @@ func (t *Telemetry) commitLegacyCells(ctx context.Context, key, name, entity str
 		return err
 	}
 	for _, c := range cells {
+		if c.raw.Attempts < c.stats.Attempts {
+			if _, err = tx.ExecContext(ctx, t.bind("INSERT INTO "+t.table("gaps")+" (segment_id,series_id,first_observed,last_observed) VALUES (?,?,?,?)"), segment, c.series, c.stats.FirstNano, c.stats.LastNano); err != nil {
+				return err
+			}
+		}
 		// The source dictionary is kept in the same offline Store. Imported
 		// rollup-only series may not have any raw row, so create their identity.
 		seriesSQL := "INSERT INTO " + t.table("series") + " (id,metric,entity,tags) VALUES (?,?,?,?)"
