@@ -27,6 +27,7 @@ const services = {
   browser: 'komari.browser.v1.BrowserService',
   file: 'komari.file.v1.FileService',
   metrics: 'komari.metrics.v1.MetricsService',
+  workspace: 'komari.workspace.v1.WorkspaceService',
 };
 
 function verificationResource(request) {
@@ -76,13 +77,21 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
   let secret;
   let lastCounter = -1;
   let agentId;
+  let workspaceToken;
+  page.on('request', request => {
+    // Observe the grant obtained by the actual UI; never inject signed state.
+    const grant = request.headers()['x-komari-workspace-grant'];
+    if (grant) workspaceToken = grant;
+  });
   let exportCount = 0;
   const fixture = name => path.join(root, 'files', name);
 
   async function request(url, data, options = {}) {
     const { allowFailure = false, method = 'POST', headers = {} } = options;
+    const workspaceHeaders = url.startsWith(`/${services.file}/`) && workspaceToken
+      ? { 'X-Komari-Workspace-Grant': workspaceToken } : {};
     const response = await http.fetch(url, {
-      method, data, headers: { Origin: base, 'Connect-Protocol-Version': '1', ...headers }, timeout: 45_000,
+      method, data, headers: { Origin: base, 'Connect-Protocol-Version': '1', ...workspaceHeaders, ...headers }, timeout: 45_000,
     });
     console.log(`${method} ${new URL(url, base).pathname}: ${response.status()}`);
     if (!allowFailure) {
@@ -106,10 +115,10 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
     }
   }
   async function mutate(method, args) {
-    return rpc('file', method, { agentId, ...args, twoFactor: { code: await freshCode() } });
+    return rpc('file', method, { agentId, ...args });
   }
-  async function fileDenied(method, args) {
-    const response = await request(`/${services.file}/${method}`, { agentId, ...args }, { allowFailure: true });
+  async function fileDenied(method, args, headers = {}) {
+    const response = await request(`/${services.file}/${method}`, { agentId, ...args }, { allowFailure: true, headers });
     expect(response.ok(), `${method} must reject this operation`).toBeFalsy();
     return response.json();
   }
@@ -146,15 +155,6 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
     await expect(dialog).toBeHidden();
     await expect.poll(() => page.evaluate(() => getComputedStyle(document.body).pointerEvents)).not.toBe('none');
     await expect(page.locator('.km-terminal-session:visible textarea.xterm-helper-textarea')).toBeAttached();
-  }
-  async function promptCode(action) {
-    const code = await freshCode();
-    const prompt = page.waitForEvent('dialog');
-    const pending = action();
-    const dialog = await prompt;
-    expect(dialog.type()).toBe('prompt');
-    await dialog.accept(code);
-    await pending;
   }
   async function downloadFile(name) {
     const response = await request(`/api/admin/client/${agentId}/file/download?${new URLSearchParams({ path: fixture(name), chunk_size: '1048576' })}`, undefined, { method: 'GET' });
@@ -392,9 +392,9 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await location.press('Enter');
       await expect(page.locator('[data-file-path]').filter({ hasText: 'editor.txt' })).toBeVisible();
       const bytes = crypto.randomBytes(2 * 1048576 + 73);
-      await promptCode(() => page.locator('input[type=file][multiple]').setInputFiles({
+      await page.locator('input[type=file][multiple]').setInputFiles({
         name: 'roundtrip.bin', mimeType: 'application/octet-stream', buffer: bytes,
-      }));
+      });
       await expect.poll(() => fs.existsSync(fixture('roundtrip.bin')) ? sha256(fs.readFileSync(fixture('roundtrip.bin'))) : '',
         { timeout: 90_000 }).toBe(sha256(bytes));
       await expect.poll(() => metrics.uploadChunks).toBeGreaterThanOrEqual(3);
@@ -412,39 +412,38 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await page.keyboard.press('Control+a');
       await page.keyboard.type('Monaco UTF-8: ');
       await page.keyboard.insertText('联调 ✓\n');
-      await promptCode(() => page.keyboard.press('Control+s'));
+      await page.keyboard.press('Control+s');
       await expect.poll(() => fs.readFileSync(fixture('editor.txt'), 'utf8')).toBe('Monaco UTF-8: 联调 ✓\n');
       expect((await downloadFile('editor.txt')).toString()).toBe('Monaco UTF-8: 联调 ✓\n');
       await editor.focus();
       await page.keyboard.press('Control+a');
       await page.keyboard.press('Backspace');
-      await promptCode(() => page.keyboard.press('Control+s'));
+      await page.keyboard.press('Control+s');
       await expect.poll(() => fs.statSync(fixture('editor.txt')).size).toBe(0);
       expect((await downloadFile('editor.txt')).length).toBe(0);
     });
 
-    await test.step('file authorization rejects missing/replayed proof and unsafe overwrite/recursive flags', async () => {
+    await test.step('file authorization requires the real workspace grant and rejects unsafe overwrite/recursive flags', async () => {
+      expect(workspaceToken).toBeTruthy();
       const created = fixture('created.txt');
-      const missing = await fileDenied('CreateEntry', { path: created, kind: 'ENTRY_KIND_FILE' });
+      const missing = await fileDenied('CreateEntry', { path: created, kind: 'ENTRY_KIND_FILE' }, { 'X-Komari-Workspace-Grant': '' });
       expect(missing.code).toBe('unauthenticated');
       expect(fs.existsSync(created)).toBe(false);
-      const code = await freshCode();
-      await rpc('file', 'CreateEntry', { agentId, path: created, kind: 'ENTRY_KIND_FILE', mode: '0600', twoFactor: { code } });
+      const invalid = await fileDenied('CreateEntry', { path: created, kind: 'ENTRY_KIND_FILE' }, { 'X-Komari-Workspace-Grant': 'invalid-grant' });
+      expect(invalid.code).toBe('unauthenticated');
+      expect(fs.existsSync(created)).toBe(false);
+      await mutate('CreateEntry', { path: created, kind: 'ENTRY_KIND_FILE', mode: '0600' });
       expect(fs.statSync(created).mode & 0o777).toBe(0o600);
-      const replayPath = fixture('replay-must-not-exist.txt');
-      const replay = await fileDenied('CreateEntry', { path: replayPath, kind: 'ENTRY_KIND_FILE', twoFactor: { code } });
-      expect(replay.code).toBe('unauthenticated');
-      expect(fs.existsSync(replayPath)).toBe(false);
       const overwrite = await fileDenied('CopyEntry', { source: fixture('roundtrip.bin'), destination: fixture('existing.txt'),
-        overwrite: false, twoFactor: { code: await freshCode() } });
+        overwrite: false });
       expect(overwrite.message).toMatch(/already exists|file exists/i);
       expect(fs.readFileSync(fixture('existing.txt'), 'utf8')).toBe('destination must survive\n');
-      const recursive = await fileDenied('DeleteEntry', { path: fixture('nonempty'), recursive: false, twoFactor: { code: await freshCode() } });
+      const recursive = await fileDenied('DeleteEntry', { path: fixture('nonempty'), recursive: false });
       expect(recursive.message).toMatch(/directory not empty/i);
       expect(fs.readFileSync(fixture('nonempty/keep.txt'), 'utf8')).toBe('keep\n');
     });
 
-    await test.step('Agent executes copy, move, chmod, search and delete with fresh proofs', async () => {
+    await test.step('Agent executes copy, move, chmod, search and delete under the authorized OS identity', async () => {
       await mutate('CopyEntry', { source: fixture('roundtrip.bin'), destination: fixture('copy.bin'), overwrite: false });
       expect(sha256(fs.readFileSync(fixture('copy.bin')))).toBe(sha256(fs.readFileSync(fixture('roundtrip.bin'))));
       await mutate('MoveEntry', { source: fixture('copy.bin'), destination: fixture('moved.bin'), overwrite: false });
@@ -470,6 +469,22 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       const after = await rpc('config', 'GetNodeConfigState', { agentId });
       expect(after.appliedRevision).toBe(before.appliedRevision);
       expect(after.observation?.serviceId).toBe(before.observation?.serviceId);
+    });
+
+    await test.step('workspace revocation rejects old file grants and re-unlock requires fresh UI verification', async () => {
+      const old = workspaceToken;
+      expect((await rpc('workspace', 'LockWorkspace', { grantToken: old })).locked).toBe(true);
+      const blockedPath = fixture('revoked-must-not-exist.txt');
+      const denied = await fileDenied('CreateEntry', { path: blockedPath, kind: 'ENTRY_KIND_FILE' });
+      expect(denied.code).toBe('unauthenticated');
+      expect(fs.existsSync(blockedPath)).toBe(false);
+      const download = await request(`/api/admin/client/${agentId}/file/download?${new URLSearchParams({ path: fixture('roundtrip.bin') })}`,
+        undefined, { method: 'GET', allowFailure: true });
+      expect(download.status()).toBe(401);
+      await page.reload();
+      await confirmTerminal();
+      await expect.poll(() => workspaceToken).not.toBe(old);
+      expect(sha256(await downloadFile('roundtrip.bin'))).toBe(sha256(fs.readFileSync(fixture('roundtrip.bin'))));
     });
   } finally {
     fs.writeFileSync(path.join(artifacts, 'browser-events.json'), JSON.stringify(events, null, 2));
