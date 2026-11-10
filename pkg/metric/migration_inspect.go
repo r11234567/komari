@@ -58,6 +58,12 @@ func InspectSQLiteMigration(ctx context.Context, cfg Config) (SQLiteMigrationSum
 	if err := db.PingContext(ctx); err != nil {
 		return SQLiteMigrationSummary{}, err
 	}
+	if cfg.RetireLegacyStorage {
+		// There is no automatic block conversion in the retired application
+		// path. In particular, do not COUNT/scan a large source merely to offer
+		// an upgrade which this build will no longer perform on startup.
+		return SQLiteMigrationSummary{Layout: "legacy-retired"}, nil
+	}
 
 	t := tables{
 		definitions:  tableName(cfg.TablePrefix, "definitions"),

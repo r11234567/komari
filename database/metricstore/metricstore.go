@@ -105,6 +105,7 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 	opts := []metric.Option{
 		metric.WithTablePrefix(tablePrefix),
 		metric.WithAutoMigrate(autoMigrate),
+		metric.WithRetiredLegacyStorage(),
 	}
 	resources := detectSQLiteResourceProfile()
 	opts = append(opts, metric.WithHeavyReadConcurrency(resources.HeavyReadConcurrent))

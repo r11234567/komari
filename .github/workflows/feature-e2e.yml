@@ -63,6 +63,8 @@ jobs:
         run: |
           bash scripts/ci/run-audit-check.sh e2e-browser \
             "$E2E_TOOLS/node_modules/.bin/playwright" test --config scripts/ci/e2e/playwright.config.cjs
+      - name: Verify real telemetry ingestion does not create legacy blocks
+        run: bash scripts/ci/run-audit-check.sh e2e-storage python3 scripts/ci/e2e/check-telemetry-retirement.py
       - name: Collect service logs and destroy temporary services and secrets
         if: always()
         run: bash scripts/ci/e2e/cleanup.sh

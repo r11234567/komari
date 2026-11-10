@@ -13,6 +13,10 @@ import (
 //
 // Config 描述 Store 的数据库后端、连接池、迁移、保留和 rollup 配置。
 type Config struct {
+	// RetireLegacyStorage keeps existing blocks readable while disabling the old
+	// compressor, automatic codec upgrades and retention jobs. The application
+	// uses this during the archive-engine transition; this is not a user setting.
+	RetireLegacyStorage bool
 	// Driver selects the database backend.
 	//
 	// Driver 选择数据库后端。
@@ -73,6 +77,12 @@ type Config struct {
 	// automatic schema migration is running. Callbacks must return quickly and
 	// must not call back into the Store being opened.
 	MigrationProgress MigrationProgressFunc
+}
+
+// WithRetiredLegacyStorage disables legacy background mutations. Readers and
+// explicit administrative deletions remain available for migration.
+func WithRetiredLegacyStorage() Option {
+	return func(c *Config) { c.RetireLegacyStorage = true }
 }
 
 // SQLiteOptions contains SQLite-specific performance and read-concurrency settings.

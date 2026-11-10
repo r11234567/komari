@@ -228,11 +228,11 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 					s.closeDBs()
 					return nil, fmt.Errorf("metric: inspect SQLite storage version: %w", err)
 				}
-				if userVersion < sqliteStorageVersionCurrent {
+				if userVersion < sqliteStorageVersionCurrent && !cfg.RetireLegacyStorage {
 					s.closeDBs()
 					return nil, fmt.Errorf("metric: SQLite storage V%d requires automatic migration", userVersion)
 				}
-				s.sqlitePingMerged = true
+				s.sqlitePingMerged = userVersion >= sqliteStorageVersionPingMerge
 			}
 		}
 	}
@@ -2102,6 +2102,12 @@ func (s *Store) CleanupExpiredMetricStep(ctx context.Context, metricName string,
 	if err := s.ensureOpen(); err != nil {
 		return 0, false, err
 	}
+	// Until the new archive handoff owns deletion, retain the source data. In
+	// particular, a successful no-op Compact must not allow cleanup to discard
+	// points that have never been archived or summarized by the new engine.
+	if s.cfg.RetireLegacyStorage {
+		return 0, true, ctx.Err()
+	}
 	def, err := s.GetMetric(ctx, metricName)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -2315,6 +2321,12 @@ func (s *Store) cleanupMetricComplete(ctx context.Context, def Definition, now t
 // tier retention. It is intentionally separate from raw cleanup so callers can
 // reclaim rollup-only storage without changing raw-data ownership semantics.
 func (s *Store) CleanupExpiredRollups(ctx context.Context, now time.Time) (int64, error) {
+	if err := s.ensureOpen(); err != nil {
+		return 0, err
+	}
+	if s.cfg.RetireLegacyStorage {
+		return 0, ctx.Err()
+	}
 	defs, err := s.ListMetrics(ctx)
 	if err != nil {
 		return 0, err

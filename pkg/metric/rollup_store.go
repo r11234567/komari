@@ -95,6 +95,9 @@ func (s *Store) compactMetric(ctx context.Context, metricName string, now time.T
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
 	}
+	if s.cfg.RetireLegacyStorage {
+		return 0, ctx.Err()
+	}
 	s.retentionMu.RLock()
 	defer s.retentionMu.RUnlock()
 	if s.sqlitePingMerged && metricName == sqliteVirtualPingLossMetric {
