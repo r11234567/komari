@@ -37,8 +37,16 @@ func diagnosticRuntime() map[string]any {
 func diagnosticsHandler(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	metricPools := map[string]any{}
+	var telemetry any
 	if store, releaseStore, err := metricstore.AcquireStore(c.Request.Context()); err == nil {
 		defer releaseStore()
+		if engine := store.Telemetry(); engine != nil {
+			if d, err := engine.Diagnostics(c.Request.Context()); err == nil {
+				telemetry = d
+			} else {
+				telemetry = gin.H{"error": err.Error()}
+			}
+		}
 		for name, s := range store.PoolStats() {
 			metricPools[name] = diagnostics.PoolSnapshot{MaxOpen: s.MaxOpenConnections, Open: s.OpenConnections, InUse: s.InUse, Idle: s.Idle, WaitCount: s.WaitCount, WaitDurationNS: int64(s.WaitDuration)}
 		}
@@ -48,6 +56,7 @@ func diagnosticsHandler(c *gin.Context) {
 		"requests": diagnostics.Default.Snapshot(), "runtime": diagnosticRuntime(),
 		"database":     gin.H{"primary_pool": dbcore.DiagnosticPool(), "primary_queries": diagnostics.PrimaryQueries.Snapshot(), "metric_pools": metricPools},
 		"report_queue": metricstore.ReportQueueDiagnostics(),
+		"telemetry":    telemetry,
 		"workspace":    workspace.Default.DiagnosticCounts(), "verification": credentialgateway.Default.DiagnosticCounts(),
 	})
 }

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/trafficreset"
 	"gorm.io/gorm"
@@ -228,6 +229,17 @@ func firstDayUsage(row models.TrafficCycleFirstDay) Usage {
 // is still open, then seals the row after the day ends. A missing row after
 // the first day has ended is treated as unavailable history, not a real zero.
 func syncCycleFirstDay(ctx context.Context, db *gorm.DB, client models.Client, now time.Time) (Usage, bool, error) {
+	if metricstore.TelemetryEnabled() {
+		if err := ensureTelemetryFresh(ctx); err != nil {
+			return Usage{}, false, err
+		}
+		_, cycle, err := CurrentTrafficCycleFor(client, now)
+		if err != nil {
+			return Usage{}, false, nil
+		}
+		row, found, err := loadStoredCycleFirstDay(ctx, db, client.UUID, cycle)
+		return firstDayUsage(row), found, err
+	}
 	cycleStart, cycle, err := CurrentTrafficCycleFor(client, now)
 	if err != nil {
 		return Usage{}, false, nil

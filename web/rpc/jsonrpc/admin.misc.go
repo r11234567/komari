@@ -2,6 +2,7 @@ package jsonrpc
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"strconv"
 	"strings"
@@ -129,6 +130,11 @@ func adminGetSettings(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.Jso
 //
 // 注意：metric_store_enabled 已废弃（metric store 始终启用），不再纳入此集合。
 var metricStoreConfigKeys = map[string]struct{}{
+	"metric_archive_directory":        {},
+	"metric_archive_retention_days":   {},
+	"metric_hot_window_minutes":       {},
+	"metric_archive_segment_minutes":  {},
+	"metric_hot_budget_mib":           {},
 	metricstore.MetricDBDriverKey:     {},
 	metricstore.MetricDBDSNKey:        {},
 	metricstore.MetricTablePrefixKey:  {},
@@ -302,6 +308,19 @@ func mergedMetricConfig(cfg map[string]interface{}) (*metricstore.MetricStoreCon
 	}
 	if v, ok := cfg[metricstore.MetricMaxIdleConnsKey]; ok {
 		merged.MaxIdleConns = toInt(v, merged.MaxIdleConns)
+	}
+	telemetry := map[string]any{}
+	for _, key := range []string{"metric_archive_directory", "metric_archive_retention_days", "metric_hot_window_minutes", "metric_archive_segment_minutes", "metric_hot_budget_mib"} {
+		if value, ok := cfg[key]; ok {
+			telemetry[key] = value
+		}
+	}
+	data, err := json.Marshal(telemetry)
+	if err != nil {
+		return nil, err
+	}
+	if err = json.Unmarshal(data, merged); err != nil {
+		return nil, err
 	}
 
 	return merged, nil

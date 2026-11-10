@@ -2,6 +2,8 @@ package connectapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -15,12 +17,14 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/trafficledger"
+	"github.com/komari-monitor/komari/pkg/metric"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	legacyv1 "github.com/komari-monitor/komari/protocol/v1"
 	agentRuntime "github.com/komari-monitor/komari/web/agent"
 	clientapi "github.com/komari-monitor/komari/web/api/client"
 	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
 	metricsv1connect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -86,23 +90,44 @@ func ingestMetricBatch(ctx context.Context, meta *rpc.ContextMeta, batch *metric
 	if len(batch.Points) == 0 || len(batch.Points) > maxMetricPointsPerBatch {
 		return nil, connectError(connect.CodeInvalidArgument, fmt.Errorf("metrics batch must contain between 1 and %d points", maxMetricPointsPerBatch))
 	}
-	sequence := metricSequenceFor(agentID)
-	sequence.Lock()
-	defer sequence.Unlock()
-	if batch.Sequence <= sequence.accepted {
-		return &metricsv1.SubmitMetricsResponse{AcceptedSequence: sequence.accepted, AcceptedPoints: uint32(len(batch.Points))}, nil
-	}
 	report, err := metricPointsToReport(batch.Points)
 	if err != nil {
 		return nil, connectError(connect.CodeInvalidArgument, err)
+	}
+	var sequence *metricAgentSequence
+	if metricstore.TelemetryEnabled() {
+		wire, encodeErr := (proto.MarshalOptions{Deterministic: true}).Marshal(batch)
+		if encodeErr != nil {
+			return nil, connectError(connect.CodeInvalidArgument, encodeErr)
+		}
+		digest := sha256.Sum256(wire)
+		ctx = metricstore.WithReportIdentity(ctx, fmt.Sprintf("metrics/%d/%d", batch.Sequence, report.UpdatedAt.UnixNano()), hex.EncodeToString(digest[:]))
+	} else {
+		sequence = metricSequenceFor(agentID)
+		sequence.Lock()
+		defer sequence.Unlock()
+		if batch.Sequence <= sequence.accepted {
+			return &metricsv1.SubmitMetricsResponse{AcceptedSequence: sequence.accepted, AcceptedPoints: uint32(len(batch.Points))}, nil
+		}
 	}
 	if err := clientapi.IngestReportContext(ctx, agentID, report, 3, true); err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, connectError(connect.CodeInvalidArgument, err)
+		if errors.Is(err, metric.ErrTelemetryBackpressure) || errors.Is(err, metricstore.ErrStoreBusy) {
+			return nil, metricReadBusy(2 * time.Second)
+		}
+		if errors.Is(err, metric.ErrTelemetryConflict) {
+			return nil, connectError(connect.CodeAlreadyExists, err)
+		}
+		if errors.Is(err, metric.ErrInvalidArgument) {
+			return nil, connectError(connect.CodeInvalidArgument, err)
+		}
+		return nil, connectError(connect.CodeUnavailable, err)
 	}
-	sequence.accepted = batch.Sequence
+	if sequence != nil {
+		sequence.accepted = batch.Sequence
+	}
 	return &metricsv1.SubmitMetricsResponse{AcceptedSequence: batch.Sequence, AcceptedPoints: uint32(len(batch.Points))}, nil
 }
 

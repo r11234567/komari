@@ -43,6 +43,10 @@ var configOnlyEmptyTables = []string{
 	"traffic_daily_ledgers",
 	"traffic_calibration_adjustments",
 	"traffic_cycle_first_days",
+	"telemetry_traffic_streams",
+	"telemetry_traffic_states",
+	"telemetry_traffic_slices",
+	"telemetry_traffic_cycles",
 	"return_route_events",
 	"return_route_statuses",
 }
@@ -226,9 +230,10 @@ func normalizePortableMetricConfig(ctx context.Context, db *sql.DB, objects map[
 		return nil
 	}
 	values := map[string]string{
-		"metric_db_driver":        `"sqlite"`,
-		"metric_db_dsn":           `"./data/metrics.db"`,
-		"metric_migration_target": `"sqlite|./data/metrics.db"`,
+		"metric_archive_directory": `"./data/telemetry"`,
+		"metric_db_driver":         `"sqlite"`,
+		"metric_db_dsn":            `"./data/metrics.db"`,
+		"metric_migration_target":  `"sqlite|./data/metrics.db"`,
 	}
 	for key, value := range values {
 		if _, err := db.ExecContext(ctx, `INSERT INTO configs (key, value) VALUES (?, ?)
@@ -408,19 +413,19 @@ func DownloadBackup(c *gin.Context) {
 	}
 
 	mainSnapshot := filepath.Join(contentDir, "komari.db")
-	if err := backupMainSQLite(mainSnapshot); err != nil {
+	snapshot := func() error { return backupMainSQLite(mainSnapshot) }
+	if scope == backupScopeFull {
+		snapshot = func() error {
+			return metricstore.BackupFull(c.Request.Context(), contentDir, func() error { return backupMainSQLite(mainSnapshot) })
+		}
+	}
+	if err := snapshot(); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if err := sanitizeConfigSnapshot(c.Request.Context(), mainSnapshot, scope); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 		return
-	}
-	if scope == backupScopeFull {
-		if err := metricstore.BackupSQLite(c.Request.Context(), filepath.Join(contentDir, "metrics.db")); err != nil {
-			api.RespondError(c, http.StatusUnprocessableEntity, "完整备份未生成："+err.Error()+"。若使用 MySQL/PostgreSQL，请同时使用数据库自身的备份工具；也可以改用仅配置导出。")
-			return
-		}
 	}
 
 	now := time.Now().UTC()

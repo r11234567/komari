@@ -494,6 +494,40 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await expect.poll(() => workspaceToken).not.toBe(old);
       expect(sha256(await downloadFile('roundtrip.bin'))).toBe(sha256(fs.readFileSync(fixture('roundtrip.bin'))));
     });
+
+    await test.step('real reports archive, charts survive raw deletion, CSV and complete backup use cold history', async () => {
+      // Public settings, not forged timestamps or seeded history, shorten the
+      // fixture rotation. All samples still come from the installed Agent.
+      await request('/api/admin/settings/', { metric_hot_window_minutes: 1, metric_archive_segment_minutes: 1 });
+      let storage;
+      await expect.poll(() => {
+        storage = JSON.parse(execFileSync('python3', ['scripts/ci/e2e/check-telemetry-retirement.py'], { encoding: 'utf8' }));
+        return storage.complete_archives;
+      }, { timeout: 210_000, intervals: [5000] }).toBeGreaterThan(0);
+      const end = new Date();
+      const start = new Date(end.getTime() - 20 * 60_000);
+      const history = await rpc('metrics', 'QueryMetrics', {
+        agentIds: [agentId], metrics: ['cpu.usage'], startTime: start.toISOString(), endTime: end.toISOString(), maxPoints: 100, downsample: true,
+      });
+      expect(history.series?.some(series => series.queryPoints?.some(point => Number(point.sampleCount) > 0))).toBe(true);
+      const created = await (await request('/api/admin/history/export', {
+        uuid: agentId, category: 'resource', start: start.toISOString(), end: end.toISOString(),
+      })).json();
+      expect(created.data?.id).toBeTruthy();
+      let job;
+      await expect.poll(async () => {
+        job = (await (await request(`/api/admin/history/export/${created.data.id}`, undefined, { method: 'GET' })).json()).data;
+        if (job.status === 'failed') throw new Error(job.error);
+        return job.status;
+      }, { timeout: 90_000 }).toBe('done');
+      const csv = await (await request(`/api/admin/history/export/${job.id}/download`, undefined, { method: 'GET' })).body();
+      expect(csv.toString('utf8').split('\n').length).toBeGreaterThan(2);
+      fs.writeFileSync(path.join(artifacts, 'real-history.csv'), csv);
+      const backup = await request('/api/admin/download/backup?scope=full', undefined, { method: 'GET' });
+      // Credentials stay inside the disposable fixture, outside uploaded artifacts.
+      fs.writeFileSync(path.join(root, 'real-full-backup.zip'), await backup.body());
+      fs.writeFileSync(path.join(artifacts, 'real-storage-roundtrip.json'), JSON.stringify({ ...storage, csvBytes: csv.length }, null, 2));
+    });
   } finally {
     fs.writeFileSync(path.join(artifacts, 'browser-events.json'), JSON.stringify(events, null, 2));
     fs.writeFileSync(path.join(artifacts, 'browser-metrics.json'), JSON.stringify(metrics, null, 2));

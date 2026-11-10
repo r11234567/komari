@@ -67,6 +67,8 @@ jobs:
         run: bash scripts/ci/run-audit-check.sh e2e-storage python3 scripts/ci/e2e/check-telemetry-retirement.py
       - name: Verify new engine across real SQL and archive process restarts
         run: bash scripts/ci/run-audit-check.sh e2e-storage-process go test -race ./pkg/metric -run TestTelemetryProcessRoundTrip -count=1 -v
+      - name: Restore the real downloaded SQL, ledger and cold archive bundle
+        run: bash scripts/ci/run-audit-check.sh e2e-storage-restore go test -race ./pkg/metric -run TestTelemetryE2ERestoreBundle -count=1 -v
       - name: Collect service logs and destroy temporary services and secrets
         if: always()
         run: bash scripts/ci/e2e/cleanup.sh

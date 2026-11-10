@@ -399,7 +399,7 @@ func (t *Telemetry) DeleteArchivedChunk(ctx context.Context, now time.Time, limi
 		return 0, err
 	}
 	var candidate, stateBefore string
-	eligible := " FROM " + t.table("segments") + " a JOIN " + t.table("receipts") + " r ON r.ingest_id=a.last_id WHERE a.state IN ('archived','deleting') AND a.last_id<=? AND r.received<=? AND NOT EXISTS (SELECT 1 FROM " + t.table("outbox") + " o WHERE o.ingest_id>=a.first_id AND o.ingest_id<=a.last_id AND o.delivered=0)"
+	eligible := " FROM " + t.table("segments") + " a JOIN " + t.table("receipts") + " r ON r.ingest_id=a.last_id WHERE a.state IN ('archived','deleting') AND a.last_id<=? AND r.received<=? AND NOT EXISTS (SELECT 1 FROM " + t.table("outbox") + " o WHERE o.ingest_id>=a.first_id AND o.ingest_id<=a.last_id AND o.delivered=0) AND NOT EXISTS (SELECT 1 FROM " + t.table("leases") + " l WHERE l.segment_id=a.id AND l.expires>" + fmt.Sprintf("%d", time.Now().UnixNano()) + ")"
 	err = t.s.reader().QueryRowContext(ctx, t.bind("SELECT a.id,a.state"+eligible+" ORDER BY a.created,a.id LIMIT 1"), coverage, now.Add(-t.cfg.RawWindow).UnixNano()).Scan(&candidate, &stateBefore)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
@@ -499,9 +499,11 @@ func (t *Telemetry) DeleteArchivedChunk(ctx context.Context, now time.Time, limi
 }
 
 type TelemetryTrafficEvent struct {
+	StoreID  string
 	IngestID int64
 	Source   string
 	Received time.Time
+	Observed time.Time
 	Traffic  TelemetryTraffic
 }
 
@@ -511,7 +513,17 @@ func (t *Telemetry) DeliverTraffic(ctx context.Context, limit int, apply func(co
 	if limit <= 0 || limit > 256 || apply == nil {
 		return 0, ErrInvalidArgument
 	}
-	rows, err := t.s.reader().QueryContext(ctx, t.bind("SELECT ingest_id,source,received,payload FROM "+t.table("outbox")+" WHERE delivered=0 ORDER BY ingest_id LIMIT ?"), limit)
+	select {
+	case t.trafficGate <- struct{}{}:
+		defer func() { <-t.trafficGate }()
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+	if err := t.claimWork(ctx, "traffic"); err != nil {
+		return 0, err
+	}
+	defer t.releaseWork("traffic")
+	rows, err := t.s.reader().QueryContext(ctx, t.bind("SELECT o.ingest_id,o.source,o.received,o.payload,r.observed FROM "+t.table("outbox")+" o JOIN "+t.table("receipts")+" r ON r.ingest_id=o.ingest_id WHERE o.delivered=0 ORDER BY o.ingest_id LIMIT ?"), limit)
 	if err != nil {
 		return 0, err
 	}
@@ -519,13 +531,19 @@ func (t *Telemetry) DeliverTraffic(ctx context.Context, limit int, apply func(co
 	for rows.Next() {
 		var e TelemetryTrafficEvent
 		var ns int64
+		var observed int64
 		var raw string
-		if err = rows.Scan(&e.IngestID, &e.Source, &ns, &raw); err != nil {
+		if err = rows.Scan(&e.IngestID, &e.Source, &ns, &raw, &observed); err != nil {
 			break
 		}
 		e.Received = time.Unix(0, ns).UTC()
+		e.StoreID = t.instance
+		e.Observed = time.Unix(0, observed).UTC()
 		if err = json.Unmarshal([]byte(raw), &e.Traffic); err != nil {
 			break
+		}
+		if e.Traffic.ObservedAt != 0 {
+			e.Observed = time.Unix(0, e.Traffic.ObservedAt).UTC()
 		}
 		events = append(events, e)
 	}
@@ -538,6 +556,9 @@ func (t *Telemetry) DeliverTraffic(ctx context.Context, limit int, apply func(co
 		return 0, readErr
 	}
 	for i, e := range events {
+		if err = t.renewWork(ctx, t.s.db, "traffic"); err != nil {
+			return i, err
+		}
 		if err = apply(ctx, e); err != nil {
 			return i, err
 		}

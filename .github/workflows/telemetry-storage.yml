@@ -49,7 +49,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Full storage race, real SQL drivers, restart and fault contracts
-        run: bash scripts/ci/run-audit-check.sh telemetry-storage bash scripts/ci/run-go-tests.sh -race ./pkg/metric ./database/metricstore
+        run: bash scripts/ci/run-audit-check.sh telemetry-storage bash scripts/ci/run-go-tests.sh -race ./pkg/metric ./database/metricstore ./database/trafficledger
       - name: Retain test events and context
         if: always()
         uses: actions/upload-artifact@v4

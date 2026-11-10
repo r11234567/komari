@@ -39,7 +39,7 @@ grow SQL storage, so it must not be shipped as the completed engine.
 
 ## 2. Implement hot SQL, incremental summaries and immutable cold archives
 
-Core implementation is in progress, independently callable through
+Core implementation is independently callable through
 `Store.OpenTelemetry`; application ingest/query/traffic routing is intentionally
 not changed until checkpoint 3. New-schema acceptance commits receipts, immutable
 rows, fixed segment membership and a traffic outbox together. SQLite requires
@@ -48,21 +48,57 @@ cursor commit together; cold files use bounded JSONL/zstd, exclusive attempts,
 cross-process publication fencing, checksums, fsync and resumable row deletion.
 No component-only result marks this checkpoint complete.
 
-Local evidence currently includes the full storage race suites and repeated
-core contracts. The dedicated workflow also runs against actual PostgreSQL,
-MySQL and MariaDB services; all remote results remain pending for this core.
+Local evidence includes the full storage race suites and repeated core
+contracts. All 25 component PR checks passed on `802e296b`, including the
+[actual PostgreSQL 17 / MySQL 8.4 / MariaDB 11.4 matrix](https://github.com/r11234567/komari/actions/runs/42791005961).
+The matrix caught PostgreSQL's padding of an empty CHAR staging identity;
+the corrected scanner and complete virtual Ping projections passed the rerun.
+The [real HTTPS / built Web / installed Agent E2E](https://github.com/r11234567/komari/actions/runs/42791050067)
+passed on `802e296b`, including the multi-process crash/restart archive test.
+The final local full race rerun passed (`pkg/metric`: 68.569s;
+`database/metricstore`: 5.505s). Application integration starts after this gate.
 
-- [ ] Durable batch identity, receipts and traffic outbox; compatible Agent
-  restart/epoch rules and integer counter handling.
-- [ ] New indexed hot tables, bounded summary processing and durable progress.
-- [ ] Mergeable weighted statistics, variance, percentiles and Ping semantics.
-- [ ] Streaming JSONL-zstd, fixed segment membership, checksums and crash-safe
+- [x] Core durable batch identity, receipts and integer traffic outbox.
+  Agent identity mapping and the metadata consumer remain checkpoint 3 work.
+- [x] New indexed hot tables, bounded summary processing and durable progress.
+- [x] Mergeable weighted statistics, variance, percentiles and Ping semantics.
+- [x] Streaming JSONL-zstd, fixed segment membership, checksums and crash-safe
   publication/deletion state machine; finite memory and cancellation.
-- [ ] Separate chart precision and raw archive retention; explicit raw API errors.
-- [ ] SQLite / supported external-driver integration, fault injection and race CI.
-- [ ] Real E2E on this checkpoint revision.
+- [x] Core precision retention and bounded hot reads with explicit raw errors.
+  HTTP query routing and archive expiration remain checkpoint 3 work.
+- [x] SQLite / supported external-driver integration, fault injection and race CI.
+- [x] Real E2E on this checkpoint revision.
 
 ## 3. Adapt and connect the surrounding features
+
+The checkpoint implementation now selects durable ingestion and scoped summary
+queries at startup, drains the idempotent integer traffic outbox into independent
+metadata ledgers, and routes explicit CSV through pinned hot/cold readers. New
+retention controls replace the retired compression controls in Web `22511e9`.
+Live SQL/archive identity changes are rejected; existing history requires the
+explicit stopped-service `telemetry-migrate --confirm-offline` command. Old
+tables remain unchanged. The offline reader uses deterministic keyset batches,
+decodes each source block once per window, and refuses ambiguous overlaps.
+
+Full SQLite backups freeze this panel's lifecycle and archive publication,
+snapshot the drained metadata/SQL boundary and hash-copy immutable files. Restore
+validates SQL integrity, the manifest boundary and every catalogued file before
+replacing data. The supported deployment is one panel writer; sharing a database
+between multiple running panels is not a coordinated full-backup mode. Portable
+external-SQL backups and live database relocation are explicitly unavailable.
+
+Local Linux race suites passed on 2026-11-11: `pkg/metric` (70.232s),
+`database/metricstore`, `database/trafficledger`, `database/enrollment`,
+`database/dbcore`, `web/connect`, `web/rpc/jsonrpc`, `web/api/admin`, `web/backup`
+and `cmd`. Compressed V4/V6, summary-only history, hot corrections and interrupted
+migration passed. The full Web production build, 196 tests and lint passed
+(zero lint errors, 39 existing warnings). A full regression also fixed expired
+previous-token handoffs by comparing decoded instants instead of SQLite text
+timestamps with different UTC offsets.
+
+Remote checkpoint CI/E2E is pending. Data-preserving post-cutover rollback,
+complete cold-cycle E2E, final driver results and physical retirement cleanup
+remain acceptance work; the items below are deliberately not marked complete.
 
 - [ ] Independent traffic state, hourly/daily/cycle ledgers and calibration.
 - [ ] Authorized bounded chart routing, actual resolution and missing-data status.

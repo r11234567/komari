@@ -15,6 +15,7 @@ import (
 	"math"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -67,28 +68,42 @@ func (c TelemetryConfig) defaults() TelemetryConfig {
 // Telemetry shares the owning Store's connection and lifetime. A cancellable
 // gate bounds writers; SQL CAS/serializable transactions protect other handles.
 type Telemetry struct {
-	s           *Store
-	cfg         TelemetryConfig
-	root        *os.Root
-	gate        chan struct{}
-	archiveGate chan struct{}
-	owner       string
+	s                *Store
+	cfg              TelemetryConfig
+	root             *os.Root
+	gate             chan struct{}
+	archiveGate      chan struct{}
+	trafficGate      chan struct{}
+	owner            string
+	instance         string
+	legacyUntil      int64
+	legacyResolution time.Duration
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 type TelemetryTraffic struct {
-	TotalUp   int64 `json:"total_up"`
-	TotalDown int64 `json:"total_down"`
-	Up        int64 `json:"up"`
-	Down      int64 `json:"down"`
+	HasDelta   bool  `json:"has_delta,omitempty"`
+	DeltaUp    int64 `json:"delta_up,omitempty"`
+	DeltaDown  int64 `json:"delta_down,omitempty"`
+	ObservedAt int64 `json:"observed_at_ns,omitempty"`
+	TotalUp    int64 `json:"total_up"`
+	TotalDown  int64 `json:"total_down"`
+	Up         int64 `json:"up"`
+	Down       int64 `json:"down"`
 }
 
 type TelemetryBatch struct {
 	Source string `json:"source"`
 	// Identity is supplied by the authenticated adapter. Legacy Agent identity
 	// includes sequence AND observed time; process-local sequence alone is unsafe.
-	Identity string            `json:"identity"`
-	Points   []Point           `json:"points"`
-	Traffic  *TelemetryTraffic `json:"traffic,omitempty"`
+	Identity string `json:"identity"`
+	// PayloadProof binds fields validated by a protocol adapter but not stored
+	// as chart points. Deterministic wire SHA256 prevents altered retries from
+	// becoming an ACK merely because those fields were projected away.
+	PayloadProof string            `json:"payload_proof,omitempty"`
+	Points       []Point           `json:"points"`
+	Traffic      *TelemetryTraffic `json:"traffic,omitempty"`
 }
 
 type TelemetryReceipt struct {
@@ -177,7 +192,7 @@ func (s *Store) OpenTelemetry(ctx context.Context, cfg TelemetryConfig) (*Teleme
 	if err != nil {
 		return nil, err
 	}
-	t := &Telemetry{s: s, cfg: cfg, root: root, gate: make(chan struct{}, 1), archiveGate: make(chan struct{}, 1), owner: telemetryID()}
+	t := &Telemetry{s: s, cfg: cfg, root: root, gate: make(chan struct{}, 1), archiveGate: make(chan struct{}, 1), trafficGate: make(chan struct{}, 1), owner: telemetryID()}
 	if err := t.createSchema(ctx); err != nil {
 		root.Close()
 		return nil, err
@@ -185,7 +200,29 @@ func (s *Store) OpenTelemetry(ctx context.Context, cfg TelemetryConfig) (*Teleme
 	return t, nil
 }
 
-func (t *Telemetry) Close() error { return t.root.Close() }
+func (t *Telemetry) Close() error {
+	t.closeOnce.Do(func() { t.closeErr = t.root.Close() })
+	return t.closeErr
+}
+
+// EnableTelemetry selects the replacement engine for this Store. Call only
+// before publishing the Store to readers/writers. Runtime reloads publish a new
+// Store under the application's exclusive lifecycle lease.
+func (s *Store) EnableTelemetry(ctx context.Context, cfg TelemetryConfig) error {
+	if s.telemetry.Load() != nil {
+		return errors.New("telemetry already enabled")
+	}
+	t, err := s.OpenTelemetry(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	s.telemetry.Store(t)
+	return nil
+}
+
+// Telemetry returns the active engine. The application must retain its Store
+// lease for the entire operation, including file streams and backup snapshots.
+func (s *Store) Telemetry() *Telemetry { return s.telemetry.Load() }
 
 func (t *Telemetry) createSchema(ctx context.Context) error {
 	progressTable := t.table("progress")
@@ -209,7 +246,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	} else if err != nil {
 		return err
 	}
-	if version != 2 && version != 1 && version != -1 {
+	if version != 3 && version != 2 && version != 1 && version != -1 {
 		return fmt.Errorf("unsupported telemetry SQL schema version %d", version)
 	}
 	// Small integer/CHAR keys keep these DDLs portable across SQLite, MySQL and
@@ -224,6 +261,10 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS %soutbox (ingest_id BIGINT PRIMARY KEY, source VARCHAR(255) NOT NULL, received BIGINT NOT NULL, payload TEXT NOT NULL, delivered INTEGER NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS %sleases (id CHAR(32) NOT NULL, segment_id CHAR(32) NOT NULL, expires BIGINT NOT NULL, PRIMARY KEY(id,segment_id))`,
 		`CREATE TABLE IF NOT EXISTS %swork (task VARCHAR(64) PRIMARY KEY, owner CHAR(32) NOT NULL, expires BIGINT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS %smembers (segment_id CHAR(32) NOT NULL, series_id CHAR(64) NOT NULL, first_observed BIGINT NOT NULL, last_observed BIGINT NOT NULL, points BIGINT NOT NULL, PRIMARY KEY(segment_id,series_id))`,
+		`CREATE TABLE IF NOT EXISTS %serasures (series_id CHAR(64) PRIMARY KEY, through_id BIGINT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS %sidentity (slot INTEGER PRIMARY KEY, id CHAR(32) NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS %straffic_ingress (source VARCHAR(255) PRIMARY KEY, observed BIGINT NOT NULL, total_up BIGINT NOT NULL, total_down BIGINT NOT NULL)`,
 	}
 	prefix := t.s.cfg.TablePrefix + "telemetry_"
 	for _, q := range stmts {
@@ -248,6 +289,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 		{"outbox_pending", "outbox", "delivered,ingest_id"},
 		{"summary_series", "summary", "series_id,resolution,bucket"},
 		{"receipt_age", "receipts", "received,ingest_id"},
+		{"members_series", "members", "series_id,first_observed,last_observed,segment_id"},
 	} {
 		q := fmt.Sprintf("CREATE INDEX %s ON %s (%s)", prefix+idx.name, t.table(idx.table), idx.cols)
 		if t.s.cfg.Driver != DriverMySQL {
@@ -276,8 +318,36 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 			return err
 		}
 	}
-	_, err = t.s.db.ExecContext(ctx, "UPDATE "+progressTable+" SET value=2 WHERE task='schema_version' AND value IN (-1,1)")
-	return err
+	identitySQL := "INSERT INTO " + t.table("identity") + " (slot,id) VALUES (1,?)"
+	if t.s.cfg.Driver == DriverMySQL {
+		identitySQL += " ON DUPLICATE KEY UPDATE slot=slot"
+	} else {
+		identitySQL += " ON CONFLICT(slot) DO NOTHING"
+	}
+	if _, err = t.s.db.ExecContext(ctx, t.bind(identitySQL), telemetryID()); err != nil {
+		return err
+	}
+	if err = t.s.db.QueryRowContext(ctx, "SELECT id FROM "+t.table("identity")+" WHERE slot=1").Scan(&t.instance); err != nil {
+		return err
+	}
+	// Core schema v1/v2 was never an application format. Existing segments are
+	// indexed lazily from their owned hot rows or verified immutable archives;
+	// opening the store never performs a historical scan.
+	_, err = t.s.db.ExecContext(ctx, "UPDATE "+progressTable+" SET value=3 WHERE task='schema_version' AND value IN (-1,1,2)")
+	if err != nil {
+		return err
+	}
+	if v, e := t.progress(ctx, t.s.db, "legacy_until"); e == nil {
+		t.legacyUntil = v
+	} else if !errors.Is(e, sql.ErrNoRows) {
+		return e
+	}
+	if v, e := t.progress(ctx, t.s.db, "legacy_resolution"); e == nil {
+		t.legacyResolution = time.Duration(v)
+	} else if !errors.Is(e, sql.ErrNoRows) {
+		return e
+	}
+	return nil
 }
 
 func (t *Telemetry) progress(ctx context.Context, q querier, task string) (int64, error) {
@@ -307,11 +377,20 @@ func (t *Telemetry) begin(ctx context.Context) (*sql.Tx, error) {
 // Accept commits receipt, immutable hot rows, segment membership and outbox as
 // one transaction. No in-memory queue is part of the acknowledgement contract.
 func (t *Telemetry) Accept(ctx context.Context, b TelemetryBatch, now time.Time) (TelemetryReceipt, error) {
+	return t.accept(ctx, b, now, false)
+}
+
+func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time, importing bool) (TelemetryReceipt, error) {
 	var result TelemetryReceipt
-	if b.Source == "" || len(b.Source) > 255 || strings.ContainsRune(b.Source, 0) || b.Identity == "" || strings.ContainsRune(b.Identity, 0) || len(b.Identity) > 256 || len(b.Points) == 0 || len(b.Points) > 256 {
+	if b.Source == "" || len(b.Source) > 255 || strings.ContainsRune(b.Source, 0) || b.Identity == "" || strings.ContainsRune(b.Identity, 0) || len(b.Identity) > 256 || (len(b.Points) == 0 && b.Traffic == nil) || len(b.Points) > 256 {
 		return result, fmt.Errorf("%w: telemetry batch", ErrInvalidArgument)
 	}
 	b.Points = append([]Point(nil), b.Points...)
+	if b.PayloadProof != "" {
+		if p, e := hex.DecodeString(b.PayloadProof); e != nil || len(p) != 32 {
+			return result, ErrInvalidArgument
+		}
+	}
 	oldest := now.UnixNano()
 	for i, p := range b.Points {
 		if err := p.Validate(); err != nil {
@@ -320,7 +399,7 @@ func (t *Telemetry) Accept(ctx context.Context, b TelemetryBatch, now time.Time)
 		if p.EntityID != b.Source || strings.ContainsRune(p.MetricName, 0) || len(p.MetricName) > 255 || len(p.Tags) > 32 || len(p.Labels) > 32 {
 			return result, fmt.Errorf("%w: telemetry series budget/identity", ErrInvalidArgument)
 		}
-		if p.Timestamp.Before(now.Add(-t.cfg.MaxLateness)) || p.Timestamp.After(now.Add(5*time.Minute)) {
+		if !importing && (p.Timestamp.Before(now.Add(-t.cfg.MaxLateness)) || p.Timestamp.After(now.Add(5*time.Minute))) {
 			return result, fmt.Errorf("%w: telemetry observed time outside acceptance window", ErrInvalidArgument)
 		}
 		b.Points[i] = p.normalized()
@@ -328,6 +407,13 @@ func (t *Telemetry) Accept(ctx context.Context, b TelemetryBatch, now time.Time)
 	}
 	if b.Traffic != nil && (b.Traffic.TotalUp < 0 || b.Traffic.TotalDown < 0 || b.Traffic.Up < 0 || b.Traffic.Down < 0) {
 		return result, fmt.Errorf("%w: negative traffic", ErrInvalidArgument)
+	}
+	if b.Traffic != nil && b.Traffic.ObservedAt != 0 {
+		at := time.Unix(0, b.Traffic.ObservedAt)
+		if at.Before(now.Add(-t.cfg.MaxLateness)) || at.After(now.Add(5*time.Minute)) {
+			return result, ErrInvalidArgument
+		}
+		oldest = min(oldest, b.Traffic.ObservedAt)
 	}
 	payload, err := json.Marshal(b)
 	if err != nil {
@@ -361,6 +447,13 @@ func (t *Telemetry) Accept(ctx context.Context, b TelemetryBatch, now time.Time)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return result, err
+	}
+	if b.Traffic != nil {
+		traffic := *b.Traffic
+		b.Traffic = &traffic
+		if err = t.deriveTraffic(ctx, tx, &b, oldest); err != nil {
+			return result, err
+		}
 	}
 	last, err := t.progress(ctx, tx, "ingest")
 	if err != nil {
@@ -431,6 +524,15 @@ func (t *Telemetry) Accept(ctx context.Context, b TelemetryBatch, now time.Time)
 			seen[sid] = true
 		}
 		if _, err = tx.ExecContext(ctx, t.bind("INSERT INTO "+t.table("hot")+" (ingest_id,ordinal,series_id,observed,received,value,labels,segment_id) VALUES (?,?,?,?,?,?,?,?)"), result.IngestID, i, sid, p.Timestamp.UnixNano(), now.UnixNano(), p.Value, string(labels), seg.ID); err != nil {
+			return result, err
+		}
+		q := "INSERT INTO " + t.table("members") + " (segment_id,series_id,first_observed,last_observed,points) VALUES (?,?,?,?,1)"
+		if t.s.cfg.Driver == DriverMySQL {
+			q += " ON DUPLICATE KEY UPDATE first_observed=LEAST(first_observed,VALUES(first_observed)),last_observed=GREATEST(last_observed,VALUES(last_observed)),points=points+1"
+		} else {
+			q += " ON CONFLICT(segment_id,series_id) DO UPDATE SET first_observed=CASE WHEN excluded.first_observed<" + t.table("members") + ".first_observed THEN excluded.first_observed ELSE " + t.table("members") + ".first_observed END,last_observed=CASE WHEN excluded.last_observed>" + t.table("members") + ".last_observed THEN excluded.last_observed ELSE " + t.table("members") + ".last_observed END,points=" + t.table("members") + ".points+1"
+		}
+		if _, err = tx.ExecContext(ctx, t.bind(q), seg.ID, sid, p.Timestamp.UnixNano(), p.Timestamp.UnixNano()); err != nil {
 			return result, err
 		}
 	}

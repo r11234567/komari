@@ -25,7 +25,7 @@ func (t *Telemetry) PruneSummaries(ctx context.Context, name string, retention t
 		return 0, err
 	}
 	defer tx.Rollback()
-	where := "s.metric=? AND ("
+	where := "s.metric=? AND a.state<>'legacy' AND ("
 	args := []any{name}
 	for i, tier := range []struct{ r, keep time.Duration }{{10 * time.Second, 2 * time.Hour}, {5 * time.Minute, 24 * time.Hour}, {15 * time.Minute, 7 * 24 * time.Hour}, {time.Hour, retention}} {
 		if i > 0 {
@@ -34,9 +34,10 @@ func (t *Telemetry) PruneSummaries(ctx context.Context, name string, retention t
 		where += "(b.resolution=? AND b.bucket<=?)"
 		args = append(args, int64(tier.r), now.Add(-min(tier.keep, retention)).Add(-tier.r).UnixNano())
 	}
-	where += ")"
+	where += ") OR (s.metric=? AND a.state='legacy' AND b.bucket+b.resolution<=?)"
+	args = append(args, name, now.Add(-retention).UnixNano())
 	args = append(args, limit)
-	rows, err := tx.QueryContext(ctx, t.bind("SELECT b.segment_id,b.series_id,b.resolution,b.bucket FROM "+t.table("summary")+" b JOIN "+t.table("series")+" s ON s.id=b.series_id WHERE "+where+" ORDER BY b.resolution,b.bucket,b.series_id,b.segment_id LIMIT ?"), args...)
+	rows, err := tx.QueryContext(ctx, t.bind("SELECT b.segment_id,b.series_id,b.resolution,b.bucket FROM "+t.table("summary")+" b JOIN "+t.table("series")+" s ON s.id=b.series_id JOIN "+t.table("segments")+" a ON a.id=b.segment_id WHERE "+where+" ORDER BY b.resolution,b.bucket,b.series_id,b.segment_id LIMIT ?"), args...)
 	if err != nil {
 		return 0, err
 	}

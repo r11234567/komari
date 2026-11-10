@@ -324,6 +324,7 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 	if err != nil {
 		return nil, err
 	}
+	ctx = metric.WithTelemetryEntities(ctx, entityIDs)
 	store, releaseStore, err := metricstore.AcquireStore(ctx)
 	if err != nil {
 		return nil, connectMetricStoreError(err)
@@ -800,6 +801,15 @@ func connectPingStats(agentID string, summary metric.SeriesSummary, tasksByID ma
 }
 
 func connectMetricStoreError(err error) error {
+	if errors.Is(err, metric.ErrTelemetryBackpressure) {
+		return metricReadBusy(2 * time.Second)
+	}
+	if errors.Is(err, metric.ErrTelemetryCold) || errors.Is(err, metric.ErrTelemetryCoverage) {
+		return connectError(connect.CodeFailedPrecondition, err)
+	}
+	if errors.Is(err, metric.ErrInvalidArgument) {
+		return connectError(connect.CodeInvalidArgument, err)
+	}
 	if errors.Is(err, metricstore.ErrStoreNotInitialized) {
 		return connectError(connect.CodeFailedPrecondition, err)
 	}

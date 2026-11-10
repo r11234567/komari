@@ -18,6 +18,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/diagnostics"
 	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/pkg/metric"
 	"github.com/komari-monitor/komari/pkg/migrations"
 	"github.com/komari-monitor/komari/utils/fsmove"
 	logger "github.com/komari-monitor/komari/utils/log"
@@ -222,6 +223,12 @@ func restoreStagedBackup(dataDir string) error {
 	if _, err := os.Stat(metricsPath); err == nil {
 		if err := validateRestoredSQLite(metricsPath, "metrics.db"); err != nil {
 			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		err := metric.ValidateTelemetryBackup(ctx, metricsPath, filepath.Join(stageDir, "telemetry"))
+		cancel()
+		if err != nil {
+			return fmt.Errorf("validate restored telemetry bundle: %w", err)
 		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect restored metrics.db: %w", err)
@@ -547,6 +554,10 @@ func doInitialize() error {
 		&models.TrafficDailyLedger{},
 		&models.TrafficCalibrationAdjustment{},
 		&models.TrafficCycleFirstDay{},
+		&models.TelemetryTrafficStream{},
+		&models.TelemetryTrafficState{},
+		&models.TelemetryTrafficSlice{},
+		&models.TelemetryTrafficCycle{},
 		&models.PingTask{},
 		&models.PingLossNotification{},
 		&models.ReturnRouteTask{},

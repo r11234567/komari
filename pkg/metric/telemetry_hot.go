@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -27,29 +26,17 @@ func (t *Telemetry) ReadHot(ctx context.Context, q Query, now time.Time) ([]Poin
 	}
 	where := "s.metric=? AND h.observed>=? AND h.observed<=?"
 	args := []any{q.MetricName, q.Start.UnixNano(), q.End.UnixNano()}
-	if q.EntityID != "" {
-		where += " AND s.entity=?"
-		args = append(args, q.EntityID)
+	filter, filterArgs, err := t.seriesFilter(ctx, q, "s")
+	if err != nil {
+		return nil, err
 	}
-	for k, v := range q.Tags {
-		// Use the same restrictive tag-key grammar as the legacy SQL renderer.
-		if k == "" || strings.IndexFunc(k, func(r rune) bool {
-			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.')
-		}) >= 0 {
-			return nil, ErrInvalidArgument
-		}
-		column := "s.tags"
-		if t.s.cfg.Driver == DriverPostgreSQL {
-			column = "s.tags::jsonb"
-		}
-		where += " AND " + t.s.dialect.jsonExtractEquals(column, k, "?")
-		args = append(args, v)
-	}
+	where += filter + " AND (e.through_id IS NULL OR h.ingest_id>e.through_id)"
+	args = append(args, filterArgs...)
 	order := "ASC"
 	if q.Order == OrderDesc {
 		order = "DESC"
 	}
-	sqlText := fmt.Sprintf("SELECT s.metric,s.entity,s.tags,h.observed,h.value,h.labels FROM %s h JOIN %s s ON s.id=h.series_id WHERE %s ORDER BY h.observed %s,h.ingest_id %s,h.ordinal %s LIMIT ? OFFSET ?", t.table("hot"), t.table("series"), where, order, order, order)
+	sqlText := fmt.Sprintf("SELECT s.metric,s.entity,s.tags,h.observed,h.value,h.labels FROM %s h JOIN %s s ON s.id=h.series_id LEFT JOIN %s e ON e.series_id=s.id WHERE %s ORDER BY h.observed %s,h.ingest_id %s,h.ordinal %s LIMIT ? OFFSET ?", t.table("hot"), t.table("series"), t.table("erasures"), where, order, order, order)
 	args = append(args, q.Limit, q.Offset)
 	rows, err := t.s.reader().QueryContext(ctx, t.bind(sqlText), args...)
 	if err != nil {

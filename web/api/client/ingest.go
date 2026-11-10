@@ -25,7 +25,9 @@ func ingestReport(uuid string, report v1.Report, protocolVersion int, markPresen
 
 func ingestReportContext(ctx context.Context, uuid string, report v1.Report, protocolVersion int, markPresence bool) error {
 	report.UUID = uuid
-	report.UpdatedAt = time.Now().UTC()
+	if !metricstore.HasReportIdentity(ctx) || report.UpdatedAt.IsZero() {
+		report.UpdatedAt = time.Now().UTC()
+	}
 	if err := clients.ReportVerify(report); err != nil {
 		return err
 	}

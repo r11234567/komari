@@ -716,7 +716,13 @@ func streamHistoryExportRows(ctx context.Context, writer *csv.Writer, store *met
 				metric.Query{MetricName: metricstore.MetricPingLoss, EntityID: job.UUID, Start: cursor, End: queryEnd, Order: metric.OrderAsc},
 			)
 		}
-		series, err := store.QueryRawBatch(ctx, queries)
+		var series [][]metric.Point
+		var err error
+		if engine := store.Telemetry(); engine != nil {
+			series, err = engine.ExportRawBatch(metric.WithTelemetryEntities(ctx, []string{job.UUID}), queries)
+		} else {
+			series, err = store.QueryRawBatch(ctx, queries)
+		}
 		if err != nil {
 			return err
 		}

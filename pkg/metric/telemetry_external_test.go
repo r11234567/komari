@@ -47,7 +47,7 @@ func telemetryExternal(t *testing.T, cfg Config) {
 	}
 	defer e.Close()
 	defer func() {
-		for _, table := range []string{"work", "leases", "outbox", "summary", "hot", "series", "receipts", "segments", "progress"} {
+		for _, table := range []string{"traffic_ingress", "identity", "erasures", "members", "work", "leases", "outbox", "summary", "hot", "series", "receipts", "segments", "progress"} {
 			if _, err := s.db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+e.table(table)); err != nil {
 				t.Errorf("drop %s: %v", table, err)
 			}

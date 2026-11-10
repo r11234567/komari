@@ -28,6 +28,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/database/trafficledger"
 	"github.com/komari-monitor/komari/internal/diagnostics"
 	"github.com/komari-monitor/komari/internal/notifications"
 	"github.com/komari-monitor/komari/internal/plugin"
@@ -222,6 +223,11 @@ func (a *App) InitStores() error {
 	}
 	if orphanResult.Entities > 0 || orphanResult.PingTasks > 0 {
 		logger.Infof("metricstore", "Removed orphaned metric data (entities=%d ping_tasks=%d)", orphanResult.Entities, orphanResult.PingTasks)
+	}
+	trafficledger.ConfigureTelemetry(dbcore.GetDBInstance())
+	metricstore.ConfigureTelemetryConsumer(trafficledger.ConsumeTelemetry)
+	if err := metricstore.ActivateTelemetry(context.Background()); err != nil {
+		return fmt.Errorf("activate telemetry: %w", err)
 	}
 	metricstore.StartReportBatcher()
 	a.addCleanup("metric-report-batcher", func(ctx context.Context) error {
