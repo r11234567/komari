@@ -418,8 +418,12 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await expect(editor).toBeAttached();
       await editor.focus();
       await page.keyboard.press('Control+a');
-      await page.keyboard.type('Monaco UTF-8: ');
+      // Chromium EditContext synchronizes selection asynchronously. Send real
+      // keystrokes at typing speed rather than a zero-delay CDP burst, and
+      // verify the rendered buffer before testing the separate save transport.
+      await page.keyboard.type('Monaco UTF-8: ', { delay: 50 });
       await page.keyboard.insertText('联调 ✓\n');
+      await expect(page.locator('.km-file-editor .view-lines')).toContainText('Monaco UTF-8: 联调 ✓');
       await page.keyboard.press('Control+s');
       await expect.poll(() => fs.readFileSync(fixture('editor.txt'), 'utf8')).toBe('Monaco UTF-8: 联调 ✓\n');
       expect((await downloadFile('editor.txt')).toString()).toBe('Monaco UTF-8: 联调 ✓\n');
