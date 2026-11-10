@@ -40,19 +40,14 @@ const (
 	connectMetricCacheTTL      = 5 * time.Second
 )
 
-var connectMetricLightCapacity = int64(max(1, min(4, runtime.GOMAXPROCS(0))))
-var connectMetricHeavyCapacity = int64(max(1, min(2, runtime.GOMAXPROCS(0))))
+var connectMetricLightCapacity = int64(max(32, min(128, runtime.GOMAXPROCS(0)*16)))
+var connectMetricHeavyCapacity = int64(max(24, min(64, runtime.GOMAXPROCS(0)*12)))
 
 // Recent reads have their own lane so multi-day scans cannot starve normal
 // dashboard/live views.
 var connectMetricLightReadGate = semaphore.NewWeighted(connectMetricLightCapacity)
 var connectMetricHeavyReadGate = semaphore.NewWeighted(connectMetricHeavyCapacity)
 var connectMetricQueryFlight singleflight.Group
-var connectMetricReadCooldown struct {
-	sync.Mutex
-	lightUntil time.Time
-	heavyUntil time.Time
-}
 var connectMetricQueryCache struct {
 	sync.Mutex
 	items map[string]metricQueryCacheEntry
@@ -91,50 +86,19 @@ func acquireMetricReadSlot(ctx context.Context, weight int64) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, connectMetricStoreError(err)
 	}
-	connectMetricReadCooldown.Lock()
-	until := connectMetricReadCooldown.lightUntil
-	if gate == connectMetricHeavyReadGate {
-		until = connectMetricReadCooldown.heavyUntil
-	}
-	if wait := time.Until(until); wait > 0 {
-		connectMetricReadCooldown.Unlock()
-		return nil, metricReadBusy(wait)
-	}
 	acquired := gate.TryAcquire(weight)
-	connectMetricReadCooldown.Unlock()
 	if !acquired {
 		return nil, metricReadBusy(2 * time.Second)
 	}
-	started := time.Now()
-	return func() {
-		// Slow reads back off their own lane, allowing ingestion and maintenance
-		// to make progress. Fast future storage engines incur no cooldown.
-		elapsed := time.Since(started)
-		if elapsed >= 2*time.Second {
-			connectMetricReadCooldown.Lock()
-			deadline := time.Now().Add(min(elapsed, 15*time.Second))
-			if gate == connectMetricHeavyReadGate {
-				connectMetricReadCooldown.heavyUntil = maxTime(connectMetricReadCooldown.heavyUntil, deadline)
-			} else {
-				connectMetricReadCooldown.lightUntil = maxTime(connectMetricReadCooldown.lightUntil, deadline)
-			}
-			connectMetricReadCooldown.Unlock()
-		}
-		gate.Release(weight)
-	}, nil
+	// Releasing a slow read immediately makes capacity available again. Its
+	// latency alone is not evidence that every other chart should be refused.
+	return func() { gate.Release(weight) }, nil
 }
 
 func metricReadBusy(wait time.Duration) error {
 	err := connect.NewError(connect.CodeResourceExhausted, errors.New("metric query capacity is busy; retry shortly"))
 	err.Meta().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(wait.Seconds())))))
 	return err
-}
-
-func maxTime(first, second time.Time) time.Time {
-	if first.After(second) {
-		return first
-	}
-	return second
 }
 
 func connectMetricReadWeight(start, end time.Time) int64 {

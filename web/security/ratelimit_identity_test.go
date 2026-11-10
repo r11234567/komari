@@ -41,7 +41,7 @@ func TestRateLimitNativeLoginAndPrincipalIsolation(t *testing.T) {
 		t.Fatal("two scoped tokens on one address shared a bucket")
 	}
 	agentHistory, historyRate, historyBurst := controller.keyAndBudget(contextFor(path, "node-a", "", ""))
-	if agentHistory != "history:client:node-a" || historyRate != 2 || historyBurst != 5 {
+	if agentHistory != "history:client:node-a" || historyRate != historyReadRate || historyBurst != historyReadBurst {
 		t.Fatal("Agent history inherited the reporting budget")
 	}
 	a, _, _ = controller.keyAndBudget(contextFor("/komari.network.v1.NetworkProbeService/SubmitPingProbeResult", "node-a", "", ""))

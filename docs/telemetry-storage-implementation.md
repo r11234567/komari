@@ -151,6 +151,26 @@ ingestion/accounting over export/backup; it is not a capacity guarantee.
 
 ## 5. Final integrated verification
 
+Historical-read admission follow-up: the original HTTP limit of two concurrent
+reads per identity and the browser's single read per second prevented ordinary
+chart/Ping fan-out even after storage scans became inexpensive. HTTP history now
+allows 32 concurrent requests per identity, 64–256 server-wide, and 32 requests
+per second with a burst of 96. Scoped API tokens use the same history budget.
+Physical metric work remains separately bounded: recent reads have 32–128 slots;
+longer reads have 24–64 weighted slots (two for day queries, three for longer
+windows). Completed slow queries no longer suspend either lane. SQLite pool and
+storage scan bounds remain independent of HTTP admission.
+
+The browser starts up to 16 chart reads and reserves a separate four-slot Ping
+queue, without a one-second launch delay. Pending queues remain bounded and
+cancelable; explicit 429/503 responses retain Retry-After backoff and at most
+one retry. A single chart timeout does not pause unrelated charts or Ping.
+Regressions cover concurrent chart/Ping admission, finite global capacity,
+Agent report/probe isolation, canceled-slot reuse and the removed slow-read
+cooldown. The real E2E adds 32 distinct concurrent chart/Ping requests through
+HTTPS with rate limiting enabled for the remaining scenarios. These limits are
+admission budgets, not a measured maximum sustainable request rate.
+
 - [x] All 25 component checks pass on final executable revision `ca5f02ac`,
   including both actual external-SQL build variants.
 - [x] Real browser/server/Agent scenarios pass on that executable revision:

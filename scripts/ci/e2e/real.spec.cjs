@@ -244,6 +244,30 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       fs.writeFileSync(path.join(artifacts, 'metric-store-reloads.json'), JSON.stringify(results, null, 2));
     });
 
+    await test.step('enabled rate limits allow 32 concurrent charts and Ping reads', async () => {
+      await request('/api/admin/settings/', { rate_limit_enabled: true });
+      const end = new Date();
+      // Distinct maxPoints bypass shared cache keys: this exercises actual
+      // bounded SQL work as well as HTTP admission through the real proxy.
+      const began = Date.now();
+      const results = await Promise.all(Array.from({ length: 32 }, async (_, i) => {
+        const ping = i >= 24;
+        const duration = i < 8 ? 30 * 86400_000 : 300_000;
+        const window = {
+          agentIds: [agentId], startTime: new Date(end.getTime() - duration).toISOString(),
+          endTime: end.toISOString(), maxPoints: 100 + i,
+        };
+        const response = await rpc('metrics', ping ? 'GetPingStats' : 'QueryMetrics',
+          ping ? window : { ...window, metrics: ['cpu.usage'], downsample: true });
+        if (ping) expect(response.endTime).toBeTruthy();
+        else expect(response.series?.some(series => series.queryPoints?.length > 0)).toBe(true);
+        return { kind: ping ? 'ping' : 'chart', duration, elapsedMs: Date.now() - began };
+      }));
+      fs.writeFileSync(path.join(artifacts, 'concurrent-charts-ping.json'), JSON.stringify(results, null, 2));
+      // Leave rate limiting enabled for the remaining real Agent, terminal,
+      // file, history and backup assertions as an integration regression.
+    });
+
     await test.step('enable real 2FA and apply a signed same-identity WebSSH grant', async () => {
       await request('/api/admin/2fa/generate', undefined, { method: 'GET' });
       secret = (await context.cookies()).find(c => c.name === '2fa_secret')?.value;
