@@ -38,8 +38,12 @@ func IdentityMiddleware() gin.HandlerFunc {
 
 		// 写入兼容字段。
 		c.Set("role", p.PrimaryRole())
+		if p.APIToken != nil {
+			c.Set("api_token_id", p.APIToken.ID)
+		}
 		switch p.Type {
 		case rpc.PrincipalAPIKey:
+			c.Set("legacy_api_key", p.APIToken == nil)
 			// 旧逻辑:API Key 时记录裸 key 与固定占位 uuid。
 			apiKey := c.GetHeader("Authorization")
 			c.Set("api_key", strings.TrimPrefix(apiKey, "Bearer "))

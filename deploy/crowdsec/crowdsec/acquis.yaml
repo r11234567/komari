@@ -1,0 +1,10 @@
+filenames:
+  - /var/log/nginx/komari-access.log
+labels:
+  type: nginx
+---
+source: journalctl
+journalctl_filter:
+  - _SYSTEMD_UNIT=ssh.service
+labels:
+  type: syslog

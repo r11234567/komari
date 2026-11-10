@@ -3,6 +3,7 @@ package security
 import (
 	"math"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,10 +39,12 @@ type rateLimitBucket struct {
 // is deliberately disabled by default and can be changed without rebuilding
 // the router through the site settings page.
 type RateLimitController struct {
-	mu        sync.Mutex
-	enabled   bool
-	buckets   map[string]rateLimitBucket
-	lastSweep time.Time
+	mu            sync.Mutex
+	enabled       bool
+	buckets       map[string]rateLimitBucket
+	lastSweep     time.Time
+	historyActive map[string]int
+	historyTotal  int
 }
 
 func NewRateLimitController(enabled bool) *RateLimitController {
@@ -157,47 +160,136 @@ func (ctrl *RateLimitController) snapshotEnabled() bool {
 
 func (ctrl *RateLimitController) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		c.Set("komari_request_limiter", ctrl)
 		if !ctrl.snapshotEnabled() || !isAPIRequestPath(c.Request.URL.Path) ||
-			c.Request.Method == http.MethodOptions || isLongLivedRequest(c.Request.URL.Path) {
+			c.Request.Method == http.MethodOptions {
 			c.Next()
 			return
 		}
 		key, rate, burst := ctrl.keyAndBudget(c)
 		allowed, retryAfter := ctrl.allow(key, rate, burst, time.Now())
+		if allowed && isHistoricalReadPath(c.Request.URL.Path) {
+			allowed = ctrl.acquireHistory(key)
+			if allowed {
+				defer ctrl.releaseHistory(key)
+			} else {
+				retryAfter = 2 * time.Second
+			}
+		}
 		if allowed {
 			c.Next()
 			return
 		}
 		c.Header("Retry-After", strconv.Itoa(int(math.Ceil(retryAfter.Seconds()))))
-		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "request rate limit exceeded"})
+		c.Header("Cache-Control", "no-store")
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"code": "resource_exhausted", "message": "request rate limit exceeded", "error": "request rate limit exceeded",
+		})
 	}
+}
+
+// AcquireCompatibilityHistoryRead charges individual legacy RPC messages, so a
+// batch or WebSocket cannot turn one HTTP opening into unlimited history work.
+// REST adapters already charged by Middleware must not spend the budget twice.
+func AcquireCompatibilityHistoryRead(c *gin.Context) (func(), time.Duration) {
+	noop := func() {}
+	if c == nil || isHistoricalReadPath(c.Request.URL.Path) {
+		return noop, 0
+	}
+	value, exists := c.Get("komari_request_limiter")
+	ctrl, ok := value.(*RateLimitController)
+	if !exists || !ok || !ctrl.snapshotEnabled() {
+		return noop, 0
+	}
+	key, _, _ := ctrl.keyAndBudget(c)
+	_, identity, _ := strings.Cut(key, ":")
+	key = "history:" + identity
+	if allowed, wait := ctrl.allow(key, 2, 5, time.Now()); !allowed {
+		return nil, wait
+	}
+	if !ctrl.acquireHistory(key) {
+		return nil, 2 * time.Second
+	}
+	return func() { ctrl.releaseHistory(key) }, 0
 }
 
 func (ctrl *RateLimitController) keyAndBudget(c *gin.Context) (string, float64, float64) {
 	role := c.GetString("role")
-	identity := c.ClientIP()
+	identity := AuthSourceIP(c)
+	authenticated := true
 	if client := c.GetString("client_uuid"); client != "" {
 		identity = "client:" + client
+	} else if tokenID := c.GetString("api_token_id"); tokenID != "" {
+		identity = "token:" + tokenID
+	} else if c.GetBool("legacy_api_key") {
+		identity = "legacy-api-key"
 	} else if uuid := c.GetString("uuid"); uuid != "" && uuid != "00000000-0000-0000-0000-000000000000" {
 		identity = "user:" + uuid
+	} else {
+		authenticated = false
 	}
 	path := c.Request.URL.Path
-	if strings.HasPrefix(path, "/api/login") {
-		return "login:" + identity, 0.2, 5
+	if path == "/api/login" || path == "/komari.credential.v1.PasswordLoginService/BeginPasswordLogin" {
+		return "login:" + AuthSourceIP(c), 0.2, 5
 	}
-	if role == "client" || strings.Contains(path, "/report") || strings.Contains(path, "/upload") {
+	// Classify history before Agent ingestion so expensive reads cannot spend
+	// or inherit the higher-priority reporting budget.
+	if isHistoricalReadPath(path) {
+		return "history:" + identity, 2, 5
+	}
+	if isLongLivedRequest(path) {
+		// Charge the HTTP opening once, never individual stream frames. A
+		// reconnect storm remains bounded without timing out an active stream.
+		if role == "client" {
+			return "stream:" + identity, 20, 80
+		}
+		return "stream:" + identity, 5, 20
+	}
+	if role == "client" && strings.HasPrefix(path, "/komari.network.v1.NetworkProbeService/") {
+		return "probe:" + identity, 100, 400
+	}
+	if role == "client" && (strings.HasPrefix(path, "/komari.report.") || strings.HasPrefix(path, "/komari.metrics.") || strings.HasPrefix(path, "/api/clients/report") || path == "/api/clients/uploadBasicInfo") {
 		return "ingest:" + identity, 20, 40
 	}
-	// Count expensive history/dashboard families independently from ordinary
-	// navigation. A complete dashboard is intentionally allowed to burst; only
-	// sustained polling from many pages drains this budget and receives 429.
-	if isHistoricalReadPath(path) {
-		return "history:" + identity, 20, 120
+	if role == "client" {
+		return "control:" + identity, 30, 100
+	}
+	if !authenticated {
+		return "read:" + identity, 10, 60
 	}
 	return "read:" + identity, 40, 160
 }
 
+func (ctrl *RateLimitController) acquireHistory(key string) bool {
+	ctrl.mu.Lock()
+	defer ctrl.mu.Unlock()
+	// Bound HTTP work independently of any particular metrics storage engine.
+	capacity := max(2, min(8, runtime.GOMAXPROCS(0)*2))
+	if ctrl.historyTotal >= capacity || ctrl.historyActive[key] >= 2 {
+		return false
+	}
+	if ctrl.historyActive == nil {
+		ctrl.historyActive = make(map[string]int)
+	}
+	ctrl.historyActive[key]++
+	ctrl.historyTotal++
+	return true
+}
+
+func (ctrl *RateLimitController) releaseHistory(key string) {
+	ctrl.mu.Lock()
+	defer ctrl.mu.Unlock()
+	ctrl.historyTotal--
+	ctrl.historyActive[key]--
+	if ctrl.historyActive[key] == 0 {
+		delete(ctrl.historyActive, key)
+	}
+}
+
 func isHistoricalReadPath(path string) bool {
+	if path == "/api/records/load" || path == "/api/records/ping" || strings.HasPrefix(path, "/api/recent/") {
+		return true
+	}
 	for _, suffix := range []string{
 		"/QueryMetrics", "/GetPingStats", "/GetDashboardCharts",
 		"/GetDashboardSummary", "/GetTrafficTrend",
@@ -210,7 +302,7 @@ func isHistoricalReadPath(path string) bool {
 }
 
 func isLongLivedRequest(path string) bool {
-	for _, suffix := range []string{"/WatchAgentStatus", "/WatchDesiredConfig", "/WatchMetrics", "/StreamMetrics", "/WatchExecution", "/WatchSession", "/SubscribeEvents", "/WatchRescueSession", "/AttachSession", "/OpenSession"} {
+	for _, suffix := range []string{"/WatchAgentStatus", "/WatchDesiredConfig", "/WatchPrivilegedDelivery", "/WatchMetrics", "/UploadMetrics", "/StreamMetrics", "/WatchExecution", "/WatchSession", "/SubscribeEvents", "/WatchRescueSession", "/AttachSession", "/OpenSession", "/LeaseSessions", "/LeaseExecution", "/LeaseFileOperations", "/AttachFileOperations", "/LeaseRescueSessions"} {
 		if strings.HasSuffix(path, suffix) {
 			return true
 		}

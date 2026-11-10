@@ -16,6 +16,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/security"
 	"github.com/komari-monitor/komari/web/signonauth"
 )
 
@@ -94,6 +95,14 @@ func CallFromGin(c *gin.Context, method string, params any) *rpc.JsonRpcResponse
 //
 // 若请求已被 RequireSensitive2FA 中间件校验过(sensitive_2fa_verified),则跳过,避免重复校验。
 func dispatchWithSensitive(ctx context.Context, c *gin.Context, meta *rpc.ContextMeta, req *rpc.JsonRpcRequest) *rpc.JsonRpcResponse {
+	switch req.Method {
+	case "public:queryMetrics", "public:getPingMetricStats", "public:getClientRecentRecords", "public:getRecordsByUUID", "public:getPingRecords":
+		release, wait := security.AcquireCompatibilityHistoryRead(c)
+		if release == nil {
+			return rpc.ErrorResponse(req.ID, rpc.Unavailable, "historical reads are busy; retry shortly", map[string]int{"retry_after_seconds": int(wait.Seconds())})
+		}
+		defer release()
+	}
 	if meta != nil && meta.Principal != nil && (c == nil || !c.GetBool("sensitive_2fa_verified")) &&
 		rpc.IsSensitive(req.Method) && rpc.CheckPrincipal(meta.Principal, req.Method) {
 		// Native proofs belong to one RPC message, never to a WebSocket handshake.

@@ -644,6 +644,7 @@ func (a *App) BuildRouter() error {
 			security.TrustedProxyEnv, security.LoopbackProxies)
 	}
 
+	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
 	r.Use(cors.Middleware())
 

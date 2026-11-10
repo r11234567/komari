@@ -78,6 +78,8 @@ func APIAuthenticationMiddleware(pluginRoute ...func(method, pattern string) boo
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid API credential"})
 			return
 		}
+		SetPrincipal(c, principal)
+		security.SetPrincipalHeader(c, principal)
 		if !principal.AllowsAPIProcedure(c.Request.URL.Path) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "API token lacks permission for this procedure"})
 			return
@@ -89,7 +91,6 @@ func APIAuthenticationMiddleware(pluginRoute ...func(method, pattern string) boo
 				return
 			}
 		}
-		SetPrincipal(c, principal)
 		c.Request = security.WithAPIKeyAuthentication(c.Request, true)
 		c.Next()
 	}
