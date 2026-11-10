@@ -22,6 +22,7 @@ const services = {
   config: 'komari.config.v1.PrivilegedDeliveryService',
   browser: 'komari.browser.v1.BrowserService',
   file: 'komari.file.v1.FileService',
+  metrics: 'komari.metrics.v1.MetricsService',
 };
 
 function totp(secret, counter = Math.floor(Date.now() / 30_000)) {
@@ -174,6 +175,43 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         '--service-user', process.env.USER], { encoding: 'utf8', timeout: 30_000 });
       fs.writeFileSync(path.join(artifacts, 'trust-install.log'), trustLog);
       execFileSync('sudo', ['systemctl', 'start', 'komari-e2e.service'], { timeout: 30_000 });
+    });
+
+    await test.step('real Agent history remains available across live metric-store reloads', async () => {
+      function window() {
+        const end = new Date();
+        return { agentIds: [agentId], startTime: new Date(end.getTime() - 300_000).toISOString(), endTime: end.toISOString(), maxPoints: 100 };
+      }
+      await expect.poll(async () => {
+        const result = await rpc('metrics', 'QueryMetrics', { ...window(), metrics: ['cpu.usage'], downsample: false });
+        return (result.series || []).some(series => (series.queryPoints || []).length > 0);
+      }, { timeout: 120_000, intervals: [2000, 5000] }).toBe(true);
+      const original = (await rpc('metrics', 'GetDownsamplingPolicy')).policy;
+      const policy = {
+        enabled: !!original.enabled,
+        minuteRetentionMinutes: original.minuteRetentionMinutes,
+        fiveMinuteRetentionMinutes: original.fiveMinuteRetentionMinutes,
+        hourRetentionHours: original.hourRetentionHours,
+      };
+      const results = [];
+      for (let iteration = 0; iteration < 6; iteration++) {
+        const [history, definitions, ping, reloaded] = await Promise.all([
+          rpc('metrics', 'QueryMetrics', { ...window(), metrics: ['cpu.usage'], downsample: false }),
+          rpc('metrics', 'ListMetricDefinitions'),
+          rpc('metrics', 'GetPingStats', window()),
+          rpc('metrics', 'SetDownsamplingPolicy', policy),
+        ]);
+        expect(history.series?.some(series => series.queryPoints?.length > 0)).toBe(true);
+        expect(definitions.definitions?.some(item => item.name === 'cpu.usage')).toBe(true);
+        expect(ping.endTime).toBeTruthy();
+        expect(!!reloaded.policy.enabled).toBe(policy.enabled);
+        results.push({ iteration, historySeries: history.series.length, definitions: definitions.definitions.length });
+        // Bypass the short response cache before verifying the next instance.
+        await delay(5500);
+      }
+      const after = await rpc('metrics', 'QueryMetrics', { ...window(), metrics: ['cpu.usage'], downsample: false });
+      expect(after.series?.some(series => series.queryPoints?.length > 0)).toBe(true);
+      fs.writeFileSync(path.join(artifacts, 'metric-store-reloads.json'), JSON.stringify(results, null, 2));
     });
 
     await test.step('enable real 2FA and apply a signed same-identity WebSSH grant', async () => {

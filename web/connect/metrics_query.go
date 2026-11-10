@@ -324,10 +324,11 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 	if err != nil {
 		return nil, err
 	}
-	store := metricstore.GetStore()
-	if store == nil {
-		return nil, connectError(connect.CodeFailedPrecondition, errors.New("metric store is not initialized"))
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return nil, connectMetricStoreError(err)
 	}
+	defer releaseStore()
 	release, err := acquireMetricReadSlot(ctx, connectMetricReadWeight(start, end))
 	if err != nil {
 		return nil, err
@@ -499,10 +500,11 @@ func connectRawPointIndices(points []metric.Point, wanted ...string) map[string]
 }
 
 func (s *metricsService) ListMetricDefinitions(ctx context.Context, _ *connect.Request[metricsv1.ListMetricDefinitionsRequest]) (*connect.Response[metricsv1.ListMetricDefinitionsResponse], error) {
-	store := metricstore.GetStore()
-	if store == nil {
-		return nil, connectError(connect.CodeFailedPrecondition, errors.New("metric store is not initialized"))
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return nil, connectMetricStoreError(err)
 	}
+	defer releaseStore()
 	definitions, err := store.ListMetrics(ctx)
 	if err != nil {
 		return nil, connectMetricStoreError(err)
@@ -573,10 +575,11 @@ func (s *metricsService) getPingStats(ctx context.Context, req *connect.Request[
 	if err != nil {
 		return nil, err
 	}
-	store := metricstore.GetStore()
-	if store == nil {
-		return nil, connectError(connect.CodeFailedPrecondition, errors.New("metric store is not initialized"))
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return nil, connectMetricStoreError(err)
 	}
+	defer releaseStore()
 	taskList, err := tasks.GetAllPingTasks()
 	if err != nil {
 		return nil, connectError(connect.CodeInternal, err)
@@ -797,6 +800,9 @@ func connectPingStats(agentID string, summary metric.SeriesSummary, tasksByID ma
 }
 
 func connectMetricStoreError(err error) error {
+	if errors.Is(err, metricstore.ErrStoreNotInitialized) {
+		return connectError(connect.CodeFailedPrecondition, err)
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return connectError(connect.CodeCanceled, err)
 	}

@@ -216,10 +216,11 @@ func trafficReportRetentionTarget(currentDays, requiredDays, baselineDays int, b
 }
 
 func commonMetricRetentionDays(ctx context.Context) (int, error) {
-	store := metricstore.GetStore()
-	if store == nil {
-		return 0, fmt.Errorf("metric store is not initialized")
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return 0, err
 	}
+	defer releaseStore()
 	metricNames := []string{
 		metricstore.MetricCPU,
 		metricstore.MetricRAM,
@@ -268,14 +269,15 @@ func EnsureTrafficReportMetricRetention(ctx context.Context) error {
 		return err
 	}
 	requiredDays := RequiredTrafficReportRetentionDays(notifications)
-	store := metricstore.GetStore()
-	if store == nil {
-		return fmt.Errorf("metric store is not initialized")
-	}
 	baselineDays, err := commonMetricRetentionDays(ctx)
 	if err != nil {
 		return err
 	}
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseStore()
 
 	// Raising retention is always safe and protects the next settlement while
 	// the one-time ledger backfill is still running.
@@ -293,9 +295,17 @@ func EnsureTrafficReportMetricRetention(ctx context.Context) error {
 		}
 	}
 
+	// Ledger backfill acquires its own leases. Never nest a shared acquisition
+	// around it: an exclusive reload queued in between would deadlock.
+	releaseStore()
 	if err := trafficledger.BackfillEnabledHistory(ctx, db, time.Now().UTC()); err != nil {
 		return fmt.Errorf("backfill daily traffic ledger: %w", err)
 	}
+	store, releaseStore, err = metricstore.AcquireStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseStore()
 
 	for _, metricName := range trafficReportMetricNames {
 		definition, err := store.GetMetric(ctx, metricName)

@@ -60,12 +60,6 @@ func CheckPingLossNotifications() {
 		return
 	}
 
-	store := metricstore.GetStore()
-	if store == nil {
-		log.Printf("Failed to check ping loss notifications: metric store is not initialized")
-		return
-	}
-
 	db := dbcore.GetDBInstance()
 	var notifications []models.PingLossNotification
 	if err := db.Preload("ClientInfo").Preload("Task").Where("enable = ?", true).Find(&notifications).Error; err != nil {
@@ -76,7 +70,7 @@ func CheckPingLossNotifications() {
 	now := time.Now().UTC()
 	for _, notification := range notifications {
 		windowStart := now.Add(-time.Duration(notification.WindowSeconds) * time.Second)
-		stats, err := getPingLossStatsWithStore(context.Background(), store, notification.Client, notification.TaskId, windowStart, now)
+		stats, err := getPingLossStats(context.Background(), notification.Client, notification.TaskId, windowStart, now)
 		if err != nil {
 			log.Printf("Failed to compute ping loss for notification %d: %v", notification.Id, err)
 			continue
@@ -99,6 +93,16 @@ func CheckPingLossNotifications() {
 			log.Printf("Failed to update ping loss notification %d: %v", notification.Id, err)
 		}
 	}
+}
+
+// Keep the instance pinned only for the database read, not notification I/O.
+func getPingLossStats(ctx context.Context, clientUUID string, taskID uint, start, end time.Time) (pingLossStats, error) {
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return pingLossStats{}, err
+	}
+	defer releaseStore()
+	return getPingLossStatsWithStore(ctx, store, clientUUID, taskID, start, end)
 }
 
 func getPingLossStatsWithStore(ctx context.Context, store *metric.Store, clientUUID string, taskID uint, start, end time.Time) (pingLossStats, error) {

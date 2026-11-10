@@ -24,6 +24,8 @@ jobs:
             packages: ./web/agent ./web/api/terminal ./web/remotemanagement
           - area: plugins-js-and-notifications
             packages: ./internal/plugin ./internal/notifications ./internal/managedconfig ./pkg/jsruntime/... ./utils/messageSender/... ./web/rpc/jsonrpc ./pkg/rpc
+          - area: metric-store-lifecycle
+            packages: ./database/metricstore ./database/notification ./database/trafficledger ./utils/notifier ./web/connect ./web/rpc/jsonrpc ./web/api/admin ./cmd
     env:
       GOMAXPROCS: '2'
       GOMEMLIMIT: 3GiB

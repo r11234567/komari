@@ -1,9 +1,9 @@
 # Real feature integration on GitHub-hosted runners
 
-**Paused by default:** this workflow has only a manual `workflow_dispatch`
-trigger, with a second job-level event guard. Pull requests and pushes never
-start it. Do not run it while the workspace/MoeJS changes are under review;
-use their focused hosted-runner CI checkpoints instead.
+**Manual invocation only:** this workflow has only a `workflow_dispatch` trigger,
+with a second job-level event guard. Pull requests and pushes never start it.
+The 2026-11-10 Store lifecycle verification was explicitly requested; invoke
+this workflow on that PR revision alongside the focused race checkpoints.
 
 When explicitly requested again, run **Feature audit - real end-to-end**
 (`feature-e2e.yml`) on the audit branch.
@@ -29,6 +29,9 @@ signed configuration or replay state are injected or edited.
 
 The single sequential Playwright scenario tests:
 
+- Real Agent CPU history, definitions and Ping summaries queried concurrently
+  with six live store reloads through the authenticated configuration API,
+  followed by uncached historical reads from the new instances.
 - Wrong OTP rejection and account gate success without reusing the proof for
   password changes.
 - Actual xterm input/output and text export; search, system clipboard copy and

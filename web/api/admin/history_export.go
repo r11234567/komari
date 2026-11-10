@@ -367,10 +367,11 @@ func writeHistoryExport(ctx context.Context, id string) error {
 	if job == nil {
 		return fmt.Errorf("export job not found")
 	}
-	store := metricstore.GetStore()
-	if store == nil {
-		return fmt.Errorf("metric store is not initialized")
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return err
 	}
+	defer releaseStore()
 	columns, err := historyExportColumnsForJob(job)
 	if err != nil {
 		return err
@@ -1152,9 +1153,10 @@ func getHistoryExportRetention(c *gin.Context) {
 }
 
 func historyExportRetentionHours(ctx context.Context) (int, int) {
-	store := metricstore.GetStore()
 	resourceHours, pingHours := 24, 24
-	if store != nil {
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err == nil {
+		defer releaseStore()
 		if definitions, err := store.ListMetrics(ctx); err == nil {
 			for _, definition := range definitions {
 				hours := definition.RetentionDays * 24

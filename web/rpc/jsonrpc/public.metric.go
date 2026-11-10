@@ -136,10 +136,11 @@ type publicPingMetricStatsResponse struct {
 }
 
 func publicListMetricDefinitions(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	store := metricstore.GetStore()
-	if store == nil {
-		return nil, rpc.MakeError(rpc.InternalError, "metric store not initialized", nil)
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "acquire metric store: "+err.Error(), nil)
 	}
+	defer releaseStore()
 	defs, err := store.ListMetrics(ctx)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to list metric definitions: "+err.Error(), nil)
@@ -193,10 +194,11 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		downsample = *params.ServerDownsample
 	}
 
-	store := metricstore.GetStore()
-	if store == nil {
-		return nil, rpc.MakeError(rpc.InternalError, "metric store not initialized", nil)
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "acquire metric store: "+err.Error(), nil)
 	}
+	defer releaseStore()
 	defs, err := store.ListMetrics(ctx)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to list metric definitions: "+err.Error(), nil)
@@ -362,10 +364,11 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 		}, nil
 	}
 
-	store := metricstore.GetStore()
-	if store == nil {
-		return nil, rpc.MakeError(rpc.InternalError, "metric store not initialized", nil)
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "acquire metric store: "+err.Error(), nil)
 	}
+	defer releaseStore()
 
 	taskList, err := tasks.GetAllPingTasks()
 	if err != nil {
