@@ -121,11 +121,28 @@ Incident-sized migration and fixed-resource verification remain checkpoint 5.
 
 ## 4. Replace the maintenance scheduler
 
-- [ ] Due-work queues, short commits, persistent per-task progress and fairness.
-- [ ] Failure-completion-based minute backoff with jitter, bounded worker count.
-- [ ] No periodic full COUNT, recompression, scan or VACUUM on idle data.
-- [ ] Independent checkpoint/space reclamation, backlog and disk backpressure.
-- [ ] Scheduler race/fault CI and real E2E on this checkpoint revision.
+- [x] Due-work queues, short commits, persistent per-task progress and fairness.
+- [x] Failure-completion-based minute backoff with jitter, bounded worker count.
+- [x] No periodic full COUNT, recompression, scan or VACUUM on idle data.
+- [x] Independent checkpoint/space reclamation, backlog and disk backpressure.
+- [x] Scheduler race/fault CI and real E2E on this checkpoint revision.
+
+Checkpoint `00245cb4` passed all 25 component checks, including the live external
+SQL matrix, and [real E2E run 42811775927](https://github.com/r11234567/komari/actions/runs/42811775927).
+The running fixture requires all 13 durable task rows and zero task failures;
+it also validates real archives/raw deletion, restart, restore and rollback.
+Local full race checks passed for metric, metricstore, trafficledger, Connect
+and application startup (2026-11-10). The first browser run failed because a
+zero-delay Chromium EditContext typing burst dropped characters before save;
+typing is now paced and the visible buffer is asserted before the unchanged
+UTF-8/zero-byte save and download assertions. No assertion was removed.
+
+The former 30-second compaction cron is replaced by one due-work worker with
+durable deadlines/cursors, independent tasks, completion-based minute backoff,
+input wakeups and bounded work slices. Archive verification releases the ingest
+gate before paced decompression and rechecks deletion eligibility afterwards.
+Disk reserve backpressure protects newly acknowledged data and prioritizes
+ingestion/accounting over export/backup; it is not a capacity guarantee.
 
 ## 5. Final integrated verification
 

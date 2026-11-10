@@ -66,16 +66,40 @@ func (t *Telemetry) PruneSummaries(ctx context.Context, name string, retention t
 }
 
 type TelemetryDiagnostics struct {
-	Accepted             int64     `json:"accepted_through"`
-	Summarized           int64     `json:"summarized_through"`
-	HotBudgetBytes       int64     `json:"hot_budget_bytes"`
-	OldestUndelivered    int64     `json:"oldest_undelivered_ingest,omitempty"`
-	OldestArchivePending time.Time `json:"oldest_archive_pending,omitempty"`
+	Accepted             int64                      `json:"accepted_through"`
+	Summarized           int64                      `json:"summarized_through"`
+	HotBudgetBytes       int64                      `json:"hot_budget_bytes"`
+	OldestUndelivered    int64                      `json:"oldest_undelivered_ingest,omitempty"`
+	OldestArchivePending time.Time                  `json:"oldest_archive_pending,omitempty"`
+	HotLimitBytes        int64                      `json:"hot_limit_bytes"`
+	FreeBytes            uint64                     `json:"free_bytes"`
+	DiskPressure         bool                       `json:"disk_pressure"`
+	CapacityError        string                     `json:"capacity_error,omitempty"`
+	Tasks                []TelemetryTaskDiagnostics `json:"tasks,omitempty"`
+}
+
+type TelemetryTaskDiagnostics struct {
+	Name         string    `json:"name"`
+	Due          time.Time `json:"due"`
+	Attempts     int       `json:"attempts"`
+	LeaseExpires time.Time `json:"lease_expires,omitempty"`
+	LastError    string    `json:"last_error,omitempty"`
 }
 
 func (t *Telemetry) Diagnostics(ctx context.Context) (TelemetryDiagnostics, error) {
 	var d TelemetryDiagnostics
 	var err error
+	d.HotLimitBytes = t.cfg.MaxHotBytes
+	if capacityErr := t.CheckCapacity(ctx, false); capacityErr != nil {
+		if ctx.Err() != nil {
+			return d, ctx.Err()
+		}
+		d.CapacityError = capacityErr.Error()
+		d.DiskPressure = true
+	}
+	t.capacity.Lock()
+	d.FreeBytes = t.capacity.free
+	t.capacity.Unlock()
 	if d.Accepted, err = t.progress(ctx, t.s.reader(), "ingest"); err != nil {
 		return d, err
 	}
@@ -98,6 +122,29 @@ func (t *Telemetry) Diagnostics(ctx context.Context) (TelemetryDiagnostics, erro
 	}
 	if d.Summarized > d.Accepted {
 		return d, fmt.Errorf("telemetry progress inconsistent")
+	}
+	rows, err := t.s.reader().QueryContext(ctx, "SELECT task,due,attempts,expires,last_error FROM "+t.table("schedule")+" ORDER BY task LIMIT 65")
+	if err != nil {
+		return d, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var task TelemetryTaskDiagnostics
+		var due, expires int64
+		if err = rows.Scan(&task.Name, &due, &task.Attempts, &expires, &task.LastError); err != nil {
+			return d, err
+		}
+		task.Due = time.Unix(0, due).UTC()
+		if expires > 0 {
+			task.LeaseExpires = time.Unix(0, expires).UTC()
+		}
+		d.Tasks = append(d.Tasks, task)
+		if len(d.Tasks) > 64 {
+			return d, ErrTelemetryBackpressure
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return d, err
 	}
 	return d, nil
 }

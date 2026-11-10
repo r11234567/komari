@@ -20,6 +20,17 @@ func TestTelemetryIncidentMigration(t *testing.T) {
 	}
 	ctx := context.Background()
 	dir := t.TempDir()
+	// Preserve an explicitly requested disposable fixture across WSL restarts.
+	// Mkdir refuses an existing destination; never overwrite a prior fixture.
+	if output := os.Getenv("KOMARI_TELEMETRY_INCIDENT_OUTPUT"); output != "" {
+		if !filepath.IsAbs(output) {
+			t.Fatal("incident output must be an absolute, new directory")
+		}
+		if err := os.Mkdir(output, 0700); err != nil {
+			t.Fatal(err)
+		}
+		dir = output
+	}
 	u := url.URL{Scheme: "file", Path: source, RawQuery: "mode=ro"}
 	db, err := sql.Open("sqlite3", u.String())
 	if err != nil {

@@ -81,9 +81,11 @@ func telemetrySchedulerLoop(ctx context.Context) {
 		started := time.Now()
 		wait := time.Minute
 		var changed <-chan struct{}
+		active := false
 		s, release, err := AcquireStore(ctx)
 		if err == nil {
 			if t := s.Telemetry(); t != nil {
+				active = true
 				changed = t.Changes()
 				err = ensureTelemetrySchedule(ctx, t, started)
 				if err == nil && input {
@@ -93,7 +95,7 @@ func telemetrySchedulerLoop(ctx context.Context) {
 			}
 			release()
 		}
-		if err == nil {
+		if err == nil && active {
 			workCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 			_, err = RunMaintenance(workCtx, started)
 			cancel()

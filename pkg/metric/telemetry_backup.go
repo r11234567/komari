@@ -3,6 +3,7 @@ package metric
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -30,6 +31,14 @@ type telemetryBackupManifest struct {
 // The application also holds its exclusive lifecycle lease, stops metadata
 // delivery and takes the metadata snapshot through the supplied callback.
 func (t *Telemetry) BackupBundle(ctx context.Context, databasePath, archiveDir string, metadata func() error) error {
+	return t.BackupBundleAfterSnapshot(ctx, databasePath, archiveDir, metadata, nil)
+}
+
+// BackupBundleAfterSnapshot keeps ingress frozen only until both SQL snapshots
+// are durable. The trusted callback may downgrade the application's lifecycle
+// gate; immutable-file copying retains archive ownership and file pins. The
+// catalog is read from the SQL snapshot, never from later accepted live data.
+func (t *Telemetry) BackupBundleAfterSnapshot(ctx context.Context, databasePath, archiveDir string, metadata func() error, snapshotReady func()) error {
 	if err := t.CheckCapacity(ctx, true); err != nil {
 		return err
 	}
@@ -43,7 +52,7 @@ func (t *Telemetry) BackupBundle(ctx context.Context, databasePath, archiveDir s
 	if err != nil {
 		return err
 	}
-	defer release()
+	defer func() { release() }()
 	if err = t.claimWork(ctx, "archive"); err != nil {
 		return err
 	}
@@ -91,9 +100,22 @@ func (t *Telemetry) BackupBundle(ctx context.Context, databasePath, archiveDir s
 	if err = t.s.BackupSQLite(ctx, databasePath); err != nil {
 		return err
 	}
-	manifest := telemetryBackupManifest{Version: 1, Store: t.instance}
-	manifest.Through, err = t.progress(ctx, t.s.reader(), "ingest")
+	snapshot, err := sql.Open("sqlite3", setSQLiteDSNParam(setSQLiteDSNParam(sqliteFileDSN(databasePath), "mode", "ro"), "_txlock", "deferred"))
 	if err != nil {
+		return err
+	}
+	defer snapshot.Close()
+	manifest := telemetryBackupManifest{Version: 1, Store: t.instance}
+	manifest.Through, err = t.progress(ctx, snapshot, "ingest")
+	if err != nil {
+		return err
+	}
+	release()
+	release = func() {}
+	if snapshotReady != nil {
+		snapshotReady()
+	}
+	if err = t.fault("backup-snapshot-ready"); err != nil {
 		return err
 	}
 	if err = os.MkdirAll(archiveDir, 0700); err != nil {
@@ -113,7 +135,7 @@ func (t *Telemetry) BackupBundle(ctx context.Context, databasePath, archiveDir s
 	// Page the catalog, too: archive history must not be an in-memory slice.
 	after := ""
 	for {
-		rows, e := t.s.reader().QueryContext(ctx, t.bind("SELECT id FROM "+t.table("segments")+" WHERE id>? AND state IN ('archived','deleting','complete') ORDER BY id LIMIT 128"), after)
+		rows, e := snapshot.QueryContext(ctx, t.bind("SELECT id FROM "+t.table("segments")+" WHERE id>? AND state IN ('archived','deleting','complete') ORDER BY id LIMIT 128"), after)
 		if e != nil {
 			return e
 		}
@@ -140,7 +162,7 @@ func (t *Telemetry) BackupBundle(ctx context.Context, databasePath, archiveDir s
 			if err = ctx.Err(); err != nil {
 				return err
 			}
-			seg, e := t.segment(ctx, t.s.reader(), id)
+			seg, e := t.segment(ctx, snapshot, id)
 			if e != nil {
 				return e
 			}

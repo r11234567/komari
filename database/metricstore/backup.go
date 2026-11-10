@@ -35,7 +35,14 @@ func BackupFull(ctx context.Context, directory string, metadata func() error) er
 	if err := storeOperations.Acquire(ctx); err != nil {
 		return err
 	}
-	defer storeOperations.Release()
+	shared := false
+	defer func() {
+		if shared {
+			storeOperations.ReleaseShared()
+		} else {
+			storeOperations.Release()
+		}
+	}()
 	s := GetStore()
 	if s == nil {
 		return ErrStoreNotInitialized
@@ -55,7 +62,10 @@ func BackupFull(ctx context.Context, directory string, metadata func() error) er
 				}
 			}
 		}
-		return t.BackupBundle(ctx, filepath.Join(directory, "metrics.db"), filepath.Join(directory, "telemetry"), metadata)
+		return t.BackupBundleAfterSnapshot(ctx, filepath.Join(directory, "metrics.db"), filepath.Join(directory, "telemetry"), metadata, func() {
+			storeOperations.Downgrade()
+			shared = true
+		})
 	}
 	if err := metadata(); err != nil {
 		return err

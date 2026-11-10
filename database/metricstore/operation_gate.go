@@ -38,3 +38,9 @@ func (g *storeOperationGate) AcquireShared(ctx context.Context) error {
 func (g *storeOperationGate) ReleaseShared() {
 	g.semaphore.Release(1)
 }
+
+// Downgrade keeps one lifecycle reader without opening a replacement window.
+// The caller must hold the exclusive gate and subsequently ReleaseShared.
+func (g *storeOperationGate) Downgrade() {
+	g.semaphore.Release(storeOperationGateWeight - 1)
+}

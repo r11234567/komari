@@ -103,3 +103,48 @@ func TestTelemetryBackupRestoreAndArchiveExpiration(t *testing.T) {
 		t.Fatal("corrupt archive accepted")
 	}
 }
+
+func TestTelemetryBackupReleasesIngressButKeepsSnapshotBoundary(t *testing.T) {
+	_, e := telemetryFixture(t, "")
+	ctx := context.Background()
+	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Minute)
+	if _, err := e.Accept(ctx, telemetryBatch("before-backup", at, 1), at); err != nil {
+		t.Fatal(err)
+	}
+	summarizeAll(t, e)
+	if _, err := e.SealDue(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := e.ArchiveNext(ctx); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	dir := t.TempDir()
+	path, archive := filepath.Join(dir, "metrics.db"), filepath.Join(dir, "archive")
+	if err := e.BackupBundleAfterSnapshot(ctx, path, archive, nil, func() {
+		writeCtx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		if _, err := e.Accept(writeCtx, telemetryBatch("during-copy", time.Now().UTC(), 99), time.Now().UTC()); err != nil {
+			t.Error("archive copy blocked ingest", err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateTelemetryBackup(ctx, path, archive); err != nil {
+		t.Fatal("snapshot mixed later live catalog/watermark", err)
+	}
+	data, err := os.ReadFile(filepath.Join(archive, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest telemetryBackupManifest
+	if err = json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Through != 1 || len(manifest.Files) != 1 {
+		t.Fatal("backup included post-snapshot data", manifest)
+	}
+	d, err := e.Diagnostics(ctx)
+	if err != nil || d.Accepted != 2 {
+		t.Fatal("concurrent ingest missing", d, err)
+	}
+}
