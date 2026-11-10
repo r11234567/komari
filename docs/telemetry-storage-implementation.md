@@ -105,10 +105,13 @@ calibration ledger; known unavailable raw fails explicitly. Already-compressed
 archive members use ZIP Store to avoid recompression. The final local relevant
 race suites passed again (`pkg/metric`: 70.723s).
 
-Legacy writer APIs are unreachable from the active application Store. Physical
-library deletion remains deferred until the final full-cycle/migration checks;
-compatibility codecs are still needed by offline migration and their tests.
-Incident-sized migration and fixed-resource verification remain checkpoint 5.
+Legacy writer entry points are excluded from the normal build. Compatibility
+decoders, schema preparation and explicit administrative deletion still support
+offline migration and retained source data. The old reference engine exists
+only behind `metric_legacy_fixture`; full reference regressions use
+`scripts/ci/run-go-tests.sh`. Production telemetry CI also runs the complete
+storage suite without that tag, and checks the selected build files. Release
+and real E2E compile without the fixture tag.
 
 - [x] Independent traffic state, hourly/daily/cycle ledgers and calibration.
 - [x] Authorized bounded chart routing, actual resolution and missing-data status.
@@ -117,7 +120,9 @@ Incident-sized migration and fixed-resource verification remain checkpoint 5.
 - [x] Settings and initial backlog diagnostics, protocol compatibility.
 - [x] Isolate legacy migration readers; prevent obsolete application writers.
 - [x] Component CI, authenticated real E2E, restore and migration verification.
-- [ ] Physically remove obsolete library writers after final compatibility checks.
+- [x] Exclude obsolete automatic migration and compaction entry points from
+  normal builds. Historical behavior remains in the explicit
+  `metric_legacy_fixture` reference build, never in release or real E2E builds.
 
 ## 4. Replace the maintenance scheduler
 
@@ -153,6 +158,24 @@ ingestion/accounting over export/backup; it is not a capacity guarantee.
   latency, cancellation and sustained backlog reduction against the design.
 - [ ] Complete retention/archive-cycle soak; permission/security regressions.
 - [ ] Evidence links, limitations and unchecked deployment-only items recorded.
+
+Final verification in progress (2026-11-10): the disposable incident migration
+imported all 11,583,271 logical raw points in 15m9.871s, then verified six exact
+raw windows and the unchanged original logical point count. Its durable fixture
+is retained outside the repository; no production database was opened for write.
+The reference-format race suite passed again after build isolation (`pkg/metric`
+72.400s), including metricstore, trafficledger, Connect and application startup.
+The normal-build full metric and metricstore suites pass independently. The
+production package selector rejects any retired fixture entry points.
+
+The resource fixture fixes ten nodes reporting every five seconds, two scoped
+day/week/month chart workers every five seconds, real cold export, cancellation,
+snapshot backup and the production background scheduler. The kernel enforces
+one CPU and 1 GiB with swap disabled. Setup/migration is excluded from measured
+CPU, and the source SQL and immutable archives are never modified. This is WSL
+storage-call acceptance, not a claim of measured Debian Docker HTTP latency or
+a completed 24-hour soak. Per-operation timings and backlog snapshots are
+retained in the report produced by `scripts/ci/telemetry-resource.sh`.
 
 Prior PR #75 verification is baseline evidence only. It does not validate this
 new storage design or any unchecked item above. Do not merge, tag or deploy the

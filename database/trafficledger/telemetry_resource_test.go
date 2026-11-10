@@ -155,7 +155,8 @@ func TestTelemetryResourceAcceptance(t *testing.T) {
 		files++
 		return nil
 	}))
-	s, err := metric.Open(ctx, metric.SQLite(path, metric.WithRetiredLegacyStorage(), metric.WithSQLiteProfile(metric.SQLiteProfileDurable)))
+	// Use the real application's cgroup-aware cache/read-pool configuration.
+	s, err := metricstore.OpenStore(ctx, &metricstore.MetricStoreConfig{Driver: "sqlite", DSN: path, ArchiveDirectory: archive})
 	require.NoError(t, err)
 	defer s.Close()
 	// Preserve old incident timestamps under the actual current clock. This
@@ -190,7 +191,10 @@ func TestTelemetryResourceAcceptance(t *testing.T) {
 	require.NoError(t, metricstore.ActivateTelemetry(ctx))
 	var entity string
 	var captured int64
-	require.NoError(t, metaSourceQuery(path, "SELECT s.entity_id,MAX(b.end_nano) FROM metric_point_blocks b JOIN metric_series s ON s.id=b.series_id WHERE s.metric_name='cpu.usage' GROUP BY s.entity_id LIMIT 1", &entity, &captured))
+	// This actual capture has memory/traffic/Ping history but no CPU raw rows;
+	// query a real populated series instead of inventing historical CPU data.
+	const historicalMetric = metricstore.MetricRAM
+	require.NoError(t, metaSourceQuery(path, "SELECT s.entity_id,MAX(b.end_nano) FROM metric_point_blocks b JOIN metric_series s ON s.id=b.series_id WHERE s.metric_name='memory.used' GROUP BY s.entity_id LIMIT 1", &entity, &captured))
 
 	samples := &resourceSamples{latencies: make(map[string][]float64)}
 	initialRSS := resourceRSS()
@@ -248,7 +252,7 @@ func TestTelemetryResourceAcceptance(t *testing.T) {
 				iteration++
 				days := []int{1, 7, 30}[iteration%3]
 				end := time.Unix(0, captured).Truncate(time.Hour).Add(time.Hour)
-				q := metric.AggregateQuery{Query: metric.Query{MetricName: metricstore.MetricCPU, EntityID: entity, Start: end.Add(-time.Duration(days) * 24 * time.Hour), End: end.Add(-time.Nanosecond)}, Interval: time.Hour, Aggregation: metric.AggAvg, PreserveSeries: true}
+				q := metric.AggregateQuery{Query: metric.Query{MetricName: historicalMetric, EntityID: entity, Start: end.Add(-time.Duration(days) * 24 * time.Hour), End: end.Add(-time.Nanosecond)}, Interval: time.Hour, Aggregation: metric.AggAvg, PreserveSeries: true}
 				queryCtx, done := context.WithTimeout(metric.WithTelemetryEntities(context.Background(), []string{entity}), 5*time.Second)
 				start := time.Now()
 				result, err := s.Telemetry().Chart(queryCtx, q, time.Now().UTC())
@@ -290,7 +294,7 @@ func TestTelemetryResourceAcceptance(t *testing.T) {
 		case <-timer.C:
 		}
 		end := time.Unix(0, captured).Truncate(time.Hour).Add(time.Hour)
-		q := metric.Query{MetricName: metricstore.MetricCPU, EntityID: entity, Start: end.Add(-time.Hour), End: end.Add(-time.Nanosecond)}
+		q := metric.Query{MetricName: historicalMetric, EntityID: entity, Start: end.Add(-time.Hour), End: end.Add(-time.Nanosecond)}
 		exportCtx, done := context.WithTimeout(metric.WithTelemetryEntities(context.Background(), []string{entity}), time.Minute)
 		start := time.Now()
 		_, err := s.Telemetry().ExportRawBatch(exportCtx, []metric.Query{q})

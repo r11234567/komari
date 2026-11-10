@@ -105,6 +105,7 @@ func (s *Store) IsVirtualMetric(metricName string) bool {
 //
 // Open 根据配置打开 Store，初始化连接池，并在需要时执行自动迁移。
 func Open(ctx context.Context, cfg Config) (*Store, error) {
+	retireLegacyConfig(&cfg)
 	if cfg.TablePrefix == "" {
 		cfg.TablePrefix = "metric_"
 	}

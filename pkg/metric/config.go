@@ -15,7 +15,7 @@ import (
 type Config struct {
 	// RetireLegacyStorage keeps existing blocks readable while disabling the old
 	// compressor, automatic codec upgrades and retention jobs. The application
-	// uses this during the archive-engine transition; this is not a user setting.
+	// always forces this on. Only explicit reference-fixture tests may disable it.
 	RetireLegacyStorage bool
 	// Driver selects the database backend.
 	//
