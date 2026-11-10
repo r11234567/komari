@@ -409,7 +409,9 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       // Current Monaco uses a native EditContext surface in Chromium; address
       // its accessible input instead of assuming the old hidden textarea.
       const editor = page.locator('.km-file-editor').getByRole('textbox', { name: 'Editor content', exact: true });
-      await expect(editor).toBeVisible();
+      // EditContext's focus target has no visual box; Monaco draws the text
+      // separately. Focus the real native target and use normal keyboard input.
+      await expect(editor).toBeAttached();
       await editor.focus();
       await page.keyboard.press('Control+a');
       await page.keyboard.type('Monaco UTF-8: ');
