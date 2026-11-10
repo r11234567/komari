@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -543,6 +544,71 @@ func TestTelemetryReceiptExpiryAndBackpressure(t *testing.T) {
 	}
 	if n := telemetryCount(t, e, "receipts"); n != 0 {
 		t.Fatal(n)
+	}
+}
+
+func TestTelemetryQuantileRankAndPingProjection(t *testing.T) {
+	for _, distribution := range []string{"normal", "tail", "spike", "repeated"} {
+		t.Run(distribution, func(t *testing.T) {
+			rng := rand.New(rand.NewSource(19))
+			values := make([]float64, 10000)
+			var combined telemetryStats
+			for batch := range 100 {
+				var part telemetryStats
+				for i := range 100 {
+					v := rng.NormFloat64()
+					switch distribution {
+					case "tail":
+						v = math.Exp(v * 3)
+					case "spike":
+						v = 0
+						if i == 99 {
+							v = 1e6
+						}
+					case "repeated":
+						v = float64(i % 7)
+					}
+					values[batch*100+i] = v
+					part.add(Point{Timestamp: time.Unix(int64(batch*100+i), 0), Value: v}, int64(batch+1), i)
+				}
+				if err := combined.merge(part); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sort.Float64s(values)
+			for _, fraction := range []float64{0.5, 0.95, 0.99} {
+				got, err := combined.value(Pxx(fraction * 100))
+				if err != nil {
+					t.Fatal(err)
+				}
+				lo := sort.SearchFloat64s(values, got)
+				hi := sort.Search(len(values), func(i int) bool { return values[i] > got })
+				target := fraction * float64(len(values)-1)
+				distance := max(float64(lo)-target, target-float64(hi))
+				if distance > float64(len(values))*0.01 {
+					t.Fatalf("p%v rank error %v value %v", fraction, distance, got)
+				}
+			}
+		})
+	}
+	_, e := telemetryFixture(t, "")
+	ctx := context.Background()
+	start := time.Now().UTC().Truncate(time.Hour)
+	b := telemetryBatch("ping", start, -1, 10, -1, 20)
+	for i := range b.Points {
+		b.Points[i].MetricName = sqliteMergedPingLatencyMetric
+	}
+	if _, err := e.Accept(ctx, b, start); err != nil {
+		t.Fatal(err)
+	}
+	summarizeAll(t, e)
+	for _, agg := range []Aggregation{AggAvg, AggSum, AggMin, AggMax, AggFirst, AggLast, AggStdDev, AggCount, AggP50, AggP95} {
+		q := AggregateQuery{Query: Query{MetricName: sqliteVirtualPingLossMetric, EntityID: "node", Start: start, End: start.Add(10*time.Second - time.Nanosecond)}, Interval: 10 * time.Second, Aggregation: agg, PreserveSeries: true}
+		got, err := e.Aggregate(ctx, q, start)
+		want, err2 := aggregateMetricValue(b.Points, pingLossPhysicalAggregation(agg))
+		if err != nil || err2 != nil || len(got.Points) != 1 || math.Abs(got.Points[0].Value-want) > 1e-12 {
+			t.Fatalf("%s %+v want=%v errors=%v/%v", agg, got, want, err, err2)
+		}
 	}
 }
 

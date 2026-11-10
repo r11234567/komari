@@ -12,6 +12,10 @@ func (t *Telemetry) ReadHot(ctx context.Context, q Query, now time.Time) ([]Poin
 	if err := q.Validate(); err != nil {
 		return nil, err
 	}
+	virtualLoss := q.MetricName == sqliteVirtualPingLossMetric
+	if virtualLoss {
+		q.MetricName = sqliteMergedPingLatencyMetric
+	}
 	if q.Start.Before(now.Add(-t.cfg.RawWindow)) {
 		return nil, ErrTelemetryCold
 	}
@@ -66,6 +70,9 @@ func (t *Telemetry) ReadHot(ctx context.Context, q Query, now time.Time) ([]Poin
 		}
 		if err = json.Unmarshal([]byte(labels), &p.Labels); err != nil {
 			return nil, err
+		}
+		if virtualLoss {
+			p = virtualPingLossPoint(p)
 		}
 		out = append(out, p)
 	}

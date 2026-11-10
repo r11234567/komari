@@ -290,12 +290,17 @@ func (t *Telemetry) Aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 	if err := q.Validate(); err != nil {
 		return out, err
 	}
+	originalMetric := q.MetricName
+	if q.MetricName == sqliteVirtualPingLossMetric {
+		q.MetricName = sqliteMergedPingLatencyMetric
+		q.Aggregation = pingLossPhysicalAggregation(q.Aggregation)
+	}
 	resolution := telemetryResolution(now.Sub(q.Start))
 	out.Resolution = resolution
 	if q.Interval < resolution || q.Interval%resolution != 0 || q.Start.UnixNano()%int64(resolution) != 0 || (q.End.UnixNano()+1)%int64(resolution) != 0 {
 		return out, ErrTelemetryCoverage
 	}
-	if q.Aggregation == AggRate {
+	if q.Aggregation == AggRate || q.Aggregation == aggPingLossRate {
 		return out, ErrTelemetryCoverage
 	}
 	// Hold a read transaction so the coverage cursor and cells are one snapshot.
@@ -391,7 +396,7 @@ func (t *Telemetry) Aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 		if q.PreserveSeries {
 			entity = k.entityID
 		}
-		out.Points = append(out.Points, AggregatePoint{MetricName: q.MetricName, EntityID: entity, Bucket: time.Unix(0, k.bucket).UTC(), Value: v, Count: int(st.Attempts), Tags: tagsByGroup[k]})
+		out.Points = append(out.Points, AggregatePoint{MetricName: originalMetric, EntityID: entity, Bucket: time.Unix(0, k.bucket).UTC(), Value: v, Count: int(st.Attempts), Tags: tagsByGroup[k]})
 	}
 	if q.Order == OrderDesc {
 		sort.SliceStable(out.Points, func(i, j int) bool { return out.Points[i].Bucket.After(out.Points[j].Bucket) })
@@ -437,6 +442,35 @@ func (s telemetryStats) value(a Aggregation) (float64, error) {
 		return float64(s.Loss) / float64(s.Attempts), nil
 	case aggPingLossSum:
 		return float64(s.Loss), nil
+	case aggPingLossMin:
+		if s.Attempts > 0 && s.Loss == s.Attempts {
+			return 1, nil
+		}
+		return 0, nil
+	case aggPingLossMax:
+		if s.Loss > 0 {
+			return 1, nil
+		}
+		return 0, nil
+	case aggPingLossFirst:
+		if s.First < 0 {
+			return 1, nil
+		}
+		return 0, nil
+	case aggPingLossLast:
+		if s.Last < 0 {
+			return 1, nil
+		}
+		return 0, nil
+	case aggPingLossStdDev:
+		if s.Attempts == 0 {
+			return 0, nil
+		}
+		p := float64(s.Loss) / float64(s.Attempts)
+		return math.Sqrt(p * (1 - p)), nil
+	}
+	if f, ok := parsePingLossPercentile(a); ok {
+		return pingLossPercentile(s.Attempts, s.Loss, f), nil
 	}
 	if f, ok := parsePercentile(a); ok {
 		if s.N == 0 {

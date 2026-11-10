@@ -54,6 +54,8 @@ func (t *Telemetry) segmentPath(seg telemetrySegment) string {
 func (t *Telemetry) segment(ctx context.Context, q querier, id string) (telemetrySegment, error) {
 	var s telemetrySegment
 	err := q.QueryRowContext(ctx, t.bind("SELECT id,state,first_id,last_id,points,bytes,created,deleted,checksum,file_bytes,staging_owner FROM "+t.table("segments")+" WHERE id=?"), id).Scan(&s.ID, &s.State, &s.First, &s.Last, &s.Points, &s.Bytes, &s.Created, &s.Deleted, &s.Hash, &s.FileBytes, &s.StagingOwner)
+	// PostgreSQL pads empty CHAR fields; identities themselves are fixed hex.
+	s.StagingOwner = strings.TrimSpace(s.StagingOwner)
 	return s, err
 }
 
