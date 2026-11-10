@@ -406,8 +406,10 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
 
     await test.step('actual Monaco editor saves UTF-8 and zero-byte content through the Agent', async () => {
       await page.locator('[data-file-path]').filter({ hasText: 'editor.txt' }).dblclick();
-      const editor = page.locator('.km-file-editor .monaco-editor textarea.inputarea');
-      await expect(editor).toBeAttached();
+      // Current Monaco uses a native EditContext surface in Chromium; address
+      // its accessible input instead of assuming the old hidden textarea.
+      const editor = page.locator('.km-file-editor').getByRole('textbox', { name: 'Editor content', exact: true });
+      await expect(editor).toBeVisible();
       await editor.focus();
       await page.keyboard.press('Control+a');
       await page.keyboard.type('Monaco UTF-8: ');
