@@ -152,10 +152,10 @@ ingestion/accounting over export/backup; it is not a capacity guarantee.
 ## 5. Final integrated verification
 
 - [ ] All CI checks and real browser/server/Agent scenarios pass on final HEAD.
-- [ ] Incident-sized consistent data, mixed ingestion/query/archive/export load,
+- [x] Incident-sized consistent data, mixed ingestion/query/archive/export load,
   migration interrupt/resume, backup restore and rollback.
-- [ ] Fixed 1 vCPU / 1 GiB benchmark manifest; record CPU/RSS, ingest and chart
-  latency, cancellation and sustained backlog reduction against the design.
+- [x] Fixed 1 vCPU / 1 GiB, 15-minute mixed-load manifest and measurements.
+- [ ] Full-day stability, isolated archive RSS and matched old/new load comparison.
 - [ ] Complete retention/archive-cycle soak; permission/security regressions.
 - [ ] Evidence links, limitations and unchecked deployment-only items recorded.
 
@@ -176,6 +176,30 @@ CPU, and the source SQL and immutable archives are never modified. This is WSL
 storage-call acceptance, not a claim of measured Debian Docker HTTP latency or
 a completed 24-hour soak. Per-operation timings and backlog snapshots are
 retained in the report produced by `scripts/ci/telemetry-resource.sh`.
+
+The completed 900.04-second run on the durable incident fixture passed:
+
+| Measurement | Result |
+| --- | --- |
+| Mean process CPU | 0.08184 cores |
+| Sampled peak process RSS | 44.80 MiB |
+| Report commits | 1,792; p95 22.83 ms, p99 62.82 ms; max 3,729.17 ms |
+| Scoped day/week/month charts | 120 each; p95 61.38 / 70.93 / 69.36 ms |
+| Cold export | 117.79 ms |
+| Full backup during ingestion | 42.81 s; includes 12,620 immutable source files |
+| End summary lag | One accepted batch; no pending task failure |
+| Hot logical-byte range | 5,347–1,727,076; ended at 1,448,166 bytes |
+
+The report contains no foreground errors. One initial maintenance slice hit its
+deadline; its completion-based retry recovered and all final task attempt counts
+returned to zero. The maximum report latency is deliberately retained even though
+the design's p95/p99 gates passed. RSS is sampled once per second and is a mixed
+process measurement, not a kernel high-water mark or isolated archive memory.
+The cancellation timing in this load report is a pre-cancelled request; active
+export cancellation and lease cleanup are verified by separate fault/race tests.
+The source fixture was migrated before build isolation; the measured application
+already selected the identical retired-storage/new-Telemetry path. A post-cleanup
+smoke and final production-build CI separately validate that build selection.
 
 Prior PR #75 verification is baseline evidence only. It does not validate this
 new storage design or any unchecked item above. Do not merge, tag or deploy the
