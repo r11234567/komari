@@ -669,16 +669,16 @@ Git-sync/现有备份适配需单独做增量文件传输和体积验证，不�
 
 ## 21. 源码与证据索引
 
-- [后端当前审查与交接报告](backend-pr75-review-2026-11-10.md)
-- [事故证据目录](komari_cpu_incident_evidence/README.md)；其中建议需结合当前源码审查，不能逐条直接执行。
-- [当前统计/保留配置](komari/database/metricstore/metricstore.go)
-- [当前指标/上报及流量增量构造](komari/database/metricstore/report.go)
-- [当前块引擎](komari/pkg/metric/sqlite_storage_v4.go)
-- [当前统计结构与计算](komari/pkg/metric/rollup.go)
-- [当前统计物化实现](komari/pkg/metric/rollup_store.go)
-- [当前流量账本](komari/database/trafficledger/trafficledger.go)
-- [当前校准路径](komari/database/trafficledger/calibration.go)
-- [当前原始查询与聚合分支](komari/web/connect/metrics_query.go)
-- [当前 CSV 规则](komari/web/api/admin/history_export.go)
-- [当前节点图表](komari/third_party/komari-web/src/pages/instance/LoadChart.tsx)
-- [当前公开查询封装](komari/third_party/komari-web/src/api/connect/public.ts)
+- 后端审查与交接报告：工作区文件 E:/123/backend-pr75-review-2026-11-10.md（不随仓库分发）。
+- 事故证据目录：工作区 E:/123/komari_cpu_incident_evidence/（不随仓库分发）；其中建议需结合当前源码审查，不能逐条直接执行。
+- [当前统计/保留配置](../database/metricstore/metricstore.go)
+- [当前指标/上报及流量增量构造](../database/metricstore/report.go)
+- [当前块引擎](../pkg/metric/sqlite_storage_v4.go)
+- [当前统计结构与计算](../pkg/metric/rollup.go)
+- [当前统计物化实现](../pkg/metric/rollup_store.go)
+- [当前流量账本](../database/trafficledger/trafficledger.go)
+- [当前校准路径](../database/trafficledger/calibration.go)
+- [当前原始查询与聚合分支](../web/connect/metrics_query.go)
+- [当前 CSV 规则](../web/api/admin/history_export.go)
+- [当前节点图表](../third_party/komari-web/src/pages/instance/LoadChart.tsx)
+- [当前公开查询封装](../third_party/komari-web/src/api/connect/public.ts)

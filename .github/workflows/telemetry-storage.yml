@@ -1,0 +1,59 @@
+name: Telemetry storage contracts
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: telemetry-storage-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  storage:
+    name: Telemetry / SQLite, PostgreSQL, MySQL and MariaDB
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: telemetry
+          POSTGRES_PASSWORD: fixture
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U postgres -d telemetry" --health-interval 5s --health-timeout 5s --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: telemetry
+          MYSQL_ROOT_PASSWORD: fixture
+        ports: ['3306:3306']
+        options: --health-cmd "mysqladmin ping -h 127.0.0.1 -pfixture" --health-interval 5s --health-timeout 5s --health-retries 30
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_DATABASE: telemetry
+          MARIADB_ROOT_PASSWORD: fixture
+        ports: ['3307:3306']
+        options: --health-cmd "healthcheck.sh --connect --innodb_initialized" --health-interval 5s --health-timeout 5s --health-retries 30
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 1GiB
+      CGO_ENABLED: '1'
+      METRIC_POSTGRES_DSN: postgres://postgres:fixture@127.0.0.1:5432/telemetry?sslmode=disable
+      METRIC_MYSQL_DSN: root:fixture@tcp(127.0.0.1:3306)/telemetry?parseTime=true
+      METRIC_MARIADB_DSN: root:fixture@tcp(127.0.0.1:3307)/telemetry?parseTime=true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Full storage race, real SQL drivers, restart and fault contracts
+        run: bash scripts/ci/run-audit-check.sh telemetry-storage bash scripts/ci/run-go-tests.sh -race ./pkg/metric ./database/metricstore
+      - name: Retain test events and context
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: telemetry-storage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30

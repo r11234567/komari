@@ -17,8 +17,18 @@ resource verification. No intermediate checkpoint is a release candidate.
   coverage and a real E2E database assertion.
 - [x] Pass the complete local Linux `pkg/metric` and `database/metricstore` race
   suites, plus three runs of the retirement regressions (2026-11-10).
-- [ ] Pass component CI on the checkpoint revision.
-- [ ] Pass real HTTPS / built Web / installed Agent E2E on the same revision.
+- [x] Pass all 24 component PR checks on checkpoint `e0451aa0`.
+- [x] Pass real HTTPS / built Web / installed Agent E2E on `e0451aa0`:
+  [run 42785003349](https://github.com/r11234567/komari/actions/runs/42785003349).
+
+The first real run failed because the browser typed while xterm was mounted but
+Agent attachment still disabled input. Trace and service logs showed no input
+request and a subsequent real shell prompt. The repaired test waits for that
+prompt, then exercises unchanged remote-output/export/clipboard assertions.
+No terminal assertion was skipped. Local race suites, three focused repetitions,
+a negative control rejecting the old mutating startup path, and byte-identical
+legacy block/axis hashes on a copy containing 11,583,271 logical raw points
+provide additional evidence. These checks do not establish new-engine speed.
 
 The retained library implementation exists only to exercise old formats and
 prepare the explicit migration reader. It is not selected by the application.
@@ -28,6 +38,19 @@ than deleting unarchived or unsummarized source data. This temporary state can
 grow SQL storage, so it must not be shipped as the completed engine.
 
 ## 2. Implement hot SQL, incremental summaries and immutable cold archives
+
+Core implementation is in progress, independently callable through
+`Store.OpenTelemetry`; application ingest/query/traffic routing is intentionally
+not changed until checkpoint 3. New-schema acceptance commits receipts, immutable
+rows, fixed segment membership and a traffic outbox together. SQLite requires
+FULL durability on replacement connections. Summary deltas and their durable
+cursor commit together; cold files use bounded JSONL/zstd, exclusive attempts,
+cross-process publication fencing, checksums, fsync and resumable row deletion.
+No component-only result marks this checkpoint complete.
+
+Local evidence currently includes the full storage race suites and repeated
+core contracts. The dedicated workflow also runs against actual PostgreSQL,
+MySQL and MariaDB services; all remote results remain pending for this core.
 
 - [ ] Durable batch identity, receipts and traffic outbox; compatible Agent
   restart/epoch rules and integer counter handling.

@@ -351,6 +351,10 @@ func prepareSQLiteConfig(cfg Config) (Config, error) {
 		// explicitly runs the blocking space-reclamation action.
 		cfg.DSN = setSQLiteDSNParam(cfg.DSN, "_auto_vacuum", "incremental")
 		cfg.DSN = appendSQLiteDSNParam(cfg.DSN, "_busy_timeout", fmt.Sprintf("%d", durationMillis(cfg.SQLite.BusyTimeout)))
+		if cfg.SQLite.PerformanceProfile == SQLiteProfileDurable {
+			// Apply on every replacement connection, not only the initial PRAGMA.
+			cfg.DSN = setSQLiteDSNParam(cfg.DSN, "_synchronous", "FULL")
+		}
 	}
 	return cfg, nil
 }

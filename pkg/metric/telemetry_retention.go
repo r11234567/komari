@@ -1,0 +1,102 @@
+package metric
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+)
+
+// PruneSummaries removes only cells whose covering coarser deltas were committed
+// with the same input cursor. This is independent of raw/archive retention.
+// The scheduler supplies one metric and a bounded chunk, never a full DB sweep.
+func (t *Telemetry) PruneSummaries(ctx context.Context, name string, retention time.Duration, now time.Time, limit int) (int, error) {
+	if name == "" || retention <= 0 || limit <= 0 || limit > 512 {
+		return 0, ErrInvalidArgument
+	}
+	release, err := t.acquire(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	tx, err := t.begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	where := "s.metric=? AND ("
+	args := []any{name}
+	for i, tier := range []struct{ r, keep time.Duration }{{10 * time.Second, 2 * time.Hour}, {5 * time.Minute, 24 * time.Hour}, {15 * time.Minute, 7 * 24 * time.Hour}, {time.Hour, retention}} {
+		if i > 0 {
+			where += " OR "
+		}
+		where += "(b.resolution=? AND b.bucket<=?)"
+		args = append(args, int64(tier.r), now.Add(-min(tier.keep, retention)).Add(-tier.r).UnixNano())
+	}
+	where += ")"
+	args = append(args, limit)
+	rows, err := tx.QueryContext(ctx, t.bind("SELECT b.segment_id,b.series_id,b.resolution,b.bucket FROM "+t.table("summary")+" b JOIN "+t.table("series")+" s ON s.id=b.series_id WHERE "+where+" ORDER BY b.resolution,b.bucket,b.series_id,b.segment_id LIMIT ?"), args...)
+	if err != nil {
+		return 0, err
+	}
+	var keys []telemetrySummaryKey
+	for rows.Next() {
+		var k telemetrySummaryKey
+		if err = rows.Scan(&k.segment, &k.series, &k.resolution, &k.bucket); err != nil {
+			break
+		}
+		keys = append(keys, k)
+	}
+	readErr := rows.Err()
+	rows.Close()
+	if err != nil {
+		return 0, err
+	}
+	if readErr != nil {
+		return 0, readErr
+	}
+	for _, k := range keys {
+		if _, err = tx.ExecContext(ctx, t.bind("DELETE FROM "+t.table("summary")+" WHERE segment_id=? AND series_id=? AND resolution=? AND bucket=?"), k.segment, k.series, k.resolution, k.bucket); err != nil {
+			return 0, err
+		}
+	}
+	return len(keys), tx.Commit()
+}
+
+type TelemetryDiagnostics struct {
+	Accepted             int64     `json:"accepted_through"`
+	Summarized           int64     `json:"summarized_through"`
+	HotBudgetBytes       int64     `json:"hot_budget_bytes"`
+	OldestUndelivered    int64     `json:"oldest_undelivered_ingest,omitempty"`
+	OldestArchivePending time.Time `json:"oldest_archive_pending,omitempty"`
+}
+
+func (t *Telemetry) Diagnostics(ctx context.Context) (TelemetryDiagnostics, error) {
+	var d TelemetryDiagnostics
+	var err error
+	if d.Accepted, err = t.progress(ctx, t.s.reader(), "ingest"); err != nil {
+		return d, err
+	}
+	if d.Summarized, err = t.progress(ctx, t.s.reader(), "summary"); err != nil {
+		return d, err
+	}
+	if d.HotBudgetBytes, err = t.progress(ctx, t.s.reader(), "hot_bytes"); err != nil {
+		return d, err
+	}
+	err = t.s.reader().QueryRowContext(ctx, "SELECT ingest_id FROM "+t.table("outbox")+" WHERE delivered=0 ORDER BY ingest_id LIMIT 1").Scan(&d.OldestUndelivered)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return d, err
+	}
+	var ns int64
+	err = t.s.reader().QueryRowContext(ctx, "SELECT created FROM "+t.table("segments")+" WHERE state IN ('sealed','writing','archived','deleting') ORDER BY created,id LIMIT 1").Scan(&ns)
+	if err == nil {
+		d.OldestArchivePending = time.Unix(0, ns).UTC()
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return d, err
+	}
+	if d.Summarized > d.Accepted {
+		return d, fmt.Errorf("telemetry progress inconsistent")
+	}
+	return d, nil
+}
