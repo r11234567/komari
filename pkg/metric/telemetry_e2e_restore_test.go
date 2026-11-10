@@ -108,6 +108,19 @@ func TestTelemetryE2ERestoreBundle(t *testing.T) {
 	if count != len(points[0]) || math.Abs(sum-actual) > 1e-8*math.Max(1, math.Abs(sum)) {
 		t.Fatalf("restored chart/raw mismatch count=%d/%d sum=%v/%v", count, len(points[0]), actual, sum)
 	}
+	rollbackPath := filepath.Join(t.TempDir(), "legacy-metrics.db")
+	if err = e.RollbackLegacy(ctx, rollbackPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := Open(ctx, SQLite(rollbackPath, WithRetiredLegacyStorage()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacy.Close()
+	replayed, err := legacy.Query(ctx, q)
+	if err != nil || len(replayed) != len(points[0]) {
+		t.Fatalf("real rollback raw count %d/%d: %v", len(replayed), len(points[0]), err)
+	}
 	main, err := sql.Open("sqlite3", filepath.Join(dir, "komari.db"))
 	if err != nil {
 		t.Fatal(err)

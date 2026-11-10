@@ -119,6 +119,9 @@ func TestBuildBackupArchiveUsesUpstreamCompatibleRootLayout(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(content, "metrics.db"), []byte("history"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(content, "sample.jsonl.zst"), []byte("immutable-compressed-history"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	archive := filepath.Join(t.TempDir(), "backup.zip")
 	if err := buildBackupArchive(archive, content, backupScopeFull, timeForBackupTest); err != nil {
 		t.Fatalf("build archive: %v", err)
@@ -131,6 +134,9 @@ func TestBuildBackupArchiveUsesUpstreamCompatibleRootLayout(t *testing.T) {
 	found := map[string]bool{}
 	for _, entry := range reader.File {
 		found[entry.Name] = true
+		if entry.Name == "sample.jsonl.zst" && entry.Method != zip.Store {
+			t.Fatal("immutable archive was recompressed")
+		}
 	}
 	for _, name := range []string{"komari.db", "metrics.db", "komari-backup-markup"} {
 		if !found[name] {

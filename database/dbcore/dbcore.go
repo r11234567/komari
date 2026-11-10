@@ -77,7 +77,11 @@ func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}) e
 		if err != nil {
 			return err
 		}
-		w, err := zw.Create(zipName)
+		method := uint16(zip.Deflate)
+		if strings.HasSuffix(zipName, ".jsonl.zst") {
+			method = zip.Store
+		}
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: zipName, Method: method, Modified: info.ModTime()})
 		if err != nil {
 			fh.Close()
 			return err

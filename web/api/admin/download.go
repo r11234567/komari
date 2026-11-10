@@ -333,7 +333,11 @@ func writeDirectoryToZip(writer *zip.Writer, contentDir string) error {
 		if err != nil {
 			return err
 		}
-		entry, err := writer.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Deflate, Modified: info.ModTime()})
+		method := uint16(zip.Deflate)
+		if strings.HasSuffix(name, ".jsonl.zst") {
+			method = zip.Store
+		}
+		entry, err := writer.CreateHeader(&zip.FileHeader{Name: name, Method: method, Modified: info.ModTime()})
 		if err != nil {
 			file.Close()
 			return err
