@@ -5,6 +5,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
+const { createRequire } = require('node:module');
+// Use the pinned Web's already-installed protobuf runtime for its wire format.
+const webRequire = createRequire(path.resolve(__dirname, '../../../third_party/komari-web/package.json'));
+const { BinaryReader } = webRequire('@bufbuild/protobuf/wire');
 
 const root = process.env.E2E_ROOT;
 const artifacts = process.env.E2E_ARTIFACTS;
@@ -24,6 +28,19 @@ const services = {
   file: 'komari.file.v1.FileService',
   metrics: 'komari.metrics.v1.MetricsService',
 };
+
+function verificationResource(request) {
+  expect(request.headers()['content-type']).toContain('application/proto');
+  const reader = new BinaryReader(request.postDataBuffer());
+  let resource;
+  while (reader.pos < reader.len) {
+    const [field, wireType] = reader.tag();
+    // BeginVerificationRequest.resource is field 3 in the pinned protocol.
+    if (field === 3) { expect(wireType).toBe(2); resource = reader.string(); }
+    else reader.skip(wireType);
+  }
+  return resource;
+}
 
 function totp(secret, counter = Math.floor(Date.now() / 30_000)) {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -282,7 +299,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await expect(passwordDialog.getByPlaceholder('000000')).toHaveCount(0);
       const challenge = page.waitForRequest(r => r.url().endsWith('.TrustedCredentialService/BeginVerification'));
       await beginVerification(passwordDialog);
-      expect((await challenge).postDataJSON().resource).toMatch(/^account:password:/);
+      expect(verificationResource(await challenge)).toMatch(/^account:password:/);
       expect(passwordWrites).toBe(0);
       await passwordDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
       await expect(passwordDialog).toBeHidden();
