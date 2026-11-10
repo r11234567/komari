@@ -545,13 +545,11 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 	}
 
 	if v, exists := updates["traffic_limit"]; exists {
-		if val, isFloat := v.(float64); isFloat {
-			numeric, ok := toInt64(val)
-			if !ok || numeric < 0 {
-				return fmt.Errorf("traffic_limit must be a valid non-negative int64 value, got %v", val)
-			}
-			updates["traffic_limit"] = numeric
+		numeric, ok := toInt64(v)
+		if !ok || numeric < 0 {
+			return fmt.Errorf("traffic_limit must be a non-negative int64 number")
 		}
+		updates["traffic_limit"] = numeric
 	}
 	if value, exists := updates["traffic_limit_type"]; exists {
 		typeName, ok := value.(string)

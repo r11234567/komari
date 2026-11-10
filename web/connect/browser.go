@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -78,12 +79,15 @@ func (s *browserService) ListAgents(ctx context.Context, req *connect.Request[br
 	cycleUsages, _ := trafficledger.CurrentCalibratedCycleUsages(ctx, dbcore.GetDBInstance(), now)
 	online := stringSet(agent_runtime.GetAllOnlineUUIDs())
 	meta := rpc.MetaFromContext(ctx)
-	isAdmin := meta != nil && meta.Principal != nil && meta.Principal.HasRole(rpc.RoleAdmin)
+	isAdmin := meta != nil && meta.Principal != nil && (meta.Principal.HasRole(rpc.RoleAdmin) || meta.Principal.APIToken != nil)
 	showGuestIP, _ := config.GetAs[bool](config.SendIpAddrToGuestKey, false)
 	filter := stringSet(req.Msg.AgentIds)
 	search := strings.ToLower(strings.TrimSpace(req.Msg.Search))
 	result := make([]*browserv1.AgentSummary, 0, len(list))
 	for _, item := range list {
+		if meta != nil && !meta.Principal.AllowsAgent(item.UUID) {
+			continue
+		}
 		if item.Hidden && !isAdmin {
 			continue
 		}
@@ -101,6 +105,9 @@ func (s *browserService) ListAgents(ctx context.Context, req *connect.Request[br
 }
 
 func (s *browserService) GetAgent(ctx context.Context, req *connect.Request[browserv1.GetAgentRequest]) (*connect.Response[browserv1.GetAgentResponse], error) {
+	if meta := rpc.MetaFromContext(ctx); meta != nil && !meta.Principal.AllowsAgent(req.Msg.AgentId) {
+		return nil, connectError(connect.CodePermissionDenied, errors.New("node is outside API token scope"))
+	}
 	if strings.TrimSpace(req.Msg.AgentId) == "" {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("agent ID is required"))
 	}
@@ -109,7 +116,7 @@ func (s *browserService) GetAgent(ctx context.Context, req *connect.Request[brow
 		return nil, connectError(connect.CodeNotFound, errors.New("agent not found"))
 	}
 	meta := rpc.MetaFromContext(ctx)
-	isAdmin := meta != nil && meta.Principal != nil && meta.Principal.HasRole(rpc.RoleAdmin)
+	isAdmin := meta != nil && meta.Principal != nil && (meta.Principal.HasRole(rpc.RoleAdmin) || meta.Principal.APIToken != nil)
 	showGuestIP, _ := config.GetAs[bool](config.SendIpAddrToGuestKey, false)
 	if item.Hidden && !isAdmin {
 		return nil, connectError(connect.CodeNotFound, errors.New("agent not found"))
@@ -423,13 +430,47 @@ func legacyReportToProto(client models.Client, report *legacyv1.Report, includeP
 			TcpConnectionCount:   uint64(max(report.Connections.TCP, 0)),
 			UdpConnectionCount:   uint64(max(report.Connections.UDP, 0)),
 		},
-		Metadata: &reportv1.AgentMetadata{},
+		Metadata:          &reportv1.AgentMetadata{},
+		DiagnosticMessage: report.Message,
 	}
 	if includePrivate {
 		result.Metadata.Version = client.Version
 	}
 	if report.Ram.Total > 0 {
 		result.Resources.MemoryPercent = float64(report.Ram.Used) * 100 / float64(report.Ram.Total)
+	}
+	if report.GPU != nil && len(report.GPU.DetailedInfo) > 0 {
+		result.Resources.Gpus = make([]*reportv1.GpuUsage, 0, len(report.GPU.DetailedInfo))
+		for index, gpu := range report.GPU.DetailedInfo {
+			item := &reportv1.GpuUsage{
+				Id:   strconv.Itoa(index),
+				Name: gpu.Name,
+			}
+			utilization := gpu.Utilization
+			item.UtilizationPercent = &utilization
+			if gpu.MemoryUsed >= 0 {
+				memUsed := uint64(gpu.MemoryUsed)
+				item.MemoryUsedBytes = &memUsed
+			}
+			if gpu.MemoryTotal >= 0 {
+				memTotal := uint64(gpu.MemoryTotal)
+				item.MemoryTotalBytes = &memTotal
+			}
+			temp := float64(gpu.Temperature)
+			item.TemperatureCelsius = &temp
+			result.Resources.Gpus = append(result.Resources.Gpus, item)
+		}
+	} else if report.GPU != nil && (client.GpuName != "" || report.GPU.AverageUsage > 0) {
+		name := client.GpuName
+		if name == "" {
+			name = "GPU"
+		}
+		utilization := report.GPU.AverageUsage
+		result.Resources.Gpus = []*reportv1.GpuUsage{{
+			Id:                 "0",
+			Name:               name,
+			UtilizationPercent: &utilization,
+		}}
 	}
 	result.NetworkInterfaces = []*reportv1.NetworkInterface{{
 		Name:                   "aggregate",

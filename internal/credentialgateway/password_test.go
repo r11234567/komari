@@ -11,7 +11,50 @@ import (
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/pquerna/otp/totp"
 )
+
+func TestPasswordTOTPFailureAndReplayNeverCreateSession(t *testing.T) {
+	f := newContactFixture(t, true)
+	complete := func(code string) (string, error) {
+		t.Helper()
+		started, err := f.gateway.BeginPassword(context.Background(), f.user.Username, "Synthetic-password-123", "192.0.2.77", "advisory-test")
+		if err != nil {
+			return "", err
+		}
+		if started.Session != "" {
+			t.Fatal("password bypassed configured factor")
+		}
+		challenge, err := f.gateway.BeginPasswordVerification(context.Background(), started.Preauthentication, "native:totp")
+		if err != nil {
+			return "", err
+		}
+		proof, _ := json.Marshal(map[string]string{"code": code})
+		session, _, err := f.gateway.CompletePassword(context.Background(), started.Preauthentication, challenge.ID, proof, "192.0.2.77", "advisory-test")
+		return session, err
+	}
+	for _, code := range []string{"", "invalid"} {
+		if session, err := complete(code); err == nil || session != "" {
+			t.Fatal("failed TOTP created session")
+		}
+	}
+	code, err := totp.GenerateCode("JBSWY3DPEHPK3PXP", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session, err := complete(code); err != nil || session == "" {
+		t.Fatalf("valid factor rejected: %v", err)
+	}
+	if session, err := complete(code); err == nil || session != "" {
+		t.Fatal("replayed TOTP created session")
+	}
+	if err = accounts.Enable2Fa(f.user.UUID, "!invalid-secret!"); err != nil {
+		t.Fatal(err)
+	}
+	if session, err := complete("123456"); err == nil || session != "" {
+		t.Fatal("malformed factor created session")
+	}
+}
 
 func TestPasswordThenNativeOTPLogin(t *testing.T) {
 	f := newContactFixture(t, false)

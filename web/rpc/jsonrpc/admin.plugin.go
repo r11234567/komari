@@ -50,8 +50,8 @@ func adminListPlugins(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.Jso
 
 // adminSetPluginEnabled is the single switch entry point. When a plugin's
 // declared permissions differ from the approved hash, enabling it returns
-// { requires_approval: true } instead of an error; the caller then shows a
-// permission dialog and retries with approved=true.
+// { requires_approval: true } instead of an error. The caller must use the
+// typed package decision with scoped 2FA; approved=true cannot grant authority.
 func adminSetPluginEnabled(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	short, ok := rpc.GetParamAs[string](req, "short")
 	if !ok || strings.TrimSpace(short) == "" {

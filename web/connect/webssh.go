@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/clients"
@@ -18,8 +19,9 @@ import (
 )
 
 const (
-	maxTerminalInput = 1 << 20
-	maxFileChunk     = 384 << 10
+	maxTerminalInput          = 1 << 20
+	maxFileChunk              = 384 << 10
+	terminalHeartbeatInterval = 5 * time.Second
 )
 
 type webSSHService struct {
@@ -114,18 +116,31 @@ func (s *webSSHService) WatchSession(ctx context.Context, req *connect.Request[w
 		return remoteSessionError(err)
 	}
 	sequence := req.Msg.AfterSequence
+	// Flush a first frame immediately. A quiet/slow login shell must not leave
+	// the browser/proxy waiting for response headers until its first PTY byte.
+	if err := stream.Send(&websshv1.WatchSessionResponse{AgentAttached: session.AgentAttached()}); err != nil {
+		return err
+	}
 	for {
 		if session.Grant == nil || !session.Grant.Active() {
 			return connectError(connect.CodeUnauthenticated, workspace.ErrLocked)
 		}
-		event, err := session.NextEvent(ctx, sequence)
+		waitCtx, cancel := context.WithTimeout(ctx, terminalHeartbeatInterval)
+		event, err := session.NextEvent(waitCtx, sequence)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			if err := stream.Send(&websshv1.WatchSessionResponse{AgentAttached: session.AgentAttached()}); err != nil {
+				return err
+			}
+			continue
+		}
 		if errors.Is(err, remotemanagement.ErrClosed) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		if err := stream.Send(&websshv1.WatchSessionResponse{Event: event}); err != nil {
+		if err := stream.Send(&websshv1.WatchSessionResponse{Event: event, AgentAttached: session.AgentAttached()}); err != nil {
 			return err
 		}
 		sequence = event.Sequence
@@ -174,8 +189,21 @@ func (s *webSSHService) LeaseSessions(ctx context.Context, req *connect.Request[
 		return err
 	}
 	agentRuntime.MarkConnectWebSSHLease(agentID)
+	// Establish the quiet lease stream before the first assignment exists and
+	// keep it alive through proxy idle deadlines. Empty messages grant no work.
+	if err := stream.Send(&websshv1.LeaseSessionsResponse{}); err != nil {
+		return err
+	}
 	for {
-		assignment, err := remotemanagement.Lease(ctx, agentID)
+		waitCtx, cancel := context.WithTimeout(ctx, terminalHeartbeatInterval)
+		assignment, err := remotemanagement.Lease(waitCtx, agentID)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			if err := stream.Send(&websshv1.LeaseSessionsResponse{}); err != nil {
+				return err
+			}
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -215,11 +243,14 @@ func (s *webSSHService) AttachSession(ctx context.Context, stream *connect.BidiS
 	if !allowed {
 		return connectError(connect.CodePermissionDenied, errors.New("WebSSH authorization was revoked"))
 	}
-	session, err := remotemanagement.Attach(agentID, attach.AssignmentId, attach.SessionId)
+	session, err := remotemanagement.Attach(agentID, attach.AssignmentId, attach.SessionId, attach.Resumable)
 	if err != nil {
 		return remoteSessionError(err)
 	}
 	defer session.Detach()
+	if !session.ValidCommandCursor(attach.AfterCommandSequence) {
+		return remoteSessionError(remotemanagement.ErrSequence)
+	}
 	if session.Grant == nil || !session.Grant.Alive() {
 		return connectError(connect.CodeUnauthenticated, workspace.ErrLocked)
 	}
@@ -241,8 +272,32 @@ func (s *webSSHService) AttachSession(ctx context.Context, stream *connect.BidiS
 		}
 	}()
 	sequence := attach.AfterCommandSequence
+	var eventSequence uint64
+	if attach.Resumable {
+		frame := session.TransportFrame(nil)
+		eventSequence = frame.AcceptedEventSequence
+		if err := stream.Send(frame); err != nil {
+			return err
+		}
+	}
 	for {
-		command, err := session.NextCommand(receiveCtx, sequence)
+		var command *websshv1.AttachSessionResponse
+		var err error
+		if attach.Resumable {
+			if !session.Grant.Alive() {
+				session.Close(websshv1.CloseReason_CLOSE_REASON_DEADLINE_EXCEEDED)
+				return connectError(connect.CodeUnauthenticated, workspace.ErrLocked)
+			}
+			wait, cancelWait := context.WithTimeout(receiveCtx, terminalHeartbeatInterval)
+			command, err = session.NextResumableFrame(wait, sequence, eventSequence)
+			cancelWait()
+			if errors.Is(err, context.DeadlineExceeded) && receiveCtx.Err() == nil {
+				command = &websshv1.AttachSessionResponse{}
+				err = nil
+			}
+		} else {
+			command, err = session.NextCommand(receiveCtx, sequence)
+		}
 		if err != nil {
 			select {
 			case receiveError := <-receiveErr:
@@ -254,10 +309,16 @@ func (s *webSSHService) AttachSession(ctx context.Context, stream *connect.BidiS
 				return err
 			}
 		}
+		if attach.Resumable {
+			command = session.TransportFrame(command)
+			eventSequence = command.AcceptedEventSequence
+		}
 		if err := stream.Send(command); err != nil {
 			return err
 		}
-		sequence = command.Sequence
+		if command.Command != nil {
+			sequence = command.Sequence
+		}
 		if command.GetCloseReason() != "" {
 			return nil
 		}
@@ -423,6 +484,8 @@ func remoteSessionError(err error) error {
 		return err
 	}
 	switch {
+	case errors.Is(err, remotemanagement.ErrTransportBusy):
+		return connectError(connect.CodeUnavailable, err)
 	case errors.Is(err, remotemanagement.ErrNotFound):
 		return connectError(connect.CodeNotFound, err)
 	case errors.Is(err, remotemanagement.ErrForbidden):

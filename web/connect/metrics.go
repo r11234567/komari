@@ -253,6 +253,15 @@ func legacyReportMetricPoints(report *legacyv1.Report) []*metricsv1.MetricsPoint
 	return points
 }
 
+// Early typed Agents emitted unit-suffixed GPU names and id/name labels.
+// Accept that released wire spelling while keeping storage names canonical.
+var gpuMetricWireAliases = map[string]string{
+	"gpu.utilization_percent": metricstore.MetricGPUDeviceUsage,
+	"gpu.memory_used_bytes":   metricstore.MetricGPUMem,
+	"gpu.memory_total_bytes":  metricstore.MetricGPUMemTotal,
+	"gpu.temperature_celsius": metricstore.MetricGPUTemp,
+}
+
 func metricPointsToReport(points []*metricsv1.MetricsPoint) (legacyv1.Report, error) {
 	report := legacyv1.Report{}
 	seen := make(map[string]struct{}, len(points))
@@ -267,15 +276,19 @@ func metricPointsToReport(points []*metricsv1.MetricsPoint) (legacyv1.Report, er
 		if point.Value > math.MaxInt64 {
 			return report, fmt.Errorf("metric %q exceeds the canonical integer range", point.Metric)
 		}
-		isGPU := len(point.Metric) > 4 && point.Metric[:4] == "gpu."
-		if _, duplicate := seen[point.Metric]; duplicate && !isGPU {
+		metricName := point.Metric
+		if canonical, ok := gpuMetricWireAliases[metricName]; ok {
+			metricName = canonical
+		}
+		isGPU := len(metricName) > 4 && metricName[:4] == "gpu."
+		if _, duplicate := seen[metricName]; duplicate && !isGPU {
 			return report, fmt.Errorf("duplicate aggregate metric %q", point.Metric)
 		}
 		if !isGPU {
-			seen[point.Metric] = struct{}{}
+			seen[metricName] = struct{}{}
 		}
 		value := point.Value
-		switch point.Metric {
+		switch metricName {
 		case "cpu.usage_percent":
 			report.CPU.Usage = value
 		case "memory.total_bytes":
@@ -314,17 +327,35 @@ func metricPointsToReport(points []*metricsv1.MetricsPoint) (legacyv1.Report, er
 			report.Process = int(value)
 		case metricstore.MetricGPUDeviceUsage, metricstore.MetricGPUMem, metricstore.MetricGPUMemTotal, metricstore.MetricGPUTemp:
 			id := point.Labels["device_index"]
-			if id == "" || point.Labels["device_name"] == "" {
+			name := point.Labels["device_name"]
+			if id == "" {
+				id = point.Labels["id"]
+			}
+			if name == "" {
+				name = point.Labels["name"]
+			}
+			if oldID := point.Labels["id"]; oldID != "" && oldID != id {
+				return report, fmt.Errorf("metric %q has conflicting GPU identity labels", point.Metric)
+			}
+			if oldName := point.Labels["name"]; oldName != "" && oldName != name {
+				return report, fmt.Errorf("metric %q has conflicting GPU name labels", point.Metric)
+			}
+			if id == "" || name == "" {
 				return report, fmt.Errorf("metric %q requires GPU device_index and device_name labels", point.Metric)
 			}
+			key := metricName + "\x00" + id
+			if _, duplicate := seen[key]; duplicate {
+				return report, fmt.Errorf("duplicate GPU metric %q for device %q", point.Metric, id)
+			}
+			seen[key] = struct{}{}
 			gpu := gpus[id]
 			if gpu == nil {
-				gpu = &legacyv1.GPUDeviceInfo{Name: point.Labels["device_name"]}
+				gpu = &legacyv1.GPUDeviceInfo{Name: name}
 				gpus[id] = gpu
-			} else if gpu.Name != point.Labels["device_name"] {
+			} else if gpu.Name != name {
 				return report, fmt.Errorf("GPU %q has inconsistent name labels", id)
 			}
-			switch point.Metric {
+			switch metricName {
 			case metricstore.MetricGPUDeviceUsage:
 				gpu.Utilization = value
 			case metricstore.MetricGPUMem:

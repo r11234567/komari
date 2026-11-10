@@ -55,11 +55,12 @@ func finalizeBackupUpload(session upload.Session) (upload.Result, error) {
 }
 
 func finalizePluginUpload(session upload.Session) (upload.Result, error) {
-	info, err := plugin.InstallZip(session.ArchivePath)
+	info, err := plugin.InstallOrStageZip(session.ArchivePath, "Chunked upload: "+session.Metadata.Filename, "", "", session.Actor)
 	if err != nil {
 		return upload.Result{}, err
 	}
-	return upload.Result{Message: "插件上传成功", Data: info}, nil
+	auditPluginInstall(session.RemoteIP, session.Actor, info)
+	return upload.Result{Message: pluginInstallMessage(info), Data: info}, nil
 }
 
 func finalizeThemeUpload(session upload.Session) (upload.Result, error) {

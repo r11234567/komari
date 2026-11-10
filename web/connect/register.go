@@ -10,6 +10,7 @@ import (
 	"github.com/komari-monitor/komari/internal/passkeycredential"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/security"
 	"github.com/komari-monitor/komari/web/workspace"
 	adminv1connect "github.com/r11234567/komari-proto/gen/go/komari/admin/v1/adminv1connect"
 	agentv1connect "github.com/r11234567/komari-proto/gen/go/komari/agent/v1/agentv1connect"
@@ -49,6 +50,7 @@ func Register(r *gin.Engine) {
 		newHandler(credentialv1connect.NewTrustedCredentialServiceHandler(&credentialService{}, connect.WithInterceptors(diagnostics.OutcomeInterceptor{}, policy), connect.WithReadMaxBytes(128<<10))),
 		newHandler(browserv1connect.NewBrowserServiceHandler(&browserService{}, opts...)),
 		newHandler(adminv1connect.NewDashboardServiceHandler(&dashboardService{}, opts...)),
+		newHandler(adminv1connect.NewApiTokenServiceHandler(&apiTokenService{}, opts...)),
 		newHandler(adminv1connect.NewMaintenanceServiceHandler(&maintenanceService{}, opts...)),
 		newHandler(adminv1connect.NewTerminalSettingsServiceHandler(&terminalSettingsService{}, opts...)),
 		newHandler(filev1connect.NewFileServiceHandler(newFileService(), opts...)),
@@ -109,6 +111,7 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 			principal = api.IdentifyPrincipal(c)
 		}
 		if err := verifyDPoP(c, principal); err != nil {
+			security.SetPrincipalHeader(c, rpc.NewAnonymousPrincipal())
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"code":    "UNAUTHENTICATED",
 				"message": err.Error(),
@@ -120,7 +123,7 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 			Permission:     principal.PrimaryRole(),
 			UserUUID:       principal.UserUUID,
 			ClientUUID:     principal.ClientUUID,
-			RemoteIP:       c.ClientIP(),
+			RemoteIP:       security.AuthSourceIP(c),
 			UserAgent:      c.Request.UserAgent(),
 			TempShareValid: api.HasTempAccess(c),
 		}

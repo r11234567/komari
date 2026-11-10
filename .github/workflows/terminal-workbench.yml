@@ -32,6 +32,13 @@ jobs:
           node scripts/ci/check-protocol.cjs --resolve-go 2>&1 | tee ci-artifacts/protocol-source.log
       - name: Terminal WebSSH, remote management and Connect settings regression
         run: scripts/ci/run-go-tests.sh ./web/connect ./web/agent ./web/api/terminal ./web/remotemanagement
+      - name: Historical query partition and concurrent ingestion evidence
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+          GOMAXPROCS: '3'
+        run: |
+          bash scripts/ci/measure-history.sh ci-artifacts
       - name: Frontend terminal workbench, clipboard and file manager integration tests
         shell: bash
         run: |

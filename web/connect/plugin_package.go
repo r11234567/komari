@@ -1,0 +1,108 @@
+package connectapi
+
+import (
+	"context"
+	"errors"
+
+	"connectrpc.com/connect"
+	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/credentialaction"
+	"github.com/komari-monitor/komari/internal/credentialgateway"
+	pluginapp "github.com/komari-monitor/komari/internal/plugin"
+	credential "github.com/komari-monitor/komari/internal/trustedcredential"
+	"github.com/komari-monitor/komari/pkg/rpc"
+	pluginv1 "github.com/r11234567/komari-proto/gen/go/komari/plugin/v1"
+)
+
+func pluginHuman(ctx context.Context) (string, error) {
+	return requireInteractiveAdministrator(ctx)
+}
+
+func requireInteractiveAdministrator(ctx context.Context) (string, error) {
+	meta := rpc.MetaFromContext(ctx)
+	user, err := requireAdminUser(meta)
+	if err != nil {
+		return "", err
+	}
+	if meta.SessionToken == "" || meta.Principal.IsAPIKey || !meta.Principal.HasRole(rpc.RoleAdmin) {
+		return "", connect.NewError(connect.CodePermissionDenied, errors.New("interactive administrator session required"))
+	}
+	return user, nil
+}
+
+func (s *pluginService) ListPluginPackages(ctx context.Context, _ *connect.Request[pluginv1.ListPluginPackagesRequest]) (*connect.Response[pluginv1.ListPluginPackagesResponse], error) {
+	if _, err := pluginHuman(ctx); err != nil {
+		return nil, err
+	}
+	rows, err := pluginapp.ListPackages()
+	if err != nil {
+		return nil, pluginGatewayConnectError(err)
+	}
+	response := &pluginv1.ListPluginPackagesResponse{}
+	for _, row := range rows {
+		// Review needs identity and permissions, not arbitrary configuration,
+		// pages or localized metadata from every unapproved package. Keep the
+		// bounded 64-package response small even for 1 MiB manifests.
+		summary := models.Plugin{Short: row.Plugin.Short, Version: row.Plugin.Version, Permissions: row.Plugin.Permissions}
+		item := &pluginv1.PluginPackage{Plugin: pluginInfoToProto(pluginapp.Info{Plugin: summary}), Digest: row.Digest, Source: row.Source, PermissionsHash: row.PermissionsHash, CreatedAtUnix: row.CreatedAt.Unix(), ApprovedBy: row.ApprovedBy, Revoked: row.Revoked, Status: row.Status, CurrentDigest: row.CurrentDigest}
+		if row.ApprovedAt != nil {
+			item.ApprovedAtUnix = row.ApprovedAt.Unix()
+		}
+		response.Packages = append(response.Packages, item)
+	}
+	result := connect.NewResponse(response)
+	result.Header().Set("Cache-Control", "no-store")
+	return result, nil
+}
+
+func (s *pluginService) DecidePluginPackage(ctx context.Context, req *connect.Request[pluginv1.DecidePluginPackageRequest]) (*connect.Response[pluginv1.DecidePluginPackageResponse], error) {
+	owner, err := pluginHuman(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// The package transaction decides whether the current grant covers this
+	// activation. Fresh grants always need scoped 2FA, including zero-capability
+	// first installs. Reuse is checked against authoritative bytes under lock.
+	token := req.Msg.TwoFactor.GetAuthorizationToken()
+	authorized := false
+	err = pluginapp.DecidePackage(req.Msg.ShortName, req.Msg.Digest, req.Msg.ExpectedCurrentDigest, req.Msg.Action, owner, func(review pluginapp.PackageReview) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if req.Msg.Action == "revoke" || req.Msg.Action == "discard" {
+			authorized = true
+			auditlog.Log(rpc.MetaFromContext(ctx).RemoteIP, owner, "authorize plugin reduction:"+req.Msg.Action+":"+review.Plugin.Short+":"+review.Digest, "info")
+			return nil
+		}
+		if token == "" {
+			if review.RequiresApproval {
+				return connect.NewError(connect.CodeUnauthenticated, errors.New("fresh scoped 2FA authorization is required for a new or expanded grant"))
+			}
+			authorized = true
+			auditlog.Log(rpc.MetaFromContext(ctx).RemoteIP, owner, "reuse plugin grant:"+review.Plugin.Short+":"+review.Digest+" previous:"+review.CurrentDigest, "info")
+			return nil
+		}
+		_, err := credentialgateway.Default.Consume(ctx, token, credential.SensitiveOperation, credentialaction.ScopedResource("plugin-package:"+req.Msg.Action, review.Targets()...))
+		if err != nil {
+			return credentialConnectError(err)
+		}
+		authorized = true
+		// Persist an audit of the authorization attempt before code can execute;
+		// package state also retains the approving user/time for successful grants.
+		auditlog.Log(rpc.MetaFromContext(ctx).RemoteIP, owner, "authorize plugin package:"+req.Msg.Action+":"+review.Plugin.Short+":"+review.Digest+" previous:"+review.CurrentDigest, "warn")
+		return nil
+	})
+	if err != nil {
+		if authorized {
+			auditlog.Log(rpc.MetaFromContext(ctx).RemoteIP, owner, "failed plugin package:"+req.Msg.Action+":"+req.Msg.ShortName+":"+req.Msg.Digest, "warn")
+		}
+		var ce *connect.Error
+		if errors.As(err, &ce) {
+			return nil, ce
+		}
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	}
+	auditlog.Log(rpc.MetaFromContext(ctx).RemoteIP, owner, "complete plugin package:"+req.Msg.Action+":"+req.Msg.ShortName+":"+req.Msg.Digest, "info")
+	return connect.NewResponse(&pluginv1.DecidePluginPackageResponse{}), nil
+}

@@ -37,7 +37,8 @@ func diagnosticRuntime() map[string]any {
 func diagnosticsHandler(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	metricPools := map[string]any{}
-	if store := metricstore.GetStore(); store != nil {
+	if store, releaseStore, err := metricstore.AcquireStore(c.Request.Context()); err == nil {
+		defer releaseStore()
 		for name, s := range store.PoolStats() {
 			metricPools[name] = diagnostics.PoolSnapshot{MaxOpen: s.MaxOpenConnections, Open: s.OpenConnections, InUse: s.InUse, Idle: s.Idle, WaitCount: s.WaitCount, WaitDurationNS: int64(s.WaitDuration)}
 		}

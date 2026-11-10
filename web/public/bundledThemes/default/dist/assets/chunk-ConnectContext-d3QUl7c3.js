@@ -1,0 +1,1 @@
+import{C as e,b as t,g as n}from"./chunk-radius.prop-2a30pAE8.js";import{t as r}from"./chunk-client-DYNuYXJg.js";var i=e(t(),1),a=n(),o=i.createContext(void 0),s=({children:e})=>(0,a.jsx)(o.Provider,{value:r,children:e}),c=()=>{let e=i.useContext(o);if(!e)throw Error(`useConnect must be used within ConnectProvider`);return e};export{c as n,s as t};

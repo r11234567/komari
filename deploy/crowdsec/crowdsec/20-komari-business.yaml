@@ -1,0 +1,9 @@
+name: local/komari-business
+description: Keep application budgets and business errors out of web scan decisions
+filter: "evt.Meta.komari_route in ['rpc', 'web']"
+whitelist:
+  reason: Komari request budgets or application-owned RPC authentication
+  expression:
+    - "evt.Meta.http_status == '429'"
+    - "evt.Meta.komari_route == 'rpc'"
+    - "evt.Meta.komari_principal in ['agent', 'user', 'api-key'] && evt.Meta.http_status != '401'"

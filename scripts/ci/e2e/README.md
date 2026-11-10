@@ -1,9 +1,9 @@
 # Real feature integration on GitHub-hosted runners
 
-**Paused by default:** this workflow has only a manual `workflow_dispatch`
-trigger, with a second job-level event guard. Pull requests and pushes never
-start it. Do not run it while the workspace/MoeJS changes are under review;
-use their focused hosted-runner CI checkpoints instead.
+**Manual invocation only:** this workflow has only a `workflow_dispatch` trigger,
+with a second job-level event guard. Pull requests and pushes never start it.
+The 2026-11-10 Store lifecycle verification was explicitly requested; invoke
+this workflow on that PR revision alongside the focused race checkpoints.
 
 When explicitly requested again, run **Feature audit - real end-to-end**
 (`feature-e2e.yml`) on the audit branch.
@@ -29,6 +29,9 @@ signed configuration or replay state are injected or edited.
 
 The single sequential Playwright scenario tests:
 
+- Real Agent CPU history, definitions and Ping summaries queried concurrently
+  with six live store reloads through the authenticated configuration API,
+  followed by uncached historical reads from the new instances.
 - Wrong OTP rejection and account gate success without reusing the proof for
   password changes.
 - Actual xterm input/output and text export; search, system clipboard copy and
@@ -39,13 +42,17 @@ The single sequential Playwright scenario tests:
   through the browser, then downloaded and compared using SHA256.
 - Monaco saves of UTF-8 text and an empty file, checked both on disk and by
   downloading through the Agent.
-- Missing/replayed file proofs, overwrite=false and recursive=false failures
+- Missing/invalid workspace grants, overwrite=false and recursive=false failures
   with assertions that existing files survive.
 - Create (including the requested Unix permission bits), copy, move, chmod,
   name search and delete, followed by an Agent
   restart with the same identity, applied revision and working file channel.
+- Workspace revocation rejecting previously valid native file grants and raw
+  download cookies; a fresh browser verification restores file access.
 
-Each sensitive action waits for a genuinely new 30-second TOTP window. No
+Each credential verification waits for a genuinely new 30-second TOTP window.
+File operations reuse the actual UI-authorized workspace identity and grant;
+they do not require a separate OTP for each file. No
 future codes, clock changes, replay resets or mock transports are used. This
 adds several minutes; the scenario timeout is 15 minutes and the job timeout
 45 minutes. Dependencies, compilation and browsers run only on Actions.

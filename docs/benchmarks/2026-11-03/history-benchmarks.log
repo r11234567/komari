@@ -1,0 +1,81 @@
+2026/11/03 14:21:57 INFO Metric store initialized successfully (driver=sqlite) component=metricstore
+goos: linux
+goarch: amd64
+pkg: github.com/komari-monitor/komari/web/connect
+cpu: 13th Gen Intel(R) Core(TM) i9-13900HX
+BenchmarkHistoryEntityPartition/1nodes/1h/previous-3         	  619213	       366.5 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/1h/previous-3         	  689390	       302.2 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/1h/previous-3         	  814795	       315.0 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/1h/grouped-3          	  722020	       351.1 ns/op	     248 B/op	       5 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/1h/grouped-3          	  708870	       338.0 ns/op	     248 B/op	       5 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/1h/grouped-3          	  680942	       327.8 ns/op	     248 B/op	       5 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/24h/previous-3        	   38444	      6068 ns/op	   24576 B/op	       1 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/24h/previous-3        	   35527	      6441 ns/op	   24576 B/op	       1 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/24h/previous-3        	   33910	      6256 ns/op	   24576 B/op	       1 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/24h/grouped-3         	   34279	      7213 ns/op	    8184 B/op	      10 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/24h/grouped-3         	   29954	      7274 ns/op	    8184 B/op	      10 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/24h/grouped-3         	   34689	      6465 ns/op	    8184 B/op	      10 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/30d/previous-3        	   23433	     10538 ns/op	   40960 B/op	       1 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/30d/previous-3        	   22344	     11129 ns/op	   40960 B/op	       1 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/30d/previous-3        	   21614	     11224 ns/op	   40960 B/op	       1 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/30d/grouped-3         	   24895	      9783 ns/op	    8184 B/op	      10 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/30d/grouped-3         	   24055	      9720 ns/op	    8184 B/op	      10 allocs/op
+BenchmarkHistoryEntityPartition/1nodes/30d/grouped-3         	   24698	      9606 ns/op	    8184 B/op	      10 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/1h/previous-3         	   13771	     15570 ns/op	   65536 B/op	       8 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/1h/previous-3         	   15530	     16973 ns/op	   65536 B/op	       8 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/1h/previous-3         	   13538	     16999 ns/op	   65536 B/op	       8 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/1h/grouped-3          	   61885	      3741 ns/op	    2728 B/op	      43 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/1h/grouped-3          	   66081	      3429 ns/op	    2728 B/op	      43 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/1h/grouped-3          	   71901	      3498 ns/op	    2728 B/op	      43 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/24h/previous-3        	     566	    391865 ns/op	 1507328 B/op	       8 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/24h/previous-3        	     656	    376604 ns/op	 1507328 B/op	       8 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/24h/previous-3        	     735	    408549 ns/op	 1507328 B/op	       8 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/24h/grouped-3         	    3535	     61387 ns/op	   66216 B/op	      83 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/24h/grouped-3         	    3937	     60416 ns/op	   66216 B/op	      83 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/24h/grouped-3         	    4234	     58830 ns/op	   66216 B/op	      83 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/30d/previous-3        	     402	    597991 ns/op	 2621440 B/op	       8 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/30d/previous-3        	     382	    605385 ns/op	 2621440 B/op	       8 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/30d/previous-3        	     396	    577681 ns/op	 2621440 B/op	       8 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/30d/grouped-3         	    2390	     89072 ns/op	   66216 B/op	      83 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/30d/grouped-3         	    2334	     99822 ns/op	   66216 B/op	      83 allocs/op
+BenchmarkHistoryEntityPartition/8nodes/30d/grouped-3         	    2709	     85675 ns/op	   66216 B/op	      83 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/1h/previous-3        	    1069	    239983 ns/op	 1048576 B/op	      32 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/1h/previous-3        	     976	    226874 ns/op	 1048578 B/op	      32 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/1h/previous-3        	     969	    229809 ns/op	 1048578 B/op	      32 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/1h/grouped-3         	   19422	     12364 ns/op	   10664 B/op	     163 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/1h/grouped-3         	   20332	     12412 ns/op	   10664 B/op	     163 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/1h/grouped-3         	   19248	     14415 ns/op	   10664 B/op	     163 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/24h/previous-3       	      28	   7341320 ns/op	23592960 B/op	      32 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/24h/previous-3       	      34	   7556930 ns/op	23592960 B/op	      32 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/24h/previous-3       	      32	   6571981 ns/op	23592960 B/op	      32 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/24h/grouped-3        	    1070	    217579 ns/op	  264616 B/op	     323 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/24h/grouped-3        	    1051	    217039 ns/op	  264616 B/op	     323 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/24h/grouped-3        	    1047	    220767 ns/op	  264616 B/op	     323 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/30d/previous-3       	      22	  10026257 ns/op	41156629 B/op	      32 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/30d/previous-3       	      21	  10014479 ns/op	41156630 B/op	      32 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/30d/previous-3       	      25	   9937426 ns/op	41156650 B/op	      32 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/30d/grouped-3        	     651	    336880 ns/op	  264616 B/op	     323 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/30d/grouped-3        	     669	    361020 ns/op	  264616 B/op	     323 allocs/op
+BenchmarkHistoryEntityPartition/32nodes/30d/grouped-3        	     669	    349447 ns/op	  264616 B/op	     323 allocs/op
+2026/11/03 14:22:13 metric: migrating SQLite metric storage to V4
+2026/11/03 14:22:13 metric: migrated SQLite metric storage to V4 (0 raw points and 0 rollups preserved bit-for-bit)
+BenchmarkHistoryReadPartition/1h/previous-3                  	     412	    652406 ns/op	  297753 B/op	    3166 allocs/op
+BenchmarkHistoryReadPartition/1h/previous-3                  	     379	    608226 ns/op	  297759 B/op	    3166 allocs/op
+BenchmarkHistoryReadPartition/1h/previous-3                  	     422	    608822 ns/op	  297790 B/op	    3167 allocs/op
+BenchmarkHistoryReadPartition/1h/grouped-3                   	     428	    567898 ns/op	  242368 B/op	    3214 allocs/op
+BenchmarkHistoryReadPartition/1h/grouped-3                   	     412	    542973 ns/op	  242365 B/op	    3214 allocs/op
+BenchmarkHistoryReadPartition/1h/grouped-3                   	     458	    539282 ns/op	  242366 B/op	    3214 allocs/op
+BenchmarkHistoryReadPartition/24h/previous-3                 	      33	   7173754 ns/op	 6049905 B/op	   59489 allocs/op
+BenchmarkHistoryReadPartition/24h/previous-3                 	      28	   7148475 ns/op	 6050166 B/op	   59490 allocs/op
+BenchmarkHistoryReadPartition/24h/previous-3                 	      32	   6981856 ns/op	 6050314 B/op	   59491 allocs/op
+BenchmarkHistoryReadPartition/24h/grouped-3                  	      32	   7137106 ns/op	 4968634 B/op	   59599 allocs/op
+BenchmarkHistoryReadPartition/24h/grouped-3                  	      32	   7004279 ns/op	 4968490 B/op	   59598 allocs/op
+BenchmarkHistoryReadPartition/24h/grouped-3                  	      30	   7076145 ns/op	 4968701 B/op	   59599 allocs/op
+BenchmarkHistoryReadPartition/30d/previous-3                 	       3	  83658015 ns/op	11360557 B/op	  470576 allocs/op
+BenchmarkHistoryReadPartition/30d/previous-3                 	       3	  85476901 ns/op	11360869 B/op	  470579 allocs/op
+BenchmarkHistoryReadPartition/30d/previous-3                 	       3	  86610516 ns/op	11360589 B/op	  470577 allocs/op
+BenchmarkHistoryReadPartition/30d/grouped-3                  	       3	  88548475 ns/op	 9984210 B/op	  470684 allocs/op
+BenchmarkHistoryReadPartition/30d/grouped-3                  	       3	  84036320 ns/op	 9984346 B/op	  470685 allocs/op
+BenchmarkHistoryReadPartition/30d/grouped-3                  	       3	  95011851 ns/op	 9984504 B/op	  470687 allocs/op
+PASS
+ok  	github.com/komari-monitor/komari/web/connect	24.759s

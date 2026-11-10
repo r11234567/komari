@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Version-only release tag, for example 2.1.5
+        description: Release tag, for example 2.1.5 or 2.1.6-dev.20261103.1
         required: true
         type: string
       version_hash:
@@ -40,6 +40,7 @@ jobs:
       version_hash: ${{ steps.validate.outputs.version_hash }}
       web_ref: ${{ steps.validate.outputs.web_ref }}
       source_ref: ${{ steps.validate.outputs.source_ref }}
+      prerelease: ${{ steps.validate.outputs.prerelease }}
     steps:
       - name: Validate release metadata
         id: validate
@@ -50,6 +51,7 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_VERSION_HASH: ${{ inputs.version_hash }}
           INPUT_WEB_REF: ${{ inputs.web_ref }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -62,7 +64,13 @@ jobs:
           else
             VERSION="${INPUT_TAG:-$VERSION}"
           fi
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid version: $VERSION" >&2; exit 1; }
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]{8}\.[0-9]+)?$ ]] || { echo "Invalid version: $VERSION" >&2; exit 1; }
+          PRERELEASE="$(gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq '.isPrerelease')"
+          [[ "$PRERELEASE" = true || "$PRERELEASE" = false ]] || exit 1
+          if [[ "$VERSION" == *-dev.* && "$PRERELEASE" != true ]]; then
+            echo "Dev tags must be published as prereleases." >&2
+            exit 1
+          fi
           VERSION_HASH="${VERSION_HASH:-${GITHUB_SHA::7}}"
           [[ "$VERSION_HASH" =~ ^[A-Za-z0-9]{7}$ ]] || { echo "Invalid version identifier: $VERSION_HASH" >&2; exit 1; }
           [ -n "$WEB_REF" ] || { echo "Komari Web ref cannot be empty." >&2; exit 1; }
@@ -70,6 +78,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "version_hash=$VERSION_HASH" >> "$GITHUB_OUTPUT"
           echo "web_ref=$WEB_REF" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
 
   build-frontend:
     needs: prepare
@@ -228,7 +237,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.version }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
+          set -euo pipefail
+          if [ "$PRERELEASE" = true ]; then
+            echo "is_latest=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>/dev/null || true)"
           highest="$(printf '%s\n%s\n' "$latest" "$TAG" | sed '/^$/d' | sort -V | tail -n 1)"
           if [ -z "$latest" ] || [ "$highest" = "$TAG" ]; then
@@ -243,6 +258,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
           tags: |
             type=raw,value=${{ needs.prepare.outputs.version }}
 

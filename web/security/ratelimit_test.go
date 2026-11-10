@@ -28,11 +28,11 @@ func TestRateLimitControllerCanBeToggled(t *testing.T) {
 	}
 }
 
-func TestRateLimitControllerAllowsDashboardInitialBurst(t *testing.T) {
+func TestRateLimitControllerAllowsPacedDashboardReads(t *testing.T) {
 	controller := NewRateLimitController(true)
 	now := time.Now()
 	for i := 0; i < 30; i++ {
-		if allowed, _ := controller.allow("history:user", 20, 120, now); !allowed {
+		if allowed, _ := controller.allow("history:user", 2, 5, now.Add(time.Duration(i)*500*time.Millisecond)); !allowed {
 			t.Fatalf("normal dashboard burst was limited at request %d", i+1)
 		}
 	}
@@ -41,12 +41,12 @@ func TestRateLimitControllerAllowsDashboardInitialBurst(t *testing.T) {
 func TestRateLimitControllerRejectsSustainedHistoryStorm(t *testing.T) {
 	controller := NewRateLimitController(true)
 	now := time.Now()
-	for i := 0; i < 120; i++ {
-		if allowed, _ := controller.allow("history:user", 20, 120, now); !allowed {
+	for i := 0; i < 5; i++ {
+		if allowed, _ := controller.allow("history:user", 2, 5, now); !allowed {
 			t.Fatalf("history burst was limited too early at request %d", i+1)
 		}
 	}
-	if allowed, _ := controller.allow("history:user", 20, 120, now); allowed {
+	if allowed, _ := controller.allow("history:user", 2, 5, now); allowed {
 		t.Fatal("sustained history storm was not limited")
 	}
 }
@@ -195,7 +195,7 @@ func TestRateLimitMiddlewareServesHonestRetryAfterHeader(t *testing.T) {
 	}
 }
 
-func TestRateLimitSkipsLongLivedAndPreflightRequests(t *testing.T) {
+func TestRateLimitBoundsStreamOpeningsButSkipsPreflight(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	controller := NewRateLimitController(true)
 	router := gin.New()
@@ -204,14 +204,17 @@ func TestRateLimitSkipsLongLivedAndPreflightRequests(t *testing.T) {
 	router.GET("/komari.agent.v1.AgentEventService/SubscribeEvents", handler)
 	router.OPTIONS("/api/anything", handler)
 
-	// A durable subscription occupies one connection for its lifetime; charging
-	// it per re-subscribe would throttle exactly the traffic that must persist.
-	for i := 0; i < 300; i++ {
+	// Only new HTTP openings spend tokens. Once opened, stream frames never
+	// re-enter middleware, but an unauthenticated reconnect storm is bounded.
+	for i := 0; i < 100; i++ {
 		request := httptest.NewRequest(http.MethodGet, "/komari.agent.v1.AgentEventService/SubscribeEvents", nil)
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, request)
-		if response.Code != http.StatusNoContent {
+		if i < 20 && response.Code != http.StatusNoContent {
 			t.Fatalf("long-lived request %d was limited with %d", i, response.Code)
+		}
+		if i == 99 && response.Code != http.StatusTooManyRequests {
+			t.Fatal("stream opening storm bypassed the limiter")
 		}
 	}
 	for i := 0; i < 300; i++ {

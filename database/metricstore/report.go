@@ -481,10 +481,16 @@ func latestReportCounter(ctx context.Context, s *metric.Store, metricName, entit
 // GetLatestTrafficBefore returns the latest retained upload/download counters
 // before a boundary, transparently reading raw points or rollups.
 func GetLatestTrafficBefore(ctx context.Context, entityIDs []string, before time.Time) (map[string]models.Record, error) {
-	s := GetStore()
-	if s == nil {
-		return nil, fmt.Errorf("metric store not enabled")
+	s, release, err := AcquireStore(ctx)
+	if err != nil {
+		return nil, err
 	}
+	defer release()
+	return getLatestTrafficBeforeWithStore(ctx, s, entityIDs, before)
+}
+
+// The caller owns the lease; reuse it when reconstructing a traffic baseline.
+func getLatestTrafficBeforeWithStore(ctx context.Context, s *metric.Store, entityIDs []string, before time.Time) (map[string]models.Record, error) {
 	result := make(map[string]models.Record, len(entityIDs))
 	for _, entityID := range entityIDs {
 		if entityID == "" {

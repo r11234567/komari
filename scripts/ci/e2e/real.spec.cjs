@@ -5,6 +5,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
+const { createRequire } = require('node:module');
+// Use the pinned Web's already-installed protobuf runtime for its wire format.
+const webRequire = createRequire(path.resolve(__dirname, '../../../third_party/komari-web/package.json'));
+const { BinaryReader } = webRequire('@bufbuild/protobuf/wire');
 
 const root = process.env.E2E_ROOT;
 const artifacts = process.env.E2E_ARTIFACTS;
@@ -22,7 +26,22 @@ const services = {
   config: 'komari.config.v1.PrivilegedDeliveryService',
   browser: 'komari.browser.v1.BrowserService',
   file: 'komari.file.v1.FileService',
+  metrics: 'komari.metrics.v1.MetricsService',
+  workspace: 'komari.workspace.v1.WorkspaceService',
 };
+
+function verificationResource(request) {
+  expect(request.headers()['content-type']).toContain('application/proto');
+  const reader = new BinaryReader(request.postDataBuffer());
+  let resource;
+  while (reader.pos < reader.len) {
+    const [field, wireType] = reader.tag();
+    // BeginVerificationRequest.resource is field 3 in the pinned protocol.
+    if (field === 3) { expect(wireType).toBe(2); resource = reader.string(); }
+    else reader.skip(wireType);
+  }
+  return resource;
+}
 
 function totp(secret, counter = Math.floor(Date.now() / 30_000)) {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -58,13 +77,21 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
   let secret;
   let lastCounter = -1;
   let agentId;
+  let workspaceToken;
+  page.on('request', request => {
+    // Observe the grant obtained by the actual UI; never inject signed state.
+    const grant = request.headers()['x-komari-workspace-grant'];
+    if (grant) workspaceToken = grant;
+  });
   let exportCount = 0;
   const fixture = name => path.join(root, 'files', name);
 
   async function request(url, data, options = {}) {
     const { allowFailure = false, method = 'POST', headers = {} } = options;
+    const workspaceHeaders = url.startsWith(`/${services.file}/`) && workspaceToken
+      ? { 'X-Komari-Workspace-Grant': workspaceToken } : {};
     const response = await http.fetch(url, {
-      method, data, headers: { Origin: base, 'Connect-Protocol-Version': '1', ...headers }, timeout: 45_000,
+      method, data, headers: { Origin: base, 'Connect-Protocol-Version': '1', ...workspaceHeaders, ...headers }, timeout: 45_000,
     });
     console.log(`${method} ${new URL(url, base).pathname}: ${response.status()}`);
     if (!allowFailure) {
@@ -88,10 +115,10 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
     }
   }
   async function mutate(method, args) {
-    return rpc('file', method, { agentId, ...args, twoFactor: { code: await freshCode() } });
+    return rpc('file', method, { agentId, ...args });
   }
-  async function fileDenied(method, args) {
-    const response = await request(`/${services.file}/${method}`, { agentId, ...args }, { allowFailure: true });
+  async function fileDenied(method, args, headers = {}) {
+    const response = await request(`/${services.file}/${method}`, { agentId, ...args }, { allowFailure: true, headers });
     expect(response.ok(), `${method} must reject this operation`).toBeFalsy();
     return response.json();
   }
@@ -111,23 +138,23 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
     await item.saveAs(destination);
     return fs.readFileSync(destination, 'utf8');
   }
+  async function beginVerification(container) {
+    await container.getByRole('button', { name: 'Start verification / send code', exact: true }).click();
+    await expect(container.getByRole('textbox', { name: 'Enter verification code', exact: true })).toHaveValue('');
+  }
+  async function verifyCredential(container, code) {
+    await container.getByRole('textbox', { name: 'Enter verification code', exact: true }).fill(code);
+    await container.getByRole('button', { name: 'Verify and continue', exact: true }).click();
+  }
   async function confirmTerminal() {
     const dialog = page.getByRole('dialog');
-    await expect(dialog.getByPlaceholder('000000')).toBeVisible();
-    await dialog.getByPlaceholder('000000').fill(await freshCode());
-    await dialog.getByRole('button', { name: 'Confirm', exact: true }).click();
+    await dialog.getByRole('textbox', { name: 'System account on this machine', exact: true }).fill(process.env.USER);
+    await dialog.getByRole('button', { name: 'Verify and unlock', exact: true }).click();
+    await beginVerification(dialog);
+    await verifyCredential(dialog, await freshCode());
     await expect(dialog).toBeHidden();
     await expect.poll(() => page.evaluate(() => getComputedStyle(document.body).pointerEvents)).not.toBe('none');
     await expect(page.locator('.km-terminal-session:visible textarea.xterm-helper-textarea')).toBeAttached();
-  }
-  async function promptCode(action) {
-    const code = await freshCode();
-    const prompt = page.waitForEvent('dialog');
-    const pending = action();
-    const dialog = await prompt;
-    expect(dialog.type()).toBe('prompt');
-    await dialog.accept(code);
-    await pending;
   }
   async function downloadFile(name) {
     const response = await request(`/api/admin/client/${agentId}/file/download?${new URLSearchParams({ path: fixture(name), chunk_size: '1048576' })}`, undefined, { method: 'GET' });
@@ -176,6 +203,43 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       execFileSync('sudo', ['systemctl', 'start', 'komari-e2e.service'], { timeout: 30_000 });
     });
 
+    await test.step('real Agent history remains available across live metric-store reloads', async () => {
+      function window() {
+        const end = new Date();
+        return { agentIds: [agentId], startTime: new Date(end.getTime() - 300_000).toISOString(), endTime: end.toISOString(), maxPoints: 100 };
+      }
+      await expect.poll(async () => {
+        const result = await rpc('metrics', 'QueryMetrics', { ...window(), metrics: ['cpu.usage'], downsample: false });
+        return (result.series || []).some(series => (series.queryPoints || []).length > 0);
+      }, { timeout: 120_000, intervals: [2000, 5000] }).toBe(true);
+      const original = (await rpc('metrics', 'GetDownsamplingPolicy')).policy;
+      const policy = {
+        enabled: !!original.enabled,
+        minuteRetentionMinutes: original.minuteRetentionMinutes,
+        fiveMinuteRetentionMinutes: original.fiveMinuteRetentionMinutes,
+        hourRetentionHours: original.hourRetentionHours,
+      };
+      const results = [];
+      for (let iteration = 0; iteration < 6; iteration++) {
+        const [history, definitions, ping, reloaded] = await Promise.all([
+          rpc('metrics', 'QueryMetrics', { ...window(), metrics: ['cpu.usage'], downsample: false }),
+          rpc('metrics', 'ListMetricDefinitions'),
+          rpc('metrics', 'GetPingStats', window()),
+          rpc('metrics', 'SetDownsamplingPolicy', policy),
+        ]);
+        expect(history.series?.some(series => series.queryPoints?.length > 0)).toBe(true);
+        expect(definitions.definitions?.some(item => item.name === 'cpu.usage')).toBe(true);
+        expect(ping.endTime).toBeTruthy();
+        expect(!!reloaded.policy.enabled).toBe(policy.enabled);
+        results.push({ iteration, historySeries: history.series.length, definitions: definitions.definitions.length });
+        // Bypass the short response cache before verifying the next instance.
+        await delay(5500);
+      }
+      const after = await rpc('metrics', 'QueryMetrics', { ...window(), metrics: ['cpu.usage'], downsample: false });
+      expect(after.series?.some(series => series.queryPoints?.length > 0)).toBe(true);
+      fs.writeFileSync(path.join(artifacts, 'metric-store-reloads.json'), JSON.stringify(results, null, 2));
+    });
+
     await test.step('enable real 2FA and apply a signed same-identity WebSSH grant', async () => {
       await request('/api/admin/2fa/generate', undefined, { method: 'GET' });
       secret = (await context.cookies()).find(c => c.name === '2fa_secret')?.value;
@@ -204,23 +268,45 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         { timeout: 60_000 }).toBe(true);
     });
 
-    await test.step('built account page rejects wrong OTP and keeps the password proof empty', async () => {
+    await test.step('built account page rejects wrong OTP and password change requires its own challenge', async () => {
       await page.goto('/admin/account');
       const gate = page.locator('.km-account-2fa-gate');
       await expect(gate).toBeVisible();
+      await beginVerification(gate);
       const counter = Math.floor(Date.now() / 30_000);
       const validCodes = [-1, 0, 1].map(n => totp(secret, counter + n));
       let invalid = '000000';
       while (validCodes.includes(invalid)) invalid = String(Number(invalid) + 1).padStart(6, '0');
-      await gate.getByPlaceholder('000000').fill(invalid);
-      const rejected = page.waitForResponse(r => r.url().includes('/api/admin/2fa/verify'));
-      await gate.getByRole('button', { name: 'Confirm', exact: true }).click();
+      const rejected = page.waitForResponse(r => r.url().endsWith('.TrustedCredentialService/CompleteVerification'));
+      await verifyCredential(gate, invalid);
       expect((await rejected).ok()).toBe(false);
       await expect(gate).toBeVisible();
-      await gate.getByPlaceholder('000000').fill(await freshCode());
-      await gate.getByRole('button', { name: 'Confirm', exact: true }).click();
+      await expect(gate.getByRole('alert')).toBeVisible();
+      await expect(gate.getByPlaceholder('000000')).toHaveValue('');
+      const accepted = page.waitForResponse(r => new URL(r.url()).pathname === '/api/admin/2fa/verify');
+      await verifyCredential(gate, await freshCode());
+      expect((await accepted).ok()).toBe(true);
       await expect(gate).toHaveCount(0);
-      await expect(page.locator('#password_2fa')).toHaveValue('');
+      const draft = `Ci9-${crypto.randomBytes(24).toString('hex')}`;
+      let passwordWrites = 0;
+      const onWrite = r => { if (new URL(r.url()).pathname === '/api/admin/update/user') passwordWrites++; };
+      page.on('request', onWrite);
+      await page.locator('#password').fill(draft);
+      await page.locator('#password_repeat').fill(draft);
+      await page.locator('.km-account-password-form').getByRole('button', { name: 'Change Password', exact: true }).click();
+      const passwordDialog = page.getByRole('dialog');
+      await expect(passwordDialog).toBeVisible();
+      await expect(passwordDialog.getByPlaceholder('000000')).toHaveCount(0);
+      const challenge = page.waitForRequest(r => r.url().endsWith('.TrustedCredentialService/BeginVerification'));
+      await beginVerification(passwordDialog);
+      expect(verificationResource(await challenge)).toMatch(/^account:password:/);
+      expect(passwordWrites).toBe(0);
+      await passwordDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await expect(passwordDialog).toBeHidden();
+      await expect(page.locator('#password')).toHaveValue('');
+      await expect(page.locator('#password_repeat')).toHaveValue('');
+      expect(passwordWrites).toBe(0);
+      page.off('request', onWrite);
     });
 
     await test.step('real xterm input, remote output, export, search and system clipboard', async () => {
@@ -275,7 +361,9 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await page.keyboard.press('Escape');
       await expect(active().locator('div').first()).toHaveCSS('background-color', 'rgb(220, 20, 60)');
       await tabMenu('Duplicate tab');
-      await confirmTerminal();
+      // A second tab shares the already authorized workspace identity.
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+      await expect(page.locator('.km-terminal-session:visible textarea.xterm-helper-textarea')).toBeAttached();
       await expect(page.getByRole('tab')).toHaveCount(2);
       await active().dblclick();
       await page.getByRole('textbox', { name: 'Rename tab', exact: true }).fill('Duplicate E2E');
@@ -304,9 +392,9 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await location.press('Enter');
       await expect(page.locator('[data-file-path]').filter({ hasText: 'editor.txt' })).toBeVisible();
       const bytes = crypto.randomBytes(2 * 1048576 + 73);
-      await promptCode(() => page.locator('input[type=file][multiple]').setInputFiles({
+      await page.locator('input[type=file][multiple]').setInputFiles({
         name: 'roundtrip.bin', mimeType: 'application/octet-stream', buffer: bytes,
-      }));
+      });
       await expect.poll(() => fs.existsSync(fixture('roundtrip.bin')) ? sha256(fs.readFileSync(fixture('roundtrip.bin'))) : '',
         { timeout: 90_000 }).toBe(sha256(bytes));
       await expect.poll(() => metrics.uploadChunks).toBeGreaterThanOrEqual(3);
@@ -318,45 +406,48 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
 
     await test.step('actual Monaco editor saves UTF-8 and zero-byte content through the Agent', async () => {
       await page.locator('[data-file-path]').filter({ hasText: 'editor.txt' }).dblclick();
-      const editor = page.locator('.km-file-editor .monaco-editor textarea.inputarea');
+      // Current Monaco uses a native EditContext surface in Chromium; address
+      // its accessible input instead of assuming the old hidden textarea.
+      const editor = page.locator('.km-file-editor').getByRole('textbox', { name: 'Editor content', exact: true });
+      // EditContext's focus target has no visual box; Monaco draws the text
+      // separately. Focus the real native target and use normal keyboard input.
       await expect(editor).toBeAttached();
       await editor.focus();
       await page.keyboard.press('Control+a');
       await page.keyboard.type('Monaco UTF-8: ');
       await page.keyboard.insertText('联调 ✓\n');
-      await promptCode(() => page.keyboard.press('Control+s'));
+      await page.keyboard.press('Control+s');
       await expect.poll(() => fs.readFileSync(fixture('editor.txt'), 'utf8')).toBe('Monaco UTF-8: 联调 ✓\n');
       expect((await downloadFile('editor.txt')).toString()).toBe('Monaco UTF-8: 联调 ✓\n');
       await editor.focus();
       await page.keyboard.press('Control+a');
       await page.keyboard.press('Backspace');
-      await promptCode(() => page.keyboard.press('Control+s'));
+      await page.keyboard.press('Control+s');
       await expect.poll(() => fs.statSync(fixture('editor.txt')).size).toBe(0);
       expect((await downloadFile('editor.txt')).length).toBe(0);
     });
 
-    await test.step('file authorization rejects missing/replayed proof and unsafe overwrite/recursive flags', async () => {
+    await test.step('file authorization requires the real workspace grant and rejects unsafe overwrite/recursive flags', async () => {
+      expect(workspaceToken).toBeTruthy();
       const created = fixture('created.txt');
-      const missing = await fileDenied('CreateEntry', { path: created, kind: 'ENTRY_KIND_FILE' });
+      const missing = await fileDenied('CreateEntry', { path: created, kind: 'ENTRY_KIND_FILE' }, { 'X-Komari-Workspace-Grant': '' });
       expect(missing.code).toBe('unauthenticated');
       expect(fs.existsSync(created)).toBe(false);
-      const code = await freshCode();
-      await rpc('file', 'CreateEntry', { agentId, path: created, kind: 'ENTRY_KIND_FILE', mode: '0600', twoFactor: { code } });
+      const invalid = await fileDenied('CreateEntry', { path: created, kind: 'ENTRY_KIND_FILE' }, { 'X-Komari-Workspace-Grant': 'invalid-grant' });
+      expect(invalid.code).toBe('unauthenticated');
+      expect(fs.existsSync(created)).toBe(false);
+      await mutate('CreateEntry', { path: created, kind: 'ENTRY_KIND_FILE', mode: '0600' });
       expect(fs.statSync(created).mode & 0o777).toBe(0o600);
-      const replayPath = fixture('replay-must-not-exist.txt');
-      const replay = await fileDenied('CreateEntry', { path: replayPath, kind: 'ENTRY_KIND_FILE', twoFactor: { code } });
-      expect(replay.code).toBe('unauthenticated');
-      expect(fs.existsSync(replayPath)).toBe(false);
       const overwrite = await fileDenied('CopyEntry', { source: fixture('roundtrip.bin'), destination: fixture('existing.txt'),
-        overwrite: false, twoFactor: { code: await freshCode() } });
+        overwrite: false });
       expect(overwrite.message).toMatch(/already exists|file exists/i);
       expect(fs.readFileSync(fixture('existing.txt'), 'utf8')).toBe('destination must survive\n');
-      const recursive = await fileDenied('DeleteEntry', { path: fixture('nonempty'), recursive: false, twoFactor: { code: await freshCode() } });
+      const recursive = await fileDenied('DeleteEntry', { path: fixture('nonempty'), recursive: false });
       expect(recursive.message).toMatch(/directory not empty/i);
       expect(fs.readFileSync(fixture('nonempty/keep.txt'), 'utf8')).toBe('keep\n');
     });
 
-    await test.step('Agent executes copy, move, chmod, search and delete with fresh proofs', async () => {
+    await test.step('Agent executes copy, move, chmod, search and delete under the authorized OS identity', async () => {
       await mutate('CopyEntry', { source: fixture('roundtrip.bin'), destination: fixture('copy.bin'), overwrite: false });
       expect(sha256(fs.readFileSync(fixture('copy.bin')))).toBe(sha256(fs.readFileSync(fixture('roundtrip.bin'))));
       await mutate('MoveEntry', { source: fixture('copy.bin'), destination: fixture('moved.bin'), overwrite: false });
@@ -382,6 +473,22 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       const after = await rpc('config', 'GetNodeConfigState', { agentId });
       expect(after.appliedRevision).toBe(before.appliedRevision);
       expect(after.observation?.serviceId).toBe(before.observation?.serviceId);
+    });
+
+    await test.step('workspace revocation rejects old file grants and re-unlock requires fresh UI verification', async () => {
+      const old = workspaceToken;
+      expect((await rpc('workspace', 'LockWorkspace', { grantToken: old })).locked).toBe(true);
+      const blockedPath = fixture('revoked-must-not-exist.txt');
+      const denied = await fileDenied('CreateEntry', { path: blockedPath, kind: 'ENTRY_KIND_FILE' });
+      expect(denied.code).toBe('unauthenticated');
+      expect(fs.existsSync(blockedPath)).toBe(false);
+      const download = await request(`/api/admin/client/${agentId}/file/download?${new URLSearchParams({ path: fixture('roundtrip.bin') })}`,
+        undefined, { method: 'GET', allowFailure: true });
+      expect(download.status()).toBe(401);
+      await page.reload();
+      await confirmTerminal();
+      await expect.poll(() => workspaceToken).not.toBe(old);
+      expect(sha256(await downloadFile('roundtrip.bin'))).toBe(sha256(fs.readFileSync(fixture('roundtrip.bin'))));
     });
   } finally {
     fs.writeFileSync(path.join(artifacts, 'browser-events.json'), JSON.stringify(events, null, 2));

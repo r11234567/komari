@@ -22,6 +22,7 @@ type PluginState struct {
 	ApprovedPermissionsHash string    `json:"approved_permissions_hash"`
 	LastError               string    `json:"last_error"`
 	UpdatedAt               time.Time `json:"updated_at"`
+	ApprovedPackageDigest   string    `json:"approved_package_digest,omitempty"`
 }
 
 func openState(path string) *State {
@@ -35,13 +36,22 @@ func (s *State) get(short string) PluginState {
 	return s.current[short]
 }
 
-func (s *State) set(short string, st PluginState) {
+func (s *State) set(short string, st PluginState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensure()
 	st.UpdatedAt = time.Now().UTC()
+	previous, exists := s.current[short]
 	s.current[short] = st
-	s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		if exists {
+			s.current[short] = previous
+		} else {
+			delete(s.current, short)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *State) delete(short string) {
@@ -71,13 +81,13 @@ func (s *State) ensure() {
 	}
 }
 
-func (s *State) saveLocked() {
+func (s *State) saveLocked() error {
 	file := struct {
 		Plugins map[string]PluginState `json:"plugins"`
 	}{Plugins: s.current}
 	data, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
-		return
+		return err
 	}
-	_ = os.WriteFile(s.path, data, 0644)
+	return atomicPackageFile(s.path, data)
 }

@@ -22,10 +22,11 @@ func (s *metricsService) UpdateMetricDefinition(ctx context.Context, req *connec
 	if name == "" {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("metric name is required"))
 	}
-	store := metricstore.GetStore()
-	if store == nil {
-		return nil, connectError(connect.CodeFailedPrecondition, errors.New("metric store is not initialized"))
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return nil, connectMetricStoreError(err)
 	}
+	defer releaseStore()
 	definition, err := store.UpdateMetricRetention(ctx, name, int(req.Msg.RetentionDays))
 	if errors.Is(err, metric.ErrNotFound) {
 		return nil, connectError(connect.CodeNotFound, fmt.Errorf("metric not found: %s", name))

@@ -21,7 +21,6 @@ import (
 	jsonRpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
 	adminv1 "github.com/r11234567/komari-proto/gen/go/komari/admin/v1"
 	adminv1connect "github.com/r11234567/komari-proto/gen/go/komari/admin/v1/adminv1connect"
-	"golang.org/x/sync/singleflight"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -30,20 +29,24 @@ type dashboardService struct {
 	adminv1connect.UnimplementedDashboardServiceHandler
 }
 
-var dashboardReadFlight singleflight.Group
-
 func (s *dashboardService) GetDashboardSummary(ctx context.Context, req *connect.Request[adminv1.GetDashboardSummaryRequest]) (*connect.Response[adminv1.GetDashboardSummaryResponse], error) {
 	key := dashboardReadKey(ctx, req.Msg)
-	value, err, _ := dashboardReadFlight.Do("summary:"+key, func() (any, error) {
-		return s.getDashboardSummary(ctx, req)
+	message, err := cachedMetricRead(ctx, "summary:"+key, func() (proto.Message, error) {
+		response, err := s.getDashboardSummary(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		return response.Msg, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return value.(*connect.Response[adminv1.GetDashboardSummaryResponse]), nil
+	return connect.NewResponse(message.(*adminv1.GetDashboardSummaryResponse)), nil
 }
 
 func (s *dashboardService) getDashboardSummary(ctx context.Context, req *connect.Request[adminv1.GetDashboardSummaryRequest]) (*connect.Response[adminv1.GetDashboardSummaryResponse], error) {
+	ctx, cancel := context.WithTimeout(ctx, connectMetricReadTimeout)
+	defer cancel()
 	release, err := acquireMetricReadSlot(ctx, 2)
 	if err != nil {
 		return nil, err
@@ -57,7 +60,7 @@ func (s *dashboardService) getDashboardSummary(ctx context.Context, req *connect
 	}
 	result, err := jsonRpc.DashboardSummaryAggregate(ctx, sections, int(req.Msg.RankingLimit))
 	if err != nil {
-		return nil, connectError(connect.CodeInternal, err)
+		return nil, connectMetricStoreError(err)
 	}
 	requested := requestedSummarySections(req.Msg.Sections)
 	summary := &adminv1.DashboardSummary{GeneratedAt: timestamppb.New(result.GeneratedAt)}
@@ -82,16 +85,22 @@ func (s *dashboardService) getDashboardSummary(ctx context.Context, req *connect
 
 func (s *dashboardService) GetDashboardCharts(ctx context.Context, req *connect.Request[adminv1.GetDashboardChartsRequest]) (*connect.Response[adminv1.GetDashboardChartsResponse], error) {
 	key := dashboardReadKey(ctx, req.Msg)
-	value, err, _ := dashboardReadFlight.Do("charts:"+key, func() (any, error) {
-		return s.getDashboardCharts(ctx, req)
+	message, err := cachedMetricRead(ctx, "charts:"+key, func() (proto.Message, error) {
+		response, err := s.getDashboardCharts(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		return response.Msg, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return value.(*connect.Response[adminv1.GetDashboardChartsResponse]), nil
+	return connect.NewResponse(message.(*adminv1.GetDashboardChartsResponse)), nil
 }
 
 func (s *dashboardService) getDashboardCharts(ctx context.Context, req *connect.Request[adminv1.GetDashboardChartsRequest]) (*connect.Response[adminv1.GetDashboardChartsResponse], error) {
+	ctx, cancel := context.WithTimeout(ctx, connectMetricReadTimeout)
+	defer cancel()
 	release, err := acquireMetricReadSlot(ctx, 2)
 	if err != nil {
 		return nil, err
@@ -104,6 +113,9 @@ func (s *dashboardService) getDashboardCharts(ctx context.Context, req *connect.
 		}
 	}
 	result := jsonRpc.DashboardChartsAggregate(ctx, charts, int(req.Msg.RankingLimit))
+	if err := ctx.Err(); err != nil {
+		return nil, connectMetricStoreError(err)
+	}
 	requested := requestedCharts(req.Msg.Charts)
 	series := &adminv1.DashboardCharts{GeneratedAt: timestamppb.New(result.GeneratedAt)}
 	if requested[adminv1.DashboardChart_DASHBOARD_CHART_TRAFFIC] {
@@ -124,6 +136,9 @@ func dashboardReadKey(ctx context.Context, request proto.Message) string {
 	scope := "guest"
 	if meta := rpc.MetaFromContext(ctx); meta != nil && meta.Principal != nil {
 		scope = fmt.Sprintf("%d:%s:%s", meta.Principal.Type, meta.Principal.UserUUID, meta.Principal.ClientUUID)
+		if token := meta.Principal.APIToken; token != nil {
+			scope += ":token:" + token.ID
+		}
 	}
 	digest := sha256.Sum256(append([]byte(scope+"\x00"), encoded...))
 	return hex.EncodeToString(digest[:])

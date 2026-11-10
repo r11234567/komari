@@ -95,6 +95,9 @@ func InitializeBaseline(db *gorm.DB, r *configv1.InitializeNodeConfigRequest, pr
 		if r.Privileged.RescueHelperEnabled != nil && r.Privileged.GetRescueHelperEnabled() {
 			return errors.New("first-install baseline cannot install a rescue helper")
 		}
+		if r.Privileged.GetRootExecutionAllowed() {
+			return errors.New("first-install baseline cannot authorize root execution")
+		}
 		s := Settings{RemoteControlEnabled: r.Privileged.GetRemoteControlEnabled(), WebSSHEnabled: r.Privileged.GetWebsshEnabled(), ExecutionEnabled: r.Privileged.GetExecutionEnabled(), EnableGPU: r.Privileged.GetEnableGpu(), RequiredPrivilegeMode: int32(r.Privileged.RequiredPrivilegeMode)}
 		if r.PreserveRuntime && (s.RemoteControlEnabled || s.WebSSHEnabled || s.ExecutionEnabled || s.EnableGPU) {
 			return errors.New("migration baseline must deny all optional privileged capabilities")
