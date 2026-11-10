@@ -53,7 +53,7 @@ func (t *Telemetry) segmentPath(seg telemetrySegment) string {
 
 func (t *Telemetry) segment(ctx context.Context, q querier, id string) (telemetrySegment, error) {
 	var s telemetrySegment
-	err := q.QueryRowContext(ctx, t.bind("SELECT id,state,first_id,last_id,points,bytes,created,deleted,checksum,file_bytes FROM "+t.table("segments")+" WHERE id=?"), id).Scan(&s.ID, &s.State, &s.First, &s.Last, &s.Points, &s.Bytes, &s.Created, &s.Deleted, &s.Hash, &s.FileBytes)
+	err := q.QueryRowContext(ctx, t.bind("SELECT id,state,first_id,last_id,points,bytes,created,deleted,checksum,file_bytes,staging_owner FROM "+t.table("segments")+" WHERE id=?"), id).Scan(&s.ID, &s.State, &s.First, &s.Last, &s.Points, &s.Bytes, &s.Created, &s.Deleted, &s.Hash, &s.FileBytes, &s.StagingOwner)
 	return s, err
 }
 
@@ -110,7 +110,7 @@ func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if _, err = t.s.db.ExecContext(ctx, t.bind("UPDATE "+t.table("segments")+" SET state='writing' WHERE id=? AND state IN ('sealed','writing')"), id); err != nil {
+	if _, err = t.s.db.ExecContext(ctx, t.bind("UPDATE "+t.table("segments")+" SET state='writing',staging_owner=? WHERE id=? AND state IN ('sealed','writing')"), t.owner, id); err != nil {
 		return false, err
 	}
 	if err = t.fault("archive-prepared"); err != nil {
@@ -137,6 +137,17 @@ func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 		parent = filepath.Join(parent, component)
 	}
 	part := path + ".part." + t.owner
+	if seg.StagingOwner != "" && seg.StagingOwner != t.owner {
+		if len(seg.StagingOwner) != 32 {
+			return false, errors.New("invalid archive staging identity")
+		}
+		if _, e := hex.DecodeString(seg.StagingOwner); e != nil {
+			return false, e
+		}
+		if e := t.root.Remove(path + ".part." + seg.StagingOwner); e != nil && !errors.Is(e, os.ErrNotExist) {
+			return false, e
+		}
+	}
 	// Only the server-generated segment path is used, beneath os.Root. No HTTP
 	// path or catalog-provided arbitrary filename can escape the archive root.
 	if info, e := t.root.Lstat(part); e == nil {

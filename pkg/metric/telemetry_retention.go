@@ -100,3 +100,53 @@ func (t *Telemetry) Diagnostics(ctx context.Context) (TelemetryDiagnostics, erro
 	}
 	return d, nil
 }
+
+// Receipts outlive the entire admissible observed-time window (including clock
+// skew). Beyond it, Accept rejects stale payloads before any dedup lookup. Only
+// fully handed-off segments qualify, so expiring receipts cannot unlock raw
+// deletion or drop undelivered accounting. Metadata consumers retain their own
+// committed watermark independently.
+func (t *Telemetry) PruneReceipts(ctx context.Context, now time.Time, limit int) (int, error) {
+	if limit <= 0 || limit > 512 {
+		return 0, ErrInvalidArgument
+	}
+	release, err := t.acquire(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	tx, err := t.begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, t.bind("SELECT r.ingest_id FROM "+t.table("receipts")+" r JOIN "+t.table("segments")+" s ON s.id=r.segment_id WHERE s.state='complete' AND r.received<? AND NOT EXISTS (SELECT 1 FROM "+t.table("outbox")+" o WHERE o.ingest_id=r.ingest_id AND o.delivered=0) ORDER BY r.received,r.ingest_id LIMIT ?"), now.Add(-t.cfg.MaxLateness-5*time.Minute).UnixNano(), limit)
+	if err != nil {
+		return 0, err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err = rows.Scan(&id); err != nil {
+			break
+		}
+		ids = append(ids, id)
+	}
+	readErr := rows.Err()
+	rows.Close()
+	if err != nil {
+		return 0, err
+	}
+	if readErr != nil {
+		return 0, readErr
+	}
+	for _, id := range ids {
+		if _, err = tx.ExecContext(ctx, t.bind("DELETE FROM "+t.table("outbox")+" WHERE ingest_id=? AND delivered=1"), id); err != nil {
+			return 0, err
+		}
+		if _, err = tx.ExecContext(ctx, t.bind("DELETE FROM "+t.table("receipts")+" WHERE ingest_id=?"), id); err != nil {
+			return 0, err
+		}
+	}
+	return len(ids), tx.Commit()
+}

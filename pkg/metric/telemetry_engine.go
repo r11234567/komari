@@ -103,6 +103,7 @@ type telemetrySegment struct {
 	First, Last, Points, Bytes, Created, Deleted int64
 	Hash                                         string
 	FileBytes                                    int64
+	StagingOwner                                 string
 }
 
 func telemetryID() string {
@@ -208,7 +209,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	} else if err != nil {
 		return err
 	}
-	if version != 1 && version != -1 {
+	if version != 2 && version != 1 && version != -1 {
 		return fmt.Errorf("unsupported telemetry SQL schema version %d", version)
 	}
 	// Small integer/CHAR keys keep these DDLs portable across SQLite, MySQL and
@@ -218,7 +219,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS %sreceipts (ingest_id BIGINT PRIMARY KEY, identity_hash CHAR(64) NOT NULL UNIQUE, payload_hash CHAR(64) NOT NULL, source VARCHAR(255) NOT NULL, observed BIGINT NOT NULL, received BIGINT NOT NULL, points INTEGER NOT NULL, segment_id CHAR(32) NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS %sseries (id CHAR(64) PRIMARY KEY, metric VARCHAR(255) NOT NULL, entity VARCHAR(255) NOT NULL, tags TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS %shot (ingest_id BIGINT NOT NULL, ordinal INTEGER NOT NULL, series_id CHAR(64) NOT NULL, observed BIGINT NOT NULL, received BIGINT NOT NULL, value DOUBLE PRECISION NOT NULL, labels TEXT NOT NULL, segment_id CHAR(32) NOT NULL, PRIMARY KEY(ingest_id, ordinal))`,
-		`CREATE TABLE IF NOT EXISTS %ssegments (id CHAR(32) PRIMARY KEY, state VARCHAR(16) NOT NULL, first_id BIGINT NOT NULL, last_id BIGINT NOT NULL, points BIGINT NOT NULL, bytes BIGINT NOT NULL, created BIGINT NOT NULL, deleted BIGINT NOT NULL, checksum CHAR(64) NOT NULL, file_bytes BIGINT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS %ssegments (id CHAR(32) PRIMARY KEY, state VARCHAR(16) NOT NULL, first_id BIGINT NOT NULL, last_id BIGINT NOT NULL, points BIGINT NOT NULL, bytes BIGINT NOT NULL, created BIGINT NOT NULL, deleted BIGINT NOT NULL, checksum CHAR(64) NOT NULL, file_bytes BIGINT NOT NULL, staging_owner CHAR(32) NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS %ssummary (segment_id CHAR(32) NOT NULL, series_id CHAR(64) NOT NULL, resolution BIGINT NOT NULL, bucket BIGINT NOT NULL, stats TEXT NOT NULL, PRIMARY KEY(segment_id,series_id,resolution,bucket))`,
 		`CREATE TABLE IF NOT EXISTS %soutbox (ingest_id BIGINT PRIMARY KEY, source VARCHAR(255) NOT NULL, received BIGINT NOT NULL, payload TEXT NOT NULL, delivered INTEGER NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS %sleases (id CHAR(32) NOT NULL, segment_id CHAR(32) NOT NULL, expires BIGINT NOT NULL, PRIMARY KEY(id,segment_id))`,
@@ -228,6 +229,14 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	for _, q := range stmts {
 		if _, err := t.s.db.ExecContext(ctx, fmt.Sprintf(q, prefix)); err != nil {
 			return err
+		}
+	}
+	if version == 1 {
+		rows, e := t.s.db.QueryContext(ctx, "SELECT staging_owner FROM "+t.table("segments")+" LIMIT 0")
+		if e == nil {
+			rows.Close()
+		} else if _, e = t.s.db.ExecContext(ctx, "ALTER TABLE "+t.table("segments")+" ADD COLUMN staging_owner CHAR(32) NOT NULL DEFAULT ''"); e != nil {
+			return e
 		}
 	}
 	for _, idx := range []struct{ name, table, cols string }{
@@ -267,7 +276,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 			return err
 		}
 	}
-	_, err = t.s.db.ExecContext(ctx, "UPDATE "+progressTable+" SET value=1 WHERE task='schema_version' AND value=-1")
+	_, err = t.s.db.ExecContext(ctx, "UPDATE "+progressTable+" SET value=2 WHERE task='schema_version' AND value IN (-1,1)")
 	return err
 }
 
@@ -467,7 +476,7 @@ func (t *Telemetry) activeSegment(ctx context.Context, tx *sql.Tx, now time.Time
 		if err != nil {
 			return seg, err
 		}
-		_, err = tx.ExecContext(ctx, t.bind("INSERT INTO "+t.table("segments")+" (id,state,first_id,last_id,points,bytes,created,deleted,checksum,file_bytes) VALUES (?,'open',?,?,0,0,?,0,'',0)"), seg.ID, last+1, last, now.UnixNano())
+		_, err = tx.ExecContext(ctx, t.bind("INSERT INTO "+t.table("segments")+" (id,state,first_id,last_id,points,bytes,created,deleted,checksum,file_bytes,staging_owner) VALUES (?,'open',?,?,0,0,?,0,'',0,'')"), seg.ID, last+1, last, now.UnixNano())
 		if err != nil {
 			return seg, err
 		}

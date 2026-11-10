@@ -509,6 +509,43 @@ func TestTelemetryLateSupplementAndRetentionNeverReadCold(t *testing.T) {
 	}
 }
 
+func TestTelemetryReceiptExpiryAndBackpressure(t *testing.T) {
+	_, e := telemetryFixture(t, "")
+	ctx := context.Background()
+	at := time.Now().UTC()
+	b := telemetryBatch("receipt", at, 1, 2)
+	if _, err := e.Accept(ctx, b, at); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := e.PruneReceipts(ctx, at.Add(72*time.Hour), 512); err != nil || n != 0 {
+		t.Fatalf("pruned unarchived %d %v", n, err)
+	}
+	summarizeAll(t, e)
+	e.SealDue(ctx, at.Add(time.Hour))
+	if _, err := e.ArchiveNext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.DeleteArchivedChunk(ctx, at.Add(time.Hour), 512); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := e.PruneReceipts(ctx, at.Add(48*time.Hour), 512); err != nil || n != 0 {
+		t.Fatalf("pruned admissible receipt %d %v", n, err)
+	}
+	if n, err := e.PruneReceipts(ctx, at.Add(72*time.Hour), 512); err != nil || n != 1 {
+		t.Fatalf("expired receipt %d %v", n, err)
+	}
+	if _, err := e.Accept(ctx, b, at.Add(72*time.Hour)); err == nil {
+		t.Fatal("reapplied expired historical receipt")
+	}
+	e.cfg.MaxHotBytes = 1
+	if _, err := e.Accept(ctx, telemetryBatch("new", at, 3), at); !errors.Is(err, ErrTelemetryBackpressure) {
+		t.Fatal(err)
+	}
+	if n := telemetryCount(t, e, "receipts"); n != 0 {
+		t.Fatal(n)
+	}
+}
+
 // This test starts fresh OS processes against a real SQL DB and archive tree;
 // receipt replay, decoding and deletion are verified after process exit. The
 // complete application E2E remains a separate mandatory checkpoint gate.
