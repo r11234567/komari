@@ -226,6 +226,7 @@ func (a *App) InitStores() error {
 	}
 	trafficledger.ConfigureTelemetry(dbcore.GetDBInstance())
 	metricstore.ConfigureTelemetryConsumer(trafficledger.ConsumeTelemetry)
+	metricstore.ConfigureTelemetryLedgerGC(trafficledger.PruneTelemetrySlices)
 	if err := metricstore.ActivateTelemetry(context.Background()); err != nil {
 		return fmt.Errorf("activate telemetry: %w", err)
 	}
@@ -233,6 +234,8 @@ func (a *App) InitStores() error {
 	a.addCleanup("metric-report-batcher", func(ctx context.Context) error {
 		return metricstore.StopReportBatcher(ctx)
 	})
+	metricstore.StartTelemetryScheduler()
+	a.addCleanup("telemetry-scheduler", metricstore.StopTelemetryScheduler)
 	return nil
 }
 
@@ -784,9 +787,6 @@ func registerScheduledWork() {
 
 	if err := corn.AddFunc("records:cleanup", "@every 30m", cleanupScheduledData); err != nil {
 		logger.ErrorArgs("server", "Failed to add cleanup scheduled task:", err)
-	}
-	if err := corn.AddContextFunc("metrics:compact", "@every 30s", false, compactMetricStore); err != nil {
-		logger.ErrorArgs("server", "Failed to add metric compact scheduled task:", err)
 	}
 	if err := corn.AddFunc("notifier:traffic", "@every 1m", notifier.CheckTraffic); err != nil {
 		logger.ErrorArgs("server", "Failed to add traffic notification task:", err)

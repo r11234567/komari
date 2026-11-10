@@ -10,14 +10,15 @@ type TelemetryTrafficStream struct {
 // TelemetryTrafficState retains integer counters independently of metric raw
 // retention. FirstObserved records the earliest known coverage of this state.
 type TelemetryTrafficState struct {
-	Client        string `gorm:"type:varchar(36);primaryKey"`
-	FirstObserved int64  `gorm:"not null"`
-	LastObserved  int64  `gorm:"not null"`
-	TotalUp       int64  `gorm:"not null"`
-	TotalDown     int64  `gorm:"not null"`
-	AccountedUp   int64  `gorm:"not null"`
-	AccountedDown int64  `gorm:"not null"`
-	LateReports   int64  `gorm:"not null"`
+	Client              string `gorm:"type:varchar(36);primaryKey"`
+	FirstObserved       int64  `gorm:"not null"`
+	LastObserved        int64  `gorm:"not null"`
+	TotalUp             int64  `gorm:"not null"`
+	TotalDown           int64  `gorm:"not null"`
+	AccountedUp         int64  `gorm:"not null"`
+	AccountedDown       int64  `gorm:"not null"`
+	LateReports         int64  `gorm:"not null"`
+	HourlyPrunedThrough int64  `gorm:"not null;default:0"`
 }
 
 // TelemetryTrafficSlice is an hourly ledger split at the configured billing
@@ -26,7 +27,7 @@ type TelemetryTrafficState struct {
 type TelemetryTrafficSlice struct {
 	Client        string `gorm:"type:varchar(36);primaryKey"`
 	Start         int64  `gorm:"primaryKey;autoIncrement:false"`
-	End           int64  `gorm:"not null"`
+	End           int64  `gorm:"not null;index"`
 	FirstObserved int64  `gorm:"not null"`
 	LastObserved  int64  `gorm:"not null"`
 	UpBytes       int64  `gorm:"not null"`

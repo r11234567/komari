@@ -121,7 +121,7 @@ func (t *Telemetry) PruneReceipts(ctx context.Context, now time.Time, limit int)
 		return 0, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, t.bind("SELECT r.ingest_id FROM "+t.table("receipts")+" r JOIN "+t.table("segments")+" s ON s.id=r.segment_id WHERE s.state='complete' AND r.received<? AND NOT EXISTS (SELECT 1 FROM "+t.table("outbox")+" o WHERE o.ingest_id=r.ingest_id AND o.delivered=0) ORDER BY r.received,r.ingest_id LIMIT ?"), now.Add(-t.cfg.MaxLateness-5*time.Minute).UnixNano(), limit)
+	rows, err := tx.QueryContext(ctx, t.bind("SELECT r.ingest_id FROM "+t.table("receipts")+" r JOIN "+t.table("segments")+" s ON s.id=r.segment_id WHERE s.state IN ('complete','expired') AND r.received<? AND NOT EXISTS (SELECT 1 FROM "+t.table("outbox")+" o WHERE o.ingest_id=r.ingest_id AND o.delivered=0) ORDER BY r.received,r.ingest_id LIMIT ?"), now.Add(-t.cfg.MaxLateness-5*time.Minute).UnixNano(), limit)
 	if err != nil {
 		return 0, err
 	}

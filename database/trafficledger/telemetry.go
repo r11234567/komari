@@ -199,6 +199,9 @@ func TelemetryUsageBatch(ctx context.Context, db *gorm.DB, clients []string, sta
 		} else if err != nil {
 			return nil, nil, err
 		}
+		if start.UnixNano() < state.HourlyPrunedThrough && end.UnixNano() >= state.FirstObserved {
+			return nil, nil, fmt.Errorf("%w: hourly traffic ledger has expired", metric.ErrTelemetryCoverage)
+		}
 		var slices []models.TelemetryTrafficSlice
 		if err := db.WithContext(ctx).Where("client = ? AND start <= ? AND end > ?", client, end.UnixNano(), start.UnixNano()).Order("start").Limit(10001).Find(&slices).Error; err != nil {
 			return nil, nil, err

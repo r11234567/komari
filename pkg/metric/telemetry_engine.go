@@ -74,6 +74,9 @@ type Telemetry struct {
 	gate             chan struct{}
 	archiveGate      chan struct{}
 	trafficGate      chan struct{}
+	scheduleGate     chan struct{}
+	changed          chan struct{}
+	capacity         telemetryCapacity
 	owner            string
 	instance         string
 	legacyUntil      int64
@@ -192,8 +195,12 @@ func (s *Store) OpenTelemetry(ctx context.Context, cfg TelemetryConfig) (*Teleme
 	if err != nil {
 		return nil, err
 	}
-	t := &Telemetry{s: s, cfg: cfg, root: root, gate: make(chan struct{}, 1), archiveGate: make(chan struct{}, 1), trafficGate: make(chan struct{}, 1), owner: telemetryID()}
+	t := &Telemetry{s: s, cfg: cfg, root: root, gate: make(chan struct{}, 1), archiveGate: make(chan struct{}, 1), trafficGate: make(chan struct{}, 1), scheduleGate: make(chan struct{}, 1), changed: make(chan struct{}, 1), owner: telemetryID()}
 	if err := t.createSchema(ctx); err != nil {
+		root.Close()
+		return nil, err
+	}
+	if err := t.initializeCapacity(ctx); err != nil {
 		root.Close()
 		return nil, err
 	}
@@ -266,6 +273,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS %sidentity (slot INTEGER PRIMARY KEY, id CHAR(32) NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS %straffic_ingress (source VARCHAR(255) PRIMARY KEY, observed BIGINT NOT NULL, total_up BIGINT NOT NULL, total_down BIGINT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS %sgaps (segment_id CHAR(32) NOT NULL, series_id CHAR(64) NOT NULL, first_observed BIGINT NOT NULL, last_observed BIGINT NOT NULL, PRIMARY KEY(segment_id,series_id,first_observed))`,
+		`CREATE TABLE IF NOT EXISTS %sschedule (task VARCHAR(64) PRIMARY KEY, due BIGINT NOT NULL, attempts INTEGER NOT NULL, scan_after VARCHAR(255) NOT NULL, owner CHAR(32) NOT NULL, expires BIGINT NOT NULL, last_error TEXT NOT NULL)`,
 	}
 	prefix := t.s.cfg.TablePrefix + "telemetry_"
 	for _, q := range stmts {
@@ -290,8 +298,11 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 		{"outbox_pending", "outbox", "delivered,ingest_id"},
 		{"summary_series", "summary", "series_id,resolution,bucket"},
 		{"receipt_age", "receipts", "received,ingest_id"},
+		{"receipt_segment", "receipts", "segment_id,ingest_id"},
 		{"members_series", "members", "series_id,first_observed,last_observed,segment_id"},
 		{"gaps_series", "gaps", "series_id,first_observed,last_observed"},
+		{"schedule_due", "schedule", "due,expires,task"},
+		{"summary_age", "summary", "resolution,bucket,series_id,segment_id"},
 	} {
 		q := fmt.Sprintf("CREATE INDEX %s ON %s (%s)", prefix+idx.name, t.table(idx.table), idx.cols)
 		if t.s.cfg.Driver != DriverMySQL {
@@ -450,6 +461,9 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 	if !errors.Is(err, sql.ErrNoRows) {
 		return result, err
 	}
+	if err = t.CheckCapacity(ctx, false); err != nil {
+		return result, err
+	}
 	if b.Traffic != nil {
 		traffic := *b.Traffic
 		b.Traffic = &traffic
@@ -559,6 +573,7 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 	if err = tx.Commit(); err != nil {
 		return TelemetryReceipt{}, err
 	}
+	t.notify()
 	return result, t.fault("ingest-after-commit")
 }
 

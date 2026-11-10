@@ -47,7 +47,7 @@ func telemetryExternal(t *testing.T, cfg Config) {
 	}
 	defer e.Close()
 	defer func() {
-		for _, table := range []string{"gaps", "traffic_ingress", "identity", "erasures", "members", "work", "leases", "outbox", "summary", "hot", "series", "receipts", "segments", "progress"} {
+		for _, table := range []string{"schedule", "gaps", "traffic_ingress", "identity", "erasures", "members", "work", "leases", "outbox", "summary", "hot", "series", "receipts", "segments", "progress"} {
 			if _, err := s.db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+e.table(table)); err != nil {
 				t.Errorf("drop %s: %v", table, err)
 			}
@@ -82,5 +82,14 @@ func telemetryExternal(t *testing.T, cfg Config) {
 	}
 	if got, err := e.Aggregate(ctx, q, now); err != nil || len(got.Points) != 1 || got.Points[0].Value != 12 {
 		t.Fatalf("cold chart %+v %v", got, err)
+	}
+	if err = e.EnsureSchedule(ctx, []ScheduleTask{{Name: "summary", Due: time.Now().Add(-time.Second)}}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, ran, err := e.DispatchSchedule(ctx, time.Now(), func(context.Context, ScheduleTask) (ScheduleOutcome, error) {
+		return ScheduleOutcome{Delay: time.Hour, Cursor: "cpu"}, nil
+	})
+	if err != nil || !ran {
+		t.Fatal("external SQL scheduler", ran, err)
 	}
 }

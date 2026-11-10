@@ -30,6 +30,9 @@ type telemetryBackupManifest struct {
 // The application also holds its exclusive lifecycle lease, stops metadata
 // delivery and takes the metadata snapshot through the supplied callback.
 func (t *Telemetry) BackupBundle(ctx context.Context, databasePath, archiveDir string, metadata func() error) error {
+	if err := t.CheckCapacity(ctx, true); err != nil {
+		return err
+	}
 	select {
 	case t.archiveGate <- struct{}{}:
 		defer func() { <-t.archiveGate }()

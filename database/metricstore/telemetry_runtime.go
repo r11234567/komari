@@ -34,41 +34,18 @@ type telemetryConsumer struct {
 
 var activeTelemetryConsumer atomic.Pointer[telemetryConsumer]
 
-func ConfigureTelemetryConsumer(apply func(context.Context, metric.TelemetryTrafficEvent) error) {
-	activeTelemetryConsumer.Store(&telemetryConsumer{apply: apply})
+type telemetryLedgerGC struct {
+	apply func(context.Context, time.Time, int) (int, error)
 }
 
-// This bounded integration pass is replaced by due-work dispatch at checkpoint
-// 4. It performs no legacy compaction or unbounded history scan.
-func runTelemetryPass(ctx context.Context, s *metric.Store, now time.Time) (SchedulerResult, error) {
-	var out SchedulerResult
-	t := s.Telemetry()
-	for i := 0; i < 128; i++ {
-		n, err := t.SummarizeNext(ctx)
-		if err != nil {
-			return out, err
-		}
-		if n == 0 {
-			break
-		}
-		out.Written += n
-		out.Compactions++
-	}
-	if c := activeTelemetryConsumer.Load(); c != nil && c.apply != nil {
-		if _, err := t.DeliverTraffic(ctx, 128, c.apply); err != nil {
-			return out, err
-		}
-	}
-	if _, err := t.SealDue(ctx, now); err != nil {
-		return out, err
-	}
-	if _, err := t.ArchiveNext(ctx); err != nil {
-		return out, err
-	}
-	if _, err := t.DeleteArchivedChunk(ctx, now, 512); err != nil {
-		return out, err
-	}
-	return out, nil
+var activeTelemetryLedgerGC atomic.Pointer[telemetryLedgerGC]
+
+func ConfigureTelemetryLedgerGC(apply func(context.Context, time.Time, int) (int, error)) {
+	activeTelemetryLedgerGC.Store(&telemetryLedgerGC{apply: apply})
+}
+
+func ConfigureTelemetryConsumer(apply func(context.Context, metric.TelemetryTrafficEvent) error) {
+	activeTelemetryConsumer.Store(&telemetryConsumer{apply: apply})
 }
 
 func telemetryConfig(cfg *MetricStoreConfig) (metric.TelemetryConfig, error) {

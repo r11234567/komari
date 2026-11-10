@@ -216,6 +216,9 @@ func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 		if err = t.renewWork(ctx, t.s.db, "archive"); err != nil {
 			return false, err
 		}
+		if err = telemetryYield(ctx); err != nil {
+			return false, err
+		}
 	}
 	if count != seg.Points {
 		return false, fmt.Errorf("archive member mismatch: got %d expected %d", count, seg.Points)
@@ -350,6 +353,11 @@ func (t *Telemetry) visitArchivePath(ctx context.Context, seg telemetrySegment, 
 			after = r.Ingest
 			ordinal = r.Ordinal
 			count++
+			if count%128 == 0 {
+				if err = telemetryYield(ctx); err != nil {
+					return err
+				}
+			}
 			if visit != nil {
 				if err = visit(r); err != nil {
 					return err
@@ -390,7 +398,7 @@ func (t *Telemetry) DeleteArchivedChunk(ctx context.Context, now time.Time, limi
 	if err != nil {
 		return 0, err
 	}
-	defer release()
+	defer func() { release() }()
 	// Full compressed-file verification precedes the first destructive chunk,
 	// outside a write transaction. Subsequent chunks check the immutable file's
 	// identity/size; they never decompress or rehash it for every 512 rows.
@@ -412,8 +420,18 @@ func (t *Telemetry) DeleteArchivedChunk(ctx context.Context, now time.Time, limi
 		if e != nil {
 			return 0, e
 		}
+		// Immutable-file verification may yield for CPU pacing. Ingestion must
+		// not wait behind decompression or those pauses. Eligibility is checked
+		// again in the destructive transaction after reacquiring the writer.
+		release()
+		release = func() {}
 		if e = t.visitArchive(ctx, seg, nil); e != nil {
 			return 0, e
+		}
+		release, err = t.acquire(ctx)
+		if err != nil {
+			release = func() {}
+			return 0, err
 		}
 	}
 	tx, err := t.begin(ctx)

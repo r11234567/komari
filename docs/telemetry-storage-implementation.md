@@ -87,7 +87,7 @@ replacing data. The supported deployment is one panel writer; sharing a database
 between multiple running panels is not a coordinated full-backup mode. Portable
 external-SQL backups and live database relocation are explicitly unavailable.
 
-Local Linux race suites passed on 2026-11-11: `pkg/metric` (70.232s),
+Local Linux race suites passed on 2026-11-10: `pkg/metric` (70.232s),
 `database/metricstore`, `database/trafficledger`, `database/enrollment`,
 `database/dbcore`, `web/connect`, `web/rpc/jsonrpc`, `web/api/admin`, `web/backup`
 and `cmd`. Compressed V4/V6, summary-only history, hot corrections and interrupted
@@ -96,17 +96,28 @@ migration passed. The full Web production build, 196 tests and lint passed
 previous-token handoffs by comparing decoded instants instead of SQLite text
 timestamps with different UTC offsets.
 
-Remote checkpoint CI/E2E is pending. Data-preserving post-cutover rollback,
-complete cold-cycle E2E, final driver results and physical retirement cleanup
-remain acceptance work; the items below are deliberately not marked complete.
+All 25 component checks, including actual external-driver services, passed on
+`a9f6675e`. The [real HTTPS / built Web / installed Agent E2E](https://github.com/r11234567/komari/actions/runs/42806682373)
+passed on that revision: real reports rotate to cold files, charts survive raw
+deletion, CSV downloads, and the downloaded full backup restores and replays
+into a separate legacy-readable database. Rollback preserves the metadata and
+calibration ledger; known unavailable raw fails explicitly. Already-compressed
+archive members use ZIP Store to avoid recompression. The final local relevant
+race suites passed again (`pkg/metric`: 70.723s).
 
-- [ ] Independent traffic state, hourly/daily/cycle ledgers and calibration.
-- [ ] Authorized bounded chart routing, actual resolution and missing-data status.
-- [ ] Streaming hot/cold CSV, archive ownership, deletion and file leases.
-- [ ] Consistent full backup/restore, resumable legacy migration and data rollback.
-- [ ] Settings and capacity/backlog diagnostics, protocol compatibility.
-- [ ] Remove obsolete runtime writers after the migration reader is isolated.
-- [ ] Component CI, authenticated real E2E, restore and migration verification.
+Legacy writer APIs are unreachable from the active application Store. Physical
+library deletion remains deferred until the final full-cycle/migration checks;
+compatibility codecs are still needed by offline migration and their tests.
+Incident-sized migration and fixed-resource verification remain checkpoint 5.
+
+- [x] Independent traffic state, hourly/daily/cycle ledgers and calibration.
+- [x] Authorized bounded chart routing, actual resolution and missing-data status.
+- [x] Bounded hot/cold CSV, archive ownership, deletion and file leases.
+- [x] Consistent SQLite full backup/restore, resumable migration and data rollback.
+- [x] Settings and initial backlog diagnostics, protocol compatibility.
+- [x] Isolate legacy migration readers; prevent obsolete application writers.
+- [x] Component CI, authenticated real E2E, restore and migration verification.
+- [ ] Physically remove obsolete library writers after final compatibility checks.
 
 ## 4. Replace the maintenance scheduler
 

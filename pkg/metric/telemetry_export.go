@@ -16,6 +16,9 @@ import (
 // application must supply WithTelemetryEntities. Normal Query/Chart never
 // invoke it. Matching metrics share one decode per immutable archive.
 func (t *Telemetry) ExportRawBatch(ctx context.Context, queries []Query) ([][]Point, error) {
+	if err := t.CheckCapacity(ctx, true); err != nil {
+		return nil, err
+	}
 	if len(queries) > 64 {
 		return nil, ErrTelemetryBackpressure
 	}
@@ -54,6 +57,15 @@ func (t *Telemetry) ExportRawBatch(ctx context.Context, queries []Query) ([][]Po
 	if err != nil {
 		release()
 		return nil, err
+	}
+	var historyFloor int64
+	if err = tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(value),0) FROM "+t.table("progress")+" WHERE task='raw_history_floor'").Scan(&historyFloor); err != nil {
+		release()
+		return nil, err
+	}
+	if historyFloor > 0 && start.UnixNano() < historyFloor {
+		release()
+		return nil, fmt.Errorf("%w: raw telemetry history has expired", ErrTelemetryCoverage)
 	}
 	// Missing old-core membership must not silently produce an empty export.
 	var missing string
