@@ -151,15 +151,20 @@ ingestion/accounting over export/backup; it is not a capacity guarantee.
 
 ## 5. Final integrated verification
 
-- [ ] All CI checks and real browser/server/Agent scenarios pass on final HEAD.
+- [x] All 25 component checks pass on final executable revision `ca5f02ac`,
+  including both actual external-SQL build variants.
+- [x] Real browser/server/Agent scenarios pass on that executable revision:
+  [final E2E 42820507567](https://github.com/r11234567/komari/actions/runs/42820507567).
 - [x] Incident-sized consistent data, mixed ingestion/query/archive/export load,
   migration interrupt/resume, backup restore and rollback.
 - [x] Fixed 1 vCPU / 1 GiB, 15-minute mixed-load manifest and measurements.
 - [ ] Full-day stability, isolated archive RSS and matched old/new load comparison.
-- [ ] Complete retention/archive-cycle soak; permission/security regressions.
-- [ ] Evidence links, limitations and unchecked deployment-only items recorded.
+- [x] Accelerated complete retention/archive-cycle and scoped authorization,
+  workspace revocation, API Token, plugin and root-permission regressions.
+- [ ] Complete deployment-environment retention/archive-cycle soak.
+- [x] Evidence links, limitations and unchecked deployment-only items recorded.
 
-Final verification in progress (2026-11-10): the disposable incident migration
+Final verification (2026-11-10): the disposable incident migration
 imported all 11,583,271 logical raw points in 15m9.871s, then verified six exact
 raw windows and the unchanged original logical point count. Its durable fixture
 is retained outside the repository; no production database was opened for write.
@@ -167,6 +172,28 @@ The reference-format race suite passed again after build isolation (`pkg/metric`
 72.400s), including metricstore, trafficledger, Connect and application startup.
 The normal-build full metric and metricstore suites pass independently. The
 production package selector rejects any retired fixture entry points.
+
+All 25 final component checks passed on `ca5f02ac`. The
+[final external SQL workflow](https://github.com/r11234567/komari/actions/runs/42820511980)
+passed the complete historical-reference race suite with real PostgreSQL 17,
+MySQL 8.4 and MariaDB 11.4, followed by the complete normal-build storage race
+suite and a package-selection guard excluding all retired writer controllers.
+The normal-build package results were 14.173s for metric, 4.173s for metricstore
+and 6.307s for trafficledger. The other component checks cover exact pinned Web
+builds, terminal/files, credential lifecycle, scoped API security, plugins,
+privileged execution, workspace lifecycle, traffic, notifications and archives.
+
+The final [real E2E](https://github.com/r11234567/komari/actions/runs/42820507567)
+also passed on `ca5f02ac`: built pinned Web, HTTPS/Nginx, an installed nonroot
+Agent, fresh human verification, terminal/clipboard/file round trips and
+workspace revocation. Actual Agent reports produced 504 summary rows, one
+complete cold archive, zero legacy hot rows or compression blocks, 13 durable
+task rows and zero task failures. History queries and the real CSV download
+passed. The downloaded full backup restored 79 CPU raw points matching the
+chart sample count and sum; traffic ownership was 79 through accepted 79.
+Process restart recovery and explicit legacy-compatible rollback also passed.
+Subsequent evidence-only documentation commits do not change the executable
+revision; they do not imply another measured runtime or deployment soak.
 
 The resource fixture fixes ten nodes reporting every five seconds, two scoped
 day/week/month chart workers every five seconds, real cold export, cancellation,
@@ -176,6 +203,11 @@ CPU, and the source SQL and immutable archives are never modified. This is WSL
 storage-call acceptance, not a claim of measured Debian Docker HTTP latency or
 a completed 24-hour soak. Per-operation timings and backlog snapshots are
 retained in the report produced by `scripts/ci/telemetry-resource.sh`.
+The [normalized resource report](evidence/telemetry-resource-2026-11-10.json)
+retains individual hot-byte samples, all timing summaries, the workload manifest
+and source report/log SHA-256 values. Only repetitive CPU-info and host interrupt
+statistics are omitted; the CPU model remains recorded. The measured working
+tree was not recorded as a pristine commit, so this report makes no such claim.
 
 The completed 900.04-second run on the durable incident fixture passed:
 
