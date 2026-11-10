@@ -197,6 +197,9 @@ the design's p95/p99 gates passed. RSS is sampled once per second and is a mixed
 process measurement, not a kernel high-water mark or isolated archive memory.
 The cancellation timing in this load report is a pre-cancelled request; active
 export cancellation and lease cleanup are verified by separate fault/race tests.
+The added active-cancellation regression stops after 128 decoded cold records,
+requires cancellation within one second and zero remaining leases, then verifies
+that another complete cold export still succeeds; three race repetitions pass.
 The source fixture was migrated before build isolation; the measured application
 already selected the identical retired-storage/new-Telemetry path. A post-cleanup
 smoke and final production-build CI separately validate that build selection.

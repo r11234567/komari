@@ -8,6 +8,58 @@ import (
 	"time"
 )
 
+func TestTelemetryCancelDuringColdDecodeReleasesLease(t *testing.T) {
+	_, e := telemetryFixture(t, "")
+	ctx := WithTelemetryEntities(context.Background(), []string{"node"})
+	now := time.Now().UTC().Truncate(time.Hour)
+	at := now.Add(-time.Hour)
+	values := make([]float64, 256)
+	for i := range values {
+		values[i] = float64(i)
+	}
+	if _, err := e.Accept(ctx, telemetryBatch("cancel-cold", at, values...), now); err != nil {
+		t.Fatal(err)
+	}
+	summarizeAll(t, e)
+	if _, err := e.SealDue(ctx, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := e.ArchiveNext(ctx); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if n, err := e.DeleteArchivedChunk(ctx, now.Add(2*time.Hour), 512); err != nil || n != len(values) {
+		t.Fatal(n, err)
+	}
+	q := Query{MetricName: "cpu", EntityID: "node", Start: at, End: now}
+	run, cancel := context.WithCancel(ctx)
+	defer cancel()
+	decoding := false
+	run = WithTelemetryWorkYield(run, func(context.Context) error {
+		// Called after 128 real archive records have been decoded, with a
+		// committed export lease. This is not a pre-cancelled request.
+		decoding = true
+		if n := telemetryCount(t, e, "leases"); n != 1 {
+			t.Fatalf("active leases = %d", n)
+		}
+		cancel()
+		return run.Err()
+	})
+	began := time.Now()
+	if _, err := e.ExportRawBatch(run, []Query{q}); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if !decoding || time.Since(began) > time.Second {
+		t.Fatal("cold decode did not stop promptly", decoding, time.Since(began))
+	}
+	if n := telemetryCount(t, e, "leases"); n != 0 {
+		t.Fatalf("cancel leaked %d archive leases", n)
+	}
+	got, err := e.ExportRawBatch(ctx, []Query{q})
+	if err != nil || len(got[0]) != len(values) {
+		t.Fatal("subsequent cold export", err, len(got))
+	}
+}
+
 func TestTelemetryExportHotColdOwnershipAndLease(t *testing.T) {
 	_, e := telemetryFixture(t, "")
 	ctx := WithTelemetryEntities(context.Background(), []string{"node"})
