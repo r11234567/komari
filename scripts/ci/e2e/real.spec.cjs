@@ -112,11 +112,20 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
     await item.saveAs(destination);
     return fs.readFileSync(destination, 'utf8');
   }
+  async function beginVerification(container) {
+    await container.getByRole('button', { name: 'Start verification / send code', exact: true }).click();
+    await expect(container.getByRole('textbox', { name: 'Enter verification code', exact: true })).toHaveValue('');
+  }
+  async function verifyCredential(container, code) {
+    await container.getByRole('textbox', { name: 'Enter verification code', exact: true }).fill(code);
+    await container.getByRole('button', { name: 'Verify and continue', exact: true }).click();
+  }
   async function confirmTerminal() {
     const dialog = page.getByRole('dialog');
-    await expect(dialog.getByPlaceholder('000000')).toBeVisible();
-    await dialog.getByPlaceholder('000000').fill(await freshCode());
-    await dialog.getByRole('button', { name: 'Confirm', exact: true }).click();
+    await dialog.getByRole('textbox', { name: 'System account on this machine', exact: true }).fill(process.env.USER);
+    await dialog.getByRole('button', { name: 'Verify and unlock', exact: true }).click();
+    await beginVerification(dialog);
+    await verifyCredential(dialog, await freshCode());
     await expect(dialog).toBeHidden();
     await expect.poll(() => page.evaluate(() => getComputedStyle(document.body).pointerEvents)).not.toBe('none');
     await expect(page.locator('.km-terminal-session:visible textarea.xterm-helper-textarea')).toBeAttached();
@@ -242,23 +251,45 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         { timeout: 60_000 }).toBe(true);
     });
 
-    await test.step('built account page rejects wrong OTP and keeps the password proof empty', async () => {
+    await test.step('built account page rejects wrong OTP and password change requires its own challenge', async () => {
       await page.goto('/admin/account');
       const gate = page.locator('.km-account-2fa-gate');
       await expect(gate).toBeVisible();
+      await beginVerification(gate);
       const counter = Math.floor(Date.now() / 30_000);
       const validCodes = [-1, 0, 1].map(n => totp(secret, counter + n));
       let invalid = '000000';
       while (validCodes.includes(invalid)) invalid = String(Number(invalid) + 1).padStart(6, '0');
-      await gate.getByPlaceholder('000000').fill(invalid);
-      const rejected = page.waitForResponse(r => r.url().includes('/api/admin/2fa/verify'));
-      await gate.getByRole('button', { name: 'Confirm', exact: true }).click();
+      const rejected = page.waitForResponse(r => r.url().endsWith('.TrustedCredentialService/CompleteVerification'));
+      await verifyCredential(gate, invalid);
       expect((await rejected).ok()).toBe(false);
       await expect(gate).toBeVisible();
-      await gate.getByPlaceholder('000000').fill(await freshCode());
-      await gate.getByRole('button', { name: 'Confirm', exact: true }).click();
+      await expect(gate.getByRole('alert')).toBeVisible();
+      await expect(gate.getByPlaceholder('000000')).toHaveValue('');
+      const accepted = page.waitForResponse(r => new URL(r.url()).pathname === '/api/admin/2fa/verify');
+      await verifyCredential(gate, await freshCode());
+      expect((await accepted).ok()).toBe(true);
       await expect(gate).toHaveCount(0);
-      await expect(page.locator('#password_2fa')).toHaveValue('');
+      const draft = `Ci9-${crypto.randomBytes(24).toString('hex')}`;
+      let passwordWrites = 0;
+      const onWrite = r => { if (new URL(r.url()).pathname === '/api/admin/update/user') passwordWrites++; };
+      page.on('request', onWrite);
+      await page.locator('#password').fill(draft);
+      await page.locator('#password_repeat').fill(draft);
+      await page.locator('.km-account-password-form').getByRole('button', { name: 'Change Password', exact: true }).click();
+      const passwordDialog = page.getByRole('dialog');
+      await expect(passwordDialog).toBeVisible();
+      await expect(passwordDialog.getByPlaceholder('000000')).toHaveCount(0);
+      const challenge = page.waitForRequest(r => r.url().endsWith('.TrustedCredentialService/BeginVerification'));
+      await beginVerification(passwordDialog);
+      expect((await challenge).postDataJSON().resource).toMatch(/^account:password:/);
+      expect(passwordWrites).toBe(0);
+      await passwordDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await expect(passwordDialog).toBeHidden();
+      await expect(page.locator('#password')).toHaveValue('');
+      await expect(page.locator('#password_repeat')).toHaveValue('');
+      expect(passwordWrites).toBe(0);
+      page.off('request', onWrite);
     });
 
     await test.step('real xterm input, remote output, export, search and system clipboard', async () => {
@@ -313,7 +344,9 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await page.keyboard.press('Escape');
       await expect(active().locator('div').first()).toHaveCSS('background-color', 'rgb(220, 20, 60)');
       await tabMenu('Duplicate tab');
-      await confirmTerminal();
+      // A second tab shares the already authorized workspace identity.
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+      await expect(page.locator('.km-terminal-session:visible textarea.xterm-helper-textarea')).toBeAttached();
       await expect(page.getByRole('tab')).toHaveCount(2);
       await active().dblclick();
       await page.getByRole('textbox', { name: 'Rename tab', exact: true }).fill('Duplicate E2E');
