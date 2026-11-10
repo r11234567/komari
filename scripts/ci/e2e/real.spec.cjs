@@ -155,6 +155,10 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
     await expect(dialog).toBeHidden();
     await expect.poll(() => page.evaluate(() => getComputedStyle(document.body).pointerEvents)).not.toBe('none');
     await expect(page.locator('.km-terminal-session:visible textarea.xterm-helper-textarea')).toBeAttached();
+    // Mounting xterm precedes Agent attachment. Input is intentionally disabled
+    // until then; wait for the real shell, not a fixed delay or a test handle.
+    await expect(page.locator('.km-terminal-session:visible .xterm-rows'))
+      .toContainText(`${process.env.USER}@`, { timeout: 45_000 });
   }
   async function downloadFile(name) {
     const response = await request(`/api/admin/client/${agentId}/file/download?${new URLSearchParams({ path: fixture(name), chunk_size: '1048576' })}`, undefined, { method: 'GET' });
