@@ -57,8 +57,9 @@ func (w *Worker) observeResources(p ResourceProof, now time.Time) *ResourceUsage
 	} // Unknown is never reported as zero CPU usage.
 	u := w.resources.sample(p, c, now)
 	if w.io != nil {
-		u.IOBudgetWaiting = w.io.waiting.Load()
-		u.IOBudgetWaitSeconds = float64(w.io.waitNanos.Load()) / float64(time.Second)
+		waiting, duration := w.io.observation()
+		u.IOBudgetWaiting = waiting
+		u.IOBudgetWaitSeconds = duration.Seconds()
 	}
 	return u
 }

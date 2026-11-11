@@ -52,19 +52,20 @@ type Request struct {
 
 type Job struct {
 	Request
-	ID                  string         `json:"id"`
-	FormatVersion       int            `json:"format_version"`
-	Status              string         `json:"status"`
-	Phase               string         `json:"phase"`
-	PhaseStartedAt      time.Time      `json:"phase_started_at"`
-	PhaseActiveSeconds  float64        `json:"phase_active_seconds"`
-	WaitingSince        time.Time      `json:"waiting_since,omitempty"`
-	WaitSeconds         float64        `json:"wait_seconds"`
-	CurrentWaitSeconds  float64        `json:"current_wait_seconds"`
-	Throughput          Throughput     `json:"throughput"`
-	PhaseETA            PhaseETA       `json:"phase_eta"`
-	CurrentInput        *InputProgress `json:"current_input,omitempty"`
-	Resources           *ResourceUsage `json:"resources,omitempty"`
+	ID                  string                  `json:"id"`
+	FormatVersion       int                     `json:"format_version"`
+	Status              string                  `json:"status"`
+	Phase               string                  `json:"phase"`
+	PhaseStartedAt      time.Time               `json:"phase_started_at"`
+	PhaseActiveSeconds  float64                 `json:"phase_active_seconds"`
+	WaitingSince        time.Time               `json:"waiting_since,omitempty"`
+	WaitSeconds         float64                 `json:"wait_seconds"`
+	CurrentWaitSeconds  float64                 `json:"current_wait_seconds"`
+	Throughput          Throughput              `json:"throughput"`
+	PhaseETA            PhaseETA                `json:"phase_eta"`
+	CurrentInput        *InputProgress          `json:"current_input,omitempty"`
+	Verification        *CheckpointVerification `json:"checkpoint_verification,omitempty"`
+	Resources           *ResourceUsage          `json:"resources,omitempty"`
 	observation         progressState
 	ProgressKind        string    `json:"progress_kind"`
 	CreatedAt           time.Time `json:"created_at"`
@@ -322,7 +323,8 @@ func (q *Queue) decorate(j *Job, control string) {
 	if control == "pause" && j.Status == "running" {
 		j.WaitReason = "user_pause_requested"
 	}
-	if j.Status == "running" || j.Status == "publishing" {
+	processing := activeStatus(j.Status) || j.Status == "recovering"
+	if processing {
 		a := q.Availability()
 		if a.Available && a.ActiveJob == j.ID {
 			j.Heartbeat = a.At
@@ -333,12 +335,14 @@ func (q *Queue) decorate(j *Job, control string) {
 	if !activeStatus(j.Status) || time.Since(j.Heartbeat) > 15*time.Second {
 		j.Throughput = Throughput{}
 		j.PhaseETA = PhaseETA{State: "unknown", Scope: "phase", Reason: j.Status}
-		j.Resources = nil
 	} else {
 		j.estimateETA(time.Now())
 		if time.Since(j.Throughput.At) > 15*time.Second {
 			j.Throughput = Throughput{}
 		}
+	}
+	if !processing || time.Since(j.Heartbeat) > 15*time.Second {
+		j.Resources = nil
 	}
 }
 func (q *Queue) List(ctx context.Context, owner string) ([]*Job, error) {

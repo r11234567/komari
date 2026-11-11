@@ -1,0 +1,70 @@
+{
+  "scope": "Short local database export recovery and browser verification; not a two-hour qualification",
+  "date_utc": "2026-11-11",
+  "source_parent": "479b671107556cbdcd4afd78c72d70c43119b533",
+  "web_commit": "8f2c729012b19b8ebe683f8dcd68ee6345691993",
+  "backend_binary_sha256": "d414fa7cf277d93aa98cf6aba9c71f865f8910c2ccfa4dc138c4ef1d4d46845f",
+  "isolation": {
+    "source": "SQLite backup of a nonproduction fixture, immutable archive links, independently copied committed CSV prefix",
+    "original_qualification_restarted_or_modified": false,
+    "instance_cpu_cores": 0.5,
+    "worker_cpu_cores": 0.01,
+    "worker_memory_max_bytes": 134217728,
+    "logical_io_bytes_per_second": 65536
+  },
+  "source_regressions": {
+    "modes": ["raw", "summary", "sample30s"],
+    "pause_during_validation_and_resume_from_zero": true,
+    "published_output_unchanged": true,
+    "stale_or_different_active_worker_not_exposed": true,
+    "cached_io_negative_replay": {
+      "bytes": 262144,
+      "configured_bytes_per_second": 1048576,
+      "old_time_only_sampling_gate_failed": true,
+      "fixed_source_passed_same_test": true
+    },
+    "in_progress_io_wait_duration_and_cancellation": true
+  },
+  "real_http_recovery": {
+    "task_id_in_independent_copy": "f8d773dd28d8db975a056587",
+    "committed_prefix_bytes": 74566313,
+    "started_at": "2026-11-11T14:48:01.213464576Z",
+    "samples": [
+      {"at": "2026-11-11T14:48:06.423770767Z", "verified_bytes": 393216, "written_rows": 8812, "checkpoint": 74, "io_wait_seconds": 4.916347764},
+      {"at": "2026-11-11T14:48:11.678034068Z", "verified_bytes": 720896, "written_rows": 8812, "checkpoint": 74, "io_wait_seconds": 9.614000424},
+      {"at": "2026-11-11T14:48:16.906168413Z", "verified_bytes": 1048576, "written_rows": 8812, "checkpoint": 74, "io_wait_seconds": 15.607982356}
+    ],
+    "live_worker_group_resources": true,
+    "generation_throughput_or_eta_reused": false,
+    "reload_preserved_recovery": true,
+    "resume_restarted_hash_from_zero": true,
+    "cancel_ms": 211,
+    "cancelled_output_published": false,
+    "javascript_errors": []
+  },
+  "mobile_layout": {
+    "viewport_width": 390,
+    "card_width": 340,
+    "card_right": 365,
+    "scroll_width": 340,
+    "client_width": 340,
+    "sidebar_animation_checked_separately": true,
+    "cancelled_job_has_no_stale_phase_progress_bar": true
+  },
+  "local_gates": {
+    "complete_race_and_vet": ["pkg/historyexport", "pkg/metric", "database/metricstore", "database/trafficledger", "web/storageupdate", "web/api/admin", "web/router"],
+    "linux_server_build": true,
+    "windows_no_cgo_compile_only": true,
+    "database_related_web_tests": 23,
+    "production_and_system_web_builds": true,
+    "lint_errors": 0,
+    "existing_lint_warnings": 39
+  },
+  "limitations": [
+    "This browser recovery was cancelled after observation; it is not a completed 71 MiB recovery qualification.",
+    "All three modes complete prefix validation and publication in the smaller real SQLite regression fixtures.",
+    "The original two-hour observer runs the prior 479b671 binary and cannot qualify these later changes.",
+    "Windows compilation is not Windows SQLite runtime or browser E2E evidence.",
+    "Two attempts to serve built assets directly from the Windows mount failed with navigation timeout and ENOMEM. Identical assets were copied and SHA256-verified on the Linux filesystem; acceptance assertions were unchanged."
+  ]
+}

@@ -31,6 +31,16 @@ type InputProgress struct {
 	Kind  string `json:"kind"`
 }
 
+// This is a separate read of the committed prefix, not newly exported work.
+// Recovery always starts hashing from byte zero; persisted values are only
+// observations and must never bypass checkpoint checksum validation.
+type CheckpointVerification struct {
+	StartedAt     time.Time `json:"started_at"`
+	LastProgress  time.Time `json:"last_progress_at"`
+	VerifiedBytes int64     `json:"verified_bytes"`
+	TotalBytes    int64     `json:"total_bytes"`
+}
+
 type progressCounters struct{ Rows, Bytes, Decoded, Units int64 }
 type rateSample struct {
 	Seconds              float64

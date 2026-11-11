@@ -308,7 +308,14 @@ func (w *Worker) Step(parent context.Context, j *Job) error {
 		return e
 	}
 	var err error
-	if recovering {
+	// Establish the baseline before the first work batch. Later steps settle
+	// outstanding debt with the control monitor active, so pause/cancel can
+	// interrupt the wait just like checkpoint verification and generation.
+	if w.io != nil {
+		err = w.io.wait(ctx)
+	}
+	if err == nil && recovering {
+		j.Status = "recovering"
 		err = w.verifyCheckpoint(ctx, j)
 		if err == nil {
 			j.Status, j.WaitReason = "running", ""
@@ -544,6 +551,7 @@ type outputWriter struct {
 // unconfirmed tail. Missing bytes and same-size corruption must never become a
 // downloadable CSV. This read shares the worker's CPU and logical I/O budgets.
 func (w *Worker) verifyCheckpoint(ctx context.Context, j *Job) error {
+	j.Verification = nil
 	if j.Committed.Offset == 0 {
 		return nil
 	}
@@ -572,6 +580,11 @@ func (w *Worker) verifyCheckpoint(ctx context.Context, j *Job) error {
 	if err = expected.(encoding.BinaryUnmarshaler).UnmarshalBinary(j.Committed.Hash); err != nil {
 		return err
 	}
+	now := time.Now().UTC()
+	j.Verification = &CheckpointVerification{StartedAt: now, TotalBytes: j.Committed.Offset}
+	if err = w.verificationProgress(ctx, j, 0, true); err != nil {
+		return err
+	}
 	h := sha256.New()
 	buf := make([]byte, 64<<10)
 	remaining := j.Committed.Offset
@@ -585,6 +598,9 @@ func (w *Worker) verifyCheckpoint(ctx context.Context, j *Job) error {
 		}
 		h.Write(buf[:n])
 		remaining -= int64(n)
+		if err = w.verificationProgress(ctx, j, j.Committed.Offset-remaining, false); err != nil {
+			return err
+		}
 		if w.io != nil {
 			if err = w.io.wait(ctx); err != nil {
 				return err
@@ -594,7 +610,25 @@ func (w *Worker) verifyCheckpoint(ctx context.Context, j *Job) error {
 	if !bytes.Equal(h.Sum(nil), expected.Sum(nil)) {
 		return errors.New("checkpoint output checksum mismatch")
 	}
+	j.Verification = nil
 	return nil
+}
+
+func (w *Worker) verificationProgress(ctx context.Context, j *Job, verified int64, force bool) error {
+	now := time.Now().UTC()
+	if !force && now.Sub(j.Verification.LastProgress) < 5*time.Second {
+		return nil
+	}
+	j.Verification.VerifiedBytes = verified
+	j.Verification.LastProgress = now
+	j.Heartbeat = now
+	if verified > 0 {
+		j.LastProgress = now
+	}
+	if err := w.Queue.Save(ctx, j); err != nil {
+		return err
+	}
+	return w.fault("checkpoint-validation-progress")
 }
 
 func (o *outputWriter) Write(b []byte) (int, error) {
