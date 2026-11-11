@@ -648,3 +648,12 @@ CI/E2E 证据记录精确代码/协议/Web/部署配置版本、源数据 manife
 - 加强版短程轮次 `42993522036` 停于既有 Monaco 零字节保存用例：远端文件先完成第一次写入，但上传响应/界面保存锁尚未结束，紧接着的第二次 Ctrl+S 被保存中保护拒绝。测试改为等待实际标签由未保存标记转为已保存图标，再执行下一次编辑；删除后也等待模型绘制为空且未保存标记可见才保存。仍严格校验远端零字节和实际下载，不加固定 sleep 或放宽文件断言。长资格不受此纯测试同步修正影响。
 - 长资格 `42991493983` 已失败：日志确认包装器默认 20m 超时，退出码 124；不是完成两小时资格，也没有证据表明因 CPU 超限失败。只为长资格步骤覆盖 `KOMARI_AUDIT_TIMEOUT=300m`，脚本仍限 4.5h，job 335m。原 150000 条负载按实测持续吞吐可能超过预算，调整为 80000 条（约 625 MiB 标签输入），仍须实际 running ≥7200s 且完成；不足两小时会失败，不以 sleep 凑时长。长期请求逐次释放 Playwright 响应内存，避免负载生成器自身无限累积。
 - `b1b1696e` 的 25 项 CI 通过，短程 `42995154776` 的 Monaco 验证通过，但取消用例复用了与已完成 raw 相同的请求，被正常去重并返回 ready 下载 200。取消用例改用独立时间范围，仍要求非终态下载 409、请求取消后最终 cancelled；不修改任务去重行为。新短/长资格结果仍待核验。
+
+### 本地分段彻查与应用修复（2026-11-11）
+
+- 停止以远端失败后重跑代替调试，增加明确的 Linux/WSL 本地入口。独立 checkout、数据库、HTTPS 端口、普通 OS 账户、真实安装的 Agent、cgroup 服务均保留在固定 fixture。每个成功浏览器阶段保存本地会话检查点；续跑经真实 UI 重新验证工作区，不注入授权。CI 仍从首次安装完整执行，续跑结果不冒充整体验收。
+- **发现并修复应用缺陷**：手动重试失败任务原先直接置为 queued，绕过进程恢复使用的已提交 CSV 前缀校验。同长度破坏 `.csv.part` 后，原实现仍可完成；现在有已提交字节的重试进入 recovering，先核验文件前缀，损坏则失败且不发布。raw/summary/sample30s 各验证正常续跑和同长度损坏，共六种场景；负向日志 `.cache/telemetry-local-manual-retry-negative.log`，修复日志 `.cache/telemetry-local-manual-retry-fixed.log`。
+- 本地编辑器现场澄清：Ctrl+S 实际发起上传，合并返回 502，原因是本地 root 准备文件时仅改 UID、遗留 root GID，普通 Agent 无法保留该属组。修正新 fixture 的 UID/GID；UTF-8 与零字节保存均按实际协议核对 HTTP 响应和远端字节（零字节在 init 完成），没有改动 Web 快捷键或 Agent 权限规则。此原因只解释本地现场，不外推为早先远端失败的唯一原因。
+- 本地浏览器分段已通过全部 19 个阶段：真实 TCP Ping、热重载、图表人口/精度、32 并发读取、原生验证、终端/文件、Agent 重启、分钟走势与日计费、真实 Agent 冷归档、三模式/v1-v2 CSV、暂停/刷新/断网、取消与失败重试。续跑最终日志 `.cache/telemetry-local-browser-resume.log`，它不是一次全新安装的完整通过记录。
+- 含重试修复的实际后端二进制已通过独立本地升级/还原：SQLite 真锁失败后重启仍受限，释放锁并经 UI 重试成功，43200 条旧原始行保留、11655 条汇总存在；退出维护返回正常路由。实际下载 ZIP 还原后，summary、raw、sample30s v1/v2 四份 ready 文件哈希均匹配，暂停 raw 任务恢复到 done 且下载哈希匹配。记录为 `.cache/telemetry-local-upgrade.log`、私有 fixture 的 `artifacts/storage-upgrade.json` 和 `export-restored-tasks.json`，不提交凭据/数据库。
+- 本次六包完整 `go test -race -count=1` 与 `go vet` 已通过：historyexport、metric、trafficledger、storageupdate、admin、router；日志 `.cache/telemetry-local-storage-gate.log`。Web 固定值未变。当前修复的线上 CI/全新真实 E2E，以及至少两小时持续冷工作、CPU/前台延迟总资格仍待完成；R4/R5 保持未验收。

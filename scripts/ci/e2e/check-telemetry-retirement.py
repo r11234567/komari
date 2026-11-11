@@ -2,13 +2,13 @@
 import json
 import os
 import sqlite3
+import subprocess
 from pathlib import Path
 
-if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
-    raise SystemExit("This check requires the disposable GitHub-hosted E2E fixture")
+subprocess.run(["bash", str(Path(__file__).with_name("guard.sh"))], check=True)
 root = Path(os.environ["E2E_ROOT"]).resolve()
 expected = Path(os.environ["RUNNER_TEMP"]).resolve() / "komari-e2e"
-if root != expected or os.environ.get("RUNNER_OS") != "Linux":
+if root != expected or (os.environ.get("KOMARI_E2E_LOCAL") != "1" and os.environ.get("RUNNER_OS") != "Linux"):
     raise SystemExit("Unexpected E2E root/platform")
 path = root / "panel" / "data" / "metrics.db"
 with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -24,7 +25,7 @@ func main() {
 }
 func run() error {
 	root := os.Getenv("E2E_ROOT")
-	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" || root != filepath.Join(os.Getenv("RUNNER_TEMP"), "komari-e2e") {
+	if exec.Command("bash", "scripts/ci/e2e/guard.sh").Run() != nil || root != filepath.Join(os.Getenv("RUNNER_TEMP"), "komari-e2e") {
 		return fmt.Errorf("disposable hosted fixture only")
 	}
 	dir := filepath.Join(root, "migration-panel", "data")

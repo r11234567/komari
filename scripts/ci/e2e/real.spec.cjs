@@ -13,10 +13,8 @@ const { BinaryReader } = webRequire('@bufbuild/protobuf/wire');
 const root = process.env.E2E_ROOT;
 const artifacts = process.env.E2E_ARTIFACTS;
 const base = 'https://127.0.0.1:29443';
-if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' ||
-    root !== path.join(process.env.RUNNER_TEMP || '', 'komari-e2e')) {
-  throw new Error('This integration test is restricted to the disposable GitHub-hosted fixture.');
-}
+const serviceUser = process.env.KOMARI_E2E_USER || process.env.USER;
+require('./guard.cjs');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const shellQuote = text => `'${text.replaceAll("'", "'\\''")}'`;
 const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -90,6 +88,38 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
   let exportCount = 0;
   const fixture = name => path.join(root, 'files', name);
 
+  // Local debugging may resume at a completed stage boundary. Saved session
+  // data stays in the private fixture, never in uploaded test artifacts. CI
+  // always executes the complete scenario without this mechanism.
+  const localCheckpoint = path.join(root, 'local-browser-checkpoint.json');
+  const completedSteps = [];
+  let resume;
+  if (process.env.KOMARI_E2E_LOCAL === '1' && process.env.KOMARI_E2E_RESUME === '1') {
+    resume = JSON.parse(fs.readFileSync(localCheckpoint, 'utf8'));
+    ({secret, fixturePassword, lastCounter, agentId, pingTaskId, workspaceToken} = resume.values);
+    await context.addCookies(resume.storage.cookies);
+    await context.addInitScript(origins => {
+      for (const origin of origins) if (location.origin === origin.origin) {
+        for (const item of origin.localStorage) localStorage.setItem(item.name, item.value);
+      }
+    }, resume.storage.origins);
+    await page.goto(resume.url);
+  }
+  async function stage(name, action) {
+    if (resume?.completed.includes(name)) {
+      completedSteps.push(name);
+      console.log(`LOCAL DEBUG: restored previously completed stage: ${name}`);
+      return;
+    }
+    await test.step(name, action);
+    completedSteps.push(name);
+    if (process.env.KOMARI_E2E_LOCAL === '1') {
+      fs.writeFileSync(localCheckpoint, JSON.stringify({completed:completedSteps,
+        values:{secret,fixturePassword,lastCounter,agentId,pingTaskId,workspaceToken},
+        storage:await context.storageState(),url:page.url()}), {mode:0o600});
+    }
+  }
+
   async function request(url, data, options = {}) {
     const { allowFailure = false, method = 'POST', headers = {} } = options;
     const workspaceHeaders = url.startsWith(`/${services.file}/`) && workspaceToken
@@ -152,7 +182,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
   }
   async function confirmTerminal() {
     const dialog = page.getByRole('dialog');
-    await dialog.getByRole('textbox', { name: 'System account on this machine', exact: true }).fill(process.env.USER);
+    await dialog.getByRole('textbox', { name: 'System account on this machine', exact: true }).fill(serviceUser);
     await dialog.getByRole('button', { name: 'Verify and unlock', exact: true }).click();
     await beginVerification(dialog);
     await verifyCredential(dialog, await freshCode());
@@ -162,19 +192,36 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
     // Mounting xterm precedes Agent attachment. Input is intentionally disabled
     // until then; wait for the real shell, not a fixed delay or a test handle.
     await expect(page.locator('.km-terminal-session:visible .xterm-rows'))
-      .toContainText(`${process.env.USER}@`, { timeout: 45_000 });
+      .toContainText(`${serviceUser}@`, { timeout: 45_000 });
   }
   async function downloadFile(name) {
     const response = await request(`/api/admin/client/${agentId}/file/download?${new URLSearchParams({ path: fixture(name), chunk_size: '1048576' })}`, undefined, { method: 'GET' });
     return response.body();
   }
 
+  if (resume && new URL(resume.url).pathname === '/terminal') {
+    // Browser storage cannot restore React's in-memory workspace identity or
+    // file pane. Obtain a new grant through the same real UI ceremony.
+    await confirmTerminal();
+    if (resume.completed.includes('real file browsing and multi-chunk browser upload/download with SHA256 equality')) {
+      await tabMenu('File Manager');
+      const location = page.getByRole('textbox', { name: 'Path', exact: true });
+      await location.fill(path.join(root, 'files'));
+      await location.press('Enter');
+      await expect(page.locator('[data-file-path]').filter({ hasText: 'editor.txt' })).toBeVisible();
+    }
+  }
+
   try {
-    await test.step('first-run setup, Secure admin cookie and actual Agent enrollment', async () => {
-      const password = `Ci9-${crypto.randomBytes(24).toString('hex')}`;
+    await stage('first-run setup, Secure admin cookie and actual Agent enrollment', async () => {
+      const bootstrap = path.join(root, 'local-bootstrap.json');
+      const localExisting = process.env.KOMARI_E2E_LOCAL === '1' && fs.existsSync(bootstrap);
+      const password = localExisting ? JSON.parse(fs.readFileSync(bootstrap)).password : `Ci9-${crypto.randomBytes(24).toString('hex')}`;
       fixturePassword = password;
+      if (process.env.KOMARI_E2E_LOCAL === '1' && !localExisting) fs.writeFileSync(bootstrap, JSON.stringify({password}), {mode:0o600});
       console.log(`::add-mask::${password}`);
-      await request('/api/install/complete', {
+      const needsInstall = !localExisting || (await (await http.get('/api/install/status')).json()).data.required;
+      if (needsInstall) await request('/api/install/complete', {
         username: 'e2e-user', password, sitename: 'Komari real E2E', description: '', metric_dsn: './data/metrics.db',
       });
       await expect.poll(async () => (await http.get('/api/version')).status(), { timeout: 60_000 }).toBe(200);
@@ -185,7 +232,9 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       const ticket = (await (await request('/api/bind/ticket', {})).json()).data.ticket;
       expect(ticket).toBeTruthy();
       const log = fs.openSync(path.join(artifacts, 'enrollment.log'), 'w', 0o600);
-      const login = spawn('/usr/lib/komari/komari-e2e/komari-agent', ['login', '--endpoint', base], { stdio: ['ignore', log, log] });
+      const loginCommand = process.env.KOMARI_E2E_LOCAL === '1' ? 'sudo' : '/usr/lib/komari/komari-e2e/komari-agent';
+      const loginPrefix = process.env.KOMARI_E2E_LOCAL === '1' ? ['-u', serviceUser, '/usr/lib/komari/komari-e2e/komari-agent'] : [];
+      const login = spawn(loginCommand, [...loginPrefix, 'login', '--endpoint', base], { stdio: ['ignore', log, log] });
       fs.closeSync(log);
       fs.writeFileSync(path.join(root, 'login.pid'), String(login.pid));
       let pending;
@@ -207,12 +256,12 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       const trustLog = execFileSync('sudo', ['/usr/lib/komari/komari-e2e/komari-host', 'trust',
         '--manifest', '/etc/komari/services/komari-e2e.json', '--endpoint', base,
         '--agent-id', agentId, '--panel-public-key', key.value, '--panel-key-id', key.keyId,
-        '--service-user', process.env.USER], { encoding: 'utf8', timeout: 30_000 });
+        '--service-user', serviceUser], { encoding: 'utf8', timeout: 30_000 });
       fs.writeFileSync(path.join(artifacts, 'trust-install.log'), trustLog);
       execFileSync('sudo', ['systemctl', 'start', 'komari-e2e.service'], { timeout: 30_000 });
     });
 
-    await test.step('installed Agent performs a real TCP latency probe', async () => {
+    await stage('installed Agent performs a real TCP latency probe', async () => {
       const created = await rpc('pingTasks', 'CreatePingTask', {
         name: 'Real E2E panel TCP', target: '127.0.0.1:29444', type: 'tcp',
         intervalSeconds: 5, clients: [agentId], defaultOn: false,
@@ -231,7 +280,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       fs.writeFileSync(path.join(artifacts, 'real-agent-ping.json'), JSON.stringify(result, null, 2));
     });
 
-    await test.step('real Agent history remains available across live metric-store reloads', async () => {
+    await stage('real Agent history remains available across live metric-store reloads', async () => {
       function window() {
         const end = new Date();
         return { agentIds: [agentId], startTime: new Date(end.getTime() - 300_000).toISOString(), endTime: end.toISOString(), maxPoints: 100 };
@@ -269,7 +318,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       fs.writeFileSync(path.join(artifacts, 'metric-store-reloads.json'), JSON.stringify(results, null, 2));
     });
 
-    await test.step('real raw and summary input ownership agrees and built charts expose source precision', async () => {
+    await stage('real raw and summary input ownership agrees and built charts expose source precision', async () => {
       const end = new Date(Date.now() - 15_000);
       const start = new Date(end.getTime() - 5*60_000);
       const window = { agentIds:[agentId], metrics:['cpu.usage'], startTime:start.toISOString(), endTime:end.toISOString(), maxPoints:30 };
@@ -317,7 +366,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       fs.writeFileSync(path.join(artifacts,'metric-query-ownership.json'),JSON.stringify({rawCount,summarized},null,2));
     });
 
-    await test.step('enabled rate limits allow 32 concurrent charts and Ping reads', async () => {
+    await stage('enabled rate limits allow 32 concurrent charts and Ping reads', async () => {
       await request('/api/admin/settings/', { rate_limit_enabled: true });
       const end = new Date();
       // Distinct maxPoints bypass shared cache keys: this exercises actual
@@ -344,7 +393,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       // file, history and backup assertions as an integration regression.
     });
 
-    await test.step('enable real 2FA and apply a signed same-identity WebSSH grant', async () => {
+    await stage('enable real 2FA and apply a signed same-identity WebSSH grant', async () => {
       await request('/api/admin/2fa/generate', undefined, { method: 'GET' });
       secret = (await context.cookies()).find(c => c.name === '2fa_secret')?.value;
       expect(secret).toBeTruthy();
@@ -372,7 +421,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         { timeout: 60_000 }).toBe(true);
     });
 
-    await test.step('built account page rejects wrong OTP and password change requires its own challenge', async () => {
+    await stage('built account page rejects wrong OTP and password change requires its own challenge', async () => {
       await page.goto('/admin/account');
       const gate = page.locator('.km-account-2fa-gate');
       await expect(gate).toBeVisible();
@@ -413,7 +462,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       page.off('request', onWrite);
     });
 
-    await test.step('real xterm input, remote output, export, search and system clipboard', async () => {
+    await stage('real xterm input, remote output, export, search and system clipboard', async () => {
       await context.addInitScript(({ base, agentId }) => {
         localStorage.setItem('komari:file-transfer:chunk-size:v1', JSON.stringify({
           [`${base}|upload|${agentId}`]: 1048576, [`${base}|download|${agentId}`]: 1048576,
@@ -450,7 +499,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await page.locator('.km-terminal-search-floating button').last().click();
     });
 
-    await test.step('rename, color, duplicate, drag and bulk close real terminal tabs', async () => {
+    await stage('rename, color, duplicate, drag and bulk close real terminal tabs', async () => {
       const active = () => page.getByRole('tab', { selected: true });
       await active().dblclick();
       await page.getByRole('textbox', { name: 'Rename tab', exact: true }).fill('Original E2E');
@@ -488,7 +537,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await expect(page.getByRole('menu', { includeHidden: true })).toHaveCount(0);
     });
 
-    await test.step('real file browsing and multi-chunk browser upload/download with SHA256 equality', async () => {
+    await stage('real file browsing and multi-chunk browser upload/download with SHA256 equality', async () => {
       await tabMenu('File Manager');
       const location = page.getByRole('textbox', { name: 'Path', exact: true });
       await expect(location).toBeVisible();
@@ -508,7 +557,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       }, null, 2));
     });
 
-    await test.step('actual Monaco editor saves UTF-8 and zero-byte content through the Agent', async () => {
+    await stage('actual Monaco editor saves UTF-8 and zero-byte content through the Agent', async () => {
       await page.locator('[data-file-path]').filter({ hasText: 'editor.txt' }).dblclick();
       // Current Monaco uses a native EditContext surface in Chromium; address
       // its accessible input instead of assuming the old hidden textarea.
@@ -526,7 +575,10 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await expect(page.locator('.km-file-editor .view-lines')).toContainText('Monaco UTF-8: 联调 ✓');
       const savedMark = page.locator('.km-file-editor').getByRole('button', { name: 'Close File', exact: true }).locator('svg');
       await expect(savedMark).toHaveCount(0); // React has observed the edited model.
+      const savedUtf8 = page.waitForResponse(r => new URL(r.url()).pathname.endsWith('/file/upload') && new URL(r.url()).searchParams.get('operation') === 'merge');
       await page.keyboard.press('Control+s');
+      const utf8Response = await savedUtf8;
+      expect(utf8Response.ok(), await utf8Response.text()).toBe(true);
       await expect.poll(() => fs.readFileSync(fixture('editor.txt'), 'utf8')).toBe('Monaco UTF-8: 联调 ✓\n');
       // The remote filesystem changes before the upload response and editor's
       // save guard settle. Wait for the actual saved tab state, not a delay.
@@ -537,13 +589,18 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await page.keyboard.press('Backspace');
       await expect(page.locator('.km-file-editor .view-lines')).toHaveText(/^\s*$/);
       await expect(savedMark).toHaveCount(0);
+      // Zero-byte files complete in init; there is no chunk/merge phase.
+      const savedEmpty = page.waitForResponse(r => new URL(r.url()).pathname.endsWith('/file/upload') && new URL(r.url()).searchParams.get('operation') === 'init');
       await page.keyboard.press('Control+s');
+      const emptyResponse = await savedEmpty;
+      expect(emptyResponse.ok(), await emptyResponse.text()).toBe(true);
+      expect((await emptyResponse.json()).data.complete).toBe(true);
       await expect.poll(() => fs.statSync(fixture('editor.txt')).size).toBe(0);
       await expect(savedMark).toHaveCount(1);
       expect((await downloadFile('editor.txt')).length).toBe(0);
     });
 
-    await test.step('file authorization requires the real workspace grant and rejects unsafe overwrite/recursive flags', async () => {
+    await stage('file authorization requires the real workspace grant and rejects unsafe overwrite/recursive flags', async () => {
       expect(workspaceToken).toBeTruthy();
       const created = fixture('created.txt');
       const missing = await fileDenied('CreateEntry', { path: created, kind: 'ENTRY_KIND_FILE' }, { 'X-Komari-Workspace-Grant': '' });
@@ -563,7 +620,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       expect(fs.readFileSync(fixture('nonempty/keep.txt'), 'utf8')).toBe('keep\n');
     });
 
-    await test.step('Agent executes copy, move, chmod, search and delete under the authorized OS identity', async () => {
+    await stage('Agent executes copy, move, chmod, search and delete under the authorized OS identity', async () => {
       await mutate('CopyEntry', { source: fixture('roundtrip.bin'), destination: fixture('copy.bin'), overwrite: false });
       expect(sha256(fs.readFileSync(fixture('copy.bin')))).toBe(sha256(fs.readFileSync(fixture('roundtrip.bin'))));
       await mutate('MoveEntry', { source: fixture('copy.bin'), destination: fixture('moved.bin'), overwrite: false });
@@ -577,7 +634,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       expect(fs.existsSync(fixture('moved.bin'))).toBe(false);
     });
 
-    await test.step('restart the disposable Agent and verify identity, authorization and file channel recovery', async () => {
+    await stage('restart the disposable Agent and verify identity, authorization and file channel recovery', async () => {
       const before = await rpc('config', 'GetNodeConfigState', { agentId });
       execFileSync('sudo', ['systemctl', 'restart', 'komari-e2e.service'], { timeout: 30_000 });
       await expect.poll(async () => (await rpc('browser', 'GetAgent', { agentId })).agent?.capabilities?.webssh?.available,
@@ -591,7 +648,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       expect(after.observation?.serviceId).toBe(before.observation?.serviceId);
     });
 
-    await test.step('workspace revocation rejects old file grants and re-unlock requires fresh UI verification', async () => {
+    await stage('workspace revocation rejects old file grants and re-unlock requires fresh UI verification', async () => {
       const old = workspaceToken;
       expect((await rpc('workspace', 'LockWorkspace', { grantToken: old })).locked).toBe(true);
       const blockedPath = fixture('revoked-must-not-exist.txt');
@@ -607,7 +664,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       expect(sha256(await downloadFile('roundtrip.bin'))).toBe(sha256(fs.readFileSync(fixture('roundtrip.bin'))));
     });
 
-    await test.step('minute traffic trends and daily billing remain independently available', async () => {
+    await stage('minute traffic trends and daily billing remain independently available', async () => {
       // Real network traffic after the installed Agent's baseline. Fetch public
       // pinned source bytes; no forged timestamps, metric writes or DB seeding.
       execFileSync('curl', ['--fail', '--location', '--max-time', '30', '--output',
@@ -648,7 +705,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       fs.writeFileSync(path.join(artifacts, 'traffic-and-billing.json'), JSON.stringify({ trends: results, billing }, null, 2));
     });
 
-    await test.step('real reports archive, charts survive raw deletion, CSV and complete backup use cold history', async () => {
+    await stage('real reports archive, charts survive raw deletion, CSV and complete backup use cold history', async () => {
       // Public settings, not forged timestamps or seeded history, shorten the
       // fixture rotation. All samples still come from the installed Agent.
       await request('/api/admin/settings/', { metric_hot_window_minutes: 1, metric_archive_segment_minutes: 1 });
@@ -682,7 +739,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       fs.writeFileSync(path.join(artifacts, 'real-storage-roundtrip.json'), JSON.stringify({ ...storage, csvBytes: csv.length }, null, 2));
     });
 
-    await test.step('background export UI: durable pause, refresh, network recovery and ready-only download', async () => {
+    await stage('background export UI: durable pause, refresh, network recovery and ready-only download', async () => {
       await page.goto('/admin/pprof');
       const card = page.getByTestId('history-export-card');
       await expect(card).toBeVisible();
@@ -730,7 +787,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await page.screenshot({ path: path.join(artifacts, 'background-export-ui.png'), fullPage: true });
     });
 
-    await test.step('all CSV modes and v1 units, real worker restart, queued cancellation and filesystem-failure retry', async () => {
+    await stage('all CSV modes and v1 units, real worker restart, queued cancellation and filesystem-failure retry', async () => {
       const end = new Date(); const start = new Date(end.getTime() - 30 * 60_000);
       const create = async extra => (await (await request('/api/admin/history/export', {
         uuid: agentId, category: 'network', start: start.toISOString(), end: end.toISOString(), ...extra,

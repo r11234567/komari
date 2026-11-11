@@ -4,14 +4,14 @@ const { chromium, expect } = require('@playwright/test');
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const {execFileSync,spawn}=require('node:child_process');
 const root=process.env.E2E_ROOT,artifacts=process.env.E2E_ARTIFACTS,base='https://127.0.0.1:29443';
-if(process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_ENVIRONMENT!=='github-hosted'||root!==path.join(process.env.RUNNER_TEMP||'','komari-e2e'))throw Error('Disposable fixture only');
+require('./guard.cjs');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const system=(...args)=>execFileSync('sudo',['systemctl',...args],{timeout:30000});
 const source=path.join(root,'migration-panel/data/metrics.db');
 const credentials=JSON.parse(fs.readFileSync(path.join(root,'migration-credentials.json')));
 function totp(secret){const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';const bits=[...secret.toUpperCase().replace(/=+$/,'')].map(c=>alphabet.indexOf(c).toString(2).padStart(5,'0')).join('');const key=Buffer.from((bits.match(/.{8}/g)||[]).map(b=>parseInt(b,2)));const t=Buffer.alloc(8);t.writeBigUInt64BE(BigInt(Math.floor(Date.now()/30000)));const h=crypto.createHmac('sha1',key).update(t).digest();return String((h.readUInt32BE(h.at(-1)&15)&0x7fffffff)%1000000).padStart(6,'0');}
-function startPanel(directory){execFileSync('sudo',['systemd-run','--unit=komari-e2e-panel','--collect','--slice=komari-e2e.slice',`--property=User=${process.env.USER}`,`--property=WorkingDirectory=${directory}`,'--property=CPUQuota=100%','--property=MemoryMax=1G',path.join(root,'bin/komari'),'server','--listen','127.0.0.1:29444'],{timeout:30000});}
-function startWorker(directory=path.join(root,'panel')){execFileSync('sudo',['systemd-run','--unit=komari-e2e-export','--collect','--slice=komari-e2e.slice',`--property=User=${process.env.USER}`,`--property=WorkingDirectory=${directory}`,'--property=CPUQuota=4%','--property=CPUQuotaPeriodSec=100ms','--property=MemoryMax=128M','--property=MemorySwapMax=0','--setenv=GOMEMLIMIT=90MiB','--setenv=GOMAXPROCS=1',path.join(root,'bin/komari'),'export-worker','--queue',path.join(directory,'data/exports-v2'),`--instance-cgroup=/sys/fs/cgroup${execFileSync('systemctl',['show','komari-e2e-panel.service','--property=ControlGroup','--value'],{encoding:'utf8'}).trim()}`],{timeout:30000});}
+function startPanel(directory){execFileSync('sudo',['systemd-run','--unit=komari-e2e-panel','--collect','--slice=komari-e2e.slice',`--property=User=${process.env.KOMARI_E2E_USER || process.env.USER}`,`--property=WorkingDirectory=${directory}`,'--property=CPUQuota=100%','--property=MemoryMax=1G',path.join(root,'bin/komari'),'server','--listen','127.0.0.1:29444'],{timeout:30000});}
+function startWorker(directory=path.join(root,'panel')){execFileSync('sudo',['systemd-run','--unit=komari-e2e-export','--collect','--slice=komari-e2e.slice',`--property=User=${process.env.KOMARI_E2E_USER || process.env.USER}`,`--property=WorkingDirectory=${directory}`,'--property=CPUQuota=4%','--property=CPUQuotaPeriodSec=100ms','--property=MemoryMax=128M','--property=MemorySwapMax=0','--setenv=GOMEMLIMIT=90MiB','--setenv=GOMAXPROCS=1',path.join(root,'bin/komari'),'export-worker','--queue',path.join(directory,'data/exports-v2'),`--instance-cgroup=/sys/fs/cgroup${execFileSync('systemctl',['show','komari-e2e-panel.service','--property=ControlGroup','--value'],{encoding:'utf8'}).trim()}`],{timeout:30000});}
 let browser,context,locker;
 async function run(){
  system('stop','komari-e2e-export.service','komari-e2e-panel.service');
@@ -76,6 +76,7 @@ async function run(){
  system('stop','komari-e2e-panel.service');
  const restored=path.join(root,'restore-panel');fs.mkdirSync(path.join(restored,'data'),{recursive:true});
  fs.copyFileSync(path.join(root,'real-full-backup.zip'),path.join(restored,'data/backup.zip'));
+ if(process.env.KOMARI_E2E_LOCAL==='1')execFileSync('chown',['-R',process.env.KOMARI_E2E_USER,restored]);
  startPanel(restored);
  const original=await browser.newContext({baseURL:base,storageState:path.join(root,'qualification-browser-state.json')});
  try {

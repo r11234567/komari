@@ -1,8 +1,6 @@
 const { defineConfig } = require('@playwright/test');
 const path = require('node:path');
-if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') {
-  throw new Error('Run real E2E only on GitHub-hosted Actions runners.');
-}
+require('./guard.cjs');
 module.exports = defineConfig({
   testDir: __dirname,
   testMatch: 'real.spec.cjs',

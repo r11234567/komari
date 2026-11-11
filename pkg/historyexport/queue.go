@@ -373,6 +373,9 @@ func (q *Queue) Control(ctx context.Context, owner, id, action string) error {
 			return ErrQueueFull
 		}
 		j.Status = "queued"
+		if j.Committed.Offset > 0 {
+			j.Status = "recovering"
+		}
 		j.Error = ""
 		j.AutomaticRetries = 0
 		j.RetryAt = time.Time{}

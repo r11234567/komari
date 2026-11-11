@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -22,7 +23,7 @@ func must(e error) {
 }
 func main() {
 	root := os.Getenv("E2E_ROOT")
-	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" || root != filepath.Join(os.Getenv("RUNNER_TEMP"), "komari-e2e") {
+	if exec.Command("bash", "scripts/ci/e2e/guard.sh").Run() != nil || root != filepath.Join(os.Getenv("RUNNER_TEMP"), "komari-e2e") {
 		panic("disposable GitHub fixture only")
 	}
 	b, e := os.ReadFile(filepath.Join(root, "qualification-scope.json"))

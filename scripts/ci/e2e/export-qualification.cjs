@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { chromium } = require('playwright');
 const root = process.env.E2E_ROOT, artifacts = process.env.E2E_ARTIFACTS;
-if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || root !== path.join(process.env.RUNNER_TEMP || '', 'komari-e2e')) throw Error('Disposable hosted runner only');
+require('./guard.cjs');
 const base = 'https://127.0.0.1:29443';
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'qualification-manifest.json')));
 const groupPath = unit => '/sys/fs/cgroup'+execFileSync('systemctl',['show',unit,'--property=ControlGroup','--value'],{encoding:'utf8'}).trim();

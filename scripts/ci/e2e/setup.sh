@@ -21,7 +21,7 @@ certutil -A -n komari-e2e -t 'C,,' -d "sql:$HOME/.pki/nssdb" -i "$E2E_ROOT/tls/c
 # H2 is required for Agent bidirectional Connect streams. The grpc module
 # proxies those paths to the server's h2c listener; ordinary browser requests
 # and the raw file data plane use HTTP/1.1 without request/response buffering.
-runner_user=$(id -un)
+runner_user=${KOMARI_E2E_USER:-$(id -un)}
 cat > "$E2E_ROOT/nginx.conf" <<NGINX
 user $runner_user;
 pid $E2E_ROOT/nginx.pid;
@@ -59,6 +59,9 @@ http {
 }
 NGINX
 cp "$E2E_ROOT/nginx.conf" "$E2E_ARTIFACTS/nginx.conf"
+if [[ "${KOMARI_E2E_LOCAL:-}" = 1 ]]; then
+  chown -R "$runner_user:$(id -gn "$runner_user")" "$E2E_ROOT"
+fi
 sudo nginx -t -c "$E2E_ROOT/nginx.conf" -p "$E2E_ROOT/"
 sudo nginx -c "$E2E_ROOT/nginx.conf" -p "$E2E_ROOT/"
 sudo systemd-run --unit=komari-e2e-panel --collect \
@@ -90,13 +93,4 @@ for attempt in $(seq 1 30); do
 done
 systemctl show komari-e2e-panel.service komari-e2e-export.service komari-e2e.slice \
   --property=ControlGroup,CPUQuotaPerSecUSec,MemoryMax > "$E2E_ARTIFACTS/resource-groups.txt"
-sudo install -d /usr/lib/komari/komari-e2e
-sudo install -m0755 "$E2E_ROOT/bin/komari-agent" /usr/lib/komari/komari-e2e/komari-agent
-sudo install -m0755 "$E2E_ROOT/bin/komari-host" /usr/lib/komari/komari-e2e/komari-host
-sudo /usr/lib/komari/komari-e2e/komari-host install \
-  --service komari-e2e --user "$runner_user" --binary-dir /usr/lib/komari/komari-e2e \
-  -- --endpoint "$E2E_URL" --disable-auto-update
-printf 'editor fixture\n' > "$E2E_ROOT/files/editor.txt"
-printf 'destination must survive\n' > "$E2E_ROOT/files/existing.txt"
-mkdir "$E2E_ROOT/files/nonempty"
-printf 'keep\n' > "$E2E_ROOT/files/nonempty/keep.txt"
+bash "$(dirname "$0")/install-agent.sh"

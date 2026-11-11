@@ -11,6 +11,10 @@ sudo journalctl -u komari-e2e.service --no-pager -o short-iso > "$E2E_ARTIFACTS/
 sudo systemctl status komari-e2e.service --no-pager > "$E2E_ARTIFACTS/agent-status.txt" 2>&1
 sudo systemctl stop komari-e2e.service
 sudo systemctl disable komari-e2e.service
+if [[ "${KOMARI_E2E_LOCAL:-}" = 1 ]]; then
+  sudo rm -f /etc/systemd/system/komari-e2e.service.d/local-fixture.conf
+  sudo rmdir /etc/systemd/system/komari-e2e.service.d 2>/dev/null
+fi
 for name in login server; do
   if [[ -f "$E2E_ROOT/$name.pid" ]]; then kill "$(cat "$E2E_ROOT/$name.pid")" 2>/dev/null; fi
 done
