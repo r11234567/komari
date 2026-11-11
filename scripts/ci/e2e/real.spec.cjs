@@ -283,7 +283,10 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       for (const hours of [6,12]) {
         await page.locator('.km-load-chart').getByRole('radio',{name:new RegExp(`^${hours}\\s*hours?$`,'i')}).click();
         await expect(page.getByTestId('chart-source-precision').first()).toBeVisible();
-        await expect(page.locator('.recharts-line-curve').first()).toBeVisible();
+        // A freshly installed Agent can occupy only one 2-minute bucket in
+        // the 12h view. Recharts correctly renders that observation as a dot,
+        // not a fabricated line joining it to missing historical data.
+        await expect(page.locator('.recharts-line-curve, .recharts-line-dots .recharts-dot').first()).toBeVisible();
       }
       await page.screenshot({path:path.join(artifacts,'chart-window-12h.png'),fullPage:true});
       fs.writeFileSync(path.join(artifacts,'metric-chart-windows.json'),JSON.stringify(windows,null,2));
