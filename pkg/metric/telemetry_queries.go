@@ -127,9 +127,30 @@ func (t *Telemetry) PingSummary(ctx context.Context, q AggregateQuery, now time.
 	}
 	stats := map[aggregateSeriesKey]*telemetryStats{}
 	tags := map[aggregateSeriesKey]map[string]string{}
-	for key, value := range r.stats {
+	keys := make([]aggregateGroupKey, 0, len(r.stats))
+	for key := range r.stats {
+		keys = append(keys, key)
+	}
+	// Sketch compression depends on merge order. Keep repeated reads of the
+	// same snapshot stable by merging output cells in chronological order.
+	sortAggregateGroupKeys(keys)
+	for _, key := range keys {
+		value := r.stats[key]
 		if stats[key.aggregateSeriesKey] == nil {
-			stats[key.aggregateSeriesKey] = &telemetryStats{}
+			combined := &telemetryStats{}
+			if err = combined.merge(*value); err != nil {
+				return SeriesSummary{}, err
+			}
+			combined.sketch, err = DecodeTDigest(combined.Digest)
+			if err != nil {
+				return SeriesSummary{}, err
+			}
+			// The final card merges many stored cells. Keep a larger temporary
+			// sketch so repeated recompression does not compound their error.
+			// This affects read memory only, not persisted summary sizes.
+			combined.sketch.compression = max(combined.sketch.compression, 400)
+			stats[key.aggregateSeriesKey] = combined
+			continue
 		}
 		if err = stats[key.aggregateSeriesKey].merge(*value); err != nil {
 			return SeriesSummary{}, err

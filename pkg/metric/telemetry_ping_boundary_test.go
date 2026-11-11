@@ -153,9 +153,13 @@ func TestTelemetryPingAlignedWindowAfterArchiveAndRestart(t *testing.T) {
 			t.Fatalf("rolling boundary %v failed after cold handoff: %+v %v", requestedStart, got, err)
 		}
 		var reference telemetryStats
+		var validValues []float64
 		for ordinal, p := range raw {
 			if !p.Timestamp.Before(start) && !p.Timestamp.After(end) {
 				reference.add(p, int64(ordinal+1), 0)
+				if p.Value >= 0 {
+					validValues = append(validValues, p.Value)
+				}
 			}
 		}
 		for _, view := range []struct {
@@ -165,10 +169,20 @@ func TestTelemetryPingAlignedWindowAfterArchiveAndRestart(t *testing.T) {
 			want, err := reference.value(view.agg)
 			tolerance := 1e-8
 			if isPercentile(view.agg) {
+				quantile, _ := parsePercentile(view.agg)
+				want = exactQuantile(validValues, quantile)
 				tolerance = 1
 			}
 			if err != nil || len(view.points) != 1 || view.points[0].Count != int(reference.Attempts) || math.Abs(view.points[0].Value-want) > tolerance {
 				t.Fatalf("%s population mismatch at %v: %+v want count=%d value=%v error=%v", view.agg, start, view.points, reference.Attempts, want, err)
+			}
+		}
+		if offset == 0 {
+			for attempt := 0; attempt < 25; attempt++ {
+				repeated, err := e.PingSummary(ctx, q, now)
+				if err != nil || repeated.P50[0].Value != got.P50[0].Value || repeated.P99[0].Value != got.P99[0].Value {
+					t.Fatalf("unchanged SQL snapshot changed percentiles: P50 %v/%v P99 %v/%v error=%v", got.P50, repeated.P50, got.P99, repeated.P99, err)
+				}
 			}
 		}
 	}
