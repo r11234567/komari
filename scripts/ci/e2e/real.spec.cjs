@@ -629,7 +629,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       });
       expect(history.series?.some(series => series.queryPoints?.some(point => Number(point.sampleCount) > 0))).toBe(true);
       const created = await (await request('/api/admin/history/export', {
-        uuid: agentId, category: 'resource', start: start.toISOString(), end: end.toISOString(),
+        uuid: agentId, category: 'resource', mode: 'raw', start: start.toISOString(), end: end.toISOString(),
       })).json();
       expect(created.data?.id).toBeTruthy();
       let job;
@@ -645,6 +645,113 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       // Credentials stay inside the disposable fixture, outside uploaded artifacts.
       fs.writeFileSync(path.join(root, 'real-full-backup.zip'), await backup.body());
       fs.writeFileSync(path.join(artifacts, 'real-storage-roundtrip.json'), JSON.stringify({ ...storage, csvBytes: csv.length }, null, 2));
+    });
+
+    await test.step('background export UI: durable pause, refresh, network recovery and ready-only download', async () => {
+      await page.goto('/admin/pprof');
+      const card = page.getByTestId('history-export-card');
+      await expect(card).toBeVisible();
+      await expect.poll(async () => (await (await request('/api/admin/history/export/retention', undefined, { method: 'GET' })).json()).data.worker_available,
+        { timeout: 60_000 }).toBe(true);
+      await expect(card.getByTestId('create-background-export')).toBeEnabled();
+      // Freeze the real process, keeping its transient unit/configuration. No
+      // forged worker heartbeat or task state is written by the test.
+      execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGSTOP', 'komari-e2e-export.service']);
+      let id;
+      try {
+        const response = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/admin/history/export');
+        await card.getByTestId('create-background-export').click();
+        const created = await (await response).json();
+        expect(created.data?.mode).toBe('raw'); expect(created.data?.format_version).toBe(2); id = created.data.id;
+        const row = page.getByTestId(`export-job-${id}`);
+        await expect(row).toBeVisible();
+        await row.getByRole('button', { name: 'Pause', exact: true }).click();
+        await expect(row).toContainText('Paused');
+        await page.reload(); await expect(page.getByTestId(`export-job-${id}`)).toContainText('Paused');
+        await context.setOffline(true);
+        await card.getByRole('button', { name: 'Refresh tasks', exact: true }).click();
+        await expect(card.getByRole('alert')).toContainText('retrying automatically');
+        await context.setOffline(false);
+        await card.getByRole('button', { name: 'Refresh tasks', exact: true }).click();
+        await expect(page.getByTestId(`export-job-${id}`)).toContainText('Paused');
+      } finally {
+        await context.setOffline(false);
+        execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGCONT', 'komari-e2e-export.service']);
+      }
+      await page.getByTestId(`export-job-${id}`).getByRole('button', { name: 'Resume', exact: true }).click();
+      let job;
+      await expect.poll(async () => {
+        job = (await (await request(`/api/admin/history/export/${id}`, undefined, { method: 'GET' })).json()).data;
+        if (job.status === 'failed' || job.status === 'cancelled') throw new Error(JSON.stringify(job));
+        return job.status;
+      }, { timeout: 180_000, intervals: [2000, 5000] }).toBe('done');
+      await expect(page.getByTestId(`export-job-${id}`)).toContainText('Complete: 100%');
+      const first = await request(`/api/admin/history/export/${id}/download`, undefined, { method: 'GET' });
+      const bytes = await first.body();
+      expect(sha256(bytes)).toBe(job.sha256); expect(first.headers()['x-export-format-version']).toBe('2');
+      expect(sha256(await (await request(`/api/admin/history/export/${id}/download`, undefined, { method: 'GET' })).body())).toBe(job.sha256);
+      expect(bytes.toString('utf8')).toContain('observation_id,observed_at,received_at,entity_id,metric,tags,labels,value,unit');
+      fs.writeFileSync(path.join(artifacts, 'background-export-ui.json'), JSON.stringify(job, null, 2));
+      await page.screenshot({ path: path.join(artifacts, 'background-export-ui.png'), fullPage: true });
+    });
+
+    await test.step('all CSV modes and v1 units, real worker restart, queued cancellation and filesystem-failure retry', async () => {
+      const end = new Date(); const start = new Date(end.getTime() - 30 * 60_000);
+      const create = async extra => (await (await request('/api/admin/history/export', {
+        uuid: agentId, category: 'network', start: start.toISOString(), end: end.toISOString(), ...extra,
+      })).json()).data;
+      const wait = async id => {
+        let result;
+        await expect.poll(async () => {
+          result = (await (await request(`/api/admin/history/export/${id}`, undefined, { method: 'GET' })).json()).data;
+          if (result.status === 'failed' || result.status === 'cancelled') throw new Error(JSON.stringify(result));
+          return result.status;
+        }, { timeout: 180_000, intervals: [2000, 5000] }).toBe('done'); return result;
+      };
+      const proofs = [];
+      for (const extra of [{ mode: 'summary', interval_seconds: 60, aggregation: 'avg' }, {}, { mode: 'sample30s', format_version: 2 }]) {
+        const created = await create(extra); expect(created.id).toBeTruthy();
+        const job = await wait(created.id);
+        const bytes = await (await request(`/api/admin/history/export/${job.id}/download`, undefined, { method: 'GET' })).body();
+        expect(sha256(bytes)).toBe(job.sha256);
+        const text = bytes.toString('utf8');
+        if (extra.mode === 'summary') expect(text).toContain('sample_count,output_interval_seconds,source_precision,coverage');
+        else if (!extra.mode) { expect(job.format_version).toBe(1); expect(text).toContain('Total downloaded (GiB)'); expect(text).toContain('Network inbound (KiB/s)'); }
+        else { expect(job.format_version).toBe(2); expect(text).toContain('net.in.rate'); }
+        proofs.push({ job, bytes: bytes.length });
+      }
+      await expect.poll(async () => (await (await request('/api/admin/history/export/retention', undefined, { method: 'GET' })).json()).data.worker_available).toBe(true);
+      execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGSTOP', 'komari-e2e-export.service']);
+      let cancelled;
+      try {
+        cancelled = await create({ mode: 'raw' });
+        const denied = await request(`/api/admin/history/export/${cancelled.id}/download`, undefined, { method: 'GET', allowFailure: true });
+        expect(denied.status()).toBe(409);
+        await request(`/api/admin/history/export/${cancelled.id}/cancel`, {});
+        expect((await (await request(`/api/admin/history/export/${cancelled.id}`, undefined, { method: 'GET' })).json()).data.status).toBe('cancel_requested');
+      } finally { execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGCONT', 'komari-e2e-export.service']); }
+      await expect.poll(async () => (await (await request(`/api/admin/history/export/${cancelled.id}`, undefined, { method: 'GET' })).json()).data.status).toBe('cancelled');
+      await expect.poll(async () => (await (await request('/api/admin/history/export/retention', undefined, { method: 'GET' })).json()).data.worker_available).toBe(true);
+      execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGSTOP', 'komari-e2e-export.service']);
+      let failed, blocked;
+      try {
+        failed = await create({ mode: 'raw', category: 'latency' });
+        blocked = path.join(root, 'panel/data/exports-v2', `${failed.id}.csv.part`);
+        fs.mkdirSync(blocked);
+      } finally { execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGCONT', 'komari-e2e-export.service']); }
+      await expect.poll(async () => (await (await request(`/api/admin/history/export/${failed.id}`, undefined, { method: 'GET' })).json()).data.status,
+        { timeout: 90_000 }).toBe('failed');
+      fs.rmdirSync(blocked); // Exactly the empty directory created by this test.
+      await page.getByTestId('history-export-card').getByRole('button', { name: 'Refresh tasks', exact: true }).click();
+      await page.getByTestId(`export-job-${failed.id}`).getByRole('button', { name: 'Retry from checkpoint', exact: true }).click();
+      execFileSync('sudo', ['systemctl', 'restart', 'komari-e2e-export.service'], { timeout: 30_000 });
+      const recovered = await wait(failed.id); expect(recovered.retries).toBe(1);
+      const outsider = await context.browser().newContext({ baseURL: base });
+      try { expect([401, 403]).toContain((await outsider.request.get(`/api/admin/history/export/${recovered.id}/download`)).status()); }
+      finally { await outsider.close(); }
+      fs.writeFileSync(path.join(artifacts, 'background-export-modes.json'), JSON.stringify({ proofs, cancelled, recovered }, null, 2));
+      await context.storageState({ path: path.join(root, 'qualification-browser-state.json') });
+      fs.writeFileSync(path.join(root, 'qualification-scope.json'), JSON.stringify({ agentId }));
     });
   } finally {
     fs.writeFileSync(path.join(artifacts, 'browser-events.json'), JSON.stringify(events, null, 2));

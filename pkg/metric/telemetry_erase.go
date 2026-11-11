@@ -46,6 +46,9 @@ func (t *Telemetry) EraseSeries(ctx context.Context, q Query) (int64, error) {
 	if _, err = tx.ExecContext(ctx, "UPDATE "+t.table("segments")+" SET state='sealed' WHERE state='open'"); err != nil {
 		return 0, err
 	}
+	if err = t.bumpExportEpoch(ctx, tx); err != nil {
+		return 0, err
+	}
 	if err = tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -90,6 +93,10 @@ func (t *Telemetry) EraseSeries(ctx context.Context, q Query) (int64, error) {
 				tx.Rollback()
 				return total, e
 			}
+		}
+		if e = t.bumpExportEpoch(ctx, tx); e != nil {
+			tx.Rollback()
+			return total, e
 		}
 		if e = tx.Commit(); e != nil {
 			return total, e

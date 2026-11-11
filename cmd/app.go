@@ -34,6 +34,7 @@ import (
 	"github.com/komari-monitor/komari/internal/plugin"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/corn"
+	"github.com/komari-monitor/komari/pkg/historyexport"
 	"github.com/komari-monitor/komari/pkg/metric"
 	"github.com/komari-monitor/komari/pkg/migrations"
 	"github.com/komari-monitor/komari/utils"
@@ -236,6 +237,7 @@ func (a *App) InitStores() error {
 	})
 	metricstore.StartTelemetryScheduler()
 	a.addCleanup("telemetry-scheduler", metricstore.StopTelemetryScheduler)
+	a.startExportPolicy()
 	return nil
 }
 
@@ -660,6 +662,17 @@ func (a *App) BuildRouter() error {
 	r.Use(api.IdentityMiddleware())
 	rateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)
 	r.Use(rateLimiter.Middleware())
+	r.Use(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		observe := strings.HasSuffix(path, "/QueryMetrics") || strings.HasSuffix(path, "/GetTrafficTrend") || strings.HasSuffix(path, "/GetDashboardCharts") || strings.HasPrefix(path, "/api/records/")
+		if !observe {
+			c.Next()
+			return
+		}
+		started := time.Now()
+		c.Next()
+		historyexport.ObserveForeground(time.Since(started))
+	})
 	r.Use(api.PrivateSiteMiddleware())
 
 	r.Use(func(c *gin.Context) {

@@ -173,16 +173,11 @@ func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 		}
 	}()
 	compressed := &telemetryHashWriter{w: f, h: sha256.New()}
-	zw, err := zstd.NewWriter(compressed, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(1), zstd.WithWindowSize(1<<20))
+	frames, err := newTelemetryFrameWriter(compressed, id)
 	if err != nil {
 		return false, err
 	}
-	defer zw.Close()
-	plain := &telemetryHashWriter{w: zw, h: sha256.New()}
-	enc := json.NewEncoder(plain)
-	if err = enc.Encode(telemetryRecord{Kind: "header", Version: 1, Segment: id}); err != nil {
-		return false, err
-	}
+	defer frames.encoder.Close()
 	var count, after int64
 	ordinal := -1
 	for {
@@ -200,13 +195,13 @@ func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 			if err = ctx.Err(); err != nil {
 				return false, err
 			}
-			if err = enc.Encode(r); err != nil {
+			if err = frames.add(r); err != nil {
 				return false, err
 			}
 			count++
 			after = r.Ingest
 			ordinal = r.Ordinal
-			if plain.n > t.cfg.SegmentBytes*4 {
+			if frames.totalPlain > t.cfg.SegmentBytes*4 {
 				return false, errors.New("telemetry archive exceeded uncompressed budget")
 			}
 		}
@@ -223,11 +218,7 @@ func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 	if count != seg.Points {
 		return false, fmt.Errorf("archive member mismatch: got %d expected %d", count, seg.Points)
 	}
-	footer := telemetryRecord{Kind: "footer", Count: count, Hash: hex.EncodeToString(plain.h.Sum(nil))}
-	if err = json.NewEncoder(zw).Encode(footer); err != nil {
-		return false, err
-	}
-	if err = zw.Close(); err != nil {
+	if err = frames.close(); err != nil {
 		return false, err
 	}
 	if err = t.fault("archive-before-sync"); err != nil {
@@ -307,8 +298,40 @@ func (t *Telemetry) visitArchivePath(ctx context.Context, seg telemetrySegment, 
 		return err
 	}
 	defer f.Close()
+	index, err := readTelemetryArchiveIndex(f, seg)
+	if err != nil {
+		return err
+	}
+	if index != nil {
+		if err = verifyTelemetryArchiveFile(ctx, f, seg); err != nil {
+			return err
+		}
+		var lastIngest int64
+		lastOrdinal := -1
+		for _, frame := range index.Frames {
+			part := seg
+			part.Points, part.First, part.Last, part.FileBytes, part.Hash = frame.Points, frame.First, frame.Last, frame.Bytes, frame.Hash
+			callback := func(r telemetryRecord) error {
+				if r.Ingest < lastIngest || (r.Ingest == lastIngest && r.Ordinal <= lastOrdinal) {
+					return errors.New("archive cross-frame order mismatch")
+				}
+				lastIngest, lastOrdinal = r.Ingest, r.Ordinal
+				if visit != nil {
+					return visit(r)
+				}
+				return nil
+			}
+			if err = t.visitArchiveStream(ctx, part, io.NewSectionReader(f, frame.Offset, frame.Bytes), callback); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return t.visitArchiveStream(ctx, seg, f, visit)
+}
+func (t *Telemetry) visitArchiveStream(ctx context.Context, seg telemetrySegment, input io.Reader, visit func(telemetryRecord) error) error {
 	compressedHash := sha256.New()
-	compressed := io.TeeReader(f, compressedHash)
+	compressed := io.TeeReader(input, compressedHash)
 	zr, err := zstd.NewReader(compressed, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(16<<20), zstd.WithDecoderMaxWindow(8<<20))
 	if err != nil {
 		return err

@@ -37,7 +37,7 @@ type TelemetryConfig struct {
 	WorkLease        time.Duration
 	// Fault is used by integration tests at durable state transitions. It is
 	// never configured from HTTP or persisted settings.
-	Fault func(string) error
+	Fault func(string) error `json:"-"`
 }
 
 func (c TelemetryConfig) defaults() TelemetryConfig {
@@ -335,7 +335,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 			}
 		}
 	}
-	for _, task := range []string{"ingest", "summary", "hot_bytes"} {
+	for _, task := range []string{"ingest", "summary", "hot_bytes", "export_epoch"} {
 		q := fmt.Sprintf("INSERT INTO %s (task,value) VALUES (?,0)", t.table("progress"))
 		if t.s.cfg.Driver == DriverMySQL {
 			q += " ON DUPLICATE KEY UPDATE task=task"

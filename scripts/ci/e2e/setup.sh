@@ -61,17 +61,25 @@ NGINX
 cp "$E2E_ROOT/nginx.conf" "$E2E_ARTIFACTS/nginx.conf"
 sudo nginx -t -c "$E2E_ROOT/nginx.conf" -p "$E2E_ROOT/"
 sudo nginx -c "$E2E_ROOT/nginx.conf" -p "$E2E_ROOT/"
-(
-  cd "$E2E_ROOT/panel"
-  nohup "$E2E_ROOT/bin/komari" server --listen 127.0.0.1:29444 \
-    > "$E2E_ARTIFACTS/server.log" 2>&1 &
-  echo "$!" > "$E2E_ROOT/server.pid"
-)
+sudo systemd-run --unit=komari-e2e-panel --collect \
+	--slice=komari-e2e.slice \
+  --property="User=$runner_user" --property="WorkingDirectory=$E2E_ROOT/panel" \
+  --property=CPUQuota=100% --property=MemoryMax=1G \
+  "$E2E_ROOT/bin/komari" server --listen 127.0.0.1:29444
+sudo systemctl set-property --runtime komari-e2e.slice CPUQuota=100% MemoryMax=1G MemorySwapMax=0
 for attempt in $(seq 1 60); do
   if curl --silent --fail "$E2E_URL/api/install/status" > "$E2E_ARTIFACTS/initial-install-status.json"; then break; fi
   if [[ "$attempt" = 60 ]]; then exit 1; fi
   sleep 1
 done
+sudo systemd-run --unit=komari-e2e-export --collect \
+	--slice=komari-e2e.slice \
+  --property="User=$runner_user" --property="WorkingDirectory=$E2E_ROOT/panel" \
+  --property=CPUQuota=4% --property=CPUQuotaPeriodSec=100ms \
+  --property=MemoryMax=128M --property=MemorySwapMax=0 \
+  --setenv=GOMEMLIMIT=90MiB --setenv=GOMAXPROCS=1 \
+  "$E2E_ROOT/bin/komari" export-worker --queue "$E2E_ROOT/panel/data/exports-v2" \
+  --instance-cgroup=/sys/fs/cgroup/komari-e2e.slice/komari-e2e-panel.service
 sudo install -d /usr/lib/komari/komari-e2e
 sudo install -m0755 "$E2E_ROOT/bin/komari-agent" /usr/lib/komari/komari-e2e/komari-agent
 sudo install -m0755 "$E2E_ROOT/bin/komari-host" /usr/lib/komari/komari-e2e/komari-host

@@ -2,12 +2,17 @@ name: Feature audit - real end-to-end
 
 on:
   workflow_dispatch:
+    inputs:
+      export_qualification:
+        description: 'Run at least two hours of real cold CSV work and mixed foreground load'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: feature-e2e-${{ github.ref }}
+  group: feature-e2e-${{ github.ref }}-${{ inputs.export_qualification }}
   cancel-in-progress: true
 
 jobs:
@@ -15,7 +20,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     name: Built Web + server + installed nonroot Agent / HTTPS
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: ${{ inputs.export_qualification && 335 || 45 }}
     env:
       GOMAXPROCS: '2'
       GOMEMLIMIT: 3GiB
@@ -67,6 +72,30 @@ jobs:
         run: bash scripts/ci/run-audit-check.sh e2e-storage python3 scripts/ci/e2e/check-telemetry-retirement.py
       - name: Verify new engine across real SQL and archive process restarts
         run: bash scripts/ci/run-audit-check.sh e2e-storage-process go test -race ./pkg/metric -run TestTelemetryProcessRoundTrip -count=1 -v
+      - name: Prepare explicitly synthetic large cold CSV input in the isolated fixture
+        if: inputs.export_qualification
+        run: |
+          sudo systemctl stop komari-e2e-export.service komari-e2e-panel.service
+          go run ./scripts/ci/export-fixture
+          cp "$E2E_ROOT/qualification-manifest.json" "$E2E_ARTIFACTS/qualification-manifest.json"
+          sudo systemd-run --unit=komari-e2e-panel --collect --slice=komari-e2e.slice \
+            --property="User=$(id -un)" --property="WorkingDirectory=$E2E_ROOT/panel" \
+            --property=CPUQuota=100% --property=MemoryMax=1G \
+            "$E2E_ROOT/bin/komari" server --listen 127.0.0.1:29444
+          sudo systemd-run --unit=komari-e2e-export --collect --slice=komari-e2e.slice \
+            --property="User=$(id -un)" --property="WorkingDirectory=$E2E_ROOT/panel" \
+            --property=CPUQuota=4% --property=CPUQuotaPeriodSec=100ms \
+            --property=MemoryMax=128M --property=MemorySwapMax=0 \
+            --setenv=GOMEMLIMIT=90MiB --setenv=GOMAXPROCS=1 \
+            "$E2E_ROOT/bin/komari" export-worker --queue "$E2E_ROOT/panel/data/exports-v2" \
+            --io-bytes-per-second=131072 \
+            --instance-cgroup=/sys/fs/cgroup/komari-e2e.slice/komari-e2e-panel.service
+      - name: Qualify actual cold CSV work for at least two hours with HTTPS, Agent and chart load
+        if: inputs.export_qualification
+        env:
+          NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
+        run: bash scripts/ci/run-audit-check.sh e2e-export-qualification node scripts/ci/e2e/export-qualification.cjs
       - name: Restore the real downloaded SQL, ledger and cold archive bundle
         run: bash scripts/ci/run-audit-check.sh e2e-storage-restore go test -race ./pkg/metric -run TestTelemetryE2ERestoreBundle -count=1 -v
       - name: Collect service logs and destroy temporary services and secrets

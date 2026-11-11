@@ -1,0 +1,29 @@
+[Unit]
+Description=Komari durable background CSV export worker
+After=komari.service
+Requires=komari.service
+
+[Service]
+Type=simple
+User=komari
+Group=komari
+WorkingDirectory=/var/lib/komari
+ExecStart=/usr/local/bin/komari export-worker --queue /var/lib/komari/data/exports-v2 --instance-cgroup /sys/fs/cgroup/system.slice/komari.service
+Restart=on-failure
+RestartSec=5
+CPUAccounting=yes
+CPUQuota=4%
+CPUQuotaPeriodSec=100ms
+MemoryAccounting=yes
+MemoryMax=128M
+MemorySwapMax=0
+Environment=GOMEMLIMIT=90MiB
+Environment=GOMAXPROCS=1
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/komari
+
+[Install]
+WantedBy=multi-user.target

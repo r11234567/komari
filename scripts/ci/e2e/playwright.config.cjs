@@ -6,7 +6,7 @@ if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 
 module.exports = defineConfig({
   testDir: __dirname,
   testMatch: 'real.spec.cjs',
-  timeout: 15 * 60_000,
+  timeout: 25 * 60_000,
   expect: { timeout: 30_000 },
   workers: 1,
   retries: 0,
