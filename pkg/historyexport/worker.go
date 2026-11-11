@@ -35,15 +35,17 @@ type Worker struct {
 	io               *ioBudget
 	activeJob        string
 	RequirePolicy    bool
+	resources        resourceSampler
 }
 type Availability struct {
-	Available     bool          `json:"available"`
-	Error         string        `json:"error,omitempty"`
-	At            time.Time     `json:"at"`
-	CPUCoreLimit  float64       `json:"cpu_core_limit"`
-	CPUShareLimit float64       `json:"cpu_share_limit"`
-	Proof         ResourceProof `json:"proof"`
-	ActiveJob     string        `json:"active_job,omitempty"`
+	Available     bool           `json:"available"`
+	Error         string         `json:"error,omitempty"`
+	At            time.Time      `json:"at"`
+	CPUCoreLimit  float64        `json:"cpu_core_limit"`
+	CPUShareLimit float64        `json:"cpu_share_limit"`
+	Proof         ResourceProof  `json:"proof"`
+	ActiveJob     string         `json:"active_job,omitempty"`
+	Resources     *ResourceUsage `json:"resources,omitempty"`
 }
 
 const maxExportInput = 2 << 30
@@ -117,7 +119,10 @@ func (w *Worker) heartbeat(ctx context.Context) error {
 	}
 	defer release()
 	p, e := w.proof()
-	a := Availability{Available: e == nil, At: time.Now().UTC(), CPUCoreLimit: .04, CPUShareLimit: .1, Proof: p, ActiveJob: w.activeJob}
+	a := Availability{Available: e == nil, At: time.Now().UTC(), CPUCoreLimit: p.WorkerCPUs, CPUShareLimit: .1, Proof: p, ActiveJob: w.activeJob}
+	if e == nil {
+		a.Resources = w.observeResources(p, a.At)
+	}
 	if e != nil {
 		a.Error = e.Error()
 	}
@@ -405,6 +410,9 @@ func (w *Worker) phase(ctx context.Context, j *Job, phase, kind string, total in
 	j.Phase = phase
 	j.ProgressKind = kind
 	j.PhaseTotal = total
+	if kind != "input_units" {
+		j.CurrentInput = nil
+	}
 	j.Heartbeat = time.Now().UTC()
 	return w.Queue.Save(ctx, j)
 }
@@ -746,6 +754,7 @@ func (w *Worker) step(ctx context.Context, j *Job) error {
 			}
 		}
 	} else {
+		j.inputProgress(snapshot, j.Committed.Unit)
 		if e = w.phase(ctx, j, "decoding_and_generating", "input_units", int64(len(snapshot.Units))); e != nil {
 			return e
 		}
@@ -775,6 +784,7 @@ func (w *Worker) step(ctx context.Context, j *Job) error {
 					}
 					j.OutputBytes = o.n
 					j.Heartbeat = time.Now().UTC()
+					j.LastProgress = j.Heartbeat
 					if e := w.Queue.Save(ctx, j); e != nil {
 						return e
 					}
@@ -879,11 +889,12 @@ func (w *Worker) sample(ctx context.Context, j *Job, snapshot metric.ExportSnaps
 	if _, e = spool.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS samples(slot INTEGER,metric TEXT,tags TEXT,observed INTEGER,ingest INTEGER,ordinal INTEGER,value REAL,unit TEXT,PRIMARY KEY(slot,metric,tags)) WITHOUT ROWID; PRAGMA temp_store=FILE;`); e != nil {
 		return e
 	}
-	if e = w.phase(ctx, j, "decoding_and_sampling", "input_units", int64(len(snapshot.Units))); e != nil {
-		return e
-	}
-	j.PhaseCompleted = int64(j.Checkpoint)
 	if j.Checkpoint < len(snapshot.Units) {
+		j.inputProgress(snapshot, j.Checkpoint)
+		if e = w.phase(ctx, j, "decoding_and_sampling", "input_units", int64(len(snapshot.Units))); e != nil {
+			return e
+		}
+		j.PhaseCompleted = int64(j.Checkpoint)
 		i := j.Checkpoint
 		tx, e := spool.BeginTx(ctx, nil)
 		if e != nil {
@@ -948,6 +959,7 @@ func (w *Worker) sample(ctx context.Context, j *Job, snapshot metric.ExportSnaps
 	if e = w.phase(ctx, j, "assembling_sampled_rows", "indeterminate", 0); e != nil {
 		return e
 	}
+	j.CurrentInput = nil
 	// Re-assembly after interruption starts at a deterministic spool boundary;
 	// it never decodes the archive again and never appends duplicate CSV rows.
 	if !j.Committed.SampleOutput {

@@ -62,6 +62,63 @@ func TestSampleSpoolUnitIsAtomicAndReplayable(t *testing.T) {
 	}
 }
 
+func TestSampleAssemblyDoesNotReturnToDecodingBetweenCheckpoints(t *testing.T) {
+	w, j := workerFixture(t, "sample30s")
+	ctx := context.Background()
+	s, err := metric.Open(ctx, metric.SQLite(j.Source.DSN, metric.WithTablePrefix(j.Source.Prefix), metric.WithRetiredLegacyStorage(), metric.WithSQLiteProfile(metric.SQLiteProfileDurable)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tel, err := s.OpenTelemetry(ctx, j.Source.Telemetry)
+	if err != nil {
+		s.Close()
+		t.Fatal(err)
+	}
+	at := j.Start.Add(-3 * time.Hour)
+	points := make([]metric.Point, 256)
+	for i := range points {
+		points[i] = metric.Point{MetricName: "cpu", EntityID: j.UUID, Timestamp: at.Add(time.Duration(i) * 30 * time.Second), Value: float64(i)}
+	}
+	_, err = tel.Accept(ctx, metric.TelemetryBatch{Source: j.UUID, Identity: "assembly-phase", Points: points}, time.Now())
+	tel.Close()
+	s.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.Start = at
+	if err = w.Queue.Save(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+	var phaseStart time.Time
+	var checkpoint int
+	for i := 0; i < 20; i++ {
+		if err = w.Step(ctx, j); err != nil {
+			t.Fatal(err)
+		}
+		j, err = w.Queue.Get(ctx, j.Owner, j.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if j.Status == "failed" {
+			t.Fatal(j.Error)
+		}
+		if j.Phase == "assembling_sampled_rows" {
+			if phaseStart.IsZero() {
+				phaseStart = j.PhaseStartedAt
+				checkpoint = j.Checkpoint
+			} else if !j.PhaseStartedAt.Equal(phaseStart) || j.Checkpoint != checkpoint {
+				t.Fatalf("assembly falsely restarted decoding at each output batch: %v -> %v", phaseStart, j.PhaseStartedAt)
+			}
+		}
+		if j.Status == "done" {
+			break
+		}
+	}
+	if phaseStart.IsZero() || j.Status != "done" || j.WrittenRows != 258 {
+		t.Fatalf("did not exercise repeated assembly checkpoints: phase=%v rows=%d status=%s", phaseStart, j.WrittenRows, j.Status)
+	}
+}
+
 func TestSampleWideRowsResumeAcross128RowCheckpoint(t *testing.T) {
 	for _, boundary := range []string{"sample-row-before-checkpoint", "sample-row-after-checkpoint"} {
 		t.Run(boundary, func(t *testing.T) {

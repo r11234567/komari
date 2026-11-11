@@ -52,10 +52,20 @@ type Request struct {
 
 type Job struct {
 	Request
-	ID                  string    `json:"id"`
-	FormatVersion       int       `json:"format_version"`
-	Status              string    `json:"status"`
-	Phase               string    `json:"phase"`
+	ID                  string         `json:"id"`
+	FormatVersion       int            `json:"format_version"`
+	Status              string         `json:"status"`
+	Phase               string         `json:"phase"`
+	PhaseStartedAt      time.Time      `json:"phase_started_at"`
+	PhaseActiveSeconds  float64        `json:"phase_active_seconds"`
+	WaitingSince        time.Time      `json:"waiting_since,omitempty"`
+	WaitSeconds         float64        `json:"wait_seconds"`
+	CurrentWaitSeconds  float64        `json:"current_wait_seconds"`
+	Throughput          Throughput     `json:"throughput"`
+	PhaseETA            PhaseETA       `json:"phase_eta"`
+	CurrentInput        *InputProgress `json:"current_input,omitempty"`
+	Resources           *ResourceUsage `json:"resources,omitempty"`
+	observation         progressState
 	ProgressKind        string    `json:"progress_kind"`
 	CreatedAt           time.Time `json:"created_at"`
 	StartedAt           time.Time `json:"started_at,omitempty"`
@@ -88,10 +98,11 @@ type Job struct {
 // DiskJob is private. Neither connection strings nor resumable hash state are
 // returned by the API. SQLite transactions serialize control and creation.
 type diskJob struct {
-	Job       Job
-	Source    Source
-	HashState []byte
-	Committed Commit
+	Job         Job
+	Source      Source
+	HashState   []byte
+	Committed   Commit
+	Observation progressState
 }
 type Commit struct {
 	Offset, Rows, Decoded int64
@@ -166,10 +177,14 @@ func decodeJob(b []byte) (*Job, error) {
 	d.Job.Source = d.Source
 	d.Job.HashState = d.HashState
 	d.Job.Committed = d.Committed
+	d.Job.observation = d.Observation
 	return &d.Job, nil
 }
 func encodeJob(j *Job) ([]byte, error) {
-	return json.Marshal(diskJob{Job: *j, Source: j.Source, HashState: j.HashState, Committed: j.Committed})
+	stored := *j
+	stored.Resources = nil // live group observations belong to worker.json
+	stored.CurrentWaitSeconds = 0
+	return json.Marshal(diskJob{Job: stored, Source: j.Source, HashState: j.HashState, Committed: j.Committed, Observation: j.observation})
 }
 func (j *Job) Validate() error {
 	if j.Owner == "" || j.UUID == "" || !j.Start.Before(j.End) || j.End.After(time.Now().Add(time.Minute)) || len(j.Metrics) == 0 || len(j.Metrics) > 64 {
@@ -198,7 +213,10 @@ func (q *Queue) Create(ctx context.Context, r Request) (*Job, error) {
 		return nil, err
 	}
 	defer release()
-	j := &Job{Request: r, FormatVersion: FormatVersion, Status: "queued", Phase: "queued", ProgressKind: "indeterminate", CreatedAt: time.Now().UTC(), CPUShareLimit: .1, CPUCoreLimit: .04}
+	j := &Job{Request: r, FormatVersion: FormatVersion, Status: "queued", Phase: "queued", ProgressKind: "indeterminate", CreatedAt: time.Now().UTC(), CPUShareLimit: .1}
+	if a := q.Availability(); a.Available {
+		j.CPUCoreLimit = a.CPUCoreLimit
+	}
 	if r.CSVVersion == 1 {
 		j.FormatVersion = 1
 	}
@@ -243,6 +261,7 @@ func (q *Queue) Create(ctx context.Context, r Request) (*Job, error) {
 		return nil, err
 	}
 	j.ID = hex.EncodeToString(b[:])
+	j.observe(j.CreatedAt)
 	body, err := encodeJob(j)
 	if err != nil {
 		return nil, err
@@ -262,6 +281,7 @@ func (q *Queue) Save(ctx context.Context, j *Job) error {
 	if !ValidID(j.ID) {
 		return ErrNotFound
 	}
+	j.observe(time.Now())
 	b, err := encodeJob(j)
 	if err != nil {
 		return err
@@ -290,6 +310,9 @@ func (q *Queue) Get(ctx context.Context, owner, id string) (*Job, error) {
 	return j, nil
 }
 func (q *Queue) decorate(j *Job, control string) {
+	if waitingStatus(j.Status) && !j.WaitingSince.IsZero() {
+		j.CurrentWaitSeconds = max(0, time.Since(j.WaitingSince).Seconds())
+	}
 	if j.Status == "done" && !time.Now().Before(j.ExpiresAt) {
 		j.Status = "expired"
 	}
@@ -303,6 +326,18 @@ func (q *Queue) decorate(j *Job, control string) {
 		a := q.Availability()
 		if a.Available && a.ActiveJob == j.ID {
 			j.Heartbeat = a.At
+			j.Resources = a.Resources
+			j.CPUCoreLimit = a.CPUCoreLimit
+		}
+	}
+	if !activeStatus(j.Status) || time.Since(j.Heartbeat) > 15*time.Second {
+		j.Throughput = Throughput{}
+		j.PhaseETA = PhaseETA{State: "unknown", Scope: "phase", Reason: j.Status}
+		j.Resources = nil
+	} else {
+		j.estimateETA(time.Now())
+		if time.Since(j.Throughput.At) > 15*time.Second {
+			j.Throughput = Throughput{}
 		}
 	}
 }
@@ -396,6 +431,7 @@ func (q *Queue) Control(ctx context.Context, owner, id, action string) error {
 	if action == "cancel" && j.Status == "failed" {
 		j.Status = "queued"
 	}
+	j.observe(time.Now())
 	b, err = encodeJob(j)
 	if err != nil {
 		return err
@@ -438,6 +474,7 @@ func (q *Queue) FencePublication(ctx context.Context, j *Job) error {
 		return context.Canceled
 	}
 	j.Status = "publishing"
+	j.observe(time.Now())
 	b, e := encodeJob(j)
 	if e != nil {
 		return e
@@ -513,6 +550,7 @@ func (q *Queue) Recover(ctx context.Context) error {
 	}
 	for _, j := range jobs {
 		j.Status, j.ProgressKind, j.WaitReason = "recovering", "indeterminate", "checkpoint_validation"
+		j.recovered(time.Now())
 		if err = q.Save(ctx, j); err != nil {
 			return err
 		}

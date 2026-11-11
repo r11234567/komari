@@ -13,17 +13,6 @@ import (
 	"syscall"
 )
 
-type ResourceProof struct {
-	At             string  `json:"at"`
-	EffectiveCPUs  float64 `json:"effective_cpus"`
-	WorkerCPUs     float64 `json:"worker_cpus"`
-	Quota          int64   `json:"quota_us"`
-	Period         int64   `json:"period_us"`
-	MemoryMax      int64   `json:"memory_max"`
-	Cgroup         string  `json:"cgroup"`
-	InstanceCgroup string  `json:"instance_cgroup"`
-}
-
 func SelfCgroup() (string, error) {
 	b, err := os.ReadFile("/proc/self/cgroup")
 	if err != nil {
@@ -200,4 +189,37 @@ func processIOBytes() (uint64, error) {
 		}
 	}
 	return total, nil
+}
+
+func readResourceCounters(group string) (resourceCounters, error) {
+	var c resourceCounters
+	b, err := os.ReadFile(filepath.Join(group, "cpu.stat"))
+	if err != nil {
+		return c, err
+	}
+	var usage bool
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || (fields[0] != "usage_usec" && fields[0] != "throttled_usec") {
+			continue
+		}
+		n, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return c, err
+		}
+		if fields[0] == "usage_usec" {
+			c.usage, usage = n, true
+		} else {
+			c.throttled = n
+		}
+	}
+	if !usage {
+		return c, errors.New("cgroup usage_usec unavailable")
+	}
+	b, err = os.ReadFile(filepath.Join(group, "memory.current"))
+	if err != nil {
+		return c, err
+	}
+	c.memory, err = strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	return c, err
 }

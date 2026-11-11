@@ -4,8 +4,6 @@ package historyexport
 
 import "errors"
 
-type ResourceProof struct{}
-
 func SelfCgroup() (string, error) {
 	return "", errors.New("strict background export currently requires Linux cgroup v2")
 }
@@ -20,4 +18,8 @@ func diskAvailable(path string) (uint64, error) {
 }
 func processIOBytes() (uint64, error) {
 	return 0, errors.New("strict background I/O accounting is unsupported on this platform")
+}
+
+func readResourceCounters(group string) (resourceCounters, error) {
+	return resourceCounters{}, errors.New("strict background resource accounting requires Linux cgroup v2")
 }

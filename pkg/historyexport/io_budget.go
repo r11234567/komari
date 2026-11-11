@@ -3,6 +3,7 @@ package historyexport
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,6 +15,8 @@ type ioBudget struct {
 	rate        int64
 	at, checked time.Time
 	bytes       uint64
+	waiting     atomic.Bool
+	waitNanos   atomic.Int64
 }
 
 func (b *ioBudget) wait(ctx context.Context) error {
@@ -36,6 +39,9 @@ func (b *ioBudget) wait(ctx context.Context) error {
 	elapsed := now.Sub(b.at)
 	required := time.Duration(float64(n-b.bytes) / float64(b.rate) * float64(time.Second))
 	if required > elapsed {
+		started := time.Now()
+		b.waiting.Store(true)
+		defer func() { b.waitNanos.Add(time.Since(started).Nanoseconds()); b.waiting.Store(false) }()
 		timer := time.NewTimer(required - elapsed)
 		defer timer.Stop()
 		select {
