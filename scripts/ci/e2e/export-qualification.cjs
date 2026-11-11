@@ -10,8 +10,9 @@ const root = process.env.E2E_ROOT, artifacts = process.env.E2E_ARTIFACTS;
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || root !== path.join(process.env.RUNNER_TEMP || '', 'komari-e2e')) throw Error('Disposable hosted runner only');
 const base = 'https://127.0.0.1:29443';
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'qualification-manifest.json')));
-const workerGroup = '/sys/fs/cgroup/komari-e2e.slice/komari-e2e-export.service';
-const slice = '/sys/fs/cgroup/komari-e2e.slice';
+const groupPath = unit => '/sys/fs/cgroup'+execFileSync('systemctl',['show',unit,'--property=ControlGroup','--value'],{encoding:'utf8'}).trim();
+const workerGroup = groupPath('komari-e2e-export.service');
+const slice = groupPath('komari-e2e.slice');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const assert = (ok, message) => { if (!ok) throw Error(message); };
 const stat = dir => Object.fromEntries(fs.readFileSync(path.join(dir, 'cpu.stat'), 'utf8').trim().split('\n').map(s => { const [k, v] = s.split(/\s+/); return [k, Number(v)]; }));
@@ -41,7 +42,10 @@ async function run() {
     };
     await Promise.all(Object.entries(requests).map(async ([key,args]) => {
       const result = await api(...args); (target[key] ||= []).push(result.ms);
-      if(key==='chart') assert(result.body.series?.some(s => s.queryPoints?.length), 'Live Agent chart disappeared');
+      if(key==='chart') {
+        const observed=(result.body.series||[]).flatMap(s=>(s.queryPoints||[]).map(p=>Date.parse(p.observedAt))).filter(Number.isFinite);
+        assert(observed.length && Math.max(...observed)>Date.now()-120_000, 'Installed Agent chart stopped receiving fresh observations');
+      }
       if(key==='traffic') assert(result.body.buckets?.length===72,'Traffic buckets missing');
       if(key==='billing') assert(!result.body.charts?.traffic?.error,'Billing unavailable');
     }));

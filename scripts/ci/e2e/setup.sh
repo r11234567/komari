@@ -79,7 +79,17 @@ sudo systemd-run --unit=komari-e2e-export --collect \
   --property=MemoryMax=128M --property=MemorySwapMax=0 \
   --setenv=GOMEMLIMIT=90MiB --setenv=GOMAXPROCS=1 \
   "$E2E_ROOT/bin/komari" export-worker --queue "$E2E_ROOT/panel/data/exports-v2" \
-  --instance-cgroup=/sys/fs/cgroup/komari-e2e.slice/komari-e2e-panel.service
+  --instance-cgroup="/sys/fs/cgroup$(systemctl show komari-e2e-panel.service --property=ControlGroup --value)"
+for attempt in $(seq 1 30); do
+  if [[ -s "$E2E_ROOT/panel/data/exports-v2/worker.json" ]]; then break; fi
+  if ! systemctl is-active --quiet komari-e2e-export.service || [[ "$attempt" = 30 ]]; then
+    sudo journalctl -u komari-e2e-export.service --no-pager
+    exit 1
+  fi
+  sleep 1
+done
+systemctl show komari-e2e-panel.service komari-e2e-export.service komari-e2e.slice \
+  --property=ControlGroup,CPUQuotaPerSecUSec,MemoryMax > "$E2E_ARTIFACTS/resource-groups.txt"
 sudo install -d /usr/lib/komari/komari-e2e
 sudo install -m0755 "$E2E_ROOT/bin/komari-agent" /usr/lib/komari/komari-e2e/komari-agent
 sudo install -m0755 "$E2E_ROOT/bin/komari-host" /usr/lib/komari/komari-e2e/komari-host

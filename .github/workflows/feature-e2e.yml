@@ -89,7 +89,7 @@ jobs:
             --setenv=GOMEMLIMIT=90MiB --setenv=GOMAXPROCS=1 \
             "$E2E_ROOT/bin/komari" export-worker --queue "$E2E_ROOT/panel/data/exports-v2" \
             --io-bytes-per-second=131072 \
-            --instance-cgroup=/sys/fs/cgroup/komari-e2e.slice/komari-e2e-panel.service
+            --instance-cgroup="/sys/fs/cgroup$(systemctl show komari-e2e-panel.service --property=ControlGroup --value)"
       - name: Qualify actual cold CSV work for at least two hours with HTTPS, Agent and chart load
         if: inputs.export_qualification
         env:

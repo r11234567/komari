@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"github.com/komari-monitor/komari/pkg/metric"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -12,6 +14,40 @@ import (
 func requestFixture(t *testing.T, owner string) Request {
 	t.Helper()
 	return Request{Owner: owner, UUID: "node", Category: "resource", Mode: "raw", Start: time.Now().Add(-time.Hour), End: time.Now().Add(-time.Minute), Metrics: []string{"cpu.usage"}, Source: Source{DSN: filepath.Join(t.TempDir(), "metrics.db"), Telemetry: metric.TelemetryConfig{ArchiveDirectory: filepath.Join(t.TempDir(), "archive")}}}
+}
+
+func TestQueuePrivateDirectoryAndCancellationPriority(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "queue")
+	if e := os.Mkdir(dir, 0755); e != nil {
+		t.Fatal(e)
+	}
+	q, e := Open(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer q.Close()
+	if runtime.GOOS != "windows" {
+		info, e := os.Stat(dir)
+		if e != nil || info.Mode().Perm() != 0700 {
+			t.Fatal("private exports exposed", info, e)
+		}
+	}
+	old, e := q.Create(ctx, requestFixture(t, "old"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	later, e := q.Create(ctx, requestFixture(t, "later"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = q.Control(ctx, later.Owner, later.ID, "cancel"); e != nil {
+		t.Fatal(e)
+	}
+	next, e := q.Next(ctx, "later")
+	if e != nil || next.ID != later.ID || next.ID == old.ID {
+		t.Fatal("cancellation starved behind active export", next, e)
+	}
 }
 
 func TestQueueRestartTTLAndControl(t *testing.T) {

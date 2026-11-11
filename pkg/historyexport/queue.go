@@ -107,7 +107,17 @@ func Open(dir string) (*Queue, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
-	dir, err := filepath.Abs(dir)
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("export queue must be a private real directory")
+	}
+	if err = os.Chmod(dir, 0700); err != nil {
+		return nil, err
+	}
+	dir, err = filepath.Abs(dir)
 	if err != nil {
 		return nil, err
 	}
