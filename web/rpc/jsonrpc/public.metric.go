@@ -389,7 +389,16 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 	}
 	now := time.Now().UTC()
 	interval := metricDownsampleInterval(end.Sub(start), maxPoints)
+	if store.Telemetry() != nil {
+		interval = metric.TelemetryChartInterval(end.Sub(start), maxPoints)
+	}
 	interval = store.CompatibleSeriesIntervalForMetric(ctx, metricstore.MetricPingLatency, start, now, interval)
+	if telemetry := store.Telemetry(); telemetry != nil {
+		start, end, err = telemetry.PingWindow(start, end, interval, now)
+		if err != nil {
+			return nil, metricQueryError(err, "Failed to resolve ping statistics window")
+		}
+	}
 
 	queries := make([]metric.AggregateQuery, 0, len(entityIDs))
 	for _, entityID := range entityIDs {

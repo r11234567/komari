@@ -583,6 +583,12 @@ func (s *metricsService) getPingStats(ctx context.Context, req *connect.Request[
 		interval = metric.TelemetryChartInterval(end.Sub(start), maxPoints)
 	}
 	interval = store.CompatibleSeriesIntervalForMetric(ctx, metricstore.MetricPingLatency, start, time.Now().UTC(), interval)
+	if telemetry := store.Telemetry(); telemetry != nil {
+		start, end, err = telemetry.PingWindow(start, end, interval, time.Now().UTC())
+		if err != nil {
+			return nil, connectMetricStoreError(err)
+		}
+	}
 	result := make([]*metricsv1.PingStat, 0)
 	for _, agentID := range entityIDs {
 		if err := ctx.Err(); err != nil {

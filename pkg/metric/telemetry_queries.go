@@ -47,6 +47,32 @@ func (t *Telemetry) compatibleInterval(start, now time.Time, interval time.Durat
 	return telemetryInterval(start, now, interval)
 }
 
+// PingWindow returns the interval which can be answered from retained cells.
+// Historical edges move inward to the output grid. Recent hot edges remain
+// exact. Callers return these actual bounds with the statistics so the probe
+// denominator always describes the advertised window.
+func (t *Telemetry) PingWindow(start, end time.Time, interval time.Duration, now time.Time) (time.Time, time.Time, error) {
+	if end.Before(start) || interval <= 0 {
+		return start, end, ErrInvalidArgument
+	}
+	interval = t.compatibleInterval(start, now, interval)
+	cutoff := now.Add(-t.cfg.RawWindow)
+	if start.Before(cutoff) {
+		aligned := alignTime(start.UTC(), interval)
+		if aligned.Before(start) {
+			aligned = aligned.Add(interval)
+		}
+		start = aligned
+	}
+	if end.Before(cutoff) {
+		end = alignTime(end.UTC().Add(time.Nanosecond), interval).Add(-time.Nanosecond)
+	}
+	if end.Before(start) {
+		return start, end, ErrTelemetryCoverage
+	}
+	return start, end, nil
+}
+
 func (t *Telemetry) SeriesBatch(ctx context.Context, queries []AggregateQuery, now time.Time) ([][]AggregatePoint, error) {
 	results, err := t.ChartBatch(ctx, queries, now)
 	if err != nil {

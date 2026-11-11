@@ -106,6 +106,7 @@ func telemetryExternal(t *testing.T, cfg Config) {
 	if err != nil || len(mixed.Points) != 2 || mixed.Points[0].Value != 21 || mixed.Points[1].Value != 57 || len(mixed.Gaps) != 0 {
 		t.Fatalf("external mixed resolution planner: %+v %v", mixed, err)
 	}
+	testTelemetryPingWindowExcludesKnownOutsideChildren(t, e)
 	if err = e.EnsureSchedule(ctx, []ScheduleTask{{Name: "summary", Due: time.Now().Add(-time.Second)}}); err != nil {
 		t.Fatal(err)
 	}

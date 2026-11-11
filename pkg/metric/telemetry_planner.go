@@ -108,8 +108,14 @@ func (t *Telemetry) planChart(ctx context.Context, tx *sql.Tx, q AggregateQuery,
 	if err != nil {
 		return nil, err
 	}
-	query := "SELECT b.segment_id,b.series_id,a.state,a.last_id,s.metric,s.entity,s.tags,b.bucket,b.resolution,b.stats FROM " + t.table("summary") + " b JOIN " + t.table("series") + " s ON s.id=b.series_id JOIN " + t.table("segments") + " a ON a.id=b.segment_id LEFT JOIN " + t.table("erasures") + " e ON e.series_id=s.id WHERE s.metric=? AND b.bucket<=? AND b.bucket+b.resolution>? AND (e.through_id IS NULL OR a.first_id>e.through_id)" + filter + " ORDER BY b.segment_id,b.series_id,b.resolution DESC,b.bucket LIMIT 100001"
-	args = append([]any{q.MetricName, q.End.UnixNano(), q.Start.UnixNano()}, args...)
+	// Online tiers are nested within UTC hours. Include the complete boundary
+	// hours so children outside the request can prove that a parent has no
+	// unrepresented observations inside it. Legacy cells own additive input and
+	// must retain their original window selection.
+	boundaryStart := q.Start.UTC().Truncate(time.Hour).UnixNano()
+	boundaryEnd := q.End.UTC().Truncate(time.Hour).Add(time.Hour).UnixNano()
+	query := "SELECT b.segment_id,b.series_id,a.state,a.last_id,s.metric,s.entity,s.tags,b.bucket,b.resolution,b.stats FROM " + t.table("summary") + " b JOIN " + t.table("series") + " s ON s.id=b.series_id JOIN " + t.table("segments") + " a ON a.id=b.segment_id LEFT JOIN " + t.table("erasures") + " e ON e.series_id=s.id WHERE s.metric=? AND ((a.state='legacy' AND b.bucket<=? AND b.bucket+b.resolution>?) OR (a.state<>'legacy' AND b.bucket<? AND b.bucket+b.resolution>?)) AND (e.through_id IS NULL OR a.first_id>e.through_id)" + filter + " ORDER BY b.segment_id,b.series_id,b.resolution DESC,b.bucket LIMIT 100001"
+	args = append([]any{q.MetricName, q.End.UnixNano(), q.Start.UnixNano(), boundaryEnd, boundaryStart}, args...)
 	rows, err := tx.QueryContext(ctx, t.bind(query), args...)
 	if err != nil {
 		return nil, err
@@ -131,7 +137,7 @@ func (t *Telemetry) planChart(ctx context.Context, tx *sql.Tx, q AggregateQuery,
 			err = ErrTelemetryBackpressure
 			break
 		}
-		if c.resolution <= 0 || c.bucket > q.End.UnixNano() || c.bucket+c.resolution <= c.bucket {
+		if c.resolution <= 0 || c.bucket+c.resolution <= c.bucket {
 			err = ErrTelemetryCoverage
 			break
 		}
@@ -176,8 +182,24 @@ func (t *Telemetry) planChart(ctx context.Context, tx *sql.Tx, q AggregateQuery,
 	for _, owner := range orderedOwners {
 		cells := owners[owner]
 		var chosen []telemetryPlanCell
+		var outside []telemetryPlanCell
 		for _, c := range cells {
-			if c.stats.Attempts == 0 || c.stats.LastNano < q.Start.UnixNano() || c.stats.FirstNano > q.End.UnixNano() {
+			if c.stats.Attempts == 0 {
+				continue
+			}
+			if c.stats.LastNano < q.Start.UnixNano() || c.stats.FirstNano > q.End.UnixNano() {
+				if c.state != "legacy" {
+					contained := false
+					for _, prior := range outside {
+						if c.bucket >= prior.bucket && c.bucket+c.resolution <= prior.bucket+prior.resolution {
+							contained = true
+							break
+						}
+					}
+					if !contained {
+						outside = append(outside, c)
+					}
+				}
 				continue
 			}
 			if time.Duration(c.resolution) > q.Interval {
@@ -254,8 +276,16 @@ func (t *Telemetry) planChart(ctx context.Context, tx *sql.Tx, q AggregateQuery,
 					}
 				}
 			}
+			if c.state != "legacy" {
+				for _, excluded := range outside {
+					if excluded.bucket >= c.bucket && excluded.bucket+excluded.resolution <= c.bucket+c.resolution {
+						represented += excluded.stats.Attempts
+					}
+				}
+			}
 			// For alternate online tiers, equal represented counts prove that no
-			// source observation remains, including legitimate empty fine buckets.
+			// source observation remains, including known outside observations and
+			// legitimate empty fine buckets. Excluded cells never enter the result.
 			if covered || c.state != "legacy" && represented == c.stats.Attempts {
 				continue
 			}
