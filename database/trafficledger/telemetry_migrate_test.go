@@ -142,3 +142,71 @@ func maxTimeLedger(a, b time.Time) time.Time {
 	}
 	return b
 }
+
+func TestOfflineMinuteRefinementRejectsUnprovableWindowsWithoutChangingBilling(t *testing.T) {
+	for _, scenario := range []string{"reset", "missing-counter", "tagged", "unsafe-integer", "mismatch", "subminute-boundary", "expired", "cancelled"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			db := openLedgerTestDB(t, "minute-edge-"+scenario)
+			require.NoError(t, db.AutoMigrate(TelemetryModels()...))
+			s, err := metric.Open(ctx, metric.SQLite(filepath.Join(t.TempDir(), "metrics.db"), metric.WithRetiredLegacyStorage(), metric.WithSQLiteProfile(metric.SQLiteProfileDurable)))
+			require.NoError(t, err)
+			defer s.Close()
+			require.NoError(t, metricstore.EnsureBuiltinMetricDefinitions(ctx, s))
+			restore := metricstore.SwapStoreForTest(s)
+			defer restore()
+			at := time.Now().UTC().Add(-time.Hour).Truncate(time.Hour)
+			var points []metric.Point
+			for i := 0; i < 2; i++ {
+				// The second counter resets, but the explicitly recorded delta is
+				// authoritative and is reconciled with the original hourly result.
+				for name, value := range map[string]float64{metricstore.MetricNetTotalUp: float64(1000 - i*990), metricstore.MetricNetTotalDown: float64(2000 - i*1980), metricstore.MetricTrafficUp: float64(i * 10), metricstore.MetricTrafficDown: float64(i * 20)} {
+					if scenario == "missing-counter" && i == 1 && name == metricstore.MetricNetTotalDown {
+						continue
+					}
+					p := metric.Point{MetricName: name, EntityID: "node", Timestamp: at.Add(time.Duration(i)*20*time.Minute + time.Second), Value: value}
+					if scenario == "tagged" {
+						p.Tags = map[string]string{"iface": "unproven"}
+					}
+					if scenario == "unsafe-integer" && name == metricstore.MetricNetTotalUp {
+						p.Value = 1 << 53
+					}
+					points = append(points, p)
+				}
+			}
+			require.NoError(t, s.WriteBatch(ctx, points))
+			want := Usage{Up: 10, Down: 20}
+			start, end, cutoff := at, at.Add(time.Hour), at.Add(time.Hour)
+			if scenario == "mismatch" {
+				want.Up++
+			}
+			if scenario == "subminute-boundary" {
+				start = start.Add(time.Second)
+			}
+			if scenario == "expired" {
+				cutoff = cutoff.Add(72 * time.Hour)
+			}
+			if scenario == "cancelled" {
+				cancelled, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = cancelled
+			}
+			fine, err := refineLegacyTrafficWindow(ctx, db, "node", start, end, cutoff, want)
+			if scenario == "cancelled" {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, scenario == "reset", fine)
+			var rows int64
+			require.NoError(t, db.Model(&models.TelemetryTrafficMinute{}).Count(&rows).Error)
+			if fine {
+				require.EqualValues(t, 2, rows)
+			} else {
+				require.Zero(t, rows)
+			}
+			require.NoError(t, db.Model(&models.TrafficDailyLedger{}).Where("client=?", "node").Count(&rows).Error)
+			require.Zero(t, rows, "precision refinement posted new billable usage")
+		})
+	}
+}

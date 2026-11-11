@@ -26,7 +26,7 @@ async function run(){
  page.on('response',r=>{const url=new URL(r.url());if(url.pathname.startsWith('/api')||url.pathname.startsWith('/komari.'))responses.push({path:url.pathname,status:r.status()});});
  await expect.poll(async()=>{try{return(await context.request.get('/api/admin/update/storage-v4/auth')).status()}catch{return 0}},{timeout:30000}).toBe(200);
  await page.goto('/admin/update/storage-v4');
- await expect(page.getByRole('heading',{name:'Telemetry storage upgrade',exact:true})).toBeVisible();
+ await expect(page.getByRole('heading',{name:'Telemetry storage upgrade',exact:true,includeHidden:true})).toBeVisible();
  // An unauthenticated visitor can see the maintenance explanation, but not
  // counts, source paths, errors or control endpoints.
  expect((await context.request.get('/api/admin/update/storage-v4/status')).status()).toBe(401);
@@ -53,6 +53,9 @@ async function run(){
  // The failed migration remains restricted after a real process restart.
  system('restart','komari-e2e-panel.service');
  await expect.poll(async()=>{try{return(await context.request.get('/api/admin/update/storage-v4/status')).status()}catch{return 0}},{timeout:20000}).toBe(200);
+ // Keep the real SQLite lock until the restarted process has independently
+ // failed too. Releasing on the first 200 races automatic startup conversion.
+ await expect.poll(async()=>{try{return(await(await context.request.get('/api/admin/update/storage-v4/status')).json()).data.state}catch{return ''}},{timeout:30000}).toBe('failed');
  fs.writeFileSync(release,'');
  await new Promise((resolve,reject)=>{if(locker.exitCode!==null)return locker.exitCode===0?resolve():reject(Error('Locker failed'));locker.once('exit',code=>code===0?resolve():reject(Error('Locker failed')));});
  await page.reload();
@@ -61,7 +64,7 @@ async function run(){
  // No operational request is used to repair/consume history. Startup must
  // finish its own conversion and hand the port back to the ordinary router.
  await expect.poll(async()=>{try{return(await context.request.get('/api/public')).status()}catch{return 0}},{timeout:180000}).toBe(200);
- await expect(page).toHaveURL(/\/admin(?:\/|$)/,{timeout:20000});
+ await expect(page).toHaveURL(url=>url.pathname==='/admin'||url.pathname==='/admin/',{timeout:20000});
  const checks=JSON.parse(execFileSync('python3',['-c',`import sqlite3,json,sys\nc=sqlite3.connect(sys.argv[1])\np=dict(c.execute("SELECT task,value FROM metric_telemetry_progress WHERE task IN ('legacy_migration_complete','legacy_ledger_complete')"))\nprint(json.dumps({'progress':p,'source_rows':c.execute('SELECT COUNT(*) FROM metric_points').fetchone()[0],'summary_rows':c.execute('SELECT COUNT(*) FROM metric_telemetry_summary').fetchone()[0]}))`,source],{encoding:'utf8'}));
  expect(checks.progress.legacy_migration_complete).toBe(1);expect(checks.progress.legacy_ledger_complete).toBe(1);expect(checks.source_rows).toBe(43200);expect(checks.summary_rows).toBeGreaterThan(0);
  await page.screenshot({path:path.join(artifacts,'storage-upgrade-complete.png'),fullPage:true});

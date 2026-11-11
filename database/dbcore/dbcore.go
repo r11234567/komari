@@ -28,7 +28,7 @@ import (
 )
 
 // zipDirectoryExcluding 将 srcDir 打包为 dstZip，exclude 是绝对路径集合需要排除
-func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}) error {
+func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}, overlays ...map[string]string) error {
 	// 规范化排除路径为绝对路径
 	normExclude := make(map[string]struct{}, len(exclude))
 	for p := range exclude {
@@ -45,33 +45,13 @@ func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}) e
 	zw := zip.NewWriter(out)
 	defer zw.Close()
 
-	absSrc, _ := filepath.Abs(srcDir)
-	walkErr := filepath.Walk(absSrc, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		// 排除 backup.zip 本身
-		if _, ok := normExclude[path]; ok {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		// 计算 zip 内相对路径
-		rel, err := filepath.Rel(absSrc, path)
-		if err != nil {
-			return err
-		}
-		// 根目录跳过
-		if rel == "." {
-			return nil
-		}
-		// 替换为正斜杠
-		zipName := filepath.ToSlash(rel)
-
+	addFile := func(path string, info os.FileInfo, zipName string) error {
 		if info.IsDir() {
 			_, err := zw.Create(zipName + "/")
 			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unsupported backup file: %s", path)
 		}
 		// 普通文件
 		fh, err := os.Open(path)
@@ -93,11 +73,97 @@ func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}) e
 		}
 		fh.Close()
 		return nil
+	}
+	overlay := map[string]string{}
+	for _, entries := range overlays {
+		for name, source := range entries {
+			overlay[name] = source
+		}
+	}
+	absSrc, err := filepath.Abs(srcDir)
+	if err != nil {
+		return err
+	}
+	walkErr := filepath.Walk(absSrc, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(absSrc, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		_, excluded := normExclude[path]
+		_, replaced := overlay[rel]
+		if excluded || replaced {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		return addFile(path, info, filepath.ToSlash(rel))
 	})
 	if walkErr != nil {
 		return walkErr
 	}
+	for name, source := range overlay {
+		if !filepath.IsLocal(name) {
+			return fmt.Errorf("invalid backup overlay: %s", name)
+		}
+		if err = filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			rel, err := filepath.Rel(source, path)
+			if err != nil {
+				return err
+			}
+			return addFile(path, info, filepath.ToSlash(filepath.Join(name, rel)))
+		}); err != nil {
+			return err
+		}
+	}
 	return zw.Close()
+}
+
+// Automatic upgrade/pre-restore packages use the same portable queue snapshot
+// as explicit full backups. The panel is stopped here; an old standalone
+// worker may still be alive, so its mutations must be excluded as well.
+func backupDataDirectory(dataDir, destination string, exclude map[string]struct{}, exportLocked bool) error {
+	queueDir := filepath.Join(dataDir, "exports-v2")
+	if _, err := os.Stat(filepath.Join(queueDir, "queue.db")); os.IsNotExist(err) {
+		return zipDirectoryExcluding(dataDir, destination, exclude)
+	} else if err != nil {
+		return err
+	}
+	q, err := historyexport.Open(queueDir)
+	if err != nil {
+		return err
+	}
+	defer q.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	if !exportLocked {
+		lockCtx, lockCancel := context.WithTimeout(ctx, 30*time.Second)
+		release, err := historyexport.LockMaintenance(lockCtx, queueDir)
+		lockCancel()
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
+	temp, err := os.MkdirTemp(filepath.Dir(dataDir), ".komari-export-backup-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(temp)
+	snapshot := filepath.Join(temp, "exports-v2")
+	if err = q.BackupLocked(ctx, snapshot); err != nil {
+		return err
+	}
+	return zipDirectoryExcluding(dataDir, destination, exclude, map[string]string{"exports-v2": snapshot})
 }
 
 // removeAllInDirExcept 删除 dir 下除 exclude 指定绝对路径外的所有文件和文件夹
@@ -271,7 +337,7 @@ func restoreStagedBackup(dataDir string) error {
 	}
 	timestamp := time.Now().UTC().Format("20060102-150405")
 	preRestorePath := filepath.Join(backupDir, fmt.Sprintf("pre-restore-%s.zip", timestamp))
-	if err := zipDirectoryExcluding(dataDir, preRestorePath, map[string]struct{}{backupZipPath: {}}); err != nil {
+	if err := backupDataDirectory(dataDir, preRestorePath, map[string]struct{}{backupZipPath: {}}, true); err != nil {
 		return fmt.Errorf("preserve current data before restore: %w", err)
 	}
 
@@ -385,7 +451,7 @@ func backupOnVersionUpgrade() {
 	tsName := time.Now().UTC().Format("20060102-150405")
 	bakPath := filepath.Join("./backup", fmt.Sprintf("upgrade-%s.zip", tsName))
 	backupZipPath := filepath.Join(".", "data", "backup.zip")
-	if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}}); zipErr != nil {
+	if zipErr := backupDataDirectory("./data", bakPath, map[string]struct{}{backupZipPath: {}}, false); zipErr != nil {
 		logger.Errorf("dbcore", "[upgrade-backup] failed to backup ./data before upgrade (from %q to %q): %v", prevVersion, versionID, zipErr)
 		return
 	}
