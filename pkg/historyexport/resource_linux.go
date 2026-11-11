@@ -126,7 +126,9 @@ func VerifyResources(worker, instance string) (ResourceProof, error) {
 	if !filepath.IsAbs(worker) || !filepath.IsAbs(instance) || filepath.Clean(worker) == filepath.Clean(instance) || strings.HasPrefix(filepath.Clean(instance)+string(os.PathSeparator), filepath.Clean(worker)+string(os.PathSeparator)) {
 		return p, errors.New("export worker requires its own cgroup and an explicit distinct instance cgroup")
 	}
-	if info,e:=os.Stat(instance);e!=nil || !info.IsDir(){return p,errors.New("configured instance cgroup does not exist")}
+	if info, e := os.Stat(instance); e != nil || !info.IsDir() {
+		return p, errors.New("configured instance cgroup does not exist")
+	}
 	q, period, e := quota(worker)
 	if e != nil {
 		return p, e

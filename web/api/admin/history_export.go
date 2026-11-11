@@ -34,7 +34,7 @@ type backgroundExportRequest struct {
 	FormatVersion                                       int `json:"format_version"`
 }
 
-func RegisterHistoryExportRoutes(group *gin.RouterGroup) {
+func RegisterHistoryExportRoutes(group *gin.RouterGroup) func() error {
 	q, e := historyexport.Open("./data/exports-v2")
 	a := &backgroundExportAPI{queue: q, err: e}
 	group.GET("/history/export/retention", a.retention)
@@ -44,6 +44,12 @@ func RegisterHistoryExportRoutes(group *gin.RouterGroup) {
 	group.GET("/history/export/:id/download", a.download)
 	group.DELETE("/history/export/:id", a.cancel)
 	group.POST("/history/export/:id/:action", a.control)
+	return func() error {
+		if q != nil {
+			return q.Close()
+		}
+		return nil
+	}
 }
 func exportError(c *gin.Context, status int, e error) {
 	c.JSON(status, gin.H{"status": "error", "message": e.Error()})

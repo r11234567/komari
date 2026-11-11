@@ -8,6 +8,30 @@ import (
 	"time"
 )
 
+func TestTelemetryChartBatchBudgetAcrossQueriesAndSources(t *testing.T) {
+	_, e := telemetryFixture(t, "")
+	ctx := WithTelemetryEntities(context.Background(), []string{"node"})
+	at := time.Now().UTC().Truncate(time.Minute)
+	if _, err := e.Accept(ctx, telemetryBatch("bounded", at, 1, 2, 3), at); err != nil {
+		t.Fatal(err)
+	}
+	q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(time.Minute)}, Interval: 10 * time.Second, Aggregation: AggAvg, PreserveSeries: true}
+	for _, summarized := range []bool{false, true} {
+		if summarized {
+			summarizeAll(t, e)
+		}
+		if _, err := e.ChartBatchBounded(ctx, []AggregateQuery{q, q}, at, 1, 1<<20); !errors.Is(err, ErrTelemetryBackpressure) {
+			t.Fatalf("unbounded shared result, summarized=%v: %v", summarized, err)
+		}
+		if _, err := e.ChartBatchBounded(ctx, []AggregateQuery{q}, at, 100, 1); !errors.Is(err, ErrTelemetryBackpressure) {
+			t.Fatalf("unbounded input allocation: %v", err)
+		}
+		if got, err := e.ChartBatchBounded(ctx, []AggregateQuery{q}, at, 100, 1<<20); err != nil || len(got) != 1 || len(got[0].Points) == 0 {
+			t.Fatalf("valid bounded chart: %+v %v", got, err)
+		}
+	}
+}
+
 func TestTelemetryChartExactBoundariesAndPendingTail(t *testing.T) {
 	_, e := telemetryFixture(t, "")
 	ctx := context.Background()

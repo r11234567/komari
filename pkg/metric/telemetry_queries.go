@@ -8,6 +8,30 @@ import (
 
 type telemetrySnapshotKey struct{}
 
+type telemetryChartBudgetKey struct{}
+type telemetryChartBudget struct{ points, bytes int }
+
+// ChartBatchBounded shares one allocation budget across every query. Export
+// manifests must reject excessive cardinality before materializing the result,
+// not after the worker has already exhausted its memory cgroup.
+func (t *Telemetry) ChartBatchBounded(ctx context.Context, queries []AggregateQuery, now time.Time, points, bytes int) ([]TelemetryQueryResult, error) {
+	if points < 1 || bytes < 1 {
+		return nil, ErrInvalidArgument
+	}
+	return t.ChartBatch(context.WithValue(ctx, telemetryChartBudgetKey{}, &telemetryChartBudget{points, bytes}), queries, now)
+}
+
+func reserveChartMemory(ctx context.Context, points, bytes int) error {
+	if b, ok := ctx.Value(telemetryChartBudgetKey{}).(*telemetryChartBudget); ok {
+		if points > b.points || bytes > b.bytes {
+			return ErrTelemetryBackpressure
+		}
+		b.points -= points
+		b.bytes -= bytes
+	}
+	return nil
+}
+
 func telemetryInterval(start, now time.Time, interval time.Duration) time.Duration {
 	// Output-grid compatibility is independent of unrelated retained history.
 	// The query planner resolves actual source precision for each ownership span.

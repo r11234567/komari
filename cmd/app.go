@@ -682,7 +682,8 @@ func (a *App) BuildRouter() error {
 		c.Next()
 	})
 
-	router.Register(r)
+	closeExports := router.Register(r)
+	a.addCleanup("history-export-queue", func(context.Context) error { return closeExports() })
 	plugin.Init(r)
 	if err := plugin.LoadAll(); err != nil {
 		logger.ErrorArgs("server", "Failed to load some plugins:", err)

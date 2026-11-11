@@ -442,7 +442,7 @@ func (w *Worker) snapshot(ctx context.Context, j *Job) (metric.ExportSnapshot, e
 		for i, q := range queries {
 			qs[i] = metric.AggregateQuery{Query: q, Aggregation: j.Aggregation, Interval: j.Interval, PreserveSeries: true}
 		}
-		r, e := telemetry.ChartBatch(ctx, qs, time.Now())
+		r, e := telemetry.ChartBatchBounded(ctx, qs, time.Now(), 20000, 8<<20)
 		if e != nil {
 			return snapshot, e
 		}

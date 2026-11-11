@@ -124,6 +124,9 @@ func (t *Telemetry) planChart(ctx context.Context, tx *sql.Tx, q AggregateQuery,
 		}
 		count++
 		bytes += len(raw) + len(tags) + 256
+		if err = reserveChartMemory(ctx, 0, len(raw)+len(tags)+256); err != nil {
+			break
+		}
 		if count > 100000 || bytes > 32<<20 {
 			err = ErrTelemetryBackpressure
 			break
@@ -213,6 +216,9 @@ func (t *Telemetry) planChart(ctx context.Context, tx *sql.Tx, q AggregateQuery,
 				return nil, err
 			}
 			if groups[k] == nil {
+				if err = reserveChartMemory(ctx, 1, 256); err != nil {
+					return nil, err
+				}
 				groups[k] = &telemetryStats{}
 				tagsByGroup[k] = c.tags
 			}

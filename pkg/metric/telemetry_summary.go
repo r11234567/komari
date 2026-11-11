@@ -430,6 +430,9 @@ func (t *Telemetry) aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 				key.aggregateSeriesKey = aggregateSeriesKey{p.MetricName, p.EntityID, h}
 			}
 			if groups[key] == nil {
+				if e = reserveChartMemory(ctx, 1, len(rawTags)+512); e != nil {
+					break
+				}
 				groups[key] = &telemetryStats{}
 				tagsByGroup[key] = p.Tags
 			}
