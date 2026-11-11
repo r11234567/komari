@@ -6,6 +6,8 @@ export KOMARI_IMAGE="komari-export-proof:${GITHUB_RUN_ID}"
 export KOMARI_DATA="$E2E_ROOT/docker-data"
 export KOMARI_PANEL_CGROUP=/not-yet-resolved
 export KOMARI_PORT=29577
+export KOMARI_UID="$(id -u)"
+export KOMARI_GID="$(id -g)"
 project="komari-export-${GITHUB_RUN_ID}"
 mkdir -p "$KOMARI_DATA" "$E2E_ROOT/docker-image"
 cp "$E2E_ROOT/bin/komari" "$E2E_ROOT/docker-image/komari"
@@ -32,6 +34,7 @@ for attempt in $(seq 1 60); do
   if [[ -s "$KOMARI_DATA/exports-v2/worker.json" ]]; then break; fi
   sleep 1
 done
+test -s "$KOMARI_DATA/exports-v2/worker.json"
 for cpus in .5 1 2 4 8; do
   docker update --cpus="$cpus" "$id"
   sleep 3

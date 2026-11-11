@@ -4,6 +4,7 @@
 services:
   panel:
     image: ${KOMARI_IMAGE:?Set the exact Komari image}
+    user: "${KOMARI_UID:?Set the data owner UID}:${KOMARI_GID:?Set the data owner GID}"
     working_dir: /srv/komari
     command: ["/app/komari", "server", "--listen", "0.0.0.0:25774"]
     cpus: ${KOMARI_CPUS:-1}
@@ -15,6 +16,7 @@ services:
       - "127.0.0.1:${KOMARI_PORT:-25774}:25774"
   export-worker:
     image: ${KOMARI_IMAGE:?Set the exact Komari image}
+    user: "${KOMARI_UID:?Set the same data owner UID}:${KOMARI_GID:?Set the same data owner GID}"
     working_dir: /srv/komari
     command:
       - /app/komari

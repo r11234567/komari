@@ -13,7 +13,7 @@
 - 所有任务共享一个独占 worker 锁、全局 8 项/每账户 2 项活动任务上限；确认一个输入单元后切换账户，保持公平。
 - 当前每任务冻结输入上限 2 GiB、输出上限 8 GiB，保留至少 256 MiB 磁盘空间；超限明确失败并要求拆分范围。临时输入和文件使用私有目录，不能让其他账户修改。
 
-Docker 部署提供 [Compose 示例](../deploy/compose.export-worker.yml)：Linux Docker Engine/cgroup v2、同一精确镜像、相同绝对数据路径、独立 0.04 核/128 MiB worker、只读 cgroup 和去除 capabilities。先启动 panel，再从宿主机 `docker inspect` 的 State.Pid 对应 `/proc/<pid>/cgroup` 解析主实例路径，设置 `KOMARI_PANEL_CGROUP` 后启动 worker。CI 会实际部署并动态改变 panel 的 0.5/1/2/4/8 核配额，验证祖先/cpuset 约束及低于支持范围时拒绝运行；在该项实际通过前仍为待验收，不代表任意容器拓扑均已验证。
+Docker 部署提供 [Compose 示例](../deploy/compose.export-worker.yml)：Linux Docker Engine/cgroup v2、同一精确镜像、相同绝对数据路径、独立 0.04 核/128 MiB worker、只读 cgroup 和去除 capabilities。两个服务必须显式使用数据目录所属的同一非 root UID/GID（`KOMARI_UID`/`KOMARI_GID`）；不能依赖 root 的 DAC override 绕过私有目录权限。先启动 panel，再从宿主机 `docker inspect` 的 State.Pid 对应 `/proc/<pid>/cgroup` 解析主实例路径，设置 `KOMARI_PANEL_CGROUP` 后启动 worker。CI 会实际部署并动态改变 panel 的 0.5/1/2/4/8 核配额，验证祖先/cpuset 约束及低于支持范围时拒绝运行；在该项实际通过前仍为待验收，不代表任意容器拓扑均已验证。
 
 ## 格式和恢复
 
