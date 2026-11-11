@@ -622,6 +622,9 @@ CI/E2E 证据记录精确代码/协议/Web/部署配置版本、源数据 manife
 
 ### R4 当前检查点（尚未验收）
 
+- `7e2f0ebe` 的 25 项 PR CI 全部通过；[短程真实 HTTPS/Web/已安装 Agent E2E](https://github.com/r11234567/komari/actions/runs/42973455163) 通过，已下载并目视检查后台任务 UI。长资格 [42973460572](https://github.com/r11234567/komari/actions/runs/42973460572) 失败于导出前的 Agent 新鲜度检查，尚未进入两小时运行：冷 fixture 生成故意停服约两分钟，Agent 仍处于连接退避。脚本补充有上限的恢复等待，正式运行中的新鲜度要求不放宽。
+- 追加恢复前缀哈希验证、缺失/截短拒绝、SQLite busy/locked 三次有界退避及 retry_wait/recovering UI、终态清理每批 64 项；本地 historyexport 全量 race 与 Web 203 项测试/构建通过，lint 0 errors / 39 原有 warnings。新增实际 Docker cgroup-v2 部署验证仍待精确提交运行。长资格和 R5 未完成，不能视为整体验收。
+
 - 独立持久队列与 Linux cgroup v2 worker 已接入：raw/summary/sample30s 三模式、旧 v1 列与单位、交互管理员和账户隔离、每账户 2/全局 8 活动任务、固定快照、取消/暂停/重试、发布栅栏、ready 后 48h、显式 expired。所有昂贵步骤在同一受限进程；无硬配额或外部 SQL CPU 未隔离则明确不可用。
 - 新归档以单文件带内索引组织独立 JSONL-zstd 帧。冻结按 32 段事务分页申请短租约，热数据复制为私有文件，冷文件硬链接或有界跨盘复制，完成冻结立即释放源租约。输出校验与 fsync 检查点一并推进，采样输入整单元校验后才提交私有 spool，宽表每 128 行可恢复并让出调度。
 - 前台积压/慢读、权限/节点、源身份与历史 epoch、磁盘余量已接入状态策略，过期策略自动暂停；历史删除同时使旧下载失效。浏览器显示真实阶段、计数、心跳与确认检查点，未知 ETA 不估造总百分比，支持条件 ETag、后台低频和错误退避。

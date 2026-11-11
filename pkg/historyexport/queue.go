@@ -81,6 +81,8 @@ type Job struct {
 	CPUShareLimit       float64   `json:"cpu_share_limit"`
 	Generation          string    `json:"snapshot_id,omitempty"`
 	Retries             int       `json:"retries"`
+	AutomaticRetries    int       `json:"automatic_retries"`
+	RetryAt             time.Time `json:"retry_at,omitempty"`
 }
 
 // DiskJob is private. Neither connection strings nor resumable hash state are
@@ -206,7 +208,7 @@ func (q *Queue) Create(ctx context.Context, r Request) (*Job, error) {
 	}
 	defer tx.Rollback()
 	var prior []byte
-	err = tx.QueryRowContext(ctx, "SELECT body FROM jobs WHERE owner=? AND dedupe=? AND status IN ('queued','running','paused','publishing','done') ORDER BY created DESC LIMIT 1", r.Owner, hex.EncodeToString(key[:])).Scan(&prior)
+	err = tx.QueryRowContext(ctx, "SELECT body FROM jobs WHERE owner=? AND dedupe=? AND status IN ('queued','running','paused','publishing','recovering','retry_wait','done') ORDER BY created DESC LIMIT 1", r.Owner, hex.EncodeToString(key[:])).Scan(&prior)
 	if err == nil {
 		old, e := decodeJob(prior)
 		if e != nil {
@@ -219,7 +221,7 @@ func (q *Queue) Create(ctx context.Context, r Request) (*Job, error) {
 		return nil, err
 	}
 	var total, owned int
-	if err = tx.QueryRowContext(ctx, "SELECT COUNT(*),COALESCE(SUM(CASE WHEN owner=? THEN 1 ELSE 0 END),0) FROM jobs WHERE status IN ('queued','running','paused','publishing')", r.Owner).Scan(&total, &owned); err != nil {
+	if err = tx.QueryRowContext(ctx, "SELECT COUNT(*),COALESCE(SUM(CASE WHEN owner=? THEN 1 ELSE 0 END),0) FROM jobs WHERE status IN ('queued','running','paused','publishing','recovering','retry_wait')", r.Owner).Scan(&total, &owned); err != nil {
 		return nil, err
 	}
 	if total >= 8 || owned >= 2 {
@@ -286,7 +288,7 @@ func (q *Queue) decorate(j *Job, control string) {
 	}
 }
 func (q *Queue) List(ctx context.Context, owner string) ([]*Job, error) {
-	rows, err := q.db.QueryContext(ctx, "SELECT body,control FROM jobs WHERE owner=? ORDER BY CASE WHEN status IN ('queued','running','paused','publishing') THEN 0 ELSE 1 END,created DESC LIMIT 64", owner)
+	rows, err := q.db.QueryContext(ctx, "SELECT body,control FROM jobs WHERE owner=? ORDER BY CASE WHEN status IN ('queued','running','paused','publishing','recovering','retry_wait') THEN 0 ELSE 1 END,created DESC LIMIT 64", owner)
 	if err != nil {
 		return nil, err
 	}
@@ -337,7 +339,7 @@ func (q *Queue) Control(ctx context.Context, owner, id, action string) error {
 			return errors.New("only failed tasks can be retried")
 		}
 		var total, owned int
-		if err = tx.QueryRowContext(ctx, "SELECT COUNT(*),COALESCE(SUM(CASE WHEN owner=? THEN 1 ELSE 0 END),0) FROM jobs WHERE status IN ('queued','running','paused','publishing')", owner).Scan(&total, &owned); err != nil {
+		if err = tx.QueryRowContext(ctx, "SELECT COUNT(*),COALESCE(SUM(CASE WHEN owner=? THEN 1 ELSE 0 END),0) FROM jobs WHERE status IN ('queued','running','paused','publishing','recovering','retry_wait')", owner).Scan(&total, &owned); err != nil {
 			return err
 		}
 		if total >= 8 || owned >= 2 {
@@ -345,10 +347,12 @@ func (q *Queue) Control(ctx context.Context, owner, id, action string) error {
 		}
 		j.Status = "queued"
 		j.Error = ""
+		j.AutomaticRetries = 0
+		j.RetryAt = time.Time{}
 		j.Retries++
 		action = "resume"
 	}
-	if action == "pause" && j.Status == "queued" {
+	if action == "pause" && (j.Status == "queued" || j.Status == "retry_wait") {
 		j.Status = "paused"
 		j.WaitReason = "pause"
 	}
@@ -404,40 +408,48 @@ func (q *Queue) FencePublication(ctx context.Context, j *Job) error {
 // Next alternates accounts at each durable checkpoint. A crashed worker's
 // running task is eligible immediately after the exclusive process lock moves.
 func (q *Queue) Next(ctx context.Context, lastOwner string) (*Job, error) {
-	var b []byte
-	err := q.db.QueryRowContext(ctx, "SELECT body FROM jobs WHERE status IN ('queued','running','paused','publishing') AND control<>'pause' ORDER BY CASE WHEN control='cancel' THEN 0 ELSE 1 END,CASE WHEN owner=? THEN 1 ELSE 0 END,created LIMIT 1", lastOwner).Scan(&b)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+	rows, err := q.db.QueryContext(ctx, "SELECT body,control FROM jobs WHERE status IN ('queued','running','paused','publishing','recovering','retry_wait') AND control<>'pause' ORDER BY CASE WHEN control='cancel' THEN 0 ELSE 1 END,CASE WHEN owner=? THEN 1 ELSE 0 END,created LIMIT 8", lastOwner)
 	if err != nil {
 		return nil, err
 	}
-	return decodeJob(b)
-}
-func (q *Queue) Prune(ctx context.Context, now time.Time) error {
-	rows, err := q.db.QueryContext(ctx, "SELECT id,body FROM jobs WHERE status IN ('done','expired','failed','cancelled')")
-	if err != nil {
-		return err
-	}
-	var expired []*Job
+	defer rows.Close()
 	for rows.Next() {
-		var id string
 		var b []byte
-		if err = rows.Scan(&id, &b); err != nil {
-			break
+		var control string
+		if err = rows.Scan(&b, &control); err != nil {
+			return nil, err
 		}
 		j, e := decodeJob(b)
 		if e != nil {
-			err = e
+			return nil, e
+		}
+		if control != "cancel" && j.Status == "retry_wait" && time.Now().Before(j.RetryAt) {
+			continue
+		}
+		return j, nil
+	}
+	return nil, rows.Err()
+}
+
+// Called only after the exclusive process lock is acquired. At most eight
+// active tasks exist, and only interrupted work needs checkpoint validation.
+func (q *Queue) Recover(ctx context.Context) error {
+	rows, err := q.db.QueryContext(ctx, "SELECT body FROM jobs WHERE status IN ('running','publishing','recovering') LIMIT 8")
+	if err != nil {
+		return err
+	}
+	var jobs []*Job
+	for rows.Next() {
+		var b []byte
+		if err = rows.Scan(&b); err != nil {
 			break
 		}
-		expiry := j.ExpiresAt
-		if j.Status != "done" && j.Status != "expired" {
-			expiry = j.CreatedAt.Add(7 * 24 * time.Hour)
+		var j *Job
+		j, err = decodeJob(b)
+		if err != nil {
+			break
 		}
-		if !expiry.IsZero() && !now.Before(expiry) {
-			expired = append(expired, j)
-		}
+		jobs = append(jobs, j)
 	}
 	if err == nil {
 		err = rows.Err()
@@ -446,36 +458,84 @@ func (q *Queue) Prune(ctx context.Context, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	for _, j := range expired {
-		id := j.ID
-		if !ValidID(id) {
-			return errors.New("invalid stored job identity")
-		}
-		for _, suffix := range []string{".csv", ".csv.part", ".snapshot", ".spool.db", ".spool.db-wal", ".spool.db-shm"} {
-			p := q.Path(id, suffix)
-			if suffix == ".snapshot" {
-				if err = os.RemoveAll(p); err != nil {
-					return err
-				}
-			} else if err = os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-		}
-		// Keep terminal metadata for seven days after the file expires, so
-		// returning users can distinguish expiry from a lost task.
-		if (j.Status == "done" || j.Status == "expired") && now.Before(j.ExpiresAt.Add(7*24*time.Hour)) {
-			j.Status, j.Phase, j.ProgressKind = "expired", "expired", "indeterminate"
-			j.HashState, j.Committed = nil, Commit{}
-			if err = q.Save(ctx, j); err != nil {
-				return err
-			}
-		} else {
-			if _, err = q.db.ExecContext(ctx, "DELETE FROM jobs WHERE id=?", id); err != nil {
-				return err
-			}
+	for _, j := range jobs {
+		j.Status, j.ProgressKind, j.WaitReason = "recovering", "indeterminate", "checkpoint_validation"
+		if err = q.Save(ctx, j); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+func (q *Queue) Prune(ctx context.Context, now time.Time) error {
+	cursor := ""
+	for {
+		rows, err := q.db.QueryContext(ctx, "SELECT id,body FROM jobs WHERE id>? AND status IN ('done','expired','failed','cancelled') ORDER BY id LIMIT 64", cursor)
+		if err != nil {
+			return err
+		}
+		var expired []*Job
+		scanned := 0
+		for rows.Next() {
+			var id string
+			var b []byte
+			if err = rows.Scan(&id, &b); err != nil {
+				break
+			}
+			cursor = id
+			scanned++
+			j, e := decodeJob(b)
+			if e != nil {
+				err = e
+				break
+			}
+			expiry := j.ExpiresAt
+			if j.Status != "done" && j.Status != "expired" {
+				expiry = j.CreatedAt.Add(7 * 24 * time.Hour)
+			}
+			if !expiry.IsZero() && !now.Before(expiry) {
+				expired = append(expired, j)
+			}
+		}
+		if err == nil {
+			err = rows.Err()
+		}
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		for _, j := range expired {
+			id := j.ID
+			if !ValidID(id) {
+				return errors.New("invalid stored job identity")
+			}
+			for _, suffix := range []string{".csv", ".csv.part", ".snapshot", ".spool.db", ".spool.db-wal", ".spool.db-shm"} {
+				p := q.Path(id, suffix)
+				if suffix == ".snapshot" {
+					if err = os.RemoveAll(p); err != nil {
+						return err
+					}
+				} else if err = os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+			}
+			// Keep terminal metadata for seven days after the file expires, so
+			// returning users can distinguish expiry from a lost task.
+			if (j.Status == "done" || j.Status == "expired") && now.Before(j.ExpiresAt.Add(7*24*time.Hour)) {
+				j.Status, j.Phase, j.ProgressKind = "expired", "expired", "indeterminate"
+				j.HashState, j.Committed = nil, Commit{}
+				if err = q.Save(ctx, j); err != nil {
+					return err
+				}
+			} else {
+				if _, err = q.db.ExecContext(ctx, "DELETE FROM jobs WHERE id=?", id); err != nil {
+					return err
+				}
+			}
+		}
+		if scanned < 64 {
+			return nil
+		}
+	}
 }
 func (j *Job) MakeFilename() string {
 	return fmt.Sprintf("%s_%s_%s_%s_v%d.csv", strings.NewReplacer("/", "_", "\\", "_", "\r", "_", "\n", "_").Replace(j.UUID), j.Start.UTC().Format("20060102-1504"), j.Category, j.Mode, j.FormatVersion)

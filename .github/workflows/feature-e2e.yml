@@ -72,6 +72,8 @@ jobs:
         run: bash scripts/ci/run-audit-check.sh e2e-storage python3 scripts/ci/e2e/check-telemetry-retirement.py
       - name: Verify new engine across real SQL and archive process restarts
         run: bash scripts/ci/run-audit-check.sh e2e-storage-process go test -race ./pkg/metric -run TestTelemetryProcessRoundTrip -count=1 -v
+      - name: Verify the exact binary in isolated Docker cgroup-v2 deployment
+        run: bash scripts/ci/run-audit-check.sh e2e-export-docker bash scripts/ci/e2e/export-docker.sh
       - name: Prepare explicitly synthetic large cold CSV input in the isolated fixture
         if: inputs.export_qualification
         run: |

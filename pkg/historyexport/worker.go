@@ -1,6 +1,7 @@
 package historyexport
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -9,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash"
 	"io"
 	"os"
@@ -20,6 +22,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/pkg/metric"
+	"github.com/mattn/go-sqlite3"
 )
 
 type Worker struct {
@@ -131,6 +134,9 @@ func (w *Worker) Run(ctx context.Context) error {
 	defer release()
 	runtime.GOMAXPROCS(1)
 	debug.SetMemoryLimit(90 << 20)
+	if e = w.Queue.Recover(ctx); e != nil {
+		return e
+	}
 	lastPrune := time.Time{}
 	for {
 		if e = ctx.Err(); e != nil {
@@ -274,7 +280,8 @@ func (w *Worker) Step(parent context.Context, j *Job) error {
 			}
 		}
 	}()
-	if j.Status != "publishing" {
+	recovering := j.Status == "recovering" || j.Status == "retry_wait"
+	if !recovering && j.Status != "publishing" {
 		j.Status = "running"
 	}
 	j.WaitReason = ""
@@ -286,7 +293,17 @@ func (w *Worker) Step(parent context.Context, j *Job) error {
 	if e := w.Queue.Save(ctx, j); e != nil {
 		return e
 	}
-	err := w.step(ctx, j)
+	var err error
+	if recovering {
+		err = w.verifyCheckpoint(ctx, j)
+		if err == nil {
+			j.Status, j.WaitReason = "running", ""
+			err = w.Queue.Save(ctx, j)
+		}
+	}
+	if err == nil {
+		err = w.step(ctx, j)
+	}
 	if err == nil {
 		return nil
 	}
@@ -330,6 +347,12 @@ func (w *Worker) Step(parent context.Context, j *Job) error {
 		j.Status = "failed"
 		j.Error = err.Error()
 		j.WaitReason = ""
+		var sqliteErr sqlite3.Error
+		if errors.As(err, &sqliteErr) && (sqliteErr.Code == sqlite3.ErrBusy || sqliteErr.Code == sqlite3.ErrLocked) && j.AutomaticRetries < 3 {
+			j.Status, j.WaitReason, j.ProgressKind = "retry_wait", "database_busy", "indeterminate"
+			j.AutomaticRetries++
+			j.RetryAt = time.Now().UTC().Add(time.Duration(5*(1<<uint(j.AutomaticRetries-1))) * time.Second)
+		}
 	}
 	return w.Queue.Save(context.Background(), j)
 }
@@ -498,6 +521,63 @@ type outputWriter struct {
 	budget     *ioBudget
 }
 
+// Validate only the durable prefix on process recovery, before truncating any
+// unconfirmed tail. Missing bytes and same-size corruption must never become a
+// downloadable CSV. This read shares the worker's CPU and logical I/O budgets.
+func (w *Worker) verifyCheckpoint(ctx context.Context, j *Job) error {
+	if j.Committed.Offset == 0 {
+		return nil
+	}
+	suffix := ".csv.part"
+	if j.Phase == "publishing" {
+		if _, e := os.Stat(w.Queue.Path(j.ID, ".csv")); e == nil {
+			suffix = ".csv"
+		}
+	}
+	f, err := os.Open(w.Queue.Path(j.ID, suffix))
+	if err != nil {
+		return fmt.Errorf("checkpoint output unavailable: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() < j.Committed.Offset || (suffix == ".csv" && info.Size() != j.Committed.Offset) {
+		return errors.New("checkpoint output size mismatch")
+	}
+	expected := sha256.New()
+	if len(j.Committed.Hash) == 0 {
+		return errors.New("checkpoint hash missing")
+	}
+	if err = expected.(encoding.BinaryUnmarshaler).UnmarshalBinary(j.Committed.Hash); err != nil {
+		return err
+	}
+	h := sha256.New()
+	buf := make([]byte, 64<<10)
+	remaining := j.Committed.Offset
+	for remaining > 0 {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		n, e := io.ReadFull(f, buf[:min(int64(len(buf)), remaining)])
+		if e != nil {
+			return e
+		}
+		h.Write(buf[:n])
+		remaining -= int64(n)
+		if w.io != nil {
+			if err = w.io.wait(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	if !bytes.Equal(h.Sum(nil), expected.Sum(nil)) {
+		return errors.New("checkpoint output checksum mismatch")
+	}
+	return nil
+}
+
 func (o *outputWriter) Write(b []byte) (int, error) {
 	if o.budget != nil {
 		if e := o.budget.wait(o.ctx); e != nil {
@@ -518,6 +598,14 @@ func (w *Worker) output(ctx context.Context, j *Job) (*outputWriter, *csv.Writer
 	f, e := os.OpenFile(w.Queue.Path(j.ID, ".csv.part"), os.O_CREATE|os.O_RDWR, 0600)
 	if e != nil {
 		return nil, nil, e
+	}
+	info, e := f.Stat()
+	if e != nil || info.Size() < j.Committed.Offset {
+		f.Close()
+		if e != nil {
+			return nil, nil, e
+		}
+		return nil, nil, errors.New("export checkpoint output is missing or truncated; retry from a new snapshot")
 	}
 	if e = f.Truncate(j.Committed.Offset); e != nil {
 		f.Close()
