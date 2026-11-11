@@ -42,3 +42,12 @@ func TestTelemetryCoveragePreservesZeroAndIsolatesEntitiesAndTags(t *testing.T) 
 		t.Fatal(got)
 	}
 }
+
+func TestTelemetryCoverageDisclosesMetricSpecificRetention(t *testing.T) {
+	at := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
+	result := metric.TelemetryQueryResult{CoverageStart: at.Add(time.Hour), CoverageEnd: at.Add(2 * time.Hour), Points: []metric.AggregatePoint{{MetricName: "cpu", EntityID: "node", Bucket: at.Add(time.Hour), Value: 0, Count: 1}}}
+	got := connectTelemetryAggregateSeries("cpu", "node", metric.Definition{RetentionDays: 1}, metric.AggAvg, time.Hour, false, at, at.Add(2*time.Hour), result, []int{0})
+	if len(got) != 1 || got[0].Coverage != "partial" || len(got[0].Gaps) != 1 || got[0].Gaps[0].Reason != "retention_expired" || len(got[0].QueryPoints) != 2 || got[0].QueryPoints[0].Value != nil || got[0].QueryPoints[1].Value == nil || *got[0].QueryPoints[1].Value != 0 {
+		t.Fatal(got)
+	}
+}

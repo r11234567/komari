@@ -24,7 +24,7 @@ func (t *Telemetry) PromoteLegacyChunk(ctx context.Context, now time.Time, limit
 		return 0, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, t.bind("SELECT b.segment_id,b.series_id,b.resolution,b.bucket,b.stats FROM "+t.table("summary")+" b JOIN "+t.table("segments")+" a ON a.id=b.segment_id WHERE a.state='legacy' AND ((b.resolution<? AND b.bucket+b.resolution<=?) OR (b.resolution<? AND b.bucket+b.resolution<=?) OR (b.resolution<? AND b.bucket+b.resolution<=?)) ORDER BY b.bucket,b.segment_id,b.series_id LIMIT ?"), int64(5*time.Minute), now.Add(-2*time.Hour).UnixNano(), int64(15*time.Minute), now.Add(-24*time.Hour).UnixNano(), int64(time.Hour), now.Add(-7*24*time.Hour).UnixNano(), limit)
+	rows, err := tx.QueryContext(ctx, t.bind("SELECT b.segment_id,b.series_id,b.resolution,b.bucket,b.stats FROM "+t.table("summary")+" b JOIN "+t.table("segments")+" a ON a.id=b.segment_id WHERE a.state='legacy' AND ((b.resolution<? AND b.bucket+b.resolution<=?) OR (b.resolution<? AND b.bucket+b.resolution<=?) OR (b.resolution<? AND b.bucket+b.resolution<=?)) ORDER BY b.bucket,b.segment_id,b.series_id LIMIT ?"), int64(time.Minute), now.Add(-3*time.Hour).UnixNano(), int64(15*time.Minute), now.Add(-48*time.Hour).UnixNano(), int64(time.Hour), now.Add(-14*24*time.Hour).UnixNano(), limit)
 	if err != nil {
 		return 0, err
 	}

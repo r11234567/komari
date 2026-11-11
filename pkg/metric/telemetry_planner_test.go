@@ -24,6 +24,7 @@ func TestTelemetryPlannerMixedRetentionAndNoDuplicateOwnership(t *testing.T) {
 		}
 		raw = append(raw, b.Points...)
 	}
+	useLegacyOnlineTiers(t, e)
 	summarizeAll(t, e)
 	// Model real retention frontiers: older 15m, newer 5m. Keep the hour
 	// tier overlapping both, so a 30m request must reject it as too coarse.
@@ -107,6 +108,7 @@ func TestTelemetryPlannerMixedPingUsesProbeWeights(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	useLegacyOnlineTiers(t, e)
 	summarizeAll(t, e)
 	if _, err := e.s.db.ExecContext(ctx, "DELETE FROM "+e.table("summary")+" WHERE resolution=? OR (resolution=? AND bucket<?) OR (resolution=? AND bucket>=?)", int64(10*time.Second), int64(5*time.Minute), at.Add(15*time.Minute).UnixNano(), int64(15*time.Minute), at.Add(15*time.Minute).UnixNano()); err != nil {
 		t.Fatal(err)
@@ -167,6 +169,7 @@ func TestTelemetryPlannerUnavailableContributionPoisonsOnlyItsSeriesBucket(t *te
 	if _, err := e.Accept(ctx, b, now); err != nil {
 		t.Fatal(err)
 	}
+	useLegacyOnlineTiers(t, e)
 	summarizeAll(t, e)
 	if _, err := e.s.db.ExecContext(ctx, "DELETE FROM "+e.table("summary")+" WHERE resolution<>?", int64(time.Hour)); err != nil {
 		t.Fatal(err)

@@ -229,14 +229,14 @@ func TestTelemetryLegacyCanonicalPromotionAtomic(t *testing.T) {
 		}
 		return nil
 	}
-	if _, err := e.PromoteLegacyChunk(ctx, at.Add(3*time.Hour), 512); err == nil {
+	if _, err := e.PromoteLegacyChunk(ctx, at.Add(4*time.Hour), 512); err == nil {
 		t.Fatal("missing failure")
 	}
 	if n := telemetryCount(t, e, "summary"); n != 2 {
 		t.Fatal("promotion lost source", n)
 	}
 	e.cfg.Fault = nil
-	if n, err := e.PromoteLegacyChunk(ctx, at.Add(3*time.Hour), 512); err != nil || n != 2 {
+	if n, err := e.PromoteLegacyChunk(ctx, at.Add(4*time.Hour), 512); err != nil || n != 2 {
 		t.Fatal(n, err)
 	}
 	if n := telemetryCount(t, e, "summary"); n != 1 {
@@ -244,5 +244,82 @@ func TestTelemetryLegacyCanonicalPromotionAtomic(t *testing.T) {
 	}
 	if n, err := e.PruneSummaries(ctx, "cpu", 30*24*time.Hour, at.Add(3*time.Hour), 512); err != nil || n != 0 {
 		t.Fatal("canonical prematurely pruned", n, err)
+	}
+}
+
+func TestTelemetryLegacyPrecisionRecoveryNeverInventsFineHistory(t *testing.T) {
+	for _, mode := range []string{"full-raw", "full-fine", "partial-fine"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			s, err := Open(ctx, SQLite(filepath.Join(dir, "metrics.db"), WithRetiredLegacyStorage(), WithSQLiteProfile(SQLiteProfileDurable)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			if err = s.CreateMetric(ctx, Definition{Name: "cpu", RetentionDays: 30}); err != nil {
+				t.Fatal(err)
+			}
+			at := time.Now().UTC().Add(-6 * time.Hour).Truncate(time.Hour)
+			var points []Point
+			coarse := newRollupBucket(100)
+			coarse.tagsJSON = "{}"
+			fine := map[rollupKey]*rollupBucket{}
+			for i := 0; i < 6; i++ {
+				p := Point{MetricName: "cpu", EntityID: "node", Timestamp: at.Add(time.Duration(i) * time.Minute), Value: float64(i + 1)}
+				points = append(points, p)
+				coarse.addPoint(p.Value, p.Timestamp.UnixNano())
+				if mode == "full-fine" || mode == "partial-fine" && i < 3 {
+					b := newRollupBucket(100)
+					b.tagsJSON = "{}"
+					b.addPoint(p.Value, p.Timestamp.UnixNano())
+					fine[rollupKey{entityID: "node", bucket: p.Timestamp.UnixNano()}] = b
+				}
+			}
+			tx, err := s.db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = s.writeRollupBucketsTx(ctx, "cpu", time.Hour, map[rollupKey]*rollupBucket{{entityID: "node", bucket: at.UnixNano()}: coarse}, tx); err != nil {
+				t.Fatal(err)
+			}
+			if len(fine) > 0 {
+				if _, err = s.writeRollupBucketsTx(ctx, "cpu", time.Minute, fine, tx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err = tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "full-raw" {
+				if err = s.WriteBatch(ctx, points); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := TelemetryConfig{ArchiveDirectory: filepath.Join(dir, "archive")}
+			if err = s.MigrateLegacy(ctx, cfg, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err = s.EnableTelemetry(ctx, cfg); err != nil {
+				t.Fatal(err)
+			}
+			q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(time.Hour - time.Nanosecond)}, Interval: time.Minute, Aggregation: AggSum, PreserveSeries: true}
+			r, err := s.Telemetry().Chart(ctx, q, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "partial-fine" {
+				if len(r.Gaps) == 0 || len(r.Points) != 0 {
+					t.Fatal("fabricated partial precision", r)
+				}
+			} else if len(r.Points) != 6 || len(r.Gaps) != 0 {
+				t.Fatal("discarded recoverable fine history", r)
+			}
+			q.Interval = time.Hour
+			r, err = s.Telemetry().Chart(ctx, q, time.Now())
+			if err != nil || len(r.Points) != 1 || r.Points[0].Count != 6 || r.Points[0].Value != 21 {
+				t.Fatal("migration changed population", r, err)
+			}
+		})
 	}
 }

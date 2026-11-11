@@ -152,9 +152,10 @@ type telemetrySummaryKey struct {
 	resolution, bucket int64
 }
 
-// SummarizeNext consumes exactly one bounded ingress batch. Every output tier
-// is merged from that batch's finest-bucket delta in the same transaction as
-// the cursor. Segment-qualified cells are immutable once their input is sealed;
+// SummarizeNext consumes exactly one bounded ingress batch. New segments write
+// only the finest tier; sealed segments promote once in bounded maintenance.
+// Old segments retain their original tier producer until sealed. The cursor
+// commits with all base cells. Segment-qualified cells become immutable;
 // late arrivals create supplementary cells, never rewrite historical archives.
 func (t *Telemetry) SummarizeNext(ctx context.Context) (int, error) {
 	release, err := t.acquire(ctx)
@@ -172,12 +173,16 @@ func (t *Telemetry) SummarizeNext(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	var next int64
+	var layout int
 	var expected int
 	err = tx.QueryRowContext(ctx, t.bind("SELECT ingest_id,points FROM "+t.table("receipts")+" WHERE ingest_id>? ORDER BY ingest_id LIMIT 1"), before).Scan(&next, &expected)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
 	if err != nil {
+		return 0, err
+	}
+	if err = tx.QueryRowContext(ctx, t.bind("SELECT a.summary_version FROM "+t.table("segments")+" a JOIN "+t.table("receipts")+" r ON r.segment_id=a.id WHERE r.ingest_id=?"), next).Scan(&layout); err != nil {
 		return 0, err
 	}
 	rows, err := tx.QueryContext(ctx, t.bind("SELECT h.ordinal,h.series_id,h.observed,h.value,h.segment_id,s.metric,COALESCE(e.through_id,0) FROM "+t.table("hot")+" h JOIN "+t.table("series")+" s ON s.id=h.series_id LEFT JOIN "+t.table("erasures")+" e ON e.series_id=s.id WHERE h.ingest_id=? ORDER BY h.ordinal"), next)
@@ -219,7 +224,14 @@ func (t *Telemetry) SummarizeNext(ctx context.Context) (int, error) {
 	all := make(map[telemetrySummaryKey]*telemetryStats, len(base)*4)
 	for k, v := range base {
 		all[k] = v
-		for _, r := range []time.Duration{5 * time.Minute, 15 * time.Minute, time.Hour} {
+		// Existing v1 open segments retain their original alternate-tier layout
+		// until sealed. New segments write only the finest delta; immutable
+		// ownership is promoted once after sealing, outside report processing.
+		var tiers []time.Duration
+		if layout == 1 {
+			tiers = []time.Duration{5 * time.Minute, 15 * time.Minute, time.Hour}
+		}
+		for _, r := range tiers {
 			ck := k
 			ck.resolution = int64(r)
 			ck.bucket = time.Unix(0, k.bucket).UTC().Truncate(r).UnixNano()
@@ -272,11 +284,11 @@ func (t *Telemetry) SummarizeNext(ctx context.Context) (int, error) {
 
 func telemetryResolution(age time.Duration) time.Duration {
 	switch {
-	case age <= 2*time.Hour:
+	case age <= 3*time.Hour:
 		return 10 * time.Second
-	case age <= 24*time.Hour:
-		return 5 * time.Minute
-	case age <= 7*24*time.Hour:
+	case age <= 48*time.Hour:
+		return time.Minute
+	case age <= 14*24*time.Hour:
 		return 15 * time.Minute
 	default:
 		return time.Hour
@@ -408,7 +420,7 @@ func (t *Telemetry) aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 				continue
 			}
 			out.Sources = append(out.Sources, TelemetrySourceSpan{MetricName: p.MetricName, EntityID: p.EntityID, Tags: p.Tags, Start: p.Timestamp, End: p.Timestamp.Add(time.Nanosecond)})
-			key := aggregateGroupKey{bucket: p.Timestamp.Truncate(q.Interval).UnixNano()}
+			key := aggregateGroupKey{bucket: alignTime(p.Timestamp, q.Interval).UnixNano()}
 			if q.PreserveSeries {
 				h, _, fingerprintErr := tagsFingerprint(p.Tags)
 				if fingerprintErr != nil {

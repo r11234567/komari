@@ -28,7 +28,7 @@ func ensureTelemetrySchedule(ctx context.Context, t *metric.Telemetry, now time.
 		return nil
 	}
 	var tasks []metric.ScheduleTask
-	for _, name := range []string{"traffic", "summary", "seal", "archive", "delete", "promotion", "summaries", "expire", "receipts", "erased", "checkpoint", "catalog", "ledger"} {
+	for _, name := range []string{"traffic", "summary", "seal", "archive", "delete", "promotion", "tiers", "summaries", "expire", "receipts", "erased", "checkpoint", "catalog", "ledger"} {
 		tasks = append(tasks, metric.ScheduleTask{Name: name, Due: now})
 	}
 	if err := t.EnsureSchedule(ctx, tasks); err != nil {
@@ -200,6 +200,7 @@ func runTelemetryPass(ctx context.Context, s *metric.Store, now time.Time) (Sche
 			n, err = t.SealDue(work, now)
 			out.Progress = int(n)
 			out.Delay = time.Minute
+			err = errors.Join(err, t.ExpediteSchedule(work, []string{"tiers"}, time.Now()))
 			if n > 0 {
 				err = errors.Join(err, t.ExpediteSchedule(work, []string{"archive", "delete"}, time.Now()))
 			}
@@ -217,6 +218,11 @@ func runTelemetryPass(ctx context.Context, s *metric.Store, now time.Time) (Sche
 			out.Delay = time.Minute
 			if out.Progress > 0 {
 				out.Delay = 200 * time.Millisecond
+			}
+		case "tiers":
+			out.Progress, err = t.PromoteSummariesChunk(work, now, chunk)
+			if out.Progress > 0 {
+				out.Delay = time.Second
 			}
 		case "promotion":
 			out.Progress, err = t.PromoteLegacyChunk(work, now, chunk)

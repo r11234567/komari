@@ -317,6 +317,9 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		aggregation = metric.AggAvg
 	}
 	baseInterval := metric.CeilStandardInterval(time.Duration((end.Sub(start).Nanoseconds() + int64(maxPoints) - 1) / int64(maxPoints)))
+	if store.Telemetry() != nil {
+		baseInterval = metric.TelemetryChartInterval(end.Sub(start), maxPoints)
+	}
 	if baseInterval < time.Second {
 		baseInterval = time.Second
 	}
@@ -371,6 +374,15 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 			continue
 		}
 		query := metric.Query{MetricName: metricName, Start: start, End: end, Tags: req.Msg.Tags, Order: metric.OrderAsc}
+		if store.Telemetry() != nil && downsample && definition.RetentionDays > 0 {
+			cutoff := time.Now().UTC().Add(-time.Duration(definition.RetentionDays) * 24 * time.Hour)
+			if cutoff.After(query.Start) {
+				query.Start = cutoff
+			}
+			if query.Start.After(end) {
+				query.Start = end
+			}
+		}
 		if downsample {
 			queries = append(queries, metric.AggregateQuery{Query: query, Aggregation: aggregation, Interval: interval, PreserveSeries: true})
 		} else {
@@ -567,6 +579,9 @@ func (s *metricsService) getPingStats(ctx context.Context, req *connect.Request[
 		taskFilter[strconv.FormatUint(id, 10)] = true
 	}
 	interval := metric.CeilStandardInterval(time.Duration((end.Sub(start).Nanoseconds() + int64(maxPoints) - 1) / int64(maxPoints)))
+	if store.Telemetry() != nil {
+		interval = metric.TelemetryChartInterval(end.Sub(start), maxPoints)
+	}
 	interval = store.CompatibleSeriesIntervalForMetric(ctx, metricstore.MetricPingLatency, start, time.Now().UTC(), interval)
 	result := make([]*metricsv1.PingStat, 0)
 	for _, agentID := range entityIDs {

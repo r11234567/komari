@@ -27,12 +27,13 @@ func (t *Telemetry) PruneSummaries(ctx context.Context, name string, retention t
 	defer tx.Rollback()
 	where := "s.metric=? AND a.state<>'legacy' AND ("
 	args := []any{name}
-	for i, tier := range []struct{ r, keep time.Duration }{{10 * time.Second, 2 * time.Hour}, {5 * time.Minute, 24 * time.Hour}, {15 * time.Minute, 7 * 24 * time.Hour}, {time.Hour, retention}} {
+	for i, tier := range []struct{ r, keep time.Duration }{{10 * time.Second, 3 * time.Hour}, {time.Minute, 48 * time.Hour}, {5 * time.Minute, 48 * time.Hour}, {15 * time.Minute, 14 * 24 * time.Hour}, {time.Hour, retention}} {
 		if i > 0 {
 			where += " OR "
 		}
-		where += "(b.resolution=? AND b.bucket<=?)"
+		where += "(b.resolution=? AND b.bucket<=? AND (a.summary_version=1 OR b.promoted_through>=a.last_id OR b.bucket+b.resolution<=?))"
 		args = append(args, int64(tier.r), now.Add(-min(tier.keep, retention)).Add(-tier.r).UnixNano())
+		args = append(args, now.Add(-retention).UnixNano())
 	}
 	where += ") OR (s.metric=? AND a.state='legacy' AND b.bucket+b.resolution<=?)"
 	args = append(args, name, now.Add(-retention).UnixNano())

@@ -220,6 +220,7 @@ func (s *Store) MigrateLegacy(ctx context.Context, cfg TelemetryConfig, observe 
 func (s *Store) legacyMigrationCells(ctx context.Context, name, entity string, start, end time.Time, tiers []time.Duration) ([]telemetryMigrationCell, error) {
 	var out []telemetryMigrationCell
 	for _, resolution := range tiers {
+		refinements := map[int][]telemetryMigrationCell{}
 		rows, err := s.scanRollupRowsBetween(ctx, name, entity, nil, int64(resolution), start.UnixNano(), end.UnixNano(), true)
 		if err != nil {
 			return nil, err
@@ -232,18 +233,15 @@ func (s *Store) legacyMigrationCells(ctx context.Context, name, entity string, s
 			}
 			tagBytes, _ := json.Marshal(tags)
 			sid := telemetryMigrationKey(name + "\x00" + entity + "\x00" + string(tagBytes))
-			overlaps := false
-			for _, c := range out {
+			overlap := -1
+			for i, c := range out {
 				if c.series == sid && row.bucket < c.bucket+int64(c.resolution) && row.bucket+int64(resolution) > c.bucket {
 					if row.bucket < c.bucket || row.bucket+int64(resolution) > c.bucket+int64(c.resolution) {
 						return nil, fmt.Errorf("%w: partially overlapping legacy tiers for %s/%s; source retained", ErrTelemetryCoverage, name, entity)
 					}
-					overlaps = true
+					overlap = i
 					break
 				}
-			}
-			if overlaps {
-				continue
 			}
 			n := b.count - b.lossCount
 			st := telemetryStats{N: n, Attempts: b.count, Loss: b.lossCount, Sum: b.sum, Min: b.min, Max: b.max, First: b.firstVal, Last: b.lastVal, FirstNano: b.firstTS, LastNano: b.lastTS}
@@ -254,11 +252,38 @@ func (s *Store) legacyMigrationCells(ctx context.Context, name, entity string, s
 			if b.digest != nil {
 				st.Digest = b.digest.encodeRaw()
 			}
-			out = append(out, telemetryMigrationCell{series: sid, tags: string(tagBytes), bucket: row.bucket, resolution: resolution, stats: st})
+			cell := telemetryMigrationCell{series: sid, tags: string(tagBytes), bucket: row.bucket, resolution: resolution, stats: st}
+			if overlap >= 0 {
+				refinements[overlap] = append(refinements[overlap], cell)
+			} else {
+				out = append(out, cell)
+			}
 			if len(out) > 16384 {
 				return nil, ErrTelemetryBackpressure
 			}
 		}
+		// Keep fine retained history only when its complete population proves
+		// equivalence to the coarse representation. Partial fine retention may
+		// not delete or double-count the older coarse population.
+		var refined []telemetryMigrationCell
+		for i, parent := range out {
+			children := refinements[i]
+			var combined telemetryStats
+			for _, child := range children {
+				if err := combined.merge(child.stats); err != nil {
+					return nil, err
+				}
+			}
+			if len(children) > 0 && equivalentLegacyPopulation(parent.stats, combined) {
+				refined = append(refined, children...)
+			} else {
+				refined = append(refined, parent)
+			}
+		}
+		if len(refined) > 16384 {
+			return nil, ErrTelemetryBackpressure
+		}
+		out = refined
 	}
 	return out, nil
 }
@@ -266,6 +291,8 @@ func (s *Store) legacyMigrationCells(ctx context.Context, name, entity string, s
 func (s *Store) migrateLegacyRawWindow(ctx context.Context, t *Telemetry, name, entity string, start, end, now time.Time, key string, cells *[]telemetryMigrationCell) (int64, error) {
 	var total int64
 	outside := map[telemetrySummaryKey]*telemetryMigrationCell{}
+	inside := map[int]map[telemetrySummaryKey]*telemetryMigrationCell{}
+	insideCount := 0
 	batchIndex := 0
 	err := s.visitLegacyMigrationRaw(ctx, t, name, entity, start, end, func(points []Point) error {
 		received := end
@@ -284,6 +311,21 @@ func (s *Store) migrateLegacyRawWindow(ctx context.Context, t *Telemetry, name, 
 				c := &(*cells)[i]
 				if c.series == sid && p.Timestamp.UnixNano() >= c.bucket && p.Timestamp.UnixNano() < c.bucket+int64(c.resolution) {
 					c.raw.add(p, total+1, 0)
+					r := telemetryResolution(now.Sub(p.Timestamp))
+					if r < c.resolution {
+						k := telemetrySummaryKey{series: sid, resolution: int64(r), bucket: p.Timestamp.Truncate(r).UnixNano()}
+						if inside[i] == nil {
+							inside[i] = map[telemetrySummaryKey]*telemetryMigrationCell{}
+						}
+						if inside[i][k] == nil {
+							inside[i][k] = &telemetryMigrationCell{series: sid, tags: string(tags), bucket: k.bucket, resolution: r}
+							insideCount++
+						}
+						inside[i][k].stats.add(p, total+1, 0)
+						if insideCount > 16384 {
+							return ErrTelemetryBackpressure
+						}
+					}
 					if p.Timestamp.UnixNano() > c.stats.LastNano {
 						c.extra.add(p, total+1, 0)
 					}
@@ -309,21 +351,49 @@ func (s *Store) migrateLegacyRawWindow(ctx context.Context, t *Telemetry, name, 
 	if err != nil {
 		return total, err
 	}
+	var refined []telemetryMigrationCell
 	for i := range *cells {
 		c := &(*cells)[i]
 		if c.raw.Attempts >= c.stats.Attempts {
+			if c.raw.FirstNano > c.stats.FirstNano || c.raw.LastNano < c.stats.LastNano {
+				return total, fmt.Errorf("%w: raw population does not cover legacy range; source retained", ErrTelemetryCoverage)
+			}
 			c.stats = c.raw
 		} else if c.extra.Attempts > 0 {
 			// The old summary has no input watermark. A partial raw overlap
 			// cannot prove which rows it already contains. Never guess a union.
 			return total, fmt.Errorf("%w: ambiguous raw/rollup overlap for %s/%s; source retained", ErrTelemetryCoverage, name, entity)
 		}
+		var children []telemetryMigrationCell
+		var combined telemetryStats
+		for _, child := range inside[i] {
+			child.raw = child.stats
+			children = append(children, *child)
+		}
+		sort.Slice(children, func(i, j int) bool { return children[i].bucket < children[j].bucket })
+		for _, child := range children {
+			if err := combined.merge(child.stats); err != nil {
+				return total, err
+			}
+		}
+		if len(children) > 0 && equivalentLegacyPopulation(c.stats, combined) {
+			refined = append(refined, children...)
+		} else {
+			refined = append(refined, *c)
+		}
 	}
+	*cells = refined
 	for _, c := range outside {
 		c.raw = c.stats
 		*cells = append(*cells, *c)
 	}
 	return total, nil
+}
+
+func equivalentLegacyPopulation(a, b telemetryStats) bool {
+	return a.Attempts == b.Attempts && a.N == b.N && a.Loss == b.Loss &&
+		a.FirstNano == b.FirstNano && a.LastNano == b.LastNano && a.First == b.First && a.Last == b.Last &&
+		a.Min == b.Min && a.Max == b.Max && math.Abs(a.Sum-b.Sum) <= 1e-10*max(1, math.Abs(a.Sum))
 }
 
 func (t *Telemetry) commitLegacyCells(ctx context.Context, key, name, entity string, cells []telemetryMigrationCell) error {

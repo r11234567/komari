@@ -272,6 +272,21 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await expect(page.getByTestId('chart-source-precision').first()).toBeVisible();
       await expect(page.locator('.recharts-line-curve').first()).toBeVisible();
       await page.screenshot({path:path.join(artifacts,'chart-source-precision.png'),fullPage:true});
+      const windows = [];
+      for (const [hours, interval] of [[1,10],[6,60],[12,120],[24,240],[168,1800],[360,3600],[720,7200]]) {
+        const last = new Date(Date.now()-15_000);
+        const result = await rpc('metrics','QueryMetrics',{agentIds:[agentId],metrics:['cpu.usage'],startTime:new Date(last.getTime()-hours*3600_000).toISOString(),endTime:last.toISOString(),maxPoints:360,downsample:true});
+        expect(result.series.length).toBeGreaterThan(0);
+        for (const series of result.series) expect(series.interval).toBe(`${interval}s`);
+        windows.push({hours,result});
+      }
+      for (const hours of [6,12]) {
+        await page.locator('.km-load-chart').getByRole('radio',{name:new RegExp(`^${hours}\\s*hours?$`,'i')}).click();
+        await expect(page.getByTestId('chart-source-precision').first()).toBeVisible();
+        await expect(page.locator('.recharts-line-curve').first()).toBeVisible();
+      }
+      await page.screenshot({path:path.join(artifacts,'chart-window-12h.png'),fullPage:true});
+      fs.writeFileSync(path.join(artifacts,'metric-chart-windows.json'),JSON.stringify(windows,null,2));
       fs.writeFileSync(path.join(artifacts,'metric-query-ownership.json'),JSON.stringify({rawCount,summarized},null,2));
     });
 

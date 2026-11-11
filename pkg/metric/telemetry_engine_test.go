@@ -274,6 +274,7 @@ func TestTelemetryVariancePingAndPrecision(t *testing.T) {
 	if _, err := e.Accept(context.Background(), telemetryBatch("coarse-only", now.Add(-24*time.Hour), 7), now); err != nil {
 		t.Fatal(err)
 	}
+	useLegacyOnlineTiers(t, e)
 	summarizeAll(t, e)
 	if _, err := e.s.db.Exec("DELETE FROM "+e.table("summary")+" WHERE resolution<>?", int64(time.Hour)); err != nil {
 		t.Fatal(err)
@@ -496,11 +497,12 @@ func TestTelemetryLateSupplementAndRetentionNeverReadCold(t *testing.T) {
 		}
 	}
 	// Removing read access to all archive files cannot affect chart SQL.
+	promoteTelemetryAll(t, e, start.Add(4*time.Hour))
 	if err := e.root.Close(); err != nil {
 		t.Fatal(err)
 	}
 	for {
-		n, err := e.PruneSummaries(ctx, "cpu", 30*24*time.Hour, start.Add(3*time.Hour), 512)
+		n, err := e.PruneSummaries(ctx, "cpu", 30*24*time.Hour, start.Add(4*time.Hour), 512)
 		if err != nil {
 			t.Fatal(err)
 		}

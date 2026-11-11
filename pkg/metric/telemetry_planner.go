@@ -68,7 +68,7 @@ func coalesceTelemetrySpans(spans []TelemetrySourceSpan) []TelemetrySourceSpan {
 }
 
 func telemetryPlanGroup(q AggregateQuery, name, entity string, tags map[string]string, at int64) (aggregateGroupKey, error) {
-	k := aggregateGroupKey{bucket: time.Unix(0, at).UTC().Truncate(q.Interval).UnixNano()}
+	k := aggregateGroupKey{bucket: alignTime(time.Unix(0, at).UTC(), q.Interval).UnixNano()}
 	if q.PreserveSeries {
 		h, _, err := tagsFingerprint(tags)
 		if err != nil {
@@ -160,7 +160,18 @@ func (t *Telemetry) planChart(ctx context.Context, tx *sql.Tx, q AggregateQuery,
 		return nil, readErr
 	}
 	cutoff := now.Add(-t.cfg.RawWindow).UnixNano()
-	for owner, cells := range owners {
+	orderedOwners := make([]telemetryPlanOwner, 0, len(owners))
+	for owner := range owners {
+		orderedOwners = append(orderedOwners, owner)
+	}
+	sort.Slice(orderedOwners, func(i, j int) bool {
+		if orderedOwners[i].segment != orderedOwners[j].segment {
+			return orderedOwners[i].segment < orderedOwners[j].segment
+		}
+		return orderedOwners[i].series < orderedOwners[j].series
+	})
+	for _, owner := range orderedOwners {
+		cells := owners[owner]
 		var chosen []telemetryPlanCell
 		for _, c := range cells {
 			if c.stats.Attempts == 0 || c.stats.LastNano < q.Start.UnixNano() || c.stats.FirstNano > q.End.UnixNano() {
@@ -175,7 +186,7 @@ func (t *Telemetry) planChart(ctx context.Context, tx *sql.Tx, q AggregateQuery,
 			}
 			// The complete observed contents must fit a single output bucket.
 			// Coarse statistics are never interpolated or divided into fake points.
-			if !time.Unix(0, first).UTC().Truncate(q.Interval).Equal(time.Unix(0, last).UTC().Truncate(q.Interval)) {
+			if !alignTime(time.Unix(0, first).UTC(), q.Interval).Equal(alignTime(time.Unix(0, last).UTC(), q.Interval)) {
 				continue
 			}
 			if !chart && (c.bucket < q.Start.UnixNano() || c.bucket+c.resolution > q.End.UnixNano()+1 || time.Duration(c.resolution) > q.Interval) {
@@ -253,7 +264,7 @@ func (t *Telemetry) planChart(ctx context.Context, tx *sql.Tx, q AggregateQuery,
 			if through < from {
 				continue
 			}
-			start := time.Unix(0, from).UTC().Truncate(q.Interval)
+			start := alignTime(time.Unix(0, from).UTC(), q.Interval)
 			for at := start; at.UnixNano() <= through; at = at.Add(q.Interval) {
 				k, err := telemetryPlanGroup(q, c.name, c.entity, c.tags, at.UnixNano())
 				if err != nil {

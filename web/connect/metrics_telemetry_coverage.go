@@ -44,9 +44,15 @@ func connectTelemetryAggregateSeries(name, id string, definition metric.Definiti
 	}
 	out := make([]*metricsv1.MetricsSeries, 0, len(byTags))
 	for _, s := range byTags {
+		if result.CoverageStart.After(start) {
+			s.Gaps = append(s.Gaps, &metricsv1.MetricsSourceSpan{StartTime: timestamppb.New(start), EndTime: timestamppb.New(result.CoverageStart), Reason: "retention_expired"})
+		}
 		s.RequestedInterval = durationpb.New(interval)
 		s.Coverage = "complete"
 		s.CoverageStart = timestamppb.New(start)
+		if result.CoverageStart.After(start) {
+			s.CoverageStart = timestamppb.New(result.CoverageStart)
+		}
 		s.CoverageEnd = timestamppb.New(end)
 		s.SummarizedThrough = uint64(max(result.AccountedThrough, 0))
 		s.AcceptedThrough = uint64(max(result.AcceptedThrough, 0))
@@ -65,7 +71,7 @@ func connectTelemetryAggregateSeries(name, id string, definition metric.Definiti
 		}
 		for _, span := range s.Gaps {
 			s.BoundaryAdjusted = true
-			for at := span.StartTime.AsTime().UTC().Truncate(interval); at.Before(span.EndTime.AsTime()); at = at.Add(interval) {
+			for at := metric.TelemetryBucketStart(span.StartTime.AsTime().UTC(), interval); at.Before(span.EndTime.AsTime()); at = at.Add(interval) {
 				points[at.UnixNano()] = &metricsv1.QueryPoint{ObservedAt: timestamppb.New(at), SourceInterval: span.SourceInterval, Coverage: "unavailable", CoverageReason: span.Reason}
 			}
 		}

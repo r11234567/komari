@@ -74,6 +74,10 @@ func telemetryExternal(t *testing.T, cfg Config) {
 	if _, err = e.SealDue(ctx, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
+	promoteTelemetryAll(t, e, now.Add(time.Hour))
+	if n, err := e.PruneSummaries(ctx, "cpu", 30*24*time.Hour, now.Add(4*time.Hour), 512); err != nil || n == 0 {
+		t.Fatal("external tier handoff/GC", n, err)
+	}
 	if ok, err := e.ArchiveNext(ctx); err != nil || !ok {
 		t.Fatalf("archive %v %v", ok, err)
 	}
@@ -93,6 +97,7 @@ func telemetryExternal(t *testing.T, cfg Config) {
 			t.Fatal(err)
 		}
 	}
+	useLegacyOnlineTiers(t, e)
 	summarizeAll(t, e)
 	if _, err = e.s.db.ExecContext(ctx, e.bind("DELETE FROM "+e.table("summary")+" WHERE series_id IN (SELECT id FROM "+e.table("series")+" WHERE entity=?) AND (resolution=? OR (resolution=? AND bucket<?) OR (resolution=? AND bucket>=?))"), "planner", int64(10*time.Second), int64(5*time.Minute), at.Add(30*time.Minute).UnixNano(), int64(15*time.Minute), at.Add(30*time.Minute).UnixNano()); err != nil {
 		t.Fatal(err)
