@@ -36,7 +36,10 @@ for attempt in $(seq 1 60); do
 done
 test -s "$KOMARI_DATA/exports-v2/worker.json"
 for cpus in .5 1 2 4 8; do
-  docker update --cpus="$cpus" "$id"
+  # Docker's --cpus rejects a quota above host CPU count. The kernel accepts
+  # that quota; proof must still report the smaller actual cpuset capacity.
+  quota=$(awk -v cpus="$cpus" 'BEGIN {printf "%.0f", cpus * 100000}')
+  docker update --cpu-period=100000 --cpu-quota="$quota" "$id"
   sleep 3
   EXPECTED_CPUS="$cpus" python3 - <<'PY'
 import json, os, pathlib
