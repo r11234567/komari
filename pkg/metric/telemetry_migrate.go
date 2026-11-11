@@ -46,47 +46,19 @@ func (s *Store) MigrateLegacy(ctx context.Context, cfg TelemetryConfig, observe 
 	if s.Telemetry() != nil {
 		return errors.New("migration requires an offline legacy reader")
 	}
+	checkpoint, err := s.PrepareLegacyMigration(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if checkpoint.Complete {
+		return nil
+	}
 	t, err := s.OpenTelemetry(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	defer t.Close()
-	if v, e := t.progress(ctx, s.db, "legacy_migration_complete"); e == nil && v == 1 {
-		return nil
-	}
-	accepted, err := t.progress(ctx, s.db, "ingest")
-	if err != nil {
-		return err
-	}
-	started, e := t.progress(ctx, s.db, "legacy_migration_started")
-	if e != nil && !errors.Is(e, sql.ErrNoRows) {
-		return e
-	}
-	if accepted > 0 && started != 1 {
-		return errors.New("target already contains online telemetry; refusing an ambiguous offline merge")
-	}
-	tx, err := t.begin(ctx)
-	if err != nil {
-		return err
-	}
-	now := time.Now().UTC()
-	if epoch, e := t.progress(ctx, tx, "legacy_migration_now"); e == nil {
-		now = time.Unix(0, epoch).UTC()
-	} else if !errors.Is(e, sql.ErrNoRows) {
-		tx.Rollback()
-		return e
-	}
-	if err = t.setProgress(ctx, tx, "legacy_migration_now", now.UnixNano()); err != nil {
-		tx.Rollback()
-		return err
-	}
-	if err = t.setProgress(ctx, tx, "legacy_migration_started", 1); err != nil {
-		tx.Rollback()
-		return err
-	}
-	if err = tx.Commit(); err != nil {
-		return err
-	}
+	now := checkpoint.Cutoff
 	defs, err := s.ListMetrics(ctx)
 	if err != nil {
 		return err
@@ -204,7 +176,7 @@ func (s *Store) MigrateLegacy(ctx context.Context, cfg TelemetryConfig, observe 
 			}
 		}
 	}
-	tx, err = t.begin(ctx)
+	tx, err := t.begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -393,7 +365,38 @@ func (s *Store) migrateLegacyRawWindow(ctx context.Context, t *Telemetry, name, 
 func equivalentLegacyPopulation(a, b telemetryStats) bool {
 	return a.Attempts == b.Attempts && a.N == b.N && a.Loss == b.Loss &&
 		a.FirstNano == b.FirstNano && a.LastNano == b.LastNano && a.First == b.First && a.Last == b.Last &&
-		a.Min == b.Min && a.Max == b.Max && math.Abs(a.Sum-b.Sum) <= 1e-10*max(1, math.Abs(a.Sum))
+		a.Min == b.Min && a.Max == b.Max && math.Abs(a.Sum-b.Sum) <= 1e-10*max(1, math.Abs(a.Sum)) &&
+		math.Abs(a.M2-b.M2) <= 1e-8*max(1, math.Abs(a.M2), math.Abs(b.M2)) && equivalentLegacyDigest(a, b)
+}
+
+// Scalar moments alone do not identify a population. Compare the retained
+// distribution as well; when independently compressed sketches cannot prove
+// equivalence we conservatively keep the original coarse statistics.
+func equivalentLegacyDigest(a, b telemetryStats) bool {
+	decode := func(s telemetryStats) *TDigest {
+		if s.sketch != nil {
+			d, _ := DecodeTDigest(s.sketch.encodeRaw())
+			return d
+		}
+		d, _ := DecodeTDigest(s.Digest)
+		return d
+	}
+	x, y := decode(a), decode(b)
+	if x == nil || y == nil {
+		return a.N == 0 && b.N == 0
+	}
+	x.process()
+	y.process()
+	if x.count != y.count || len(x.centroids) != len(y.centroids) {
+		return false
+	}
+	for i, c := range x.centroids {
+		d := y.centroids[i]
+		if c.weight != d.weight || math.Abs(c.mean-d.mean) > 1e-10*max(1, math.Abs(c.mean), math.Abs(d.mean)) {
+			return false
+		}
+	}
+	return true
 }
 
 func (t *Telemetry) commitLegacyCells(ctx context.Context, key, name, entity string, cells []telemetryMigrationCell) error {

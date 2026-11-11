@@ -29,6 +29,7 @@ func MigrateTelemetryLedger(ctx context.Context, db *gorm.DB, now time.Time) err
 		}
 		var total Usage
 		var first time.Time
+		var minuteSince time.Time
 		for from := today.AddDate(0, 0, -35); !from.After(now); {
 			until := from.Truncate(time.Hour).Add(time.Hour)
 			schedule := clientSchedule(client)
@@ -46,6 +47,21 @@ func MigrateTelemetryLedger(ctx context.Context, db *gorm.DB, now time.Time) err
 			row := models.TelemetryTrafficSlice{Client: client.UUID, Start: from.UnixNano(), End: until.UnixNano(), FirstObserved: from.UnixNano(), LastObserved: until.Add(-time.Nanosecond).UnixNano(), UpBytes: usage.Up, DownBytes: usage.Down}
 			if err = db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error; err != nil {
 				return err
+			}
+			if !from.Before(now.Add(-telemetryMinuteRetention)) {
+				fine, err := refineLegacyTrafficWindow(ctx, db, client.UUID, from, until, now, usage)
+				if err != nil {
+					return err
+				}
+				if fine && minuteSince.IsZero() {
+					minuteSince = from
+				}
+				if !fine {
+					minuteSince = until.Truncate(time.Minute)
+					if minuteSince.Before(until) {
+						minuteSince = minuteSince.Add(time.Minute)
+					}
+				}
 			}
 			if !from.Before(today) {
 				total = addUsage(total, usage)
@@ -70,6 +86,10 @@ func MigrateTelemetryLedger(ctx context.Context, db *gorm.DB, now time.Time) err
 		}
 		if found {
 			state := models.TelemetryTrafficState{Client: client.UUID, FirstObserved: first.UnixNano(), LastObserved: at.UnixNano(), TotalUp: up, TotalDown: down}
+			if !minuteSince.IsZero() && !minuteSince.After(at) {
+				state.MinuteSince = minuteSince.UnixNano()
+				state.TailPrunedThrough = now.Add(-telemetryTailRetention).UnixNano()
+			}
 			if err = db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&state).Error; err != nil {
 				return err
 			}

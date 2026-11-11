@@ -88,6 +88,38 @@ func MigrateTelemetryOffline(ctx context.Context, s *metric.Store, cfg *MetricSt
 	return s.MigrateLegacy(ctx, c, observe)
 }
 
+func PrepareTelemetryMigration(ctx context.Context) (metric.LegacyMigrationState, error) {
+	cfg, err := config.GetManyAs[MetricStoreConfig]()
+	if err != nil {
+		return metric.LegacyMigrationState{}, err
+	}
+	c, err := telemetryConfig(cfg)
+	if err != nil {
+		return metric.LegacyMigrationState{}, err
+	}
+	s := GetStore()
+	if s == nil {
+		return metric.LegacyMigrationState{}, ErrStoreNotInitialized
+	}
+	return s.PrepareLegacyMigration(ctx, c)
+}
+
+func CompleteTelemetryLedgerMigration(ctx context.Context) error {
+	cfg, err := config.GetManyAs[MetricStoreConfig]()
+	if err != nil {
+		return err
+	}
+	c, err := telemetryConfig(cfg)
+	if err != nil {
+		return err
+	}
+	s := GetStore()
+	if s == nil {
+		return ErrStoreNotInitialized
+	}
+	return s.CompleteLegacyLedgerMigration(ctx, c)
+}
+
 func SeedTelemetryTrafficBaseline(ctx context.Context, source string, at time.Time, up, down int64) error {
 	cfg, err := config.GetManyAs[MetricStoreConfig]()
 	if err != nil {

@@ -470,6 +470,9 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 	defer controller.Deactivate()
 
 	r := gin.New()
+	if err := security.ConfigureTrustedProxies(r, security.TrustedProxiesFromEnv()); err != nil {
+		return false, fmt.Errorf("invalid %s: %w", security.TrustedProxyEnv, err)
+	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
@@ -486,8 +489,10 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 	frontendpublic.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
 		r.NoRoute(func(c *gin.Context) {
 			requestPath := c.Request.URL.Path
-			if strings.HasPrefix(requestPath, "/api") {
-				api.RespondError(c, http.StatusNotFound, "Not found in metric storage upgrade mode")
+			if strings.HasPrefix(requestPath, "/api") || strings.HasPrefix(requestPath, "/komari.") {
+				c.Header("Retry-After", "5")
+				c.Header("Cache-Control", "no-store")
+				api.RespondError(c, http.StatusServiceUnavailable, "Telemetry storage migration in progress; retry after completion")
 				return
 			}
 			if c.Request.Method == http.MethodGet && requestPath != storageupdateweb.PagePath && filepath.Ext(requestPath) == "" {
@@ -521,6 +526,7 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 	case err := <-serverErr:
 		return false, fmt.Errorf("listen in metric storage upgrade mode: %w", err)
 	case <-quit:
+		controller.Deactivate()
 		return false, a.Shutdown()
 	case <-controller.Done():
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

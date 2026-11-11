@@ -37,8 +37,17 @@ func init() {
 		defer metricstore.CloseStoreContext(context.Background())
 		// Settle business history while the legacy reader is still available.
 		// This is an explicit offline operation, never a page-open side effect.
-		if err = trafficledger.MigrateTelemetryLedger(ctx, dbcore.GetDBInstance(), time.Now()); err != nil {
+		checkpoint, err := metricstore.PrepareTelemetryMigration(ctx)
+		if err != nil {
 			return err
+		}
+		if !checkpoint.Complete && !checkpoint.LedgerComplete {
+			if err = trafficledger.MigrateTelemetryLedger(ctx, dbcore.GetDBInstance(), checkpoint.Cutoff); err != nil {
+				return err
+			}
+			if err = metricstore.CompleteTelemetryLedgerMigration(ctx); err != nil {
+				return err
+			}
 		}
 		var points int64
 		last := time.Time{}

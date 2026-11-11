@@ -8,12 +8,15 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/database/trafficledger"
 	appconfig "github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/metric"
 	"github.com/komari-monitor/komari/pkg/migrationutil"
 	"github.com/komari-monitor/komari/web/api"
 	publicapi "github.com/komari-monitor/komari/web/api/public"
+	connectapi "github.com/komari-monitor/komari/web/connect"
 	jsonrpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
 )
 
@@ -43,15 +46,21 @@ type Controller struct {
 	startedAt time.Time
 	endedAt   time.Time
 	running   bool
+	closed    bool
 
 	startOnce sync.Once
 	doneOnce  sync.Once
 	done      chan struct{}
 	migrate   func(context.Context, metric.MigrationProgressFunc) error
+	ctx       context.Context
+	cancel    context.CancelFunc
+	runWG     sync.WaitGroup
 }
 
 func NewController(summary metric.SQLiteMigrationSummary) *Controller {
+	ctx, cancel := context.WithCancel(context.Background())
 	controller := &Controller{
+		ctx: ctx, cancel: cancel,
 		status: Status{
 			State:   "pending",
 			Phase:   metric.MigrationPhasePreparing,
@@ -64,12 +73,22 @@ func NewController(summary metric.SQLiteMigrationSummary) *Controller {
 }
 
 func (c *Controller) Activate() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
 	c.active.Store(true)
-	c.startOnce.Do(func() { go c.run() })
+	c.startOnce.Do(func() { c.runWG.Add(1); go func() { defer c.runWG.Done(); c.run() }() })
 }
 
 func (c *Controller) Deactivate() {
+	c.mu.Lock()
+	c.closed = true
 	c.active.Store(false)
+	c.cancel()
+	c.mu.Unlock()
+	c.runWG.Wait()
 }
 
 func (c *Controller) Done() <-chan struct{} {
@@ -77,6 +96,7 @@ func (c *Controller) Done() <-chan struct{} {
 }
 
 func (c *Controller) Register(r *gin.Engine) {
+	connectapi.RegisterRestrictedPasswordLogin(r)
 	r.POST("/api/login", publicapi.Login)
 	r.GET("/api/me", jsonrpc.Bind("public:getMe", jsonrpc.WithRaw()))
 	r.GET("/api/oauth", publicapi.OAuth)
@@ -114,7 +134,7 @@ func (c *Controller) getStatus(ctx *gin.Context) {
 
 func (c *Controller) retry(ctx *gin.Context) {
 	c.mu.Lock()
-	if c.running || c.status.State != "failed" {
+	if c.closed || c.running || c.status.State != "failed" {
 		c.mu.Unlock()
 		api.RespondError(ctx, http.StatusConflict, "storage migration is not retryable in its current state")
 		return
@@ -129,9 +149,10 @@ func (c *Controller) retry(ctx *gin.Context) {
 	c.status.ElapsedMS = 0
 	c.status.Error = ""
 	c.endedAt = time.Time{}
+	c.runWG.Add(1)
 	c.mu.Unlock()
 
-	go c.run()
+	go func() { defer c.runWG.Done(); c.run() }()
 	api.RespondSuccessMessage(ctx, "storage migration restarted", gin.H{})
 }
 
@@ -149,7 +170,7 @@ func (c *Controller) run() {
 	c.status.Error = ""
 	c.mu.Unlock()
 
-	ctx := context.Background()
+	ctx := c.ctx
 	pacer := migrationutil.NewPacer(0.5)
 	err := c.migrate(ctx, func(progress metric.MigrationProgress) {
 		c.onProgress(progress)
@@ -181,11 +202,38 @@ func (c *Controller) run() {
 }
 
 func (c *Controller) openAndMigrate(ctx context.Context, progress metric.MigrationProgressFunc) error {
-	store, err := metricstore.OpenConfiguredStoreForMigration(ctx, progress)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := metricstore.InitializeStoreContext(ctx); err != nil {
+		return err
+	}
+	defer metricstore.CloseStoreContext(context.Background())
+	checkpoint, err := metricstore.PrepareTelemetryMigration(ctx)
 	if err != nil {
 		return err
 	}
-	return store.Close()
+	if checkpoint.Complete {
+		return nil
+	}
+	if !checkpoint.LedgerComplete {
+		progress(metric.MigrationProgress{Phase: "traffic_ledger"})
+		if err = trafficledger.MigrateTelemetryLedger(ctx, dbcore.GetDBInstance(), checkpoint.Cutoff); err != nil {
+			return err
+		}
+		if err = metricstore.CompleteTelemetryLedgerMigration(ctx); err != nil {
+			return err
+		}
+	}
+	cfg, err := appconfig.GetManyAs[metricstore.MetricStoreConfig]()
+	if err != nil {
+		return err
+	}
+	var points int64
+	return metricstore.MigrateTelemetryOffline(ctx, metricstore.GetStore(), cfg, func(_ string, n int64) {
+		points += n
+		progress(metric.MigrationProgress{Phase: "telemetry_history", Current: points, Preserved: points})
+	})
 }
 
 func (c *Controller) onProgress(progress metric.MigrationProgress) {

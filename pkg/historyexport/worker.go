@@ -110,7 +110,12 @@ func (w *Worker) fault(s string) error {
 	}
 	return nil
 }
-func (w *Worker) heartbeat() error {
+func (w *Worker) heartbeat(ctx context.Context) error {
+	release, err := w.Queue.guard(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	p, e := w.proof()
 	a := Availability{Available: e == nil, At: time.Now().UTC(), CPUCoreLimit: .04, CPUShareLimit: .1, Proof: p, ActiveJob: w.activeJob}
 	if e != nil {
@@ -141,7 +146,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		if e = ctx.Err(); e != nil {
 			return e
 		}
-		if e = w.heartbeat(); e != nil {
+		if e = w.heartbeat(ctx); e != nil {
 			return e
 		}
 		if time.Since(lastPrune) > time.Hour {
@@ -172,6 +177,11 @@ func (w *Worker) Run(ctx context.Context) error {
 // Step executes one immutable input unit, then gives another account a turn.
 // The complete process, including planning and checkpoints, shares one cgroup.
 func (w *Worker) Step(parent context.Context, j *Job) error {
+	release, lockErr := w.Queue.guard(parent)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer release()
 	if _, e := w.proof(); e != nil {
 		return e
 	}
@@ -267,7 +277,7 @@ func (w *Worker) Step(parent context.Context, j *Job) error {
 						cancel(e)
 						return
 					}
-					if e = w.heartbeat(); e != nil {
+					if e = w.heartbeat(ctx); e != nil {
 						reasonMu.Lock()
 						reason = "quota_configuration"
 						reasonMu.Unlock()
@@ -402,6 +412,9 @@ func (w *Worker) snapshot(ctx context.Context, j *Job) (metric.ExportSnapshot, e
 	dir := w.Queue.Path(j.ID, ".snapshot")
 	path := filepath.Join(dir, "manifest.json")
 	var snapshot metric.ExportSnapshot
+	if info, e := os.Lstat(path); e == nil && (!info.Mode().IsRegular() || info.Size() > 16<<20) {
+		return snapshot, errors.New("invalid manifest size/type")
+	}
 	if b, e := os.ReadFile(path); e == nil {
 		if len(b) > 16<<20 {
 			return snapshot, errors.New("manifest exceeds budget")

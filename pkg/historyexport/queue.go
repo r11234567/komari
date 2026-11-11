@@ -101,8 +101,9 @@ type Commit struct {
 	Slot                  int64
 }
 type Queue struct {
-	db  *sql.DB
-	Dir string
+	db       *sql.DB
+	Dir      string
+	identity os.FileInfo
 }
 
 func Open(dir string) (*Queue, error) {
@@ -132,6 +133,11 @@ func Open(dir string) (*Queue, error) {
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,owner TEXT NOT NULL,dedupe TEXT NOT NULL,created INTEGER NOT NULL,status TEXT NOT NULL,control TEXT NOT NULL DEFAULT '',body BLOB NOT NULL);
 CREATE INDEX IF NOT EXISTS jobs_owner ON jobs(owner,created);
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status,created);`)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	q.identity, err = os.Stat(filepath.Join(dir, "queue.db"))
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -187,6 +193,11 @@ func (j *Job) Validate() error {
 	return nil
 }
 func (q *Queue) Create(ctx context.Context, r Request) (*Job, error) {
+	release, err := q.guard(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	j := &Job{Request: r, FormatVersion: FormatVersion, Status: "queued", Phase: "queued", ProgressKind: "indeterminate", CreatedAt: time.Now().UTC(), CPUShareLimit: .1, CPUCoreLimit: .04}
 	if r.CSVVersion == 1 {
 		j.FormatVersion = 1
@@ -243,6 +254,11 @@ func (q *Queue) Create(ctx context.Context, r Request) (*Job, error) {
 	return j, tx.Commit()
 }
 func (q *Queue) Save(ctx context.Context, j *Job) error {
+	release, err := q.guard(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if !ValidID(j.ID) {
 		return ErrNotFound
 	}
@@ -254,6 +270,9 @@ func (q *Queue) Save(ctx context.Context, j *Job) error {
 	return err
 }
 func (q *Queue) Get(ctx context.Context, owner, id string) (*Job, error) {
+	if err := q.checkGeneration(); err != nil {
+		return nil, err
+	}
 	var b []byte
 	var control string
 	err := q.db.QueryRowContext(ctx, "SELECT body,control FROM jobs WHERE id=? AND owner=?", id, owner).Scan(&b, &control)
@@ -288,6 +307,9 @@ func (q *Queue) decorate(j *Job, control string) {
 	}
 }
 func (q *Queue) List(ctx context.Context, owner string) ([]*Job, error) {
+	if err := q.checkGeneration(); err != nil {
+		return nil, err
+	}
 	rows, err := q.db.QueryContext(ctx, "SELECT body,control FROM jobs WHERE owner=? ORDER BY CASE WHEN status IN ('queued','running','paused','publishing','recovering','retry_wait') THEN 0 ELSE 1 END,created DESC LIMIT 64", owner)
 	if err != nil {
 		return nil, err
@@ -310,6 +332,11 @@ func (q *Queue) List(ctx context.Context, owner string) ([]*Job, error) {
 	return out, rows.Err()
 }
 func (q *Queue) Control(ctx context.Context, owner, id, action string) error {
+	release, err := q.guard(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if action != "pause" && action != "resume" && action != "cancel" && action != "retry" {
 		return errors.New("invalid export action")
 	}
@@ -358,6 +385,9 @@ func (q *Queue) Control(ctx context.Context, owner, id, action string) error {
 	}
 	if action == "resume" && j.Status == "paused" {
 		j.Status = "queued"
+		if j.Committed.Offset > 0 {
+			j.Status = "recovering"
+		}
 		j.WaitReason = ""
 	}
 	if action == "cancel" && j.Status == "failed" {
@@ -374,14 +404,24 @@ func (q *Queue) Control(ctx context.Context, owner, id, action string) error {
 	return tx.Commit()
 }
 func (q *Queue) Desired(ctx context.Context, id string) (string, error) {
+	release, err := q.guard(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	var s string
-	err := q.db.QueryRowContext(ctx, "SELECT control FROM jobs WHERE id=?", id).Scan(&s)
+	err = q.db.QueryRowContext(ctx, "SELECT control FROM jobs WHERE id=?", id).Scan(&s)
 	return s, err
 }
 
 // FencePublication serializes the final cancellation decision with control
 // requests. Once this state commits, cancellation is explicitly too late.
 func (q *Queue) FencePublication(ctx context.Context, j *Job) error {
+	release, err := q.guard(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	tx, e := q.db.BeginTx(ctx, nil)
 	if e != nil {
 		return e
@@ -408,6 +448,11 @@ func (q *Queue) FencePublication(ctx context.Context, j *Job) error {
 // Next alternates accounts at each durable checkpoint. A crashed worker's
 // running task is eligible immediately after the exclusive process lock moves.
 func (q *Queue) Next(ctx context.Context, lastOwner string) (*Job, error) {
+	release, err := q.guard(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	rows, err := q.db.QueryContext(ctx, "SELECT body,control FROM jobs WHERE status IN ('queued','running','paused','publishing','recovering','retry_wait') AND control<>'pause' ORDER BY CASE WHEN control='cancel' THEN 0 ELSE 1 END,CASE WHEN owner=? THEN 1 ELSE 0 END,created LIMIT 8", lastOwner)
 	if err != nil {
 		return nil, err
@@ -434,6 +479,11 @@ func (q *Queue) Next(ctx context.Context, lastOwner string) (*Job, error) {
 // Called only after the exclusive process lock is acquired. At most eight
 // active tasks exist, and only interrupted work needs checkpoint validation.
 func (q *Queue) Recover(ctx context.Context) error {
+	release, err := q.guard(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	rows, err := q.db.QueryContext(ctx, "SELECT body FROM jobs WHERE status IN ('running','publishing','recovering') LIMIT 8")
 	if err != nil {
 		return err
@@ -467,6 +517,11 @@ func (q *Queue) Recover(ctx context.Context) error {
 	return nil
 }
 func (q *Queue) Prune(ctx context.Context, now time.Time) error {
+	release, err := q.guard(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	cursor := ""
 	for {
 		rows, err := q.db.QueryContext(ctx, "SELECT id,body FROM jobs WHERE id>? AND status IN ('done','expired','failed','cancelled') ORDER BY id LIMIT 64", cursor)

@@ -76,6 +76,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
   await context.addInitScript(() => localStorage.setItem('i18nextLng', 'en'));
   const http = context.request;
   let secret;
+  let fixturePassword;
   let lastCounter = -1;
   let agentId;
   let workspaceToken;
@@ -169,6 +170,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
   try {
     await test.step('first-run setup, Secure admin cookie and actual Agent enrollment', async () => {
       const password = `Ci9-${crypto.randomBytes(24).toString('hex')}`;
+      fixturePassword = password;
       console.log(`::add-mask::${password}`);
       await request('/api/install/complete', {
         username: 'e2e-user', password, sitename: 'Komari real E2E', description: '', metric_dsn: './data/metrics.db',
@@ -750,8 +752,24 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       try { expect([401, 403]).toContain((await outsider.request.get(`/api/admin/history/export/${recovered.id}/download`)).status()); }
       finally { await outsider.close(); }
       fs.writeFileSync(path.join(artifacts, 'background-export-modes.json'), JSON.stringify({ proofs, cancelled, recovered }, null, 2));
+      // The portable full backup must include ready tasks of every output type
+      // and a genuinely paused queue entry. Stop only after the worker is idle,
+      // so the backup never waits on a process frozen while holding its lock.
+      await expect.poll(() => JSON.parse(fs.readFileSync(path.join(root, 'panel/data/exports-v2/worker.json'))).active_job || '').toBe('');
+      execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGSTOP', 'komari-e2e-export.service']);
+      let pausedBackup;
+      try {
+        pausedBackup = await create({ mode: 'raw', category: 'resource', end: new Date(end.getTime()-1000).toISOString() });
+        expect(pausedBackup.id).toBeTruthy();
+        await request(`/api/admin/history/export/${pausedBackup.id}/pause`, {});
+        expect((await (await request(`/api/admin/history/export/${pausedBackup.id}`, undefined, { method: 'GET' })).json()).data.status).toBe('paused');
+        const backup = await request('/api/admin/download/backup?scope=full', undefined, { method: 'GET' });
+        fs.writeFileSync(path.join(root, 'real-full-backup.zip'), await backup.body());
+        fs.writeFileSync(path.join(root, 'export-restore-proof.json'), JSON.stringify({ ready: proofs.map(p=>p.job), paused: pausedBackup }));
+      } finally { execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGCONT', 'komari-e2e-export.service']); }
       await context.storageState({ path: path.join(root, 'qualification-browser-state.json') });
       fs.writeFileSync(path.join(root, 'qualification-scope.json'), JSON.stringify({ agentId }));
+      fs.writeFileSync(path.join(root, 'migration-credentials.json'), JSON.stringify({ username: 'e2e-user', password: fixturePassword, secret }), { mode: 0o600 });
     });
   } finally {
     fs.writeFileSync(path.join(artifacts, 'browser-events.json'), JSON.stringify(events, null, 2));

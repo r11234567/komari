@@ -491,6 +491,12 @@ func TestConnection(ctx context.Context, cfg *MetricStoreConfig) error {
 
 // InitializeStore 初始化 metric store（启动时调用，可在失败或关闭后重试）。
 func InitializeStore() error {
+	return InitializeStoreContext(context.Background())
+}
+
+// InitializeStoreContext lets the restricted startup controller cancel the
+// open/schema work as well as the subsequent history conversion.
+func InitializeStoreContext(parent context.Context) error {
 	storeInitMu.Lock()
 	defer storeInitMu.Unlock()
 
@@ -510,6 +516,11 @@ func InitializeStore() error {
 	// timeout. Remote stores retain a bounded startup deadline.
 	ctx, cancel := startupStoreContext(cfg)
 	defer cancel()
+	stop := context.AfterFunc(parent, cancel)
+	defer stop()
+	if err := parent.Err(); err != nil {
+		return err
+	}
 
 	s, err := openStore(ctx, cfg)
 	if err != nil {

@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	appconfig "github.com/komari-monitor/komari/pkg/config"
@@ -28,6 +30,40 @@ func setupConfigDB(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	appconfig.SetDb(db)
+}
+
+func TestDeactivateCancelsAndWaitsForMigration(t *testing.T) {
+	c := NewController(metric.SQLiteMigrationSummary{Required: true})
+	started, stopped := make(chan struct{}), make(chan struct{})
+	c.migrate = func(ctx context.Context, _ metric.MigrationProgressFunc) error {
+		close(started)
+		<-ctx.Done()
+		close(stopped)
+		return ctx.Err()
+	}
+	c.Activate()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("migration never started")
+	}
+	c.Deactivate()
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("database could close before migration exited")
+	}
+	// Concurrent shutdown calls and an attempted reactivation cannot add work
+	// after Wait starts or bring a cancelled controller back online.
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); c.Activate(); c.Deactivate() }()
+	}
+	wg.Wait()
+	if c.active.Load() {
+		t.Fatal("closed controller reactivated")
+	}
 }
 
 func TestRestrictedControllerRoutes(t *testing.T) {

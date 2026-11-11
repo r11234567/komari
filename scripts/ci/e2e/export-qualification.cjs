@@ -37,11 +37,15 @@ async function run() {
   // before measuring the no-export baseline. During qualification freshness
   // remains mandatory on every foreground request.
   const warmupDeadline = Date.now()+180_000;
-  let warmup;
+  let warmup, initialNewest;
   do {
     warmup = await api(`/${services.metrics}/QueryMetrics`,{agentIds:[manifest.agentId],metrics:['cpu.usage'],startTime:new Date(Date.now()-3600_000).toISOString(),endTime:new Date().toISOString(),maxPoints:360,downsample:true});
     const observed=(warmup.body.series||[]).flatMap(s=>(s.queryPoints||[]).filter(p=>p.value!==undefined).map(p=>Date.parse(p.observedAt))).filter(Number.isFinite);
-    if(observed.length && Math.max(...observed)>Date.now()-120_000) break;
+    const newest=observed.length ? Math.max(...observed) : 0;
+    initialNewest ??= newest;
+    // A cached pre-shutdown point may still be <120s old. Require an actual
+    // advance after this process starts, not merely a still-fresh old bucket.
+    if(newest>initialNewest && newest>Date.now()-120_000) break;
     fs.writeFileSync(path.join(artifacts,'export-agent-warmup.json'),JSON.stringify(warmup.body,null,2));
     assert(Date.now()<warmupDeadline,'Installed Agent did not recover after the fixture panel restart');
     await sleep(2000);
@@ -58,7 +62,10 @@ async function run() {
       const result = await api(...args); (target[key] ||= []).push(result.ms);
       if(key==='chart') {
         const observed=(result.body.series||[]).flatMap(s=>(s.queryPoints||[]).filter(p=>p.value!==undefined).map(p=>Date.parse(p.observedAt))).filter(Number.isFinite);
-        assert(observed.length && Math.max(...observed)>Date.now()-120_000, 'Installed Agent chart stopped receiving fresh observations');
+        if(!observed.length || Math.max(...observed)<=Date.now()-120_000) {
+          fs.writeFileSync(path.join(artifacts,'export-agent-stale.json'),JSON.stringify(result.body,null,2));
+          throw Error('Installed Agent chart stopped receiving fresh observations');
+        }
       }
       if(key==='traffic') assert(result.body.buckets?.length===72,'Traffic buckets missing');
       if(key==='billing') assert(!result.body.charts?.traffic?.error,'Billing unavailable');

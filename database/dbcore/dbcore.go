@@ -18,6 +18,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/diagnostics"
 	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/pkg/historyexport"
 	"github.com/komari-monitor/komari/pkg/metric"
 	"github.com/komari-monitor/komari/pkg/migrations"
 	"github.com/komari-monitor/komari/utils/fsmove"
@@ -238,11 +239,33 @@ func restoreStagedBackup(dataDir string) error {
 		return fmt.Errorf("inspect restored metrics.db: %w", err)
 	}
 	_ = os.Remove(filepath.Join(stageDir, "komari-backup-markup"))
+	queueDir := filepath.Join(stageDir, "exports-v2")
+	if _, err := os.Stat(queueDir); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		err = historyexport.ValidateAndRebindBackup(ctx, queueDir, dataDir)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("validate restored export queue: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Join(stageDir, "theme"), 0o755); err != nil {
 		return fmt.Errorf("prepare restored theme directory: %w", err)
 	}
 
 	backupDir := filepath.Join(filepath.Dir(dataDir), "backup")
+	if _, err := os.Stat(filepath.Join(dataDir, "exports-v2")); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		release, err := historyexport.LockMaintenance(ctx, filepath.Join(dataDir, "exports-v2"))
+		cancel()
+		if err != nil {
+			return fmt.Errorf("quiesce export worker before restore: %w", err)
+		}
+		defer release()
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	if err := os.MkdirAll(backupDir, 0o755); err != nil {
 		return fmt.Errorf("create pre-restore backup directory: %w", err)
 	}

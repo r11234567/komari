@@ -16,6 +16,7 @@ import (
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/pkg/historyexport"
 	"github.com/komari-monitor/komari/web/api"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -422,6 +423,21 @@ func DownloadBackup(c *gin.Context) {
 	snapshot := func() error { return backupMainSQLite(mainSnapshot) }
 	if scope == backupScopeFull {
 		snapshot = func() error {
+			queue, err := historyexport.Open("./data/exports-v2")
+			if err != nil {
+				return err
+			}
+			defer queue.Close()
+			lockCtx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+			release, err := historyexport.LockMaintenance(lockCtx, queue.Dir)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("wait for export checkpoint before backup: %w", err)
+			}
+			defer release()
+			if err = queue.BackupLocked(c.Request.Context(), filepath.Join(contentDir, "exports-v2")); err != nil {
+				return err
+			}
 			return metricstore.BackupFull(c.Request.Context(), contentDir, func() error { return backupMainSQLite(mainSnapshot) })
 		}
 	}

@@ -35,6 +35,14 @@ import (
 
 const maxConnectRequestBytes = 4 << 20
 
+// Restricted startup listeners expose only the existing native password
+// ceremony, including its configured second factor, never operational RPCs.
+func RegisterRestrictedPasswordLogin(r *gin.Engine) {
+	path, handler := credentialv1connect.NewPasswordLoginServiceHandler(&passwordLoginService{}, connect.WithInterceptors(diagnostics.OutcomeInterceptor{}, newPolicyInterceptor()), connect.WithReadMaxBytes(128<<10))
+	registerDiagnosticProcedures(path)
+	r.Any(strings.TrimSuffix(path, "/")+"/*method", bridge(handler))
+}
+
 // Register mounts each generated Connect service at its canonical procedure path.
 func Register(r *gin.Engine) {
 	policy := newPolicyInterceptor()

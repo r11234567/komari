@@ -74,6 +74,13 @@ jobs:
         run: bash scripts/ci/run-audit-check.sh e2e-storage-process go test -race ./pkg/metric -run TestTelemetryProcessRoundTrip -count=1 -v
       - name: Verify the exact binary in isolated Docker cgroup-v2 deployment
         run: bash scripts/ci/run-audit-check.sh e2e-export-docker bash scripts/ci/e2e/export-docker.sh
+      - name: Build explicitly synthetic legacy upgrade fixture from the real installation backup
+        run: bash scripts/ci/run-audit-check.sh e2e-migration-fixture go run ./scripts/ci/migration-fixture
+      - name: Verify automatic restricted upgrade, native password and TOTP, failure and retry
+        env:
+          NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
+        run: bash scripts/ci/run-audit-check.sh e2e-storage-upgrade node scripts/ci/e2e/storage-upgrade.cjs
       - name: Prepare explicitly synthetic large cold CSV input in the isolated fixture
         if: inputs.export_qualification
         run: |
