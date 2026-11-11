@@ -16,6 +16,7 @@ import (
 	installweb "github.com/komari-monitor/komari/web/install"
 	"github.com/komari-monitor/komari/web/public"
 	jsonRpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
+	"github.com/komari-monitor/komari/web/storageupdate"
 )
 
 // legacyRemoteCompatEnabled reports whether the pre-Connect terminal and remote
@@ -53,6 +54,7 @@ func Register(r *gin.Engine) func() error {
 // registerPublicRoutes 公开路由。JSON 读接口经 Bind 绑定到 public: 命名空间方法。
 func registerPublicRoutes(r *gin.Engine) {
 	installweb.RegisterCompleted(r)
+	storageupdate.RegisterCompleted(r)
 
 	// 非 JSON / 特殊流程，保留 REST handler。
 	r.POST("/api/login", public_api.Login)

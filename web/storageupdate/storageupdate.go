@@ -109,6 +109,19 @@ func (c *Controller) Register(r *gin.Engine) {
 	authorized.POST("/retry", c.retry)
 }
 
+// RegisterCompleted closes the maintenance endpoints explicitly after the
+// normal router takes over. Otherwise its SPA fallback returns HTML with 200
+// for /auth and the browser cannot detect the completed listener handoff.
+func RegisterCompleted(r *gin.Engine) {
+	completed := func(ctx *gin.Context) {
+		ctx.Header("Cache-Control", "no-store")
+		api.RespondError(ctx, http.StatusNotFound, "storage migration is not active")
+	}
+	r.GET(APIPath+"/auth", completed)
+	r.GET(APIPath+"/status", completed)
+	r.POST(APIPath+"/retry", completed)
+}
+
 func (c *Controller) requireActive(ctx *gin.Context) {
 	if !c.active.Load() {
 		ctx.AbortWithStatus(http.StatusNotFound)

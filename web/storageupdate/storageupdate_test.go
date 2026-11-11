@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -101,6 +102,24 @@ func TestRestrictedControllerRoutes(t *testing.T) {
 	r.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status code = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestCompletedEndpointsBypassSPAFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	RegisterCompleted(r)
+	r.NoRoute(func(c *gin.Context) { c.Data(http.StatusOK, "text/html", []byte("<html>SPA</html>")) })
+	for _, route := range []struct{ method, path string }{
+		{http.MethodGet, APIPath + "/auth"},
+		{http.MethodGet, APIPath + "/status"},
+		{http.MethodPost, APIPath + "/retry"},
+	} {
+		response := httptest.NewRecorder()
+		r.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))
+		if response.Code != http.StatusNotFound || !strings.HasPrefix(response.Header().Get("Content-Type"), "application/json") || response.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("completed %s %s: code=%d headers=%v body=%s", route.method, route.path, response.Code, response.Header(), response.Body.String())
+		}
 	}
 }
 
