@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/pkg/metric"
-	"github.com/mattn/go-sqlite3"
 )
 
 type Worker struct {
@@ -347,8 +346,7 @@ func (w *Worker) Step(parent context.Context, j *Job) error {
 		j.Status = "failed"
 		j.Error = err.Error()
 		j.WaitReason = ""
-		var sqliteErr sqlite3.Error
-		if errors.As(err, &sqliteErr) && (sqliteErr.Code == sqlite3.ErrBusy || sqliteErr.Code == sqlite3.ErrLocked) && j.AutomaticRetries < 3 {
+		if transientDatabaseBusy(err) && j.AutomaticRetries < 3 {
 			j.Status, j.WaitReason, j.ProgressKind = "retry_wait", "database_busy", "indeterminate"
 			j.AutomaticRetries++
 			j.RetryAt = time.Now().UTC().Add(time.Duration(5*(1<<uint(j.AutomaticRetries-1))) * time.Second)
