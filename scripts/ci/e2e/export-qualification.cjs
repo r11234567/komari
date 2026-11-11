@@ -29,8 +29,14 @@ async function run() {
   const api = async (url, data, method='POST') => {
     const started = performance.now();
     const r = await context.request.fetch(url, {method, data, headers:{Origin:base,'Connect-Protocol-Version':'1'},timeout:30_000});
-    assert(r.ok(), `${url}: ${r.status()} ${(await r.text()).slice(0,300)}`);
-    return {body:await r.json(),ms:performance.now()-started};
+    try {
+      assert(r.ok(), `${url}: ${r.status()} ${(await r.text()).slice(0,300)}`);
+      return {body:await r.json(),ms:performance.now()-started};
+    } finally {
+      // Playwright retains response bodies until disposed. This is a multi-
+      // hour load generator, so do not accumulate every historical response.
+      await r.dispose();
+    }
   };
   // Creating the cold fixture deliberately stops the panel. The installed
   // Agent then backs off its real transport; wait for that transport to recover

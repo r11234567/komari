@@ -42,7 +42,10 @@ func main() {
 	tel, e := s.OpenTelemetry(ctx, metric.TelemetryConfig{ArchiveDirectory: filepath.Join(root, "panel/data/telemetry"), RawWindow: time.Minute, SegmentDuration: time.Minute})
 	must(e)
 	defer tel.Close()
-	const count = 150000
+	// At the measured logical-I/O throughput this is about 2.5 hours of
+	// actual work, leaving recovery and final verification within the 4.5h
+	// qualification deadline. The test still rejects any run shorter than 2h.
+	const count = 80000
 	at := time.Now().UTC().Add(-12 * time.Hour).Truncate(time.Minute)
 	labels := map[string]string{"origin": "synthetic_cold_csv_qualification", "payload": strings.Repeat("abcd0123", 1024)}
 	for base := 0; base < count; base += 128 {

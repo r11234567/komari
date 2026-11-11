@@ -102,6 +102,7 @@ jobs:
       - name: Qualify actual cold CSV work for at least two hours with HTTPS, Agent and chart load
         if: inputs.export_qualification
         env:
+          KOMARI_AUDIT_TIMEOUT: 300m
           NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
           NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
         run: bash scripts/ci/run-audit-check.sh e2e-export-qualification node scripts/ci/e2e/export-qualification.cjs

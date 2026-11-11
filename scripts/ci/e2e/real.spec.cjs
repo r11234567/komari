@@ -760,7 +760,10 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGSTOP', 'komari-e2e-export.service']);
       let cancelled;
       try {
-        cancelled = await create({ mode: 'raw' });
+        // A completed identical request is intentionally deduplicated. Give
+        // this new queued task its own immutable time range before checking
+        // that it cannot download and can be cancelled while the worker stops.
+        cancelled = await create({ mode: 'raw', end: new Date(end.getTime()-2).toISOString() });
         const denied = await request(`/api/admin/history/export/${cancelled.id}/download`, undefined, { method: 'GET', allowFailure: true });
         expect(denied.status()).toBe(409);
         await request(`/api/admin/history/export/${cancelled.id}/cancel`, {});
