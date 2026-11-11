@@ -27,6 +27,7 @@ const services = {
   browser: 'komari.browser.v1.BrowserService',
   file: 'komari.file.v1.FileService',
   metrics: 'komari.metrics.v1.MetricsService',
+  dashboard: 'komari.admin.v1.DashboardService',
   workspace: 'komari.workspace.v1.WorkspaceService',
 };
 
@@ -521,6 +522,47 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await confirmTerminal();
       await expect.poll(() => workspaceToken).not.toBe(old);
       expect(sha256(await downloadFile('roundtrip.bin'))).toBe(sha256(fs.readFileSync(fixture('roundtrip.bin'))));
+    });
+
+    await test.step('minute traffic trends and daily billing remain independently available', async () => {
+      // Real network traffic after the installed Agent's baseline. Fetch public
+      // pinned source bytes; no forged timestamps, metric writes or DB seeding.
+      execFileSync('curl', ['--fail', '--location', '--max-time', '30', '--output',
+        path.join(root, 'traffic-observation.txt'),
+        'https://raw.githubusercontent.com/r11234567/komari/cfed6d1f67abcd3316983095391728b88ae1652a/scripts/ci/e2e/real.spec.cjs']);
+      await expect.poll(async () => {
+        const trend = await rpc('browser', 'GetTrafficTrend', { window: '86400s', interval: '1200s' });
+        return (trend.buckets || []).reduce((sum, b) => sum + BigInt(b.uploadBytes || 0) + BigInt(b.downloadBytes || 0), 0n) > 0n;
+      }, { timeout: 120_000, intervals: [3000, 5000] }).toBe(true);
+      const results = [];
+      for (const seconds of [600, 1200, 1800]) {
+        const trend = await rpc('browser', 'GetTrafficTrend', { window: '86400s', interval: `${seconds}s` });
+        expect(trend.requestedInterval).toBe(`${seconds}s`);
+        expect(trend.interval).toBe(`${seconds}s`);
+        expect(['complete', 'partial']).toContain(trend.coverage);
+        expect(trend.buckets).toHaveLength(86400 / seconds);
+        expect(trend.dataEnd).toBeTruthy();
+        expect(trend.accountingThrough).toBeTruthy();
+        for (let i = 1; i < trend.buckets.length; i++) {
+          expect(Date.parse(trend.buckets[i].startTime) - Date.parse(trend.buckets[i - 1].startTime)).toBe(seconds * 1000);
+        }
+        results.push(trend);
+      }
+      const billing = await rpc('dashboard', 'GetDashboardCharts', { charts: ['DASHBOARD_CHART_TRAFFIC'], rankingLimit: 5 });
+      expect(billing.charts.traffic.error || '').toBe('');
+      expect(billing.charts.traffic.todayError || '').toBe('');
+      expect(billing.charts.traffic.trendError || '').toBe('');
+      expect(billing.charts.traffic.daily).toHaveLength(30);
+      expect(billing.charts.traffic.daily.at(-1).available).not.toBe(false);
+      await page.goto('/admin');
+      const live = page.locator('section').filter({ has: page.getByText('Live traffic over the last 24 hours', { exact: true }) });
+      const daily = page.locator('section').filter({ has: page.getByText('Daily billable traffic', { exact: true }) });
+      await expect(live).toBeVisible();
+      await expect(daily).toBeVisible();
+      await expect(live.getByText('Data unavailable', { exact: true })).toHaveCount(0);
+      await expect(daily.getByText('Data unavailable', { exact: true })).toHaveCount(0);
+      await page.screenshot({ path: path.join(artifacts, 'traffic-and-billing.png'), fullPage: true });
+      fs.writeFileSync(path.join(artifacts, 'traffic-and-billing.json'), JSON.stringify({ trends: results, billing }, null, 2));
     });
 
     await test.step('real reports archive, charts survive raw deletion, CSV and complete backup use cold history', async () => {

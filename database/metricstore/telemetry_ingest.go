@@ -32,9 +32,21 @@ func TelemetryEnabled() bool {
 	return store != nil && store.Telemetry() != nil
 }
 
+func TelemetryTrafficPending(ctx context.Context) (bool, error) {
+	s, release, err := AcquireStore(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	if s.Telemetry() == nil {
+		return false, nil
+	}
+	return s.Telemetry().TrafficPending(ctx)
+}
+
 // DeliverTelemetryTraffic holds the same lifecycle lease as ingest and reload.
-// A bounded handoff is useful both to background work and freshness-sensitive
-// billing reads. It never consults historical metric points.
+// Only background and explicit offline/test operations call this handoff.
+// Foreground billing and dashboard reads never advance accounting.
 func DeliverTelemetryTraffic(ctx context.Context, limit int, consume func(context.Context, metric.TelemetryTrafficEvent) error) (int, error) {
 	s, release, err := AcquireStore(ctx)
 	if err != nil {

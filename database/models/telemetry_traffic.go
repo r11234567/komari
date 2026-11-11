@@ -19,6 +19,29 @@ type TelemetryTrafficState struct {
 	AccountedDown       int64  `gorm:"not null"`
 	LateReports         int64  `gorm:"not null"`
 	HourlyPrunedThrough int64  `gorm:"not null;default:0"`
+	MinuteSince         int64  `gorm:"not null;default:0"`
+	MinutePrunedThrough int64  `gorm:"not null;default:0"`
+	TailPrunedThrough   int64  `gorm:"not null;default:0"`
+}
+
+// TelemetryTrafficMinute owns accepted event deltas, not averages of network
+// rates. It can be composed into any whole-minute reporting interval.
+type TelemetryTrafficMinute struct {
+	Client        string `gorm:"type:varchar(36);primaryKey"`
+	Start         int64  `gorm:"primaryKey;autoIncrement:false;index"`
+	FirstObserved int64  `gorm:"not null"`
+	LastObserved  int64  `gorm:"not null"`
+	UpBytes       int64  `gorm:"not null"`
+	DownBytes     int64  `gorm:"not null"`
+}
+
+// TelemetryTrafficTail retains only the short mutable edge needed to answer a
+// fixed endpoint inside a minute. Its lifetime is independent of metric raw.
+type TelemetryTrafficTail struct {
+	Client    string `gorm:"type:varchar(36);primaryKey"`
+	Observed  int64  `gorm:"primaryKey;autoIncrement:false;index"`
+	UpBytes   int64  `gorm:"not null"`
+	DownBytes int64  `gorm:"not null"`
 }
 
 // TelemetryTrafficSlice is an hourly ledger split at the configured billing

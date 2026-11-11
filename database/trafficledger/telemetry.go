@@ -24,7 +24,7 @@ var telemetryTrafficMu sync.Mutex
 func ConfigureTelemetry(db *gorm.DB) { telemetryMetadata.Store(db) }
 
 func TelemetryModels() []any {
-	return []any{&models.TelemetryTrafficStream{}, &models.TelemetryTrafficState{}, &models.TelemetryTrafficSlice{}, &models.TelemetryTrafficCycle{}}
+	return []any{&models.TelemetryTrafficStream{}, &models.TelemetryTrafficState{}, &models.TelemetryTrafficSlice{}, &models.TelemetryTrafficCycle{}, &models.TelemetryTrafficMinute{}, &models.TelemetryTrafficTail{}}
 }
 
 func ConsumeTelemetry(ctx context.Context, event metric.TelemetryTrafficEvent) error {
@@ -36,16 +36,11 @@ func ConsumeTelemetry(ctx context.Context, event metric.TelemetryTrafficEvent) e
 }
 
 func ensureTelemetryFresh(ctx context.Context) error {
-	// At most one short batch is drained on a foreground read. An unbounded
-	// backlog is reported for retry rather than monopolising a request/CPU.
-	n, err := metricstore.DeliverTelemetryTraffic(ctx, 128, ConsumeTelemetry)
-	if err != nil {
-		return err
-	}
-	if n == 128 {
-		return fmt.Errorf("%w: traffic accounting is catching up", metric.ErrTelemetryBackpressure)
-	}
-	return nil
+	// Accounting is owned exclusively by the persistent background consumer.
+	// A read must never claim an outbox watermark, take a write lock, or make
+	// its success depend on the number of queued reports. Read metadata exposes
+	// the accounting observation time separately from the request time.
+	return ctx.Err()
 }
 
 func telemetryUsage(ctx context.Context, clients []string, start, end time.Time, interval time.Duration) (map[string]Usage, map[string][]HourlyUsage, error) {
@@ -124,6 +119,14 @@ func ApplyTelemetry(ctx context.Context, db *gorm.DB, event metric.TelemetryTraf
 				return metric.ErrInvalidArgument
 			}
 		}
+		if state.MinuteSince == 0 {
+			state.MinuteSince = ns
+			if found {
+				// All earlier accepted events are represented only by old hourly
+				// rows. Do not advertise minute precision for that history.
+				state.MinuteSince = state.LastObserved + 1
+			}
+		}
 		state.LastObserved = ns
 		state.TotalUp = event.Traffic.TotalUp
 		state.TotalDown = event.Traffic.TotalDown
@@ -174,7 +177,10 @@ func ApplyTelemetry(ctx context.Context, db *gorm.DB, event metric.TelemetryTraf
 		slice.LastObserved = ns
 		slice.UpBytes = saturatingAdd(slice.UpBytes, delta.Up)
 		slice.DownBytes = saturatingAdd(slice.DownBytes, delta.Down)
-		return tx.Save(&slice).Error
+		if err = tx.Save(&slice).Error; err != nil {
+			return err
+		}
+		return applyTelemetryMinute(tx, event.Source, event.Observed, delta)
 	})
 	if err == nil {
 		InvalidateCalibratedCycleCache()
@@ -185,7 +191,7 @@ func ApplyTelemetry(ctx context.Context, db *gorm.DB, event metric.TelemetryTraf
 // TelemetryUsageBatch reads only compact business ledgers. Partial historical
 // slices whose exact attribution was not retained return an explicit coverage
 // error; there is no hidden scan of raw metrics or archives.
-func TelemetryUsageBatch(ctx context.Context, db *gorm.DB, clients []string, start, end time.Time, interval time.Duration) (map[string]Usage, map[string][]HourlyUsage, error) {
+func telemetryHourlyUsageBatch(ctx context.Context, db *gorm.DB, clients []string, start, end time.Time, interval time.Duration) (map[string]Usage, map[string][]HourlyUsage, error) {
 	if db == nil || len(clients) > 256 || interval <= 0 || end.Before(start) {
 		return nil, nil, metric.ErrInvalidArgument
 	}

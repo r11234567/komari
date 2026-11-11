@@ -8,6 +8,17 @@ import (
 	"time"
 )
 
+// TrafficPending uses a bounded indexed read, not a backlog COUNT(*). This is
+// advisory across the metadata/metric database boundary.
+func (t *Telemetry) TrafficPending(ctx context.Context) (bool, error) {
+	var id int64
+	err := t.s.reader().QueryRowContext(ctx, "SELECT ingest_id FROM "+t.table("outbox")+" WHERE delivered=0 ORDER BY ingest_id LIMIT 1").Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // deriveTraffic maintains only a small durable ingress baseline, not a query
 // history. Deltas, complete raw report, receipt and outbox commit atomically.
 // Business totals remain in the independent metadata ledger after handoff.

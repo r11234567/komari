@@ -47,6 +47,8 @@ var configOnlyEmptyTables = []string{
 	"telemetry_traffic_states",
 	"telemetry_traffic_slices",
 	"telemetry_traffic_cycles",
+	"telemetry_traffic_minutes",
+	"telemetry_traffic_tails",
 	"return_route_events",
 	"return_route_statuses",
 }

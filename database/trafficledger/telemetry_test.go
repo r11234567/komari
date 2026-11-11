@@ -2,7 +2,6 @@ package trafficledger
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -99,8 +98,9 @@ func TestTelemetryTrafficRollbackAndExactResetBoundary(t *testing.T) {
 	u, _, err := TelemetryUsageBatch(ctx, db, []string{"client-a"}, boundary, at.Add(time.Minute), time.Hour)
 	require.NoError(t, err)
 	require.Equal(t, Usage{Up: 10, Down: 20}, u["client-a"])
-	_, _, err = TelemetryUsageBatch(ctx, db, []string{"client-a"}, at.Add(time.Second), at.Add(6*time.Second), time.Hour)
-	require.True(t, errors.Is(err, metric.ErrTelemetryCoverage))
+	u, _, err = TelemetryUsageBatch(ctx, db, []string{"client-a"}, at.Add(time.Second), at.Add(6*time.Second), time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, Usage{Up: 10, Down: 20}, u["client-a"])
 	var first models.TrafficCycleFirstDay
 	require.NoError(t, db.First(&first, "client = ? AND day = ?", "client-a", "2026-11-01").Error)
 	require.Equal(t, int64(10), first.UpBytes)

@@ -441,6 +441,7 @@ func trafficToProto(value jsonRpc.DashboardTraffic) *adminv1.DashboardTraffic {
 			UploadBytes:   day.Up,
 			DownloadBytes: day.Down,
 			BillableBytes: day.Billable,
+			Available:     day.Available,
 		})
 	}
 	ranking := make([]*adminv1.DashboardTrafficRankItem, 0, len(value.Ranking))
@@ -454,7 +455,7 @@ func trafficToProto(value jsonRpc.DashboardTraffic) *adminv1.DashboardTraffic {
 			DetailUrl:     item.DetailURL,
 		})
 	}
-	return &adminv1.DashboardTraffic{
+	result := &adminv1.DashboardTraffic{
 		TodayUploadBytes:   value.TodayUp,
 		TodayDownloadBytes: value.TodayDown,
 		TodayBillableBytes: value.TodayBillable,
@@ -463,7 +464,16 @@ func trafficToProto(value jsonRpc.DashboardTraffic) *adminv1.DashboardTraffic {
 		Ranking:            ranking,
 		HistoryReady:       value.HistoryReady,
 		Error:              value.Error,
+		TodayError:         value.TodayError,
+		TrendError:         value.TrendError,
+		RankingError:       value.RankingError,
+		CatchingUp:         value.CatchingUp,
+		TrendCoverage:      value.TrendCoverage,
 	}
+	if value.AccountingThrough != nil {
+		result.AccountingThrough = timestamppb.New(*value.AccountingThrough)
+	}
+	return result
 }
 
 func latencyToProto(value jsonRpc.DashboardLatency) *adminv1.DashboardLatency {

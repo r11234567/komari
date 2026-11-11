@@ -1,5 +1,18 @@
 # Telemetry storage replacement: implementation checkpoints
 
+> 2026-11-11 follow-up: [reinforcement plan](telemetry-storage-reinforcement-plan.md)
+> records confirmed chart precision, hourly traffic / 20-minute query and
+> dashboard failure-isolation defects, plus sustained cold-export CPU gaps.
+> R0–R5 follow-up implementation and acceptance remain unchecked. The historical
+> results below validate their stated fixtures only; they do not establish that
+> these newly identified behaviors are correct. This update changes documents
+> only and does not claim new CI, E2E, fixes or publication.
+> CSV follow-up additionally requires explicit long-running background jobs,
+> distinct summary/raw/30-second sampled modes, truthful phase progress and
+> persistent recovery. All export work must share a verified hard ceiling of
+> 10% of total effective CPU capacity. The corresponding two-hour-scale cold
+> export and UI/resource acceptance remain unimplemented and unverified.
+
 The accepted design is [SQL hot data, summaries and JSONL-zstd archives](telemetry-storage-design.md).
 This branch follows the requested order. Each checkpoint must pass component CI
 and the real HTTPS browser/server/installed-Agent E2E before the next production
