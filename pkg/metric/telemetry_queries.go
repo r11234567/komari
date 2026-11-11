@@ -69,6 +69,12 @@ func (t *Telemetry) PingSummary(ctx context.Context, q AggregateQuery, now time.
 	if err != nil {
 		return SeriesSummary{}, err
 	}
+	// A statistics card has no per-bucket gap representation. Returning only
+	// the retained subset would silently change its probe denominator and
+	// percentiles. The caller must disclose unavailable coverage instead.
+	if len(r.Gaps) > 0 {
+		return SeriesSummary{}, ErrTelemetryCoverage
+	}
 	stats := map[aggregateSeriesKey]*telemetryStats{}
 	tags := map[aggregateSeriesKey]map[string]string{}
 	for key, value := range r.stats {

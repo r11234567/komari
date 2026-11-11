@@ -121,6 +121,13 @@ func TestTelemetryPlannerMixedPingUsesProbeWeights(t *testing.T) {
 	if err != nil || len(r.Points) != 1 || math.Abs(r.Points[0].Value-1.0/3) > 1e-9 {
 		t.Fatalf("loss averaged from bucket percentages: %+v %v", r, err)
 	}
+	if _, err = e.s.db.ExecContext(ctx, "DELETE FROM "+e.table("summary")+" WHERE resolution<>?", int64(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	q.Interval = 10 * time.Second
+	if _, err = e.PingSummary(ctx, q, now); !errors.Is(err, ErrTelemetryCoverage) {
+		t.Fatalf("partial Ping population was reported as complete: %v", err)
+	}
 }
 
 func TestTelemetryPlannerLegacyPartialPromotionRemainsAdditive(t *testing.T) {
