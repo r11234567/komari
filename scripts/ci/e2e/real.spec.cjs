@@ -524,14 +524,22 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await page.keyboard.type('Monaco UTF-8: ', { delay: 50 });
       await page.keyboard.insertText('联调 ✓\n');
       await expect(page.locator('.km-file-editor .view-lines')).toContainText('Monaco UTF-8: 联调 ✓');
+      const savedMark = page.locator('.km-file-editor').getByRole('button', { name: 'Close File', exact: true }).locator('svg');
+      await expect(savedMark).toHaveCount(0); // React has observed the edited model.
       await page.keyboard.press('Control+s');
       await expect.poll(() => fs.readFileSync(fixture('editor.txt'), 'utf8')).toBe('Monaco UTF-8: 联调 ✓\n');
+      // The remote filesystem changes before the upload response and editor's
+      // save guard settle. Wait for the actual saved tab state, not a delay.
+      await expect(savedMark).toHaveCount(1);
       expect((await downloadFile('editor.txt')).toString()).toBe('Monaco UTF-8: 联调 ✓\n');
       await editor.focus();
       await page.keyboard.press('Control+a');
       await page.keyboard.press('Backspace');
+      await expect(page.locator('.km-file-editor .view-lines')).toHaveText(/^\s*$/);
+      await expect(savedMark).toHaveCount(0);
       await page.keyboard.press('Control+s');
       await expect.poll(() => fs.statSync(fixture('editor.txt')).size).toBe(0);
+      await expect(savedMark).toHaveCount(1);
       expect((await downloadFile('editor.txt')).length).toBe(0);
     });
 
