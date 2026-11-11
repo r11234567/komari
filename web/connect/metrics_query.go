@@ -379,11 +379,18 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 	}
 	if downsample && len(queries) > 0 {
 		var batch [][]metric.AggregatePoint
+		var telemetryBatch []metric.TelemetryQueryResult
 		var queryErr error
 		// SQLite V4 can route all ordinary dashboard aggregations through one
 		// snapshot. This avoids one block/axis scan per metric in a six-metric
 		// page while retaining SeriesBatch for percentile/rate compatibility.
-		if aggregation == metric.AggAvg || aggregation == metric.AggSum || aggregation == metric.AggLast {
+		if telemetry := store.Telemetry(); telemetry != nil {
+			telemetryBatch, queryErr = telemetry.ChartBatch(ctx, queries, time.Now().UTC())
+			batch = make([][]metric.AggregatePoint, len(telemetryBatch))
+			for i, result := range telemetryBatch {
+				batch[i] = result.Points
+			}
+		} else if aggregation == metric.AggAvg || aggregation == metric.AggSum || aggregation == metric.AggLast {
 			batch, queryErr = store.DashboardSeriesBatch(ctx, queries, time.Now().UTC())
 		} else {
 			batch, queryErr = store.SeriesBatch(ctx, queries, time.Now().UTC())
@@ -403,7 +410,9 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 				grouped[item.queryIndex] = connectAggregatePointIndices(batch[item.queryIndex], entityIDs...)
 			}
 			points := grouped[item.queryIndex][item.agentID]
-			if len(points) > 0 {
+			if telemetryBatch != nil {
+				resultParts[item.index] = connectTelemetryAggregateSeries(item.metricName, item.agentID, item.definition, aggregation, item.interval, req.Msg.FillEmpty, start, end, telemetryBatch[item.queryIndex], points)
+			} else if len(points) > 0 {
 				resultParts[item.index] = connectAggregateSeries(item.metricName, item.agentID, item.definition, aggregation, item.interval, req.Msg.FillEmpty, start, end, batch[item.queryIndex], points)
 			}
 		}

@@ -269,6 +269,15 @@ func TestTelemetryVariancePingAndPrecision(t *testing.T) {
 	_, e := telemetryFixture(t, "")
 	now := time.Now().UTC().Truncate(time.Hour)
 	q := AggregateQuery{Query: Query{MetricName: "cpu", Start: now.Add(-72 * time.Hour), End: now.Add(-time.Nanosecond)}, Interval: 10 * time.Second, Aggregation: AggAvg}
+	// Precision failure must reflect actual retained cells, not the age of an
+	// empty query or an unrelated series' global migration marker.
+	if _, err := e.Accept(context.Background(), telemetryBatch("coarse-only", now.Add(-24*time.Hour), 7), now); err != nil {
+		t.Fatal(err)
+	}
+	summarizeAll(t, e)
+	if _, err := e.s.db.Exec("DELETE FROM "+e.table("summary")+" WHERE resolution<>?", int64(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := e.Aggregate(context.Background(), q, now); !errors.Is(err, ErrTelemetryCoverage) {
 		t.Fatal(err)
 	}

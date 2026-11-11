@@ -245,6 +245,36 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       fs.writeFileSync(path.join(artifacts, 'metric-store-reloads.json'), JSON.stringify(results, null, 2));
     });
 
+    await test.step('real raw and summary input ownership agrees and built charts expose source precision', async () => {
+      const end = new Date(Date.now() - 15_000);
+      const start = new Date(end.getTime() - 5*60_000);
+      const window = { agentIds:[agentId], metrics:['cpu.usage'], startTime:start.toISOString(), endTime:end.toISOString(), maxPoints:30 };
+      const raw = await rpc('metrics','QueryMetrics',{...window, downsample:false});
+      const summarized = await rpc('metrics','QueryMetrics',{...window, downsample:true, aggregation:'count'});
+      const rawCount = (raw.series || []).reduce((n,s)=>n+(s.queryPoints || []).length,0);
+      expect(rawCount).toBeGreaterThan(0);
+      expect(summarized.series.length).toBeGreaterThan(0);
+      let total = 0;
+      for (const series of summarized.series) {
+        expect(series.requestedInterval).toBe(series.interval);
+        expect(series.coverage).toBe('complete');
+        expect(series.sources?.length).toBeGreaterThan(0);
+        expect(BigInt(series.acceptedThrough || '0')).toBeGreaterThanOrEqual(BigInt(series.summarizedThrough || '0'));
+        for (const point of series.queryPoints || []) {
+          expect(Number(point.value)).toBe(Number(point.sampleCount));
+          expect(point.coverage).toBe('complete');
+          total += Number(point.sampleCount);
+        }
+      }
+      expect(total).toBe(rawCount);
+      await page.goto(`/instance/${agentId}`);
+      await page.locator('.km-load-chart').getByRole('radio', { name:/^1\s*hour$/i }).click();
+      await expect(page.getByTestId('chart-source-precision').first()).toBeVisible();
+      await expect(page.locator('.recharts-line-curve').first()).toBeVisible();
+      await page.screenshot({path:path.join(artifacts,'chart-source-precision.png'),fullPage:true});
+      fs.writeFileSync(path.join(artifacts,'metric-query-ownership.json'),JSON.stringify({rawCount,summarized},null,2));
+    });
+
     await test.step('enabled rate limits allow 32 concurrent charts and Ping reads', async () => {
       await request('/api/admin/settings/', { rate_limit_enabled: true });
       const end = new Date();

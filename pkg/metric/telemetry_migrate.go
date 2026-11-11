@@ -142,11 +142,8 @@ func (s *Store) MigrateLegacy(ctx context.Context, cfg TelemetryConfig, observe 
 	}
 	sort.Slice(tiers, func(i, j int) bool { return tiers[i] > tiers[j] })
 	legacyResolution := time.Second * 10
-	for _, r := range tiers {
-		legacyResolution = telemetryLCM(legacyResolution, r)
-	}
-	// Imported raw-only windows already use the age-appropriate retained tier.
-	legacyResolution = telemetryLCM(legacyResolution, time.Hour)
+	// Kept only as a backwards-compatible migration marker. Source cells own
+	// their actual resolution; no global LCM/hour floor controls chart queries.
 	if globalStart.Valid {
 		for _, def := range defs {
 			if def.RetentionDays <= 0 || def.Name == sqliteVirtualPingLossMetric {

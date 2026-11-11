@@ -292,6 +292,8 @@ type TelemetryQueryResult struct {
 	CoverageStart    time.Time
 	CoverageEnd      time.Time
 	BoundaryAdjusted bool
+	Sources          []TelemetrySourceSpan
+	Gaps             []TelemetrySourceSpan
 }
 
 // Aggregate reads summary SQL only. It never opens an archive. Partial bucket
@@ -302,7 +304,7 @@ func (t *Telemetry) Aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 
 // Chart includes a bounded unsummarized hot tail in the same SQL snapshot.
 // Recent partial boundaries use exact hot points. Older partial boundaries
-// return the retained bucket intersection and disclose adjusted coverage.
+// with unavailable detail disclose gaps instead of publishing a partial total.
 // No archive is opened by this path, even when summary processing is behind.
 func (t *Telemetry) Chart(ctx context.Context, q AggregateQuery, now time.Time) (TelemetryQueryResult, error) {
 	return t.aggregate(ctx, q, now, true)
@@ -318,12 +320,7 @@ func (t *Telemetry) aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 		q.MetricName = sqliteMergedPingLatencyMetric
 		q.Aggregation = pingLossPhysicalAggregation(q.Aggregation)
 	}
-	resolution := telemetryResolution(now.Sub(q.Start))
-	if t.legacyUntil > 0 && q.Start.UnixNano() <= t.legacyUntil && q.Interval < t.legacyResolution {
-		return out, ErrTelemetryCoverage
-	}
-	out.Resolution = resolution
-	if q.Interval < resolution || q.Interval%resolution != 0 || (!chart && (q.Start.UnixNano()%int64(resolution) != 0 || (q.End.UnixNano()+1)%int64(resolution) != 0)) {
+	if q.Interval < 10*time.Second || q.Interval%(10*time.Second) != 0 {
 		return out, ErrTelemetryCoverage
 	}
 	if q.Aggregation == AggRate || q.Aggregation == aggPingLossRate {
@@ -348,105 +345,23 @@ func (t *Telemetry) aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 	if err != nil {
 		return out, err
 	}
-	boundaryResolution := resolution
-	if t.legacyUntil > 0 && q.Start.UnixNano() <= t.legacyUntil {
-		boundaryResolution = telemetryLCM(resolution, t.legacyResolution)
-		out.Resolution = boundaryResolution
-	}
-	first := q.Start.Truncate(boundaryResolution)
-	if first.Before(q.Start) {
-		first = first.Add(boundaryResolution)
-	}
-	lastEnd := q.End.Add(time.Nanosecond).Truncate(boundaryResolution).Add(-time.Nanosecond)
 	out.CoverageStart, out.CoverageEnd = q.Start, q.End
 	cutoff := now.Add(-t.cfg.RawWindow)
-	if chart && q.Start.Before(cutoff) && first.After(q.Start) {
-		out.CoverageStart, out.BoundaryAdjusted = first, true
+	groups := make(map[aggregateGroupKey]*telemetryStats)
+	tagsByGroup := make(map[aggregateGroupKey]map[string]string)
+	plan, err := t.planChart(ctx, tx, q, now, chart, &out, groups, tagsByGroup)
+	if err != nil {
+		return out, err
 	}
-	if chart && q.End.Before(cutoff) && lastEnd.Before(q.End) {
-		out.CoverageEnd, out.BoundaryAdjusted = lastEnd, true
-	}
-	sqlText := "SELECT s.metric,s.entity,s.tags,b.bucket,b.stats FROM " + t.table("summary") + " b JOIN " + t.table("series") + " s ON s.id=b.series_id JOIN " + t.table("segments") + " a ON a.id=b.segment_id LEFT JOIN " + t.table("erasures") + " e ON e.series_id=s.id WHERE s.metric=? AND ((a.state<>'legacy' AND b.resolution=?) OR (a.state='legacy' AND b.resolution<=?)) AND b.bucket>=? AND b.bucket+b.resolution<=? AND (e.through_id IS NULL OR a.first_id>e.through_id)"
-	args := []any{q.MetricName, int64(resolution), int64(q.Interval), first.UnixNano(), lastEnd.Add(time.Nanosecond).UnixNano()}
 	filter, filterArgs, err := t.seriesFilter(ctx, q.Query, "s")
 	if err != nil {
 		return out, err
 	}
-	sqlText += filter
-	args = append(args, filterArgs...)
-	sqlText += " ORDER BY b.bucket,s.id,b.segment_id LIMIT 100001"
-	rows, err := tx.QueryContext(ctx, t.bind(sqlText), args...)
-	if err != nil {
-		return out, err
-	}
-	groups := make(map[aggregateGroupKey]*telemetryStats)
-	tagsByGroup := make(map[aggregateGroupKey]map[string]string)
-	n := 0
-	decodedBytes := 0
-	for rows.Next() {
-		n++
-		if n > 100000 {
-			rows.Close()
-			return out, ErrTelemetryBackpressure
-		}
-		var name, entity, tagsJSON, raw string
-		var ns int64
-		if err = rows.Scan(&name, &entity, &tagsJSON, &ns, &raw); err != nil {
-			break
-		}
-		decodedBytes += len(raw) + len(tagsJSON) + 256
-		if decodedBytes > 32<<20 {
-			rows.Close()
-			return out, ErrTelemetryBackpressure
-		}
-		var tags map[string]string
-		if err = json.Unmarshal([]byte(tagsJSON), &tags); err != nil {
-			break
-		}
-		matches := true
-		for k, v := range q.Tags {
-			if tags[k] != v {
-				matches = false
-				break
-			}
-		}
-		if !matches {
-			continue
-		}
-		var stats telemetryStats
-		if err = json.Unmarshal([]byte(raw), &stats); err != nil {
-			break
-		}
-		key := aggregateGroupKey{bucket: time.Unix(0, ns).UTC().Truncate(q.Interval).UnixNano()}
-		if q.PreserveSeries {
-			h, _, e := tagsFingerprint(tags)
-			if e != nil {
-				err = e
-				break
-			}
-			key.aggregateSeriesKey = aggregateSeriesKey{name, entity, h}
-		}
-		if groups[key] == nil {
-			groups[key] = &telemetryStats{}
-			tagsByGroup[key] = tags
-		}
-		if err = groups[key].merge(stats); err != nil {
-			break
-		}
-	}
-	readErr := rows.Err()
-	rows.Close()
-	if err != nil {
-		return out, err
-	}
-	if readErr != nil {
-		return out, readErr
-	}
 	if chart {
-		// Interior summarized cells and hot points are disjoint by durable cursor.
-		// Exact boundary points are read irrespective of that cursor.
-		hotSQL := "SELECT s.metric,s.entity,s.tags,h.observed,h.value,h.ingest_id,h.ordinal FROM " + t.table("hot") + " h JOIN " + t.table("series") + " s ON s.id=h.series_id LEFT JOIN " + t.table("erasures") + " e ON e.series_id=s.id WHERE s.metric=? AND h.observed>=? AND h.observed<=? AND (e.through_id IS NULL OR h.ingest_id>e.through_id) AND (h.ingest_id>? OR h.observed<? OR h.observed>?)" + filter + " ORDER BY h.ingest_id,h.ordinal LIMIT 10001"
-		hotArgs := []any{q.MetricName, q.Start.UnixNano(), q.End.UnixNano(), out.AccountedThrough, first.UnixNano(), lastEnd.UnixNano()}
+		// The fixed summary cursor and per-owner plan keep represented input
+		// disjoint from pending input and exact recent boundaries.
+		hotSQL := "SELECT s.metric,s.entity,s.tags,h.observed,h.value,h.ingest_id,h.ordinal,h.segment_id,h.series_id FROM " + t.table("hot") + " h JOIN " + t.table("series") + " s ON s.id=h.series_id LEFT JOIN " + t.table("erasures") + " e ON e.series_id=s.id WHERE s.metric=? AND h.observed>=? AND h.observed<=? AND (e.through_id IS NULL OR h.ingest_id>e.through_id) AND (h.ingest_id>? OR h.observed>=?)" + filter + " ORDER BY h.ingest_id,h.ordinal LIMIT 10001"
+		hotArgs := []any{q.MetricName, q.Start.UnixNano(), q.End.UnixNano(), out.AccountedThrough, cutoff.UnixNano()}
 		hotArgs = append(hotArgs, filterArgs...)
 		hr, e := tx.QueryContext(ctx, t.bind(hotSQL), hotArgs...)
 		if e != nil {
@@ -462,11 +377,14 @@ func (t *Telemetry) aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 			var p Point
 			var ns, ingest int64
 			var ordinal int
-			var rawTags string
-			if e = hr.Scan(&p.MetricName, &p.EntityID, &rawTags, &ns, &p.Value, &ingest, &ordinal); e != nil {
+			var rawTags, segment, series string
+			if e = hr.Scan(&p.MetricName, &p.EntityID, &rawTags, &ns, &p.Value, &ingest, &ordinal, &segment, &series); e != nil {
 				break
 			}
 			p.Timestamp = time.Unix(0, ns).UTC()
+			if ingest <= out.AccountedThrough && plan.coversRaw(telemetryPlanOwner{segment, series}, ns, ingest) {
+				continue
+			}
 			if p.Timestamp.Before(cutoff) {
 				// Pending old input must not silently disappear, nor turn an
 				// online query into an unbounded raw-history fallback.
@@ -479,6 +397,17 @@ func (t *Telemetry) aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 			if e = json.Unmarshal([]byte(rawTags), &p.Tags); e != nil {
 				break
 			}
+			matches := true
+			for key, value := range q.Tags {
+				if p.Tags[key] != value {
+					matches = false
+					break
+				}
+			}
+			if !matches {
+				continue
+			}
+			out.Sources = append(out.Sources, TelemetrySourceSpan{MetricName: p.MetricName, EntityID: p.EntityID, Tags: p.Tags, Start: p.Timestamp, End: p.Timestamp.Add(time.Nanosecond)})
 			key := aggregateGroupKey{bucket: p.Timestamp.Truncate(q.Interval).UnixNano()}
 			if q.PreserveSeries {
 				h, _, fingerprintErr := tagsFingerprint(p.Tags)
@@ -503,6 +432,16 @@ func (t *Telemetry) aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 			return out, re
 		}
 	}
+	// A partial contribution is unknown, even when other segments supplied
+	// valid values to the same output bucket. Do not publish a false total.
+	for key := range plan.missing {
+		delete(groups, key)
+	}
+	if len(out.Gaps) > 0 {
+		out.BoundaryAdjusted = true
+	}
+	out.Sources = coalesceTelemetrySpans(out.Sources)
+	out.Gaps = coalesceTelemetrySpans(out.Gaps)
 	keys := make([]aggregateGroupKey, 0, len(groups))
 	out.stats = groups
 	for k := range groups {

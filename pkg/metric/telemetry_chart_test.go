@@ -94,8 +94,15 @@ func TestTelemetryChartScopeAndColdCoverage(t *testing.T) {
 	}
 	q.Start = at.Add(time.Second)
 	got, err = e.Chart(ctx, q, now)
-	if err != nil || !got.BoundaryAdjusted || !got.CoverageStart.Equal(at.Add(5*time.Minute)) {
+	if err != nil || got.BoundaryAdjusted || len(got.Points) != 0 {
 		t.Fatalf("old boundary %+v %v", got, err)
+	}
+	// Known first/last observation times prove the previous window is empty.
+	// Cutting through actual retained observations must instead disclose a gap.
+	q.Start = at.Add(time.Nanosecond)
+	got, err = e.Chart(ctx, q, now)
+	if err != nil || !got.BoundaryAdjusted || len(got.Gaps) == 0 || len(got.Points) != 0 {
+		t.Fatalf("unknown partial source was published as a complete value: %+v %v", got, err)
 	}
 	if err = e.root.Close(); err != nil {
 		t.Fatal(err)

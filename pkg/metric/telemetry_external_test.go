@@ -83,6 +83,24 @@ func telemetryExternal(t *testing.T, cfg Config) {
 	if got, err := e.Aggregate(ctx, q, now); err != nil || len(got.Points) != 1 || got.Points[0].Value != 12 {
 		t.Fatalf("cold chart %+v %v", got, err)
 	}
+	// Execute the actual planner SQL on every supported external engine, not
+	// just a SQLite model. Older 15m and newer 5m cells must produce two 30m
+	// output buckets, with the hour alternate representation counted once.
+	at := now.Add(-6 * time.Hour)
+	for i := 0; i < 12; i++ {
+		batch := TelemetryBatch{Source: "planner", Identity: fmt.Sprintf("mixed/%d", i), Points: []Point{{MetricName: "cpu", EntityID: "planner", Timestamp: at.Add(time.Duration(i) * 5 * time.Minute), Value: float64(i + 1), Tags: map[string]string{"device": "0"}}}}
+		if _, err = e.Accept(ctx, batch, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	summarizeAll(t, e)
+	if _, err = e.s.db.ExecContext(ctx, e.bind("DELETE FROM "+e.table("summary")+" WHERE series_id IN (SELECT id FROM "+e.table("series")+" WHERE entity=?) AND (resolution=? OR (resolution=? AND bucket<?) OR (resolution=? AND bucket>=?))"), "planner", int64(10*time.Second), int64(5*time.Minute), at.Add(30*time.Minute).UnixNano(), int64(15*time.Minute), at.Add(30*time.Minute).UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	mixed, err := e.Chart(ctx, AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "planner", Start: at, End: at.Add(time.Hour - time.Nanosecond)}, Interval: 30 * time.Minute, Aggregation: AggSum, PreserveSeries: true}, now)
+	if err != nil || len(mixed.Points) != 2 || mixed.Points[0].Value != 21 || mixed.Points[1].Value != 57 || len(mixed.Gaps) != 0 {
+		t.Fatalf("external mixed resolution planner: %+v %v", mixed, err)
+	}
 	if err = e.EnsureSchedule(ctx, []ScheduleTask{{Name: "summary", Due: time.Now().Add(-time.Second)}}); err != nil {
 		t.Fatal(err)
 	}

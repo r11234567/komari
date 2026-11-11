@@ -9,7 +9,9 @@ import (
 type telemetrySnapshotKey struct{}
 
 func telemetryInterval(start, now time.Time, interval time.Duration) time.Duration {
-	r := telemetryResolution(now.Sub(start))
+	// Output-grid compatibility is independent of unrelated retained history.
+	// The query planner resolves actual source precision for each ownership span.
+	r := 10 * time.Second
 	interval = max(interval, r)
 	if remainder := interval % r; remainder != 0 {
 		interval += r - remainder
@@ -18,14 +20,23 @@ func telemetryInterval(start, now time.Time, interval time.Duration) time.Durati
 }
 
 func (t *Telemetry) compatibleInterval(start, now time.Time, interval time.Duration) time.Duration {
-	interval = telemetryInterval(start, now, interval)
-	if t.legacyUntil > 0 && start.UnixNano() <= t.legacyUntil && t.legacyResolution > 0 {
-		interval = telemetryLCM(interval, t.legacyResolution)
-	}
-	return interval
+	return telemetryInterval(start, now, interval)
 }
 
 func (t *Telemetry) SeriesBatch(ctx context.Context, queries []AggregateQuery, now time.Time) ([][]AggregatePoint, error) {
+	results, err := t.ChartBatch(ctx, queries, now)
+	if err != nil {
+		return nil, err
+	}
+	out := make([][]AggregatePoint, len(results))
+	for i, r := range results {
+		out[i] = r.Points
+	}
+	return out, nil
+}
+
+// ChartBatch preserves precision/coverage and points in the same read snapshot.
+func (t *Telemetry) ChartBatch(ctx context.Context, queries []AggregateQuery, now time.Time) ([]TelemetryQueryResult, error) {
 	if len(queries) > 64 {
 		return nil, ErrTelemetryBackpressure
 	}
@@ -35,13 +46,13 @@ func (t *Telemetry) SeriesBatch(ctx context.Context, queries []AggregateQuery, n
 	}
 	defer tx.Rollback()
 	ctx = context.WithValue(ctx, telemetrySnapshotKey{}, tx)
-	out := make([][]AggregatePoint, len(queries))
+	out := make([]TelemetryQueryResult, len(queries))
 	for i, q := range queries {
 		r, e := t.Chart(ctx, q, now)
 		if e != nil {
 			return nil, e
 		}
-		out[i] = r.Points
+		out[i] = r
 	}
 	return out, tx.Commit()
 }
