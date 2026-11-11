@@ -89,7 +89,7 @@ async function run(){
   const paused=await original.request.get(`/api/admin/history/export/${proof.paused.id}`);expect(paused.status()).toBe(200);expect((await paused.json()).data.status).toBe('paused');
   expect((await original.request.get(`/api/admin/history/export/${proof.paused.id}/download`)).status()).toBe(409);
   startWorker(restored);
-  expect((await original.request.post(`/api/admin/history/export/${proof.paused.id}/resume`,{data:{}})).status()).toBe(200);
+  expect((await original.request.post(`/api/admin/history/export/${proof.paused.id}/resume`,{data:{}})).status()).toBe(202);
   let resumed;
   await expect.poll(async()=>{resumed=(await (await original.request.get(`/api/admin/history/export/${proof.paused.id}`)).json()).data;if(['failed','cancelled'].includes(resumed.status))throw Error(JSON.stringify(resumed));return resumed.status;},{timeout:120000}).toBe('done');
   const resumedBytes=await (await original.request.get(`/api/admin/history/export/${resumed.id}/download`)).body();
