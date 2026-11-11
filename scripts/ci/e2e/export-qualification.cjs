@@ -38,14 +38,17 @@ async function run() {
   // remains mandatory on every foreground request.
   const warmupDeadline = Date.now()+180_000;
   let warmup, initialNewest;
+  const newestObservation = (body, metric) => {
+    const observed=(body.series||[]).filter(s=>s.metric===metric).flatMap(s=>(s.queryPoints||[]).filter(p=>p.value!==undefined).map(p=>Date.parse(p.observedAt))).filter(Number.isFinite);
+    return observed.length ? Math.max(...observed) : 0;
+  };
   do {
-    warmup = await api(`/${services.metrics}/QueryMetrics`,{agentIds:[manifest.agentId],metrics:['cpu.usage'],startTime:new Date(Date.now()-3600_000).toISOString(),endTime:new Date().toISOString(),maxPoints:360,downsample:true});
-    const observed=(warmup.body.series||[]).flatMap(s=>(s.queryPoints||[]).filter(p=>p.value!==undefined).map(p=>Date.parse(p.observedAt))).filter(Number.isFinite);
-    const newest=observed.length ? Math.max(...observed) : 0;
+    warmup = await api(`/${services.metrics}/QueryMetrics`,{agentIds:[manifest.agentId],metrics:['cpu.usage','ping.latency_ms'],startTime:new Date(Date.now()-3600_000).toISOString(),endTime:new Date().toISOString(),maxPoints:360,downsample:true});
+    const newest=['cpu.usage','ping.latency_ms'].map(metric=>newestObservation(warmup.body,metric));
     initialNewest ??= newest;
     // A cached pre-shutdown point may still be <120s old. Require an actual
     // advance after this process starts, not merely a still-fresh old bucket.
-    if(newest>initialNewest && newest>Date.now()-120_000) break;
+    if(newest.every((value,i)=>value>initialNewest[i] && value>Date.now()-120_000)) break;
     fs.writeFileSync(path.join(artifacts,'export-agent-warmup.json'),JSON.stringify(warmup.body,null,2));
     assert(Date.now()<warmupDeadline,'Installed Agent did not recover after the fixture panel restart');
     await sleep(2000);
@@ -54,19 +57,20 @@ async function run() {
     const end = new Date(), start = new Date(end.getTime()-3600_000);
     const requests = {
       ping: [`/${services.metrics}/QueryMetrics`,{agentIds:[manifest.agentId],metrics:['ping.latency_ms'],startTime:start.toISOString(),endTime:end.toISOString(),maxPoints:360,downsample:true}],
+      ping_stats: [`/${services.metrics}/GetPingStats`,{agentIds:[manifest.agentId],taskIds:[String(manifest.pingTaskId)],startTime:start.toISOString(),endTime:end.toISOString(),maxPoints:360}],
       chart: [`/${services.metrics}/QueryMetrics`,{agentIds:[manifest.agentId],metrics:['cpu.usage'],startTime:start.toISOString(),endTime:end.toISOString(),maxPoints:360,downsample:true}],
       traffic: [`/${services.browser}/GetTrafficTrend`,{window:'86400s',interval:'1200s'}],
       billing: [`/${services.dashboard}/GetDashboardCharts`,{charts:['DASHBOARD_CHART_TRAFFIC'],rankingLimit:5}],
     };
     await Promise.all(Object.entries(requests).map(async ([key,args]) => {
       const result = await api(...args); (target[key] ||= []).push(result.ms);
-      if(key==='chart') {
-        const observed=(result.body.series||[]).flatMap(s=>(s.queryPoints||[]).filter(p=>p.value!==undefined).map(p=>Date.parse(p.observedAt))).filter(Number.isFinite);
-        if(!observed.length || Math.max(...observed)<=Date.now()-120_000) {
-          fs.writeFileSync(path.join(artifacts,'export-agent-stale.json'),JSON.stringify(result.body,null,2));
-          throw Error('Installed Agent chart stopped receiving fresh observations');
+      if(key==='chart'||key==='ping') {
+        if(newestObservation(result.body,key==='chart'?'cpu.usage':'ping.latency_ms')<=Date.now()-120_000) {
+          fs.writeFileSync(path.join(artifacts,`export-agent-${key}-stale.json`),JSON.stringify(result.body,null,2));
+          throw Error(`Installed Agent ${key} stopped receiving fresh observations`);
         }
       }
+      if(key==='ping_stats') assert(result.body.stats?.some(s=>String(s.taskId)===String(manifest.pingTaskId)&&s.valid>0),'Real Agent TCP probe statistics missing');
       if(key==='traffic') assert(result.body.buckets?.length===72,'Traffic buckets missing');
       if(key==='billing') assert(!result.body.charts?.traffic?.error,'Billing unavailable');
     }));

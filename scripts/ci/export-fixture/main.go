@@ -28,11 +28,12 @@ func main() {
 	b, e := os.ReadFile(filepath.Join(root, "qualification-scope.json"))
 	must(e)
 	var scope struct {
-		AgentID string `json:"agentId"`
+		AgentID    string `json:"agentId"`
+		PingTaskID uint32 `json:"pingTaskId"`
 	}
 	must(json.Unmarshal(b, &scope))
-	if scope.AgentID == "" {
-		panic("missing enrolled Agent")
+	if scope.AgentID == "" || scope.PingTaskID == 0 {
+		panic("missing enrolled Agent or real TCP probe")
 	}
 	ctx := context.Background()
 	s, e := metric.Open(ctx, metric.SQLite(filepath.Join(root, "panel/data/metrics.db"), metric.WithTablePrefix("metric_"), metric.WithRetiredLegacyStorage(), metric.WithSQLiteProfile(metric.SQLiteProfileDurable)))
@@ -80,7 +81,7 @@ func main() {
 	}
 	state, e := tel.ExportState(ctx)
 	must(e)
-	manifest := map[string]any{"origin": "synthetic load; real installed Agent continues separately", "records": count, "payload_bytes_per_record": 8192, "agentId": scope.AgentID, "start": at, "end": at.Add(time.Duration(count)*time.Millisecond + time.Second), "state": state, "io_budget_bytes_per_second": 131072}
+	manifest := map[string]any{"origin": "synthetic load; real installed Agent continues separately", "records": count, "payload_bytes_per_record": 8192, "agentId": scope.AgentID, "pingTaskId": scope.PingTaskID, "start": at, "end": at.Add(time.Duration(count)*time.Millisecond + time.Second), "state": state, "io_budget_bytes_per_second": 131072}
 	b, e = json.MarshalIndent(manifest, "", "  ")
 	must(e)
 	must(os.WriteFile(filepath.Join(root, "qualification-manifest.json"), b, 0600))

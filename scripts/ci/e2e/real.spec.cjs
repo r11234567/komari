@@ -27,6 +27,7 @@ const services = {
   browser: 'komari.browser.v1.BrowserService',
   file: 'komari.file.v1.FileService',
   metrics: 'komari.metrics.v1.MetricsService',
+  pingTasks: 'komari.admin.v1.PingTaskService',
   dashboard: 'komari.admin.v1.DashboardService',
   workspace: 'komari.workspace.v1.WorkspaceService',
 };
@@ -79,6 +80,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
   let fixturePassword;
   let lastCounter = -1;
   let agentId;
+  let pingTaskId;
   let workspaceToken;
   page.on('request', request => {
     // Observe the grant obtained by the actual UI; never inject signed state.
@@ -210,6 +212,25 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       execFileSync('sudo', ['systemctl', 'start', 'komari-e2e.service'], { timeout: 30_000 });
     });
 
+    await test.step('installed Agent performs a real TCP latency probe', async () => {
+      const created = await rpc('pingTasks', 'CreatePingTask', {
+        name: 'Real E2E panel TCP', target: '127.0.0.1:29444', type: 'tcp',
+        intervalSeconds: 5, clients: [agentId], defaultOn: false,
+      });
+      pingTaskId = created.taskId;
+      expect(pingTaskId).toBeGreaterThan(0);
+      let result;
+      await expect.poll(async () => {
+        const end = new Date();
+        result = await rpc('metrics', 'GetPingStats', {
+          agentIds: [agentId], taskIds: [String(pingTaskId)],
+          startTime: new Date(end.getTime()-300_000).toISOString(), endTime: end.toISOString(), maxPoints: 100,
+        });
+        return result.stats?.some(s => String(s.taskId) === String(pingTaskId) && s.valid > 0);
+      }, { timeout: 120_000, intervals: [2000, 5000] }).toBe(true);
+      fs.writeFileSync(path.join(artifacts, 'real-agent-ping.json'), JSON.stringify(result, null, 2));
+    });
+
     await test.step('real Agent history remains available across live metric-store reloads', async () => {
       function window() {
         const end = new Date();
@@ -237,6 +258,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         expect(history.series?.some(series => series.queryPoints?.length > 0)).toBe(true);
         expect(definitions.definitions?.some(item => item.name === 'cpu.usage')).toBe(true);
         expect(ping.endTime).toBeTruthy();
+        expect(ping.stats?.some(s => String(s.taskId) === String(pingTaskId) && s.valid > 0)).toBe(true);
         expect(!!reloaded.policy.enabled).toBe(policy.enabled);
         results.push({ iteration, historySeries: history.series.length, definitions: definitions.definitions.length });
         // Bypass the short response cache before verifying the next instance.
@@ -310,7 +332,10 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         };
         const response = await rpc('metrics', ping ? 'GetPingStats' : 'QueryMetrics',
           ping ? window : { ...window, metrics: ['cpu.usage'], downsample: true });
-        if (ping) expect(response.endTime).toBeTruthy();
+        if (ping) {
+          expect(response.endTime).toBeTruthy();
+          expect(response.stats?.some(s => String(s.taskId) === String(pingTaskId) && s.valid > 0)).toBe(true);
+        }
         else expect(response.series?.some(series => series.queryPoints?.length > 0)).toBe(true);
         return { kind: ping ? 'ping' : 'chart', duration, elapsedMs: Date.now() - began };
       }));
@@ -768,7 +793,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         fs.writeFileSync(path.join(root, 'export-restore-proof.json'), JSON.stringify({ ready: proofs.map(p=>p.job), paused: pausedBackup }));
       } finally { execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGCONT', 'komari-e2e-export.service']); }
       await context.storageState({ path: path.join(root, 'qualification-browser-state.json') });
-      fs.writeFileSync(path.join(root, 'qualification-scope.json'), JSON.stringify({ agentId }));
+      fs.writeFileSync(path.join(root, 'qualification-scope.json'), JSON.stringify({ agentId, pingTaskId }));
       fs.writeFileSync(path.join(root, 'migration-credentials.json'), JSON.stringify({ username: 'e2e-user', password: fixturePassword, secret }), { mode: 0o600 });
     });
   } finally {
