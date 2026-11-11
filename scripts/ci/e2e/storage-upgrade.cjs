@@ -67,6 +67,8 @@ async function run(){
  await expect(page).toHaveURL(url=>url.pathname==='/admin'||url.pathname==='/admin/',{timeout:20000});
  const checks=JSON.parse(execFileSync('python3',['-c',`import sqlite3,json,sys\nc=sqlite3.connect(sys.argv[1])\np=dict(c.execute("SELECT task,value FROM metric_telemetry_progress WHERE task IN ('legacy_migration_complete','legacy_ledger_complete')"))\nprint(json.dumps({'progress':p,'source_rows':c.execute('SELECT COUNT(*) FROM metric_points').fetchone()[0],'summary_rows':c.execute('SELECT COUNT(*) FROM metric_telemetry_summary').fetchone()[0]}))`,source],{encoding:'utf8'}));
  expect(checks.progress.legacy_migration_complete).toBe(1);expect(checks.progress.legacy_ledger_complete).toBe(1);expect(checks.source_rows).toBe(43200);expect(checks.summary_rows).toBeGreaterThan(0);
+ await expect(page.getByText('Daily billable traffic',{exact:true})).toBeVisible({timeout:30000});
+ await expect(page.getByRole('heading',{name:'Telemetry storage upgrade',exact:true})).toHaveCount(0);
  await page.screenshot({path:path.join(artifacts,'storage-upgrade-complete.png'),fullPage:true});
  fs.writeFileSync(path.join(artifacts,'storage-upgrade.json'),JSON.stringify({checks,responses,synthetic_input:true,native_password_and_totp:true,restarted_after_failure:true},null,2));
  // Now exercise the server's actual staged ZIP restore, not just an in-process

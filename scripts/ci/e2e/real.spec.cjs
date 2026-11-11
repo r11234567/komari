@@ -736,13 +736,14 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         }, { timeout: 180_000, intervals: [2000, 5000] }).toBe('done'); return result;
       };
       const proofs = [];
-      for (const extra of [{ mode: 'summary', interval_seconds: 60, aggregation: 'avg' }, {}, { mode: 'sample30s', format_version: 2 }]) {
+      for (const extra of [{ mode: 'summary', interval_seconds: 60, aggregation: 'avg' }, { mode: 'raw' }, {}, { mode: 'sample30s', format_version: 2 }]) {
         const created = await create(extra); expect(created.id).toBeTruthy();
         const job = await wait(created.id);
         const bytes = await (await request(`/api/admin/history/export/${job.id}/download`, undefined, { method: 'GET' })).body();
         expect(sha256(bytes)).toBe(job.sha256);
         const text = bytes.toString('utf8');
         if (extra.mode === 'summary') expect(text).toContain('sample_count,output_interval_seconds,source_precision,coverage');
+        else if (extra.mode === 'raw') expect(text).toContain('observation_id,observed_at,received_at,entity_id,metric,tags,labels,value,unit');
         else if (!extra.mode) { expect(job.format_version).toBe(1); expect(text).toContain('Total downloaded (GiB)'); expect(text).toContain('Network inbound (KiB/s)'); }
         else { expect(job.format_version).toBe(2); expect(text).toContain('net.in.rate'); }
         proofs.push({ job, bytes: bytes.length });
