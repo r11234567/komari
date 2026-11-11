@@ -707,3 +707,10 @@ CI/E2E 证据记录精确代码/协议/Web/部署配置版本、源数据 manife
 - 卡片原本在 390px 视口占约 551px，内容被裁切。现在父容器明确占满可用宽度并允许长字段换行、按钮折行；实测卡片宽 340px，左右范围及 scrollWidth 均不越界。恢复不再显示旧生成百分比，取消/过期状态也隐藏旧阶段进度。数据库相关 Web 23 项测试、生产及 system 构建通过，lint 0 errors / 39 原有 warnings；真实恢复、刷新和窄屏页面已复核。
 - 浏览器前两次从 Windows 挂载目录直接提供静态资源时分别发生页面加载超时与 `ENOMEM`，未进入恢复断言，均保留失败记录。将同一构建产物复制至 Linux 文件系统并逐文件核对 SHA256 后通过；未延长或放宽恢复进度、控制延迟和布局断言。侧栏切换视口的动画另行等待实际关闭后目视复核，不把动画中的叠字当成导出卡片完成状态。
 - 紧凑实测数据见 [恢复与窄屏证据](evidence/telemetry-export-recovery-2026-11-11.json)，完整私有记录位于 `.cache/telemetry-db-recovery-ui/`、`.cache/telemetry-db-io-gate.log`。原长测不重启、不替换二进制；本轮精确提交的线上 CI 与新的持续负载资格仍须分别确认，R4/R5 保持未验收。
+
+### 持续资格转到 GitHub（2026-11-11）
+
+- 按用户要求停止本地持续负载。旧二进制 `479b671` 的运行标记为 `interrupted_by_user`、未验收，不计为源码失败或成功；观察器、独立校验器、worker、面板、专用 Agent 和专用反代均已停止。日志、原始 JSONL 及一致 SQLite 副本保留在私有 `/var/tmp/komari-local-e2e-0/qualification-user-stop`，不上传私人库或凭据。
+- 使用既有 `feature-e2e.yml` 的 `database_only=true`、`export_qualification=true` 启动最新提交的独立 GitHub-hosted Linux 环境。初装、登录、实际非 root Agent 注册和 TCP Ping 仅作为数据库数据源准备，不重跑 TOTP、终端、文件或 Agent 升级。依赖旧完整场景产物的迁移和备份恢复步骤明确跳过；本次长测不据此声称完成 R5 迁移恢复验收。
+- 复用原始冷负载生成器、生产 worker 和长测断言：实际工作至少两小时且最终完成、1s/10s CPU 不超过有效容量 10%、worker `memory.current` 不超过 128 MiB、实例不超过 1 GiB、五类真实前台读取 p95 不超过同并发基线 1.2 倍；保留暂停、真实 worker 重启和 CPU 容量变化。输出仍核对行数及下载 SHA256，合成输入仍明确标记为约 80 秒观测跨度，不冒充 30 天明细。
+- 本次不在本地重新启动长测。GitHub 结果须对应精确提交；R4/R5 及未覆盖的复杂历史、持续容量和独立 RSS 等项目保持未验收，不能由已有普通 CI 通过代替。
