@@ -7,7 +7,8 @@ services:
     user: "${KOMARI_UID:?Set the data owner UID}:${KOMARI_GID:?Set the data owner GID}"
     working_dir: /srv/komari
     command: ["/app/komari", "server", "--listen", "0.0.0.0:25774"]
-    cpus: ${KOMARI_CPUS:-1}
+    cpu_period: 100000
+    cpu_quota: ${KOMARI_PANEL_CPU_QUOTA:-100000}
     mem_limit: 896m
     memswap_limit: 896m
     volumes:

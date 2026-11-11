@@ -57,7 +57,7 @@ out = pathlib.Path(os.environ['E2E_ARTIFACTS'])/'export-docker-resources.jsonl'
 with out.open('a') as f: f.write(json.dumps(a)+'\n')
 PY
 done
-docker update --cpus=.25 "$id"
+docker update --cpu-period=100000 --cpu-quota=25000 "$id"
 sleep 5
 python3 - <<'PY'
 import json, os, pathlib
