@@ -114,8 +114,13 @@ func (t *Telemetry) planChart(ctx context.Context, tx *sql.Tx, q AggregateQuery,
 	// must retain their original window selection.
 	boundaryStart := q.Start.UTC().Truncate(time.Hour).UnixNano()
 	boundaryEnd := q.End.UTC().Truncate(time.Hour).Add(time.Hour).UnixNano()
-	query := "SELECT b.segment_id,b.series_id,a.state,a.last_id,s.metric,s.entity,s.tags,b.bucket,b.resolution,b.stats FROM " + t.table("summary") + " b JOIN " + t.table("series") + " s ON s.id=b.series_id JOIN " + t.table("segments") + " a ON a.id=b.segment_id LEFT JOIN " + t.table("erasures") + " e ON e.series_id=s.id WHERE s.metric=? AND ((a.state='legacy' AND b.bucket<=? AND b.bucket+b.resolution>?) OR (a.state<>'legacy' AND b.bucket<? AND b.bucket+b.resolution>?)) AND (e.through_id IS NULL OR a.first_id>e.through_id)" + filter + " ORDER BY b.segment_id,b.series_id,b.resolution DESC,b.bucket LIMIT 100001"
-	args = append([]any{q.MetricName, q.End.UnixNano(), q.Start.UnixNano(), boundaryEnd, boundaryStart}, args...)
+	// Select owners by their observed-time membership before reading cells.
+	// The summary series index starts with resolution, so filtering only on
+	// bucket+b.resolution otherwise walks every retained cell of the series.
+	// Membership is updated atomically with ingestion/migration and survives
+	// raw retirement; creation time cannot substitute for late observations.
+	query := "SELECT b.segment_id,b.series_id,a.state,a.last_id,s.metric,s.entity,s.tags,b.bucket,b.resolution,b.stats FROM " + t.table("summary") + " b JOIN " + t.table("members") + " m ON m.segment_id=b.segment_id AND m.series_id=b.series_id JOIN " + t.table("series") + " s ON s.id=m.series_id JOIN " + t.table("segments") + " a ON a.id=b.segment_id LEFT JOIN " + t.table("erasures") + " e ON e.series_id=s.id WHERE s.metric=? AND m.first_observed<? AND m.last_observed>=? AND ((a.state='legacy' AND b.bucket<=? AND b.bucket+b.resolution>?) OR (a.state<>'legacy' AND b.bucket<? AND b.bucket+b.resolution>?)) AND (e.through_id IS NULL OR a.first_id>e.through_id)" + filter + " ORDER BY b.segment_id,b.series_id,b.resolution DESC,b.bucket LIMIT 100001"
+	args = append([]any{q.MetricName, boundaryEnd, boundaryStart, q.End.UnixNano(), q.Start.UnixNano(), boundaryEnd, boundaryStart}, args...)
 	rows, err := tx.QueryContext(ctx, t.bind(query), args...)
 	if err != nil {
 		return nil, err

@@ -144,6 +144,7 @@ jobs:
           NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
         run: |
           bash scripts/ci/run-audit-check.sh e2e-qualification-contracts node --test scripts/ci/e2e/qualification-observations.test.cjs
+          bash scripts/ci/run-audit-check.sh e2e-qualification-performance node --test scripts/ci/e2e/qualification-performance.test.cjs
           bash scripts/ci/run-audit-check.sh e2e-export-qualification node scripts/ci/e2e/export-qualification.cjs
       - name: Restore the real downloaded SQL, ledger and cold archive bundle
         if: ${{ !inputs.database_only || inputs.skip_csv }}

@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { request } = require('playwright');
 const { newestObservation, agentRecovered } = require('./qualification-observations.cjs');
+const { pairedWindow, populationFingerprint, comparePerformancePairs } = require('./qualification-performance.cjs');
 const root = process.env.E2E_ROOT, artifacts = process.env.E2E_ARTIFACTS;
 require('./guard.cjs');
 const base = 'https://127.0.0.1:29443';
@@ -17,13 +18,20 @@ const slice = groupPath('komari-e2e.slice');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const assert = (ok, message) => { if (!ok) throw Error(message); };
 const stat = dir => Object.fromEntries(fs.readFileSync(path.join(dir, 'cpu.stat'), 'utf8').trim().split('\n').map(s => { const [k, v] = s.split(/\s+/); return [k, Number(v)]; }));
-const percentile = (xs, q) => [...xs].sort((a,b) => a-b)[Math.min(xs.length-1, Math.floor(xs.length*q))];
 const output = fs.createWriteStream(path.join(artifacts, 'export-resources.jsonl'));
 const reads = fs.createWriteStream(path.join(artifacts, 'export-foreground.jsonl'));
 let timer, context, job, failed;
 let capacity = 1, previous, samples = 0, maxShare1s = 0, maxShare10s = 0, maxRSS = 0, cpuTotal = 0, runningMS = 0;
 const ring = [];
 const latencies = {}, baseline = {};
+const performancePairs = [];
+let measurementPhase = 'live', lastStatusAt;
+function observeStatus(status) {
+  const now = Date.now();
+  if (lastStatusAt && (job.status === 'running' || job.status === 'publishing')) runningMS += now - lastStatusAt;
+  job.status = status;
+  lastStatusAt = now;
+}
 const services = {metrics:'komari.metrics.v1.MetricsService',browser:'komari.browser.v1.BrowserService',dashboard:'komari.admin.v1.DashboardService'};
 async function run() {
   context = await request.newContext({baseURL:base,storageState:path.join(root,'qualification-browser-state.json')});
@@ -61,19 +69,26 @@ async function run() {
     warmup_started_at:new Date(warmupStarted).toISOString(),
     recovered_at:new Date().toISOString(),body:warmup.body,
   },null,2));
-  const foreground = async target => {
+  const foreground = async (target, options = {}) => {
     const end = new Date(), start = new Date(end.getTime()-3600_000);
+    const range = options.range || { startTime:start.toISOString(), endTime:end.toISOString() };
     const requests = {
-      ping: [`/${services.metrics}/QueryMetrics`,{agentIds:[manifest.agentId],metrics:['ping.latency_ms'],startTime:start.toISOString(),endTime:end.toISOString(),maxPoints:360,downsample:true}],
-      ping_stats: [`/${services.metrics}/GetPingStats`,{agentIds:[manifest.agentId],taskIds:[String(manifest.pingTaskId)],startTime:start.toISOString(),endTime:end.toISOString(),maxPoints:360}],
-      chart: [`/${services.metrics}/QueryMetrics`,{agentIds:[manifest.agentId],metrics:['cpu.usage'],startTime:start.toISOString(),endTime:end.toISOString(),maxPoints:360,downsample:true}],
+      ping: [`/${services.metrics}/QueryMetrics`,{agentIds:[manifest.agentId],metrics:['ping.latency_ms'],...range,maxPoints:360,downsample:true}],
+      ping_stats: [`/${services.metrics}/GetPingStats`,{agentIds:[manifest.agentId],taskIds:[String(manifest.pingTaskId)],...range,maxPoints:360}],
+      chart: [`/${services.metrics}/QueryMetrics`,{agentIds:[manifest.agentId],metrics:['cpu.usage'],...range,maxPoints:360,downsample:true}],
       traffic: [`/${services.browser}/GetTrafficTrend`,{window:'86400s',interval:'1200s'}],
       billing: [`/${services.dashboard}/GetDashboardCharts`,{charts:['DASHBOARD_CHART_TRAFFIC'],rankingLimit:5}],
     };
+    const fingerprints = {};
     const results = await Promise.allSettled(Object.entries(requests).map(async ([key,args]) => {
       const result = await api(...args); (target[key] ||= []).push(result.ms);
-      reads.write(JSON.stringify({at:new Date().toISOString(),phase:target===baseline?'baseline':'during_export',query:key,ms:result.ms})+'\n');
-      if(key==='chart'||key==='ping') {
+      reads.write(JSON.stringify({at:new Date().toISOString(),phase:options.phase||(target===baseline?'initial_baseline':'live_during_export'),pair:options.pair,query:key,ms:result.ms,range})+'\n');
+      fingerprints[key] = populationFingerprint(key, result.body);
+      if(options.expected && fingerprints[key] !== options.expected[key]) {
+        fs.writeFileSync(path.join(artifacts,`export-pair-${options.pair}-${key}-changed.json`),JSON.stringify(result.body,null,2));
+        throw Error(`Paired ${key} input population changed; latency comparison is invalid`);
+      }
+      if(options.fresh!==false && (key==='chart'||key==='ping')) {
         if(newestObservation(result.body,key==='chart'?'cpu.usage':'ping.latency_ms')<=Date.now()-120_000) {
           fs.writeFileSync(path.join(artifacts,`export-agent-${key}-stale.json`),JSON.stringify(result.body,null,2));
           throw Error(`Installed Agent ${key} stopped receiving fresh observations`);
@@ -88,8 +103,11 @@ async function run() {
     const rejected = results.find(result => result.status === 'rejected');
     if (rejected) throw rejected.reason;
     execFileSync('systemctl',['is-active','--quiet','komari-e2e.service']);
+    return fingerprints;
   };
-  // Identical concurrency and request shapes before and during export.
+  // Initial rolling-history measurements are diagnostic only: the installed
+  // Agent's history grows during the run. Acceptance uses adjacent paired
+  // export-off/export-on reads with identical fixed metric input below.
   for (let i=0;i<40;i++) { await foreground(baseline); await sleep(500); }
   fs.writeFileSync(path.join(artifacts,'export-baseline.json'),JSON.stringify(baseline));
   for(let i=0;i<30;i++) {
@@ -99,7 +117,8 @@ async function run() {
   const created = (await api('/api/admin/history/export',{uuid:manifest.agentId,category:'resource',mode:'raw',format_version:2,start:manifest.start,end:manifest.end})).body.data;
   assert(created?.id,'Large job not accepted'); job=created;
   fs.writeFileSync(path.join(artifacts,'qualification-active.json'),JSON.stringify({id:job.id,created_at:job.created_at}));
-  const started = Date.now(); let latestStatus='running', userPausedMS=0, lastStatusAt=started;
+  const started = Date.now(); let latestStatus=job.status, userPausedMS=0;
+  lastStatusAt=started;
   timer=setInterval(() => {
     let sample;
     try {
@@ -109,7 +128,7 @@ async function run() {
         const [key,value] = line.split(/\s+/);
         memory[key] = Number(value);
       }
-      sample={at:new Date(now).toISOString(),...cpu,rss,capacity,status:latestStatus,phase:job.phase,decoded:job.decoded_records,rows:job.written_rows,output_bytes:job.output_bytes,checkpoint:job.confirmed_checkpoint,wait_reason:job.wait_reason,throughput:job.throughput,phase_eta:job.phase_eta,resources:job.resources,whole_instance_memory:Number(fs.readFileSync(path.join(slice,'memory.current'),'utf8')),
+      sample={at:new Date(now).toISOString(),...cpu,rss,capacity,status:latestStatus,measurement:measurementPhase,phase:job.phase,decoded:job.decoded_records,rows:job.written_rows,output_bytes:job.output_bytes,checkpoint:job.confirmed_checkpoint,wait_reason:job.wait_reason,throughput:job.throughput,phase_eta:job.phase_eta,resources:job.resources,whole_instance_memory:Number(fs.readFileSync(path.join(slice,'memory.current'),'utf8')),
         memory: Object.fromEntries(['anon','file','file_dirty','file_writeback','kernel','pagetables','slab'].map(key=>[key,memory[key]])),
         memory_events:fs.readFileSync(path.join(workerGroup,'memory.events'),'utf8').trim()};
       if(previous && cpu.usage_usec>=previous.usage_usec) {
@@ -127,33 +146,79 @@ async function run() {
       if (sample) output.write(JSON.stringify(sample)+'\n');
     }
   },1000);
-  let paused=false,restarted=false,reduced=false,restored=false;
+  let paused=false,restarted=false,reduced=false,restored=false,reducedAt;
+  let nextPairAt=started+300_000;
+  const measurePair = async () => {
+    const id=performancePairs.length+1, pair={id,anchor:Date.now(),capacity,state:'pausing',baseline:{},during:{},fingerprints:[]};
+    performancePairs.push(pair);
+    const savePair = () => fs.writeFileSync(path.join(artifacts,'export-performance-pairs.json'),JSON.stringify(performancePairs,null,2));
+    savePair();
+    const pauseAt=Date.now();
+    await api(`/api/admin/history/export/${job.id}/pause`,{});
+    let state;
+    do {
+      state=(await api(`/api/admin/history/export/${job.id}`,undefined,'GET')).body.data;
+      if(state.status==='paused') break;
+      assert(Date.now()-pauseAt<1000,'Running pause did not respond within one second');
+      await sleep(25);
+    } while(true);
+    assert(Date.now()-pauseAt<=1000,'Running pause did not respond within one second');
+    observeStatus('paused');latestStatus='paused';measurementPhase='paired_export_off';
+    const offAt=Date.now(), pausedBytes=state.output_bytes;
+    pair.state='export_off';pair.output_bytes_before=pausedBytes;
+    for(let i=0;i<40;i++) {
+      pair.fingerprints.push(await foreground(pair.baseline,{range:pairedWindow(pair.anchor,i),fresh:false,phase:'paired_export_off',pair:id}));
+      savePair();
+      await sleep(500);
+    }
+    state=(await api(`/api/admin/history/export/${job.id}`,undefined,'GET')).body.data;
+    assert(state.status==='paused' && state.output_bytes===pausedBytes,'Export advanced during its no-export baseline');
+    await api(`/api/admin/history/export/${job.id}/resume`,{});
+    userPausedMS+=Date.now()-offAt;
+    const resumeAt=Date.now();
+    do {
+      state=(await api(`/api/admin/history/export/${job.id}`,undefined,'GET')).body.data;
+      assert(!['done','failed','cancelled','expired'].includes(state.status),'Export ended before the paired running window');
+      if(state.status==='running') break;
+      assert(Date.now()-resumeAt<30000,'Export did not resume for paired measurement');
+      await sleep(100);
+    } while(true);
+    observeStatus('running');latestStatus='running';measurementPhase='paired_export_on';
+    pair.state='export_on';savePair();
+    // Every replay follows all forty baseline requests (>20s), beyond the 5s
+    // application cache TTL. Both phases execute the same five-way concurrency.
+    for(let i=0;i<40;i++) {
+      await foreground(pair.during,{range:pairedWindow(pair.anchor,i),fresh:false,phase:'paired_export_on',pair:id,expected:pair.fingerprints[i]});
+      savePair();
+      await sleep(500);
+    }
+    state=(await api(`/api/admin/history/export/${job.id}`,undefined,'GET')).body.data;
+    assert(state.output_bytes>pausedBytes,'No actual CSV work occurred during paired measurement');
+    pair.output_bytes_after=state.output_bytes;pair.state='complete';
+    paused=true;measurementPhase='live';savePair();
+    await foreground(latencies); // Continue checking live Agent freshness.
+  };
   while(true) {
     if(failed)throw failed;
     assert(Date.now()-started<4.5*3600_000,'Large export did not finish within qualification budget');
-    job=(await api(`/api/admin/history/export/${job.id}`,undefined,'GET')).body.data;
+    const observed=(await api(`/api/admin/history/export/${job.id}`,undefined,'GET')).body.data;
+    observeStatus(observed.status);job=observed;
     assert(job.phase_started_at && !job.phase_started_at.startsWith('0001-'),'Durable phase timestamp missing');
     assert(job.phase_eta?.scope==='phase' && job.throughput,'Progress observations missing');
     if(job.current_input) assert(job.current_input.index<=job.current_input.total,'Input unit identity exceeds manifest');
-    const now=Date.now();if(latestStatus==='running'||latestStatus==='publishing')runningMS+=now-lastStatusAt;latestStatus=job.status;lastStatusAt=now;
+    latestStatus=job.status;
     assert(!['failed','cancelled','expired'].includes(job.status),JSON.stringify(job));
     if(job.status==='done')break;
     await foreground(latencies);
     const elapsed=Date.now()-started;
-    if(!paused && elapsed>300_000){
-      const at=Date.now();await api(`/api/admin/history/export/${job.id}/pause`,{});
-      for(let i=0;i<40;i++){const p=(await api(`/api/admin/history/export/${job.id}`,undefined,'GET')).body.data;if(p.status==='paused')break;await sleep(25);}
-      const observed=(await api(`/api/admin/history/export/${job.id}`,undefined,'GET')).body.data;
-      assert(observed.status==='paused' && Date.now()-at<=1000,'Running pause did not respond within one second');
-      await api(`/api/admin/history/export/${job.id}/resume`,{});userPausedMS+=Date.now()-at;paused=true;
-    }
+    if(Date.now()>=nextPairAt){await measurePair();nextPairAt+=900_000;}
     if(!restarted && elapsed>600_000){execFileSync('sudo',['systemctl','restart','komari-e2e-export.service']);restarted=true;previous=undefined;}
-    if(!reduced && elapsed>900_000){execFileSync('sudo',['systemctl','set-property','--runtime','komari-e2e-panel.service','CPUQuota=50%']);capacity=.5;ring.length=0;reduced=true;}
-    if(reduced&&!restored&&elapsed>960_000){execFileSync('sudo',['systemctl','set-property','--runtime','komari-e2e-panel.service','CPUQuota=100%']);capacity=1;ring.length=0;restored=true;}
+    if(!reduced && elapsed>900_000){execFileSync('sudo',['systemctl','set-property','--runtime','komari-e2e-panel.service','CPUQuota=50%']);capacity=.5;ring.length=0;reduced=true;reducedAt=Date.now();}
+    if(reduced&&!restored&&Date.now()-reducedAt>60000){execFileSync('sudo',['systemctl','set-property','--runtime','komari-e2e-panel.service','CPUQuota=100%']);capacity=1;ring.length=0;restored=true;}
     if(samples%60<6) console.log(JSON.stringify({elapsed_seconds:Math.round(elapsed/1000),status:job.status,phase:job.phase,rows:job.written_rows,decoded:job.decoded_records,wait:job.wait_reason,max_cpu_share:maxShare1s}));
     await sleep(5000);
   }
-  assert(runningMS-userPausedMS>=7200_000,'Qualification finished before two hours of actual running work');
+  assert(runningMS>=7200_000,'Qualification finished before two hours of actual running work');
   assert(job.written_rows===manifest.records,'Missing or duplicate synthetic rows');
   assert(job.decoded_records>=manifest.records && job.retries===0,'Invalid decoding/recovery counters');
   const cookies=(await context.storageState()).cookies, cookie=cookies.filter(c=>c.domain==='127.0.0.1').map(c=>`${c.name}=${c.value}`).join('; ');
@@ -162,8 +227,10 @@ async function run() {
     r.on('data',b=>{h.update(b);bytes+=b.length;for(const x of b)if(x===10)lines++;});r.on('end',()=>resolve({sha256:h.digest('hex'),bytes,lines}));r.on('error',reject);
   }).on('error',reject);});
   assert(download.sha256===job.sha256 && download.lines===manifest.records+1,'Downloaded output checksum/row count differs');
-  const comparison={};for(const key of Object.keys(baseline)) { const a=percentile(baseline[key],.95),b=percentile(latencies[key],.95);comparison[key]={baseline_p95_ms:a,during_p95_ms:b,ratio:b/a,p99_ms:percentile(latencies[key],.99),requests:latencies[key].length};assert(b<=a*1.2,`${key} p95 regression exceeds 20%: ${b/a}`); }
-  const result={job,download,manifest,elapsed_seconds:(Date.now()-started)/1000,running_seconds:(runningMS-userPausedMS)/1000,samples,cpu_seconds:cpuTotal,max_cpu_share_1s:maxShare1s,max_cpu_share_10s:maxShare10s,max_worker_memory_current:maxRSS,memory_basis:'cgroup v2 memory.current, including page cache; not process RSS',foreground:comparison,paused,restarted,reduced,restored,hard_quota:'4000 100000, burst=0',shared_limit:'1 CPU / 1 GiB',io_budget_bytes_per_second:131072};
+  const comparison=comparePerformancePairs(performancePairs);
+  const result={job,download,manifest,elapsed_seconds:(Date.now()-started)/1000,running_seconds:runningMS/1000,user_paused_seconds:userPausedMS/1000,samples,cpu_seconds:cpuTotal,max_cpu_share_1s:maxShare1s,max_cpu_share_10s:maxShare10s,max_worker_memory_current:maxRSS,memory_basis:'cgroup v2 memory.current, including page cache; not process RSS',foreground:comparison,foreground_method:'adjacent export-off/on pairs; identical fixed metric population, five-way concurrency and cache-miss request keys; live freshness checked separately',paused,restarted,reduced,restored,hard_quota:'4000 100000, burst=0',shared_limit:'1 CPU / 1 GiB',io_budget_bytes_per_second:131072};
   fs.writeFileSync(path.join(artifacts,'export-qualification.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));
+  assert(performancePairs.length>=8,'Missing sustained paired foreground measurements');
+  for(const [key,values] of Object.entries(comparison)) assert(values.ratio<=1.2,`${key} p95 regression exceeds 20%: ${values.ratio}`);
 }
 run().catch(e=>{console.error(e);process.exitCode=1;fs.writeFileSync(path.join(artifacts,'export-qualification-error.txt'),e.stack||String(e));}).finally(async()=>{clearInterval(timer);output.end();reads.end();if(context)await context.dispose();});
