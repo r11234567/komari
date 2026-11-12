@@ -50,6 +50,7 @@ type Availability struct {
 
 const maxExportInput = 2 << 30
 const maxExportOutput = 8 << 30
+const exportFileCacheWindow = 4 << 20
 
 func atomicJSON(path string, value any) error {
 	b, e := json.Marshal(value)
@@ -539,12 +540,13 @@ func (w *Worker) snapshot(ctx context.Context, j *Job) (metric.ExportSnapshot, e
 }
 
 type outputWriter struct {
-	f          *os.File
-	h          hash.Hash
-	n          int64
-	sampleSlot int64
-	ctx        context.Context
-	budget     *ioBudget
+	f             *os.File
+	h             hash.Hash
+	n             int64
+	cacheReleased int64
+	sampleSlot    int64
+	ctx           context.Context
+	budget        *ioBudget
 }
 
 // Validate only the durable prefix on process recovery, before truncating any
@@ -566,6 +568,9 @@ func (w *Worker) verifyCheckpoint(ctx context.Context, j *Job) error {
 		return fmt.Errorf("checkpoint output unavailable: %w", err)
 	}
 	defer f.Close()
+	if err = limitFileReadAhead(f); err != nil {
+		return err
+	}
 	info, err := f.Stat()
 	if err != nil {
 		return err
@@ -588,6 +593,7 @@ func (w *Worker) verifyCheckpoint(ctx context.Context, j *Job) error {
 	h := sha256.New()
 	buf := make([]byte, 64<<10)
 	remaining := j.Committed.Offset
+	var cacheReleased int64
 	for remaining > 0 {
 		if err = ctx.Err(); err != nil {
 			return err
@@ -598,6 +604,13 @@ func (w *Worker) verifyCheckpoint(ctx context.Context, j *Job) error {
 		}
 		h.Write(buf[:n])
 		remaining -= int64(n)
+		consumed := j.Committed.Offset - remaining
+		if consumed-cacheReleased >= exportFileCacheWindow || remaining == 0 {
+			cacheReleased, err = releaseFileCache(f, cacheReleased, consumed)
+			if err != nil {
+				return err
+			}
+		}
 		if err = w.verificationProgress(ctx, j, j.Committed.Offset-remaining, false); err != nil {
 			return err
 		}
@@ -645,7 +658,21 @@ func (o *outputWriter) Write(b []byte) (int, error) {
 		o.h.Write(b[:n])
 		o.n += int64(n)
 	}
+	// A legacy single-stream unit can produce hundreds of MiB before its
+	// checkpoint. Bound dirty/clean output cache during that unit as well.
+	if e == nil && o.n-o.cacheReleased >= exportFileCacheWindow {
+		e = o.syncAndReleaseCache()
+	}
 	return n, e
+}
+
+func (o *outputWriter) syncAndReleaseCache() error {
+	if err := o.f.Sync(); err != nil {
+		return err
+	}
+	var err error
+	o.cacheReleased, err = releaseFileCache(o.f, o.cacheReleased, o.n)
+	return err
 }
 func (w *Worker) output(ctx context.Context, j *Job) (*outputWriter, *csv.Writer, error) {
 	f, e := os.OpenFile(w.Queue.Path(j.ID, ".csv.part"), os.O_CREATE|os.O_RDWR, 0600)
@@ -677,7 +704,7 @@ func (w *Worker) output(ctx context.Context, j *Job) (*outputWriter, *csv.Writer
 	}
 	j.OutputBytes = j.Committed.Offset
 	j.WrittenRows = j.Committed.Rows
-	o := &outputWriter{f: f, h: h, n: j.Committed.Offset, sampleSlot: j.Committed.Slot, ctx: ctx, budget: w.io}
+	o := &outputWriter{f: f, h: h, n: j.Committed.Offset, cacheReleased: j.Committed.Offset, sampleSlot: j.Committed.Slot, ctx: ctx, budget: w.io}
 	return o, csv.NewWriter(o), nil
 }
 func (w *Worker) checkpoint(ctx context.Context, j *Job, o *outputWriter, c *csv.Writer, unit int) error {
@@ -688,7 +715,7 @@ func (w *Worker) checkpoint(ctx context.Context, j *Job, o *outputWriter, c *csv
 	if e := w.fault("checkpoint-before-sync"); e != nil {
 		return e
 	}
-	if e := o.f.Sync(); e != nil {
+	if e := o.syncAndReleaseCache(); e != nil {
 		return e
 	}
 	if e := w.fault("checkpoint-after-sync"); e != nil {

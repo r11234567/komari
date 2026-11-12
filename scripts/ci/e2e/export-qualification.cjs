@@ -95,9 +95,17 @@ async function run() {
   fs.writeFileSync(path.join(artifacts,'qualification-active.json'),JSON.stringify({id:job.id,created_at:job.created_at}));
   const started = Date.now(); let latestStatus='running', userPausedMS=0, lastStatusAt=started;
   timer=setInterval(() => {
+    let sample;
     try {
       const now=Date.now(), cpu=stat(workerGroup), rss=Number(fs.readFileSync(path.join(workerGroup,'memory.current'),'utf8'));
-      const sample={at:new Date(now).toISOString(),...cpu,rss,capacity,status:latestStatus,phase:job.phase,decoded:job.decoded_records,rows:job.written_rows,output_bytes:job.output_bytes,checkpoint:job.confirmed_checkpoint,wait_reason:job.wait_reason,throughput:job.throughput,phase_eta:job.phase_eta,resources:job.resources,whole_instance_memory:Number(fs.readFileSync(path.join(slice,'memory.current'),'utf8'))};
+      const memory = {};
+      for (const line of fs.readFileSync(path.join(workerGroup,'memory.stat'),'utf8').trim().split('\n')) {
+        const [key,value] = line.split(/\s+/);
+        memory[key] = Number(value);
+      }
+      sample={at:new Date(now).toISOString(),...cpu,rss,capacity,status:latestStatus,phase:job.phase,decoded:job.decoded_records,rows:job.written_rows,output_bytes:job.output_bytes,checkpoint:job.confirmed_checkpoint,wait_reason:job.wait_reason,throughput:job.throughput,phase_eta:job.phase_eta,resources:job.resources,whole_instance_memory:Number(fs.readFileSync(path.join(slice,'memory.current'),'utf8')),
+        memory: Object.fromEntries(['anon','file','file_dirty','file_writeback','kernel','pagetables','slab'].map(key=>[key,memory[key]])),
+        memory_events:fs.readFileSync(path.join(workerGroup,'memory.events'),'utf8').trim()};
       if(previous && cpu.usage_usec>=previous.usage_usec) {
         const dt=(now-previous.now)/1000, used=(cpu.usage_usec-previous.usage_usec)/1e6;
         cpuTotal+=used; const share=used/dt/capacity; maxShare1s=Math.max(maxShare1s,share);sample.cpu_share=share;
@@ -107,8 +115,11 @@ async function run() {
       }
       maxRSS=Math.max(maxRSS,rss);assert(rss<=128*1048576,'Worker memory exceeded');
       assert(sample.whole_instance_memory<=1073741824,'Combined instance memory exceeded');
-      previous={now,...cpu};samples++;output.write(JSON.stringify(sample)+'\n');
+      previous={now,...cpu};samples++;
     } catch(e) { failed=e; }
+    finally {
+      if (sample) output.write(JSON.stringify(sample)+'\n');
+    }
   },1000);
   let paused=false,restarted=false,reduced=false,restored=false;
   while(true) {
