@@ -120,7 +120,9 @@ jobs:
           KOMARI_AUDIT_TIMEOUT: 300m
           NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
           NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
-        run: bash scripts/ci/run-audit-check.sh e2e-export-qualification node scripts/ci/e2e/export-qualification.cjs
+        run: |
+          bash scripts/ci/run-audit-check.sh e2e-qualification-contracts node --test scripts/ci/e2e/qualification-observations.test.cjs
+          bash scripts/ci/run-audit-check.sh e2e-export-qualification node scripts/ci/e2e/export-qualification.cjs
       - name: Restore the real downloaded SQL, ledger and cold archive bundle
         if: ${{ !inputs.database_only }}
         run: bash scripts/ci/run-audit-check.sh e2e-storage-restore go test -race ./pkg/metric -run TestTelemetryE2ERestoreBundle -count=1 -v

@@ -6,6 +6,7 @@ const https = require('node:https');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { request } = require('playwright');
+const { newestObservation, agentRecovered } = require('./qualification-observations.cjs');
 const root = process.env.E2E_ROOT, artifacts = process.env.E2E_ARTIFACTS;
 require('./guard.cjs');
 const base = 'https://127.0.0.1:29443';
@@ -42,23 +43,24 @@ async function run() {
   // Agent then backs off its real transport; wait for that transport to recover
   // before measuring the no-export baseline. During qualification freshness
   // remains mandatory on every foreground request.
-  const warmupDeadline = Date.now()+180_000;
-  let warmup, initialNewest;
-  const newestObservation = (body, metric) => {
-    const observed=(body.series||[]).filter(s=>s.metric===metric).flatMap(s=>(s.queryPoints||[]).filter(p=>p.value!==undefined).map(p=>Date.parse(p.observedAt))).filter(Number.isFinite);
-    return observed.length ? Math.max(...observed) : 0;
-  };
+  const warmupStarted = Date.now();
+  const warmupDeadline = warmupStarted+180_000;
+  let warmup;
   do {
-    warmup = await api(`/${services.metrics}/QueryMetrics`,{agentIds:[manifest.agentId],metrics:['cpu.usage','ping.latency_ms'],startTime:new Date(Date.now()-3600_000).toISOString(),endTime:new Date().toISOString(),maxPoints:360,downsample:true});
-    const newest=['cpu.usage','ping.latency_ms'].map(metric=>newestObservation(warmup.body,metric));
-    initialNewest ??= newest;
-    // A cached pre-shutdown point may still be <120s old. Require an actual
-    // advance after this process starts, not merely a still-fresh old bucket.
-    if(newest.every((value,i)=>value>initialNewest[i] && value>Date.now()-120_000)) break;
+    const end = new Date();
+    warmup = await api(`/${services.metrics}/QueryMetrics`,{agentIds:[manifest.agentId],metrics:['cpu.usage','ping.latency_ms'],startTime:new Date(end.getTime()-3600_000).toISOString(),endTime:end.toISOString(),maxPoints:360,downsample:true});
+    // Bucket timestamps can advance when output resolution changes, even
+    // while the Agent is still backing off. Both metrics must contain an
+    // observation after warmup began before starting the baseline.
+    if(agentRecovered(warmup.body,warmupStarted,Date.now())) break;
     fs.writeFileSync(path.join(artifacts,'export-agent-warmup.json'),JSON.stringify(warmup.body,null,2));
     assert(Date.now()<warmupDeadline,'Installed Agent did not recover after the fixture panel restart');
     await sleep(2000);
   } while(true);
+  fs.writeFileSync(path.join(artifacts,'export-agent-recovered.json'),JSON.stringify({
+    warmup_started_at:new Date(warmupStarted).toISOString(),
+    recovered_at:new Date().toISOString(),body:warmup.body,
+  },null,2));
   const foreground = async target => {
     const end = new Date(), start = new Date(end.getTime()-3600_000);
     const requests = {
@@ -68,7 +70,7 @@ async function run() {
       traffic: [`/${services.browser}/GetTrafficTrend`,{window:'86400s',interval:'1200s'}],
       billing: [`/${services.dashboard}/GetDashboardCharts`,{charts:['DASHBOARD_CHART_TRAFFIC'],rankingLimit:5}],
     };
-    await Promise.all(Object.entries(requests).map(async ([key,args]) => {
+    const results = await Promise.allSettled(Object.entries(requests).map(async ([key,args]) => {
       const result = await api(...args); (target[key] ||= []).push(result.ms);
       reads.write(JSON.stringify({at:new Date().toISOString(),phase:target===baseline?'baseline':'during_export',query:key,ms:result.ms})+'\n');
       if(key==='chart'||key==='ping') {
@@ -81,6 +83,10 @@ async function run() {
       if(key==='traffic') assert(result.body.buckets?.length===72,'Traffic buckets missing');
       if(key==='billing') assert(!result.body.charts?.traffic?.error,'Billing unavailable');
     }));
+    // Keep diagnostics open until every concurrent response has settled.
+    // Preserve the first real request failure after the other reads finish.
+    const rejected = results.find(result => result.status === 'rejected');
+    if (rejected) throw rejected.reason;
     execFileSync('systemctl',['is-active','--quiet','komari-e2e.service']);
   };
   // Identical concurrency and request shapes before and during export.
