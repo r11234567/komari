@@ -259,6 +259,37 @@ func (t *Telemetry) planChart(ctx context.Context, tx *sql.Tx, q AggregateQuery,
 			out.Resolution = max(out.Resolution, time.Duration(c.resolution))
 			out.Sources = append(out.Sources, TelemetrySourceSpan{MetricName: c.name, EntityID: c.entity, Tags: c.tags, Start: time.Unix(0, max(c.bucket, q.Start.UnixNano())).UTC(), End: time.Unix(0, min(c.bucket+c.resolution, q.End.UnixNano()+1)).UTC(), Resolution: time.Duration(c.resolution)})
 		}
+		// A coarse parent can straddle both the raw cutoff and the requested
+		// edge. Its historical children may be fully represented even though
+		// one recent child needs exact hot SQL. Count those disjoint recent
+		// children as coverage proof only: do not select their coarse stats or
+		// exclude their raw observations from the query below.
+		var exactHot []telemetryPlanCell
+		if chart {
+			for _, c := range cells {
+				if c.state == "legacy" || c.stats.Attempts == 0 || c.stats.FirstNano < cutoff {
+					continue
+				}
+				overlaps := false
+				for _, proof := range [][]telemetryPlanCell{chosen, outside, exactHot} {
+					for _, prior := range proof {
+						if c.bucket < prior.bucket+prior.resolution && c.bucket+c.resolution > prior.bucket {
+							overlaps = true
+							break
+						}
+					}
+					if overlaps {
+						break
+					}
+				}
+				if !overlaps {
+					if err := reserveChartMemory(ctx, 0, 512); err != nil {
+						return nil, err
+					}
+					exactHot = append(exactHot, c)
+				}
+			}
+		}
 		for _, c := range cells {
 			if c.stats.Attempts == 0 || c.stats.LastNano < q.Start.UnixNano() || c.stats.FirstNano > q.End.UnixNano() {
 				continue
@@ -285,6 +316,11 @@ func (t *Telemetry) planChart(ctx context.Context, tx *sql.Tx, q AggregateQuery,
 				for _, excluded := range outside {
 					if excluded.bucket >= c.bucket && excluded.bucket+excluded.resolution <= c.bucket+c.resolution {
 						represented += excluded.stats.Attempts
+					}
+				}
+				for _, recent := range exactHot {
+					if recent.bucket >= c.bucket && recent.bucket+recent.resolution <= c.bucket+c.resolution {
+						represented += recent.stats.Attempts
 					}
 				}
 			}

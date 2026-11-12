@@ -986,3 +986,19 @@ komari telemetry-compact --confirm-offline \
 生产与显式 `metric_legacy_fixture` 两种构建的 metric、metricstore、trafficledger、historyexport、dbcore 五包完整 race 均通过，vet 和生产二进制构建通过。24 个 online/migrated 历史窗口（1h 至 105d）raw-oracle 通过；高基数实验使用独立硬限进程。命令的 metadata/key 回退测试加入 CI，无 CSV E2E 增加真实离线命令→新文件安装→重启→HTTP 图表/计费查询。不新增 TOTP、终端或 Agent 升级场景，不放宽精度、人口、资源或恢复期限。
 
 本轮实现与有限测量见 [第 1、2 项证据](evidence/telemetry-review-items-1-2-2026-11-12.json)。准确新提交的远端 CI/E2E 启动后只确认一次，不轮询；是否通过以后以该提交的实际产物为准。
+
+### 2026-11-12：第 1、2 项补强后的三项失败复查
+
+提交 `7e82ad9e` 的远端验证没有通过，不能把上节的本地包测试和“重开数据库”当成完整服务启动成功。本节记录实际失败及补救，继续附加到 PR #76。
+
+1. **退表后的服务启动失败，属于源码缺陷。** 无 CSV E2E [43246818996](https://github.com/r11234567/komari/actions/runs/43246818996) 已成功执行离线退表、校验和文件安装，但完整服务在 `App.InitStores` 中先运行孤儿清理、后启用 telemetry。清理仍通过旧引擎查询 `metric_rollups`，导致 `no such table`，普通 HTTP 一直无法恢复。旧表尚在时也存在同根语义错误：清理了旧表的孤儿节点和任务，却保留了新引擎中对应的历史。修复顺序为：完成旧迁移及目标迁移 → 配置账本回调并启用新引擎 → 清理新引擎的孤儿数据 → 启动 batcher、scheduler 和 export policy。未完成迁移仍拒绝切换，不恢复旧表，也不跳过清理。
+2. **指定 job 的产物上传权限失败。** [43246727820/job/131281272618](https://github.com/r11234567/komari/actions/runs/43246727820/job/131281272618) 的历史窗口矩阵、归档独立实验和图表资源实验均已执行成功，失败步骤是上传产物：systemd 默认以 root 运行，生成 root 属主的 `0600 result.json`，runner 无权读取。现在 transient unit 显式使用 runner 的 UID/GID；产物仍为 `0600`，CPU 10%、128MiB 内存和禁用 swap 的硬限制不变。步骤末尾由 runner 断言可读，另用实际非 root 进程生成并读取私有产物验证整个交付路径。
+3. **CSV 长测被真实 PingStats 查询错误中断，属于独立源码缺陷。** [43246815324](https://github.com/r11234567/komari/actions/runs/43246815324) 在约 21 分钟时，暂停导出后的第二组配对读取返回 `GetPingStats: 400 failed_precondition`；尚未完成两小时资格，不能算通过。失败请求范围为 `2026-11-12T14:42:00.370Z` 至 `15:42:00.370Z`。粗父桶同时包含历史观测和需要精确裁切的近期子桶；历史细桶已选中，但父桶的剩余人口未把仍可由 hot SQL 精确回答的边缘子桶计算在内，错误标记整段历史缺失。新规划器把与已选及已排除桶不重叠、全部观测仍在 raw window 内的子桶，仅用作完整性证明；实际值仍由同一只读快照中的受限 hot SQL 提供，不把整个子桶塞进输出，不读冷归档，不重复计数。证明列表的分配计入查询预算。确实缺少历史细桶且 raw 已归档时，仍返回精度不可用。
+
+新增 `TestAppInitStoresTelemetryLifecycle` 使用隔离进程实际执行 Bootstrap/InitStores，覆盖新库、未迁移拦截、迁移后旧表尚在、实际 CompactSQLite 退表后启动，并逐项核对孤儿节点、孤儿任务、有效历史及不重建旧表。用 Go overlay 加载原启动源码时，“迁移后新引擎残留孤儿数据”和“退表后缺表”两个用例确实失败，修复后通过。该回归加入存储 CI。
+
+另用全新 43,203 行合成夹具执行真实 `telemetry-migrate`、`telemetry-compact --retire-legacy` 和文件安装，再分别运行原二进制及修复后的完整 `komari server`。原二进制复现缺表退出；修复版本以非 root 身份连续两次启动，在 HTTP 层核对全部 8,640 个 CPU 观测、加权和 426,480、有效 Ping 值 17、30 天计费面板、退表状态和完整性。该夹具显式保留 30 天，使 24 小时输入在演练期间不跨默认留存边界；无值 coverage marker 不被计为观测，保留独立的覆盖语义检查。这是有限启动演练，不是本地长测。
+
+新增 Ping 确定性回归按失败请求的秒及毫秒边界建立跨 raw cutoff 的父子桶，经过真实汇总、归档及旧 raw 删除后关闭归档读取入口，再对原始观测核对 attempts、均值、最小/最大/末值、标准差、丢包、P50/P99。原规划器稳定复现相同精度错误；修复后通过。额外删除一个历史 10s 子桶会继续得到 `ErrTelemetryCoverage`，防止把真正缺失也改成成功。相同案例加入 PostgreSQL/MySQL/MariaDB 实际驱动合同。既有分位数精度标准不变，未修改长测请求、失败断言、普通恢复 30s、CPU 10% 或前台 p95 1.2x 标准。
+
+证据及准确的新运行状态见 [三项失败复查](evidence/telemetry-startup-and-ping-failure-review-2026-11-12.json)。旧提交失败记录保留；新提交仍需远端存储 CI、无 CSV 数据库 E2E 及两小时 CSV 资格。仅确认运行及准确 SHA 后停止查询。容量低于旧引擎、原事故库全量重迁移、跨长期多归档持续资源验证及部署环境 24h 观察仍未验收。

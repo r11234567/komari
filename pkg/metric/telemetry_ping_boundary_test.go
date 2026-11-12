@@ -14,6 +14,111 @@ func TestTelemetryPingWindowExcludesKnownOutsideChildren(t *testing.T) {
 	testTelemetryPingWindowExcludesKnownOutsideChildren(t, e)
 }
 
+// A fixed export-off/export-on request can end between two real probes while
+// the same segment also owns historical observations. The segment's coarse
+// parent must not mark already represented historical children unavailable:
+// its remaining edge population is still exactly readable from hot SQL.
+func TestTelemetryPingMixedHistoricalParentWithExactHotEdge(t *testing.T) {
+	_, e := telemetryFixture(t, "")
+	testTelemetryPingMixedHistoricalParentWithExactHotEdge(t, e)
+}
+
+func testTelemetryPingMixedHistoricalParentWithExactHotEdge(t *testing.T, e *Telemetry) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Date(2026, 11, 12, 15, 47, 44, 0, time.UTC)
+	start := now.Truncate(time.Hour).Add(24 * time.Minute)
+	var raw []Point
+	for i := 0; i < 280; i++ {
+		p := Point{MetricName: sqliteMergedPingLatencyMetric, EntityID: "hot-edge-node", Timestamp: start.Add(time.Duration(i)*5*time.Second + 200*time.Millisecond), Value: float64(10 + i%19), Tags: map[string]string{"task_id": "1"}}
+		if i%17 == 0 {
+			p.Value = -1
+		}
+		raw = append(raw, p)
+		if _, err := e.Accept(ctx, TelemetryBatch{Source: "hot-edge-node", Identity: fmt.Sprint(i), Points: []Point{p}}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	summarizeAll(t, e)
+	if _, err := e.SealDue(ctx, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	promoteTelemetryAll(t, e, now)
+	// Match the actual handoff: archive and remove old hot rows, keeping only
+	// the configured recent raw window. Querying cold archives is forbidden.
+	for {
+		ok, err := e.ArchiveNext(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			break
+		}
+	}
+	for {
+		n, err := e.DeleteArchivedChunk(ctx, now, 512)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+	}
+	if err := e.root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, offset := range []time.Duration{370 * time.Millisecond, 5370 * time.Millisecond, 10370 * time.Millisecond, 11370 * time.Millisecond} {
+		requestedEnd := now.Truncate(time.Hour).Add(42*time.Minute + offset)
+		lo, hi, err := e.PingWindow(requestedEnd.Add(-time.Hour), requestedEnd, 10*time.Second, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := AggregateQuery{Query: Query{EntityID: "hot-edge-node", Start: lo, End: hi}, Interval: 10 * time.Second}
+		got, err := e.PingSummary(ctx, q, now)
+		if err != nil {
+			t.Fatalf("historical parent plus exact hot edge %v: %v", requestedEnd, err)
+		}
+		var reference telemetryStats
+		var valid []float64
+		for i, p := range raw {
+			if !p.Timestamp.Before(lo) && !p.Timestamp.After(hi) {
+				reference.add(p, 1, i)
+				if p.Value >= 0 {
+					valid = append(valid, p.Value)
+				}
+			}
+		}
+		for _, view := range []struct {
+			a      Aggregation
+			points []AggregatePoint
+		}{{AggAvg, got.Avg}, {AggMin, got.Min}, {AggMax, got.Max}, {AggLast, got.Last}, {AggStdDev, got.StdDev}, {aggPingLossAvg, got.Loss}, {AggP50, got.P50}, {AggP99, got.P99}} {
+			want, err := reference.value(view.a)
+			tolerance := 1e-9
+			if isPercentile(view.a) {
+				quantile, _ := parsePercentile(view.a)
+				want = exactQuantile(valid, quantile)
+				tolerance = 1 // Existing Ping raw-oracle quantile contract.
+			}
+			if err != nil || len(view.points) != 1 || view.points[0].Count != int(reference.Attempts) || math.Abs(view.points[0].Value-want) > tolerance {
+				t.Fatalf("%s edge population changed: %+v want %v count %d, error %v", view.a, view.points, want, reference.Attempts, err)
+			}
+		}
+	}
+	// Real historical precision loss remains an error. A recent exact edge
+	// cannot forgive a missing fine cell whose raw population was archived.
+	deleted, err := e.s.db.ExecContext(ctx, e.bind("DELETE FROM "+e.table("summary")+" WHERE series_id IN (SELECT id FROM "+e.table("series")+" WHERE metric=? AND entity=?) AND resolution=? AND bucket=?"), sqliteMergedPingLatencyMetric, "hot-edge-node", int64(10*time.Second), start.Add(7*time.Minute).UnixNano())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := deleted.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("historical precision fault not injected: %d %v", n, err)
+	}
+	hi := now.Truncate(time.Hour).Add(42*time.Minute + 370*time.Millisecond)
+	if _, err := e.PingSummary(ctx, AggregateQuery{Query: Query{EntityID: "hot-edge-node", Start: start, End: hi}, Interval: 10 * time.Second}, now); !errors.Is(err, ErrTelemetryCoverage) {
+		t.Fatalf("missing historical population was silently forgiven: %v", err)
+	}
+}
+
 func testTelemetryPingWindowExcludesKnownOutsideChildren(t *testing.T, e *Telemetry) {
 	t.Helper()
 	ctx := context.Background()

@@ -32,12 +32,14 @@ jobs:
         run: |
           mkdir -p ci-artifacts/independent/chart
           sudo -n systemd-run --unit=komari-chart-budget-${{ github.run_id }} --wait --pipe --collect \
+            --property=User="$(id -u)" --property=Group="$(id -g)" \
             --property=CPUQuota=10% --property=CPUQuotaPeriodSec=100ms --property=MemoryMax=128M --property=MemorySwapMax=0 \
             /usr/bin/env GOMAXPROCS=1 GOMEMLIMIT=96MiB \
             KOMARI_TELEMETRY_REQUIRE_CHART_CGROUP=1 \
             KOMARI_TELEMETRY_CHART_MEMORY_OUTPUT="$GITHUB_WORKSPACE/ci-artifacts/independent/chart/result.json" \
             /usr/bin/time -v /var/tmp/komari-metric-resource.test -test.run '^TestTelemetryChartHighCardinalityResourceBudget$' -test.v -test.timeout 5m \
             > ci-artifacts/independent/chart/process.log 2>&1
+          test -r ci-artifacts/independent/chart/result.json
       - name: Retain independent measurements
         if: always()
         uses: actions/upload-artifact@v4
@@ -94,6 +96,8 @@ jobs:
           go test -race -count=1 -timeout=12m ./pkg/metric ./database/metricstore ./database/trafficledger
       - name: Offline metadata rollback snapshot and active key preservation
         run: go test -race -count=1 -timeout=5m ./cmd -run '^TestCompactMetadata'
+      - name: Full store startup after legacy table retirement
+        run: bash scripts/ci/run-audit-check.sh telemetry-retired-startup go test -race -count=1 -timeout=5m ./cmd -run '^TestAppInitStoresTelemetryLifecycle$'
       - name: Retain test events and context
         if: always()
         uses: actions/upload-artifact@v4

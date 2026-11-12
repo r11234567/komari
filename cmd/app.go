@@ -202,6 +202,15 @@ func (a *App) InitStores() error {
 
 		return fmt.Errorf("metrics startup migration failed: %w", err)
 	}
+	// Route all store operations through telemetry before cleanup. Offline
+	// compaction may already have retired the legacy tables; orphan cleanup
+	// must enumerate and erase the active engine, never the retired schema.
+	trafficledger.ConfigureTelemetry(dbcore.GetDBInstance())
+	metricstore.ConfigureTelemetryConsumer(trafficledger.ConsumeTelemetry)
+	metricstore.ConfigureTelemetryLedgerGC(trafficledger.PruneTelemetrySlices)
+	if err := metricstore.ActivateTelemetry(context.Background()); err != nil {
+		return fmt.Errorf("activate telemetry: %w", err)
+	}
 	var registeredClients []models.Client
 	if err := dbcore.GetDBInstance().Select("uuid").Find(&registeredClients).Error; err != nil {
 		return fmt.Errorf("failed to list clients for metrics orphan cleanup: %w", err)
@@ -224,12 +233,6 @@ func (a *App) InitStores() error {
 	}
 	if orphanResult.Entities > 0 || orphanResult.PingTasks > 0 {
 		logger.Infof("metricstore", "Removed orphaned metric data (entities=%d ping_tasks=%d)", orphanResult.Entities, orphanResult.PingTasks)
-	}
-	trafficledger.ConfigureTelemetry(dbcore.GetDBInstance())
-	metricstore.ConfigureTelemetryConsumer(trafficledger.ConsumeTelemetry)
-	metricstore.ConfigureTelemetryLedgerGC(trafficledger.PruneTelemetrySlices)
-	if err := metricstore.ActivateTelemetry(context.Background()); err != nil {
-		return fmt.Errorf("activate telemetry: %w", err)
 	}
 	metricstore.StartReportBatcher()
 	a.addCleanup("metric-report-batcher", func(ctx context.Context) error {

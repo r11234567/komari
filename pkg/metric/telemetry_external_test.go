@@ -132,4 +132,5 @@ func telemetryExternal(t *testing.T, cfg Config) {
 		t.Fatal("external SQL scheduler", ran, err)
 	}
 	testTelemetryPackedGapExports(t, e, now)
+	testTelemetryPingMixedHistoricalParentWithExactHotEdge(t, e)
 }
