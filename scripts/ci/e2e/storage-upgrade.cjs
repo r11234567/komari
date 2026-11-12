@@ -70,13 +70,15 @@ async function run(){
  // No operational request is used to repair/consume history. Startup must
  // finish its own conversion and hand the port back to the ordinary router.
  await expect.poll(async()=>{try{return(await context.request.get('/api/public')).status()}catch{return 0}},{timeout:180000}).toBe(200);
- await expect(page).toHaveURL(url=>url.pathname==='/admin'||url.pathname==='/admin/',{timeout:20000});
+ // storage_update.tsx hands off to /admin; routes.ts then replaces that
+ // intermediate URL with /admin/dashboard. Wait for the completed route.
+ await expect(page).toHaveURL(`${base}/admin/dashboard`,{timeout:20000});
  const checks=JSON.parse(execFileSync('python3',['-c',`import sqlite3,json,sys\nc=sqlite3.connect(sys.argv[1])\np=dict(c.execute("SELECT task,value FROM metric_telemetry_progress WHERE task IN ('legacy_migration_complete','legacy_ledger_complete')"))\nprint(json.dumps({'progress':p,'source_rows':c.execute('SELECT COUNT(*) FROM metric_points').fetchone()[0],'summary_rows':c.execute('SELECT COUNT(*) FROM metric_telemetry_summary').fetchone()[0]}))`,source],{encoding:'utf8'}));
  expect(checks.progress.legacy_migration_complete).toBe(1);expect(checks.progress.legacy_ledger_complete).toBe(1);expect(checks.source_rows).toBe(43200);expect(checks.summary_rows).toBeGreaterThan(0);
  await expect(page.getByText('Daily billable traffic',{exact:true})).toBeVisible({timeout:30000});
  await expect(page.getByRole('heading',{name:'Telemetry storage upgrade',exact:true})).toHaveCount(0);
  await page.screenshot({path:path.join(artifacts,'storage-upgrade-complete.png'),fullPage:true});
- fs.writeFileSync(path.join(artifacts,'storage-upgrade.json'),JSON.stringify({checks,responses,synthetic_input:true,native_password:true,totp:!!credentials.secret,restarted_after_failure:true},null,2));
+ fs.writeFileSync(path.join(artifacts,'storage-upgrade.json'),JSON.stringify({checks,responses,final_url:page.url(),synthetic_input:true,native_password:true,totp:!!credentials.secret,restarted_after_failure:true},null,2));
  // Now exercise the server's actual staged ZIP restore, not just an in-process
  // reader. The downloaded package contains real Agent history and output.
  system('stop','komari-e2e-panel.service');
