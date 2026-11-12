@@ -13,6 +13,16 @@ const { BinaryReader } = webRequire('@bufbuild/protobuf/wire');
 const root = process.env.E2E_ROOT;
 const artifacts = process.env.E2E_ARTIFACTS;
 const base = 'https://127.0.0.1:29443';
+const skipCSV = process.env.KOMARI_E2E_SKIP_CSV === '1';
+const databaseStages = new Set([
+  'first-run setup, Secure admin cookie and actual Agent enrollment',
+  'installed Agent performs a real TCP latency probe',
+  'real Agent history remains available across live metric-store reloads',
+  'real raw and summary input ownership agrees and built charts expose source precision',
+  'enabled rate limits allow 32 concurrent charts and Ping reads',
+  'minute traffic trends and daily billing remain independently available',
+  'real reports archive, charts survive raw deletion, CSV and complete backup use cold history',
+]);
 const serviceUser = process.env.KOMARI_E2E_USER || process.env.USER;
 require('./guard.cjs');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -106,6 +116,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
     await page.goto(resume.url);
   }
   async function stage(name, action) {
+    if (skipCSV && !databaseStages.has(name)) return;
     if (resume?.completed.includes(name)) {
       completedSteps.push(name);
       console.log(`LOCAL DEBUG: restored previously completed stage: ${name}`);
@@ -720,23 +731,36 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         agentIds: [agentId], metrics: ['cpu.usage'], startTime: start.toISOString(), endTime: end.toISOString(), maxPoints: 100, downsample: true,
       });
       expect(history.series?.some(series => series.queryPoints?.some(point => Number(point.sampleCount) > 0))).toBe(true);
-      const created = await (await request('/api/admin/history/export', {
-        uuid: agentId, category: 'resource', mode: 'raw', start: start.toISOString(), end: end.toISOString(),
-      })).json();
-      expect(created.data?.id).toBeTruthy();
-      let job;
-      await expect.poll(async () => {
-        job = (await (await request(`/api/admin/history/export/${created.data.id}`, undefined, { method: 'GET' })).json()).data;
-        if (job.status === 'failed') throw new Error(job.error);
-        return job.status;
-      }, { timeout: 90_000 }).toBe('done');
-      const csv = await (await request(`/api/admin/history/export/${job.id}/download`, undefined, { method: 'GET' })).body();
-      expect(csv.toString('utf8').split('\n').length).toBeGreaterThan(2);
-      fs.writeFileSync(path.join(artifacts, 'real-history.csv'), csv);
+      let csvBytes = 0;
+      if (!skipCSV) {
+        const created = await (await request('/api/admin/history/export', {
+          uuid: agentId, category: 'resource', mode: 'raw', start: start.toISOString(), end: end.toISOString(),
+        })).json();
+        expect(created.data?.id).toBeTruthy();
+        let job;
+        await expect.poll(async () => {
+          job = (await (await request(`/api/admin/history/export/${created.data.id}`, undefined, { method: 'GET' })).json()).data;
+          if (job.status === 'failed') throw new Error(job.error);
+          return job.status;
+        }, { timeout: 90_000 }).toBe('done');
+        const csv = await (await request(`/api/admin/history/export/${job.id}/download`, undefined, { method: 'GET' })).body();
+        expect(csv.toString('utf8').split('\n').length).toBeGreaterThan(2);
+        fs.writeFileSync(path.join(artifacts, 'real-history.csv'), csv);
+        csvBytes = csv.length;
+      }
       const backup = await request('/api/admin/download/backup?scope=full', undefined, { method: 'GET' });
       // Credentials stay inside the disposable fixture, outside uploaded artifacts.
       fs.writeFileSync(path.join(root, 'real-full-backup.zip'), await backup.body());
-      fs.writeFileSync(path.join(artifacts, 'real-storage-roundtrip.json'), JSON.stringify({ ...storage, csvBytes: csv.length }, null, 2));
+      fs.writeFileSync(path.join(artifacts, 'real-storage-roundtrip.json'), JSON.stringify({ ...storage, csvBytes, csv_scenarios: !skipCSV }, null, 2));
+      if (skipCSV) {
+        await context.storageState({ path: path.join(root, 'qualification-browser-state.json') });
+        fs.writeFileSync(path.join(root, 'qualification-scope.json'), JSON.stringify({ agentId, pingTaskId }));
+        fs.writeFileSync(path.join(root, 'migration-credentials.json'), JSON.stringify({ username: 'e2e-user', password: fixturePassword }), { mode: 0o600 });
+        fs.writeFileSync(path.join(artifacts, 'database-scenario-scope.json'), JSON.stringify({
+          database_only: true, csv_scenarios: false,
+          completed: [...completedSteps, 'real reports archive, charts survive raw deletion, CSV and complete backup use cold history'],
+        }, null, 2));
+      }
     });
 
     await stage('background export UI: durable pause, refresh, network recovery and ready-only download', async () => {

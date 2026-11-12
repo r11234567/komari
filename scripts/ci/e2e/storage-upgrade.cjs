@@ -4,6 +4,7 @@ const { chromium, expect } = require('@playwright/test');
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const {execFileSync,spawn}=require('node:child_process');
 const root=process.env.E2E_ROOT,artifacts=process.env.E2E_ARTIFACTS,base='https://127.0.0.1:29443';
+const skipCSV=process.env.KOMARI_E2E_SKIP_CSV==='1';
 require('./guard.cjs');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const system=(...args)=>execFileSync('sudo',['systemctl',...args],{timeout:30000});
@@ -36,6 +37,7 @@ async function run(){
  await page.locator('#restricted-login-username').fill(credentials.username);
  await page.locator('#restricted-login-password').fill(credentials.password);
  await page.locator('.km-restricted-login-form button[type=submit]').click();
+ if(credentials.secret){
  const code=page.getByRole('textbox',{name:'Enter verification code',exact:true});
  await expect(code).toBeVisible();
  const wrong=totp(credentials.secret);await code.fill(String((Number(wrong)+1)%1000000).padStart(6,'0'));
@@ -47,6 +49,7 @@ async function run(){
  if(Date.now()%30000>27000)await sleep(3100);
  await code.fill(totp(credentials.secret));
  await page.locator('.km-password-credential-step').getByRole('button',{name:'Continue',exact:true}).click();
+ }
  await expect(page.locator('.km-restricted-login-dialog')).toBeHidden({timeout:15000});
  await expect(page.getByRole('heading',{name:'Migration stopped; original history preserved',exact:true})).toBeVisible({timeout:20000});
  await page.screenshot({path:path.join(artifacts,'storage-upgrade-failed.png'),fullPage:true});
@@ -70,7 +73,7 @@ async function run(){
  await expect(page.getByText('Daily billable traffic',{exact:true})).toBeVisible({timeout:30000});
  await expect(page.getByRole('heading',{name:'Telemetry storage upgrade',exact:true})).toHaveCount(0);
  await page.screenshot({path:path.join(artifacts,'storage-upgrade-complete.png'),fullPage:true});
- fs.writeFileSync(path.join(artifacts,'storage-upgrade.json'),JSON.stringify({checks,responses,synthetic_input:true,native_password_and_totp:true,restarted_after_failure:true},null,2));
+ fs.writeFileSync(path.join(artifacts,'storage-upgrade.json'),JSON.stringify({checks,responses,synthetic_input:true,native_password:true,totp:!!credentials.secret,restarted_after_failure:true},null,2));
  // Now exercise the server's actual staged ZIP restore, not just an in-process
  // reader. The downloaded package contains real Agent history and output.
  system('stop','komari-e2e-panel.service');
@@ -81,6 +84,26 @@ async function run(){
  const original=await browser.newContext({baseURL:base,storageState:path.join(root,'qualification-browser-state.json')});
  try {
   await expect.poll(async()=>{try{return(await original.request.get('/api/public')).status()}catch{return 0}},{timeout:60000}).toBe(200);
+  if(skipCSV){
+   const scope=JSON.parse(fs.readFileSync(path.join(root,'qualification-scope.json')));
+   const end=new Date();
+   const history=await original.request.post('/komari.metrics.v1.MetricsService/QueryMetrics',{
+    data:{agentIds:[scope.agentId],metrics:['cpu.usage'],startTime:new Date(end.getTime()-3600_000).toISOString(),endTime:end.toISOString(),maxPoints:360,downsample:true},
+    headers:{Origin:base,'Connect-Protocol-Version':'1'},
+   });
+   expect(history.status()).toBe(200);
+   const body=await history.json();
+   expect(body.series?.some(series=>series.queryPoints?.some(point=>Number(point.sampleCount)>0))).toBe(true);
+   const traffic=await original.request.post('/komari.admin.v1.DashboardService/GetDashboardCharts',{
+    data:{charts:['DASHBOARD_CHART_TRAFFIC'],rankingLimit:5},headers:{Origin:base,'Connect-Protocol-Version':'1'},
+   });
+   expect(traffic.status()).toBe(200);
+   const billing=await traffic.json();
+   expect(billing.charts?.traffic?.error||'').toBe('');
+   expect(billing.charts?.traffic?.daily).toHaveLength(30);
+   fs.writeFileSync(path.join(artifacts,'database-restored-http.json'),JSON.stringify({history:body,billing,csv_scenarios:false},null,2));
+   return;
+  }
   const proof=JSON.parse(fs.readFileSync(path.join(root,'export-restore-proof.json'))),verified=[];
   for(const expected of proof.ready){
    const response=await original.request.get(`/api/admin/history/export/${expected.id}`);expect(response.status()).toBe(200);
