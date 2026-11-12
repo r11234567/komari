@@ -1,0 +1,202 @@
+{
+  "recorded_at_utc": "2026-11-12T16:28:58.633609+00:00",
+  "failed_run": 43254628509,
+  "failed_job": 131309390602,
+  "parent_revision": "7b9824ae07bd027d2fc09a43f8323a1eeacc1766",
+  "cause": "testTelemetryPackedGapExports closes caller engine, reopens only its local parameter, and defers closing the new engine; the subsequent mixed-hot-edge helper reused the closed original archive root",
+  "prior_validation_gap": "External SQL DSNs were not exercised locally in the previous revision; passing standalone SQLite regressions did not validate the composed external sequence",
+  "changes": [
+    "Own Store, namespace, archive directory and cleanup per each of three SQL contract scenarios",
+    "Run the identical composed scenarios on durable SQLite even without external DSNs"
+  ],
+  "production_code_changed": false,
+  "workflow_changed": false,
+  "test_source_sha256": "7493e35e9f68215edbdb62ba4dff0ad9a74ef735e917e022077628bee2d0af6e",
+  "local_environment": {
+    "compiler": "Go 1.25.0 linux/amd64",
+    "race": true,
+    "runtime": "Docker Linux Debian bookworm; disposable isolated SQL services; no published ports",
+    "engines_and_remaining_fixture_table_count": {
+      "postgresql": "PostgreSQL 17.11 (Debian 17.11-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit\n0",
+      "mysql": "8.4.13\n0",
+      "mariadb": "11.4.13-MariaDB-ubu2404\n0"
+    }
+  },
+  "runs": [
+    {
+      "label": "before-real-sql-negative",
+      "exit_code": 1,
+      "expected_negative": true,
+      "checked_ok": true,
+      "seconds": 12.46,
+      "passed_top_level": 0,
+      "skipped_top_level": 0,
+      "log": "E:\\123\\.cache\\telemetry-external-review\\before-real-sql-negative.log"
+    },
+    {
+      "label": "after-fixture-full-metric",
+      "exit_code": 0,
+      "expected_negative": false,
+      "checked_ok": true,
+      "seconds": 118.589,
+      "passed_top_level": 254,
+      "skipped_top_level": 9,
+      "log": "E:\\123\\.cache\\telemetry-external-review\\after-fixture-full-metric.log"
+    },
+    {
+      "label": "after-production-full-metric",
+      "exit_code": 0,
+      "expected_negative": false,
+      "checked_ok": true,
+      "seconds": 54.511,
+      "passed_top_level": 172,
+      "skipped_top_level": 9,
+      "log": "E:\\123\\.cache\\telemetry-external-review\\after-production-full-metric.log"
+    },
+    {
+      "label": "after-shuffled-repeat-real-sql",
+      "exit_code": 0,
+      "expected_negative": false,
+      "checked_ok": true,
+      "seconds": 34.339,
+      "passed_top_level": 8,
+      "skipped_top_level": 0,
+      "log": "E:\\123\\.cache\\telemetry-external-review\\after-shuffled-repeat-real-sql.log"
+    }
+  ],
+  "logs": {
+    "before-real-sql-negative": {
+      "sha256": "1fd801e22cab5d6e94c4869f18e219b14a1faf98035cbf09d682d83adbd1c4bf",
+      "bytes": 2673,
+      "passed_top_level": 0,
+      "skipped_top_level": 0,
+      "skipped_tests": [],
+      "passed_packages": []
+    },
+    "after-fixture-full-metric": {
+      "sha256": "938fe18c4a7662af84ebd8d0820beb2480a340d7ba963b3bc5ff417de605f5e8",
+      "bytes": 89562,
+      "passed_top_level": 254,
+      "skipped_top_level": 9,
+      "skipped_tests": [
+        "TestTelemetryChartHighCardinalityResourceBudget",
+        "TestTelemetryOfflineCompactIncidentCopy",
+        "TestTelemetryE2ERestoreBundle",
+        "TestTelemetryGapCompactionIncidentCopy",
+        "TestTelemetryIncidentMigration",
+        "TestTelemetryIndependentHistoricalMatrix",
+        "TestTelemetryIndependentArchivePrepare",
+        "TestTelemetryIndependentArchiveRead",
+        "TestTelemetryStatsCompactionIncidentCopy"
+      ],
+      "passed_packages": []
+    },
+    "after-production-full-metric": {
+      "sha256": "dd11aac1f27615e3964ba8839e4c9f1b25ed1e22ced6b3cc2b621f3c239e7c68",
+      "bytes": 38824,
+      "passed_top_level": 172,
+      "skipped_top_level": 9,
+      "skipped_tests": [
+        "TestTelemetryChartHighCardinalityResourceBudget",
+        "TestTelemetryOfflineCompactIncidentCopy",
+        "TestTelemetryE2ERestoreBundle",
+        "TestTelemetryGapCompactionIncidentCopy",
+        "TestTelemetryIncidentMigration",
+        "TestTelemetryIndependentHistoricalMatrix",
+        "TestTelemetryIndependentArchivePrepare",
+        "TestTelemetryIndependentArchiveRead",
+        "TestTelemetryStatsCompactionIncidentCopy"
+      ],
+      "passed_packages": []
+    },
+    "after-shuffled-repeat-real-sql": {
+      "sha256": "3a9891cd1f6a9c567365799a250ce8c98c1c92edfb98e250a28e7fbad40e7ca8",
+      "bytes": 11574,
+      "passed_top_level": 8,
+      "skipped_top_level": 0,
+      "skipped_tests": [],
+      "passed_packages": []
+    },
+    "dependent-fixture": {
+      "sha256": "50bd8ac917ddd623eafe8cb49f9b3fc04ecf18675981b5a3d4b03524a217c3cf",
+      "bytes": 52907,
+      "passed_top_level": 177,
+      "skipped_top_level": 2,
+      "skipped_tests": [
+        "TestDashboardSQLiteResourceAcceptance",
+        "TestTelemetryResourceAcceptance"
+      ],
+      "passed_packages": [
+        [
+          "github.com/komari-monitor/komari/database/metricstore",
+          "10.342s"
+        ],
+        [
+          "github.com/komari-monitor/komari/database/trafficledger",
+          "12.186s"
+        ],
+        [
+          "github.com/komari-monitor/komari/pkg/historyexport",
+          "25.523s"
+        ]
+      ]
+    },
+    "dependent-production": {
+      "sha256": "5407b1d2dc91429ee04446e45cab11240c352fd9e183f8b1d8c69d7f2bf388db",
+      "bytes": 27372,
+      "passed_top_level": 130,
+      "skipped_top_level": 2,
+      "skipped_tests": [
+        "TestDashboardSQLiteResourceAcceptance",
+        "TestTelemetryResourceAcceptance"
+      ],
+      "passed_packages": [
+        [
+          "github.com/komari-monitor/komari/database/metricstore",
+          "5.734s"
+        ],
+        [
+          "github.com/komari-monitor/komari/database/trafficledger",
+          "11.313s"
+        ]
+      ]
+    },
+    "startup-metadata": {
+      "sha256": "8a5fbc8b252b7ad9b4a0a63a9ae6e9b29be4d5260945278d9e2e1e4374065dc7",
+      "bytes": 3694,
+      "passed_top_level": 2,
+      "skipped_top_level": 0,
+      "skipped_tests": [],
+      "passed_packages": [
+        [
+          "github.com/komari-monitor/komari/cmd",
+          "6.365s"
+        ]
+      ]
+    },
+    "production-check": {
+      "sha256": "236b151bbcc2a13d2aab1b029808619b9968d32555e8a3df9e9a54513b837ae3",
+      "bytes": 73,
+      "passed_top_level": 0,
+      "skipped_top_level": 0,
+      "skipped_tests": [],
+      "passed_packages": []
+    },
+    "vet": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "passed_top_level": 0,
+      "skipped_top_level": 0,
+      "skipped_tests": [],
+      "passed_packages": []
+    }
+  },
+  "validation_boundaries": [
+    "Complete pkg/metric test binaries built separately with metric_legacy_fixture and production tags, run against all three real SQL services plus SQLite",
+    "Independent dependent database packages, historyexport and actual Python E2E inspector executed in WSL; startup and metadata subprocess contracts executed",
+    "Targeted external contract suite repeated twice under shuffle seed 79; all 4 drivers and all 3 scenarios explicitly required to pass, not skip",
+    "Prior successful historical/resources CI job not rerun locally; remote CI for this revision remains pending",
+    "No new local long soak or end-to-end HTTP soak; previous remote database E2E and CSV runs not cancelled or restarted",
+    "Capacity, complete fresh incident migration/reconciliation, extended multi-archive/high-cardinality sustained resource qualification and deployment 24h observation remain open"
+  ]
+}

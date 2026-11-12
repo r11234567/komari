@@ -4,9 +4,16 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+// Exercise the same composed contract suite even when external SQL DSNs are
+// absent, including the lifecycle boundaries between independent scenarios.
+func TestTelemetrySQLiteIntegration(t *testing.T) {
+	telemetryExternal(t, SQLite(filepath.Join(t.TempDir(), "metrics.db"), WithRetiredLegacyStorage(), WithSQLiteProfile(SQLiteProfileDurable)))
+}
 
 func TestTelemetryPostgreSQLIntegration(t *testing.T) {
 	dsn := os.Getenv("METRIC_POSTGRES_DSN")
@@ -32,27 +39,54 @@ func TestTelemetryMariaDBIntegration(t *testing.T) {
 
 func telemetryExternal(t *testing.T, cfg Config) {
 	t.Helper()
+	t.Run("storage_contracts", func(t *testing.T) {
+		ctx, e := telemetryExternalFixture(t, cfg)
+		testTelemetryExternalStorage(t, ctx, e)
+	})
+	t.Run("packed_gaps_restart_and_exports", func(t *testing.T) {
+		_, e := telemetryExternalFixture(t, cfg)
+		testTelemetryPackedGapExports(t, e, time.Now().UTC().Truncate(time.Hour))
+	})
+	t.Run("mixed_historical_parent_with_exact_hot_edge", func(t *testing.T) {
+		_, e := telemetryExternalFixture(t, cfg)
+		testTelemetryPingMixedHistoricalParentWithExactHotEdge(t, e)
+	})
+}
+
+// Scenarios that close/reopen the engine or deliberately close the archive
+// root own their store, table namespace and archive directory independently.
+func telemetryExternalFixture(t *testing.T, cfg Config) (context.Context, *Telemetry) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 	cfg.TablePrefix = fmt.Sprintf("te_%d_", time.Now().UnixNano())
 	s, err := Open(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
-	defer dropIntegrationTables(t, s, cfg.TablePrefix)
+	t.Cleanup(func() { s.Close() })
+	if cfg.Driver != DriverSQLite {
+		t.Cleanup(func() { dropIntegrationTables(t, s, cfg.TablePrefix) })
+	}
+	// SQLite's entire database belongs to the parent TempDir, including legacy
+	// compatibility views that the external engines do not create.
 	e, err := s.OpenTelemetry(ctx, TelemetryConfig{ArchiveDirectory: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer e.Close()
-	defer func() {
+	t.Cleanup(func() {
 		for _, table := range []string{"schedule", "gaps", "traffic_ingress", "identity", "erasures", "members", "work", "leases", "outbox", "summary", "hot", "series", "receipts", "segments", "progress"} {
 			if _, err := s.db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+e.table(table)); err != nil {
 				t.Errorf("drop %s: %v", table, err)
 			}
 		}
-	}()
+	})
+	t.Cleanup(func() { e.Close() })
+	return ctx, e
+}
+
+func testTelemetryExternalStorage(t *testing.T, ctx context.Context, e *Telemetry) {
+	t.Helper()
 	now := time.Now().UTC().Truncate(time.Hour)
 	b := telemetryBatch("sql/one", now, 1, 3, 8)
 	r, err := e.Accept(ctx, b, now)
@@ -131,6 +165,4 @@ func telemetryExternal(t *testing.T, cfg Config) {
 	if err != nil || !ran {
 		t.Fatal("external SQL scheduler", ran, err)
 	}
-	testTelemetryPackedGapExports(t, e, now)
-	testTelemetryPingMixedHistoricalParentWithExactHotEdge(t, e)
 }
