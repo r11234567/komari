@@ -20,6 +20,13 @@ func (t *Telemetry) RollbackLegacy(ctx context.Context, destination string, obse
 	if t.s.cfg.Driver != DriverSQLite {
 		return fmt.Errorf("offline rollback currently requires SQLite")
 	}
+	var retired int
+	if err := t.s.reader().QueryRowContext(ctx, "SELECT COALESCE(MAX(value),0) FROM "+t.table("progress")+" WHERE task='legacy_tables_retired'").Scan(&retired); err != nil {
+		return err
+	}
+	if retired == 1 {
+		return fmt.Errorf("legacy source tables were retired; restore the retained pre-retirement backup before rollback")
+	}
 	if _, err := os.Lstat(destination); !os.IsNotExist(err) {
 		return fmt.Errorf("rollback destination must not exist")
 	}
@@ -44,20 +51,20 @@ func (t *Telemetry) RollbackLegacy(ctx context.Context, destination string, obse
 	erased := map[string]int64{}
 	after := ""
 	for {
-		rows, err := t.s.reader().QueryContext(ctx, t.bind("SELECT s.id,s.metric,s.entity,s.tags,e.through_id FROM "+t.table("erasures")+" e JOIN "+t.table("series")+" s ON s.id=e.series_id WHERE s.id>? ORDER BY s.id LIMIT 128"), after)
+		rows, err := t.s.reader().QueryContext(ctx, t.bind("SELECT s.id,"+t.canonicalSeriesSQL("s")+",s.metric,s.entity,s.tags,e.through_id FROM "+t.table("erasures")+" e JOIN "+t.table("series")+" s ON s.id=e.series_id WHERE s.id>? ORDER BY s.id LIMIT 128"), after)
 		if err != nil {
 			return err
 		}
 		type item struct {
-			id      string
-			q       Query
-			through int64
+			id, canonical string
+			q             Query
+			through       int64
 		}
 		var items []item
 		for rows.Next() {
 			var v item
 			var tags string
-			if err = rows.Scan(&v.id, &v.q.MetricName, &v.q.EntityID, &tags, &v.through); err != nil {
+			if err = rows.Scan(&v.id, &v.canonical, &v.q.MetricName, &v.q.EntityID, &tags, &v.through); err != nil {
 				break
 			}
 			if err = json.Unmarshal([]byte(tags), &v.q.Tags); err != nil {
@@ -80,7 +87,7 @@ func (t *Telemetry) RollbackLegacy(ctx context.Context, destination string, obse
 			if len(erased) >= 16384 {
 				return ErrTelemetryBackpressure
 			}
-			erased[v.id] = v.through
+			erased[v.canonical] = v.through
 			if _, err = target.DeleteSeries(ctx, v.q); err != nil {
 				return err
 			}
@@ -169,7 +176,7 @@ func (t *Telemetry) RollbackLegacy(ctx context.Context, destination string, obse
 		return err
 	}
 	// Never let a future new-engine startup silently use the pre-replay target.
-	for _, name := range []string{"schedule", "gaps", "traffic_ingress", "identity", "erasures", "members", "work", "leases", "outbox", "summary", "hot", "series", "receipts", "segments", "progress"} {
+	for _, name := range []string{"schedule", "gaps", "traffic_ingress", "identity", "erasures", "members", "work", "leases", "outbox", "summary", "hot", "series", "series_keys", "receipts", "segments", "progress"} {
 		if _, err = target.db.ExecContext(ctx, "DROP TABLE "+t.table(name)); err != nil {
 			return err
 		}

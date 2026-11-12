@@ -324,6 +324,7 @@ func (t *Telemetry) Chart(ctx context.Context, q AggregateQuery, now time.Time) 
 
 func (t *Telemetry) aggregate(ctx context.Context, q AggregateQuery, now time.Time, chart bool) (TelemetryQueryResult, error) {
 	var out TelemetryQueryResult
+	ctx = defaultChartBudget(ctx)
 	if err := q.Validate(); err != nil {
 		return out, err
 	}
@@ -406,6 +407,9 @@ func (t *Telemetry) aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 				}
 				continue
 			}
+			if e = reserveChartMemory(ctx, 0, 4*len(rawTags)+len(p.MetricName)+len(p.EntityID)+1024); e != nil {
+				break
+			}
 			if e = json.Unmarshal([]byte(rawTags), &p.Tags); e != nil {
 				break
 			}
@@ -436,7 +440,9 @@ func (t *Telemetry) aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 				groups[key] = &telemetryStats{}
 				tagsByGroup[key] = p.Tags
 			}
-			groups[key].add(p, ingest, ordinal)
+			if e = addChartStats(ctx, groups[key], p, ingest, ordinal); e != nil {
+				break
+			}
 		}
 		re := hr.Err()
 		hr.Close()
@@ -465,6 +471,21 @@ func (t *Telemetry) aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 	sortAggregateGroupKeys(keys)
 	for _, k := range keys {
 		st := groups[k]
+		if _, quantile := parsePercentile(q.Aggregation); quantile && st.N > 0 && st.sketch == nil {
+			st.sketch, err = decodeChartDigest(ctx, st.Digest)
+			if err != nil {
+				return out, err
+			}
+		}
+		if st.sketch != nil && !st.sketch.processed {
+			scratch := 3*cap(st.sketch.centroids)*16 + 128
+			if err = reserveChartMemory(ctx, 0, scratch); err != nil {
+				return out, err
+			}
+			before := chartStatsBytes(st)
+			st.sketch.process()
+			releaseChartMemory(ctx, scratch-max(0, chartStatsBytes(st)-before))
+		}
 		v, e := st.value(q.Aggregation)
 		if e != nil {
 			return out, e

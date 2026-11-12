@@ -62,7 +62,7 @@ func ValidateTelemetryBackup(ctx context.Context, databasePath, archiveDirectory
 	if err = db.QueryRowContext(ctx, "SELECT value FROM "+quote(prefix+"progress")+" WHERE task='schema_version'").Scan(&version); err != nil {
 		return err
 	}
-	if version != 3 && version != 4 && version != 5 && version != 6 {
+	if version != 3 && version != 4 && version != 5 && version != 6 && version != 7 {
 		return fmt.Errorf("unsupported restored telemetry schema %d", version)
 	}
 	root, err := os.OpenRoot(archiveDirectory)

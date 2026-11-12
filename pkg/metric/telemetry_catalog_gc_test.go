@@ -51,7 +51,7 @@ func TestTelemetryRetentionCycleKeepsMissingHistoryExplicit(t *testing.T) {
 	if n, err := e.PruneCatalogChunk(ctx, late, 128); err != nil || n == 0 {
 		t.Fatal("expired catalog never reclaimed", n, err)
 	}
-	for _, table := range []string{"hot", "summary", "receipts", "members", "segments", "series"} {
+	for _, table := range []string{"hot", "summary", "receipts", "members", "segments", "series", "series_keys"} {
 		if n := telemetryCount(t, e, table); n != 0 {
 			t.Fatal(table, n)
 		}

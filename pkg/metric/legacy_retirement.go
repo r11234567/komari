@@ -2,6 +2,8 @@ package metric
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -9,6 +11,27 @@ import (
 // startup path, it never seals points, rewrites axes/digests or rebuilds tiers.
 // Old files remain authoritative until the explicit resumable migration.
 func (s *Store) openRetiredSQLiteStorage(ctx context.Context) error {
+	progress := s.cfg.TablePrefix + "telemetry_progress"
+	if kind, err := sqliteObjectType(ctx, s.db, progress); err != nil {
+		return err
+	} else if kind == "table" {
+		var retired int
+		err = s.db.QueryRowContext(ctx, "SELECT value FROM "+progress+" WHERE task='legacy_tables_retired'").Scan(&retired)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if retired == 1 {
+			// A verified offline compacted database has no legacy reader. Never
+			// recreate the old compression schema after physical retirement.
+			// Virtual metric semantics outlive those physical tables.
+			var version int
+			if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+				return err
+			}
+			s.sqlitePingMerged = version >= sqliteStorageVersionPingMerge
+			return nil
+		}
+	}
 	pointKind, err := sqliteObjectType(ctx, s.db, s.tables.points)
 	if err != nil {
 		return err

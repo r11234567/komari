@@ -419,6 +419,20 @@ func (t *Telemetry) commitLegacyCells(ctx context.Context, key, name, entity str
 	if _, err = tx.ExecContext(ctx, t.bind(q), segment, max(1, through)); err != nil {
 		return err
 	}
+	cells = append([]telemetryMigrationCell(nil), cells...)
+	resolvedKeys := make(map[string]string)
+	for i := range cells {
+		canonical := cells[i].series
+		sid, ok := resolvedKeys[canonical]
+		if !ok {
+			sid, err = t.seriesKey(ctx, tx, canonical)
+			if err != nil {
+				return err
+			}
+			resolvedKeys[canonical] = sid
+		}
+		cells[i].series = sid
+	}
 	for _, c := range cells {
 		if c.raw.Attempts < c.stats.Attempts {
 			if _, err = tx.ExecContext(ctx, t.bind("INSERT INTO "+t.table("gaps")+" (segment_id,series_id,first_observed,last_observed) VALUES (?,?,?,?)"), segment, c.series, c.stats.FirstNano, c.stats.LastNano); err != nil {

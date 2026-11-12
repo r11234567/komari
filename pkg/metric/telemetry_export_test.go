@@ -3,6 +3,7 @@ package metric
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -57,6 +58,55 @@ func TestTelemetryCancelDuringColdDecodeReleasesLease(t *testing.T) {
 	got, err := e.ExportRawBatch(ctx, []Query{q})
 	if err != nil || len(got[0]) != len(values) {
 		t.Fatal("subsequent cold export", err, len(got))
+	}
+}
+
+func TestTelemetryDictionaryErasureSurvivesSharedColdFileAndReindex(t *testing.T) {
+	_, e := telemetryFixture(t, "")
+	ctx := WithTelemetryEntities(context.Background(), []string{"node"})
+	now := time.Now().UTC().Truncate(time.Hour)
+	at := now.Add(-time.Hour)
+	b := telemetryBatch("shared-file", at, 2, 3)
+	b.Points[1].Tags = map[string]string{"device": "1"}
+	if _, err := e.Accept(ctx, b, now); err != nil {
+		t.Fatal(err)
+	}
+	summarizeAll(t, e)
+	if _, err := e.SealDue(ctx, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := e.ArchiveNext(ctx); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if _, err := e.DeleteArchivedChunk(ctx, now.Add(time.Hour), 512); err != nil {
+		t.Fatal(err)
+	}
+	var segment string
+	if err := e.s.db.QueryRow("SELECT id FROM " + e.table("segments") + " LIMIT 1").Scan(&segment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.s.db.Exec("DELETE FROM " + e.table("members")); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.IndexLegacyCoreSegment(ctx, segment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.EraseSeries(ctx, Query{MetricName: "cpu", EntityID: "node", Tags: map[string]string{"device": "0"}}); err != nil {
+		t.Fatal(err)
+	}
+	queries := []Query{{MetricName: "cpu", EntityID: "node", Start: at, End: now}}
+	points, err := e.ExportRawBatch(ctx, queries)
+	if err != nil || len(points[0]) != 1 || points[0][0].Value != 3 {
+		t.Fatal("erased canonical identity resurfaced", points, err)
+	}
+	dir := filepath.Join(t.TempDir(), "snapshot")
+	snapshot, err := e.FreezeExport(ctx, queries, dir, 8<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := exportSnapshotPoints(t, dir, snapshot)
+	if len(frozen) != 1 || frozen[0].Point.Value != 3 {
+		t.Fatal("frozen export resurfaced erased identity", frozen)
 	}
 }
 

@@ -253,7 +253,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	} else if err != nil {
 		return err
 	}
-	if version != 6 && version != 5 && version != 4 && version != 3 && version != 2 && version != 1 && version != -1 {
+	if version != 7 && version != 6 && version != 5 && version != 4 && version != 3 && version != 2 && version != 1 && version != -1 {
 		return fmt.Errorf("unsupported telemetry SQL schema version %d", version)
 	}
 	// Small integer/CHAR keys keep these DDLs portable across SQLite, MySQL and
@@ -278,6 +278,11 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	prefix := t.s.cfg.TablePrefix + "telemetry_"
 	for _, q := range stmts {
 		if _, err := t.s.db.ExecContext(ctx, fmt.Sprintf(q, prefix)); err != nil {
+			return err
+		}
+	}
+	if t.s.cfg.Driver == DriverSQLite {
+		if _, err := t.s.db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS "+t.table("series_keys")+" (id INTEGER PRIMARY KEY,canonical TEXT NOT NULL UNIQUE)"); err != nil {
 			return err
 		}
 	}
@@ -320,6 +325,16 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 		{"summary_age", "summary", "resolution,bucket,series_id,segment_id"},
 		{"summary_pending", "summary", "resolution,promoted_through,bucket,segment_id,series_id"},
 	} {
+		if t.s.cfg.Driver == DriverSQLite {
+			switch idx.name {
+			case "summary_series":
+				idx.cols = "series_id"
+			case "summary_age":
+				idx.cols = "resolution,bucket"
+			case "summary_pending":
+				idx.cols = "resolution,promoted_through,bucket"
+			}
+		}
 		q := fmt.Sprintf("CREATE INDEX %s ON %s (%s)", prefix+idx.name, t.table(idx.table), idx.cols)
 		if t.s.cfg.Driver != DriverMySQL {
 			q = strings.Replace(q, "CREATE INDEX", "CREATE INDEX IF NOT EXISTS", 1)
@@ -362,7 +377,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	// Core schema v1/v2 was never an application format. Existing segments are
 	// indexed lazily from their owned hot rows or verified immutable archives;
 	// opening the store never performs a historical scan.
-	_, err = t.s.db.ExecContext(ctx, "UPDATE "+progressTable+" SET value=6 WHERE task='schema_version' AND value IN (-1,1,2,3,4,5)")
+	_, err = t.s.db.ExecContext(ctx, "UPDATE "+progressTable+" SET value=7 WHERE task='schema_version' AND value IN (-1,1,2,3,4,5,6)")
 	if err != nil {
 		return err
 	}
@@ -421,6 +436,7 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 		}
 	}
 	oldest := now.UnixNano()
+	resolvedKeys := make(map[string]string)
 	for i, p := range b.Points {
 		if err := p.Validate(); err != nil {
 			return result, err
@@ -539,7 +555,15 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 			return TelemetryReceipt{}, fmt.Errorf("%w: telemetry tags budget", ErrInvalidArgument)
 		}
 		key := sha256.Sum256([]byte(p.MetricName + "\x00" + p.EntityID + "\x00" + string(tags)))
-		sid := hex.EncodeToString(key[:])
+		canonical := hex.EncodeToString(key[:])
+		sid, ok := resolvedKeys[canonical]
+		if !ok {
+			sid, err = t.seriesKey(ctx, tx, canonical)
+			if err != nil {
+				return result, err
+			}
+			resolvedKeys[canonical] = sid
+		}
 		if !seen[sid] {
 			if len(seen) >= 1024 {
 				return result, fmt.Errorf("%w: maximum series per source", ErrTelemetryBackpressure)

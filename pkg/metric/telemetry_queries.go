@@ -87,6 +87,7 @@ func (t *Telemetry) SeriesBatch(ctx context.Context, queries []AggregateQuery, n
 
 // ChartBatch preserves precision/coverage and points in the same read snapshot.
 func (t *Telemetry) ChartBatch(ctx context.Context, queries []AggregateQuery, now time.Time) ([]TelemetryQueryResult, error) {
+	ctx = defaultChartBudget(ctx)
 	if len(queries) > 64 {
 		return nil, ErrTelemetryBackpressure
 	}
@@ -111,6 +112,7 @@ func (t *Telemetry) ChartBatch(ctx context.Context, queries []AggregateQuery, no
 // evaluating percentiles and variance. Averaging per-bucket percentiles or
 // weighting latency averages by failed attempts would change their meaning.
 func (t *Telemetry) PingSummary(ctx context.Context, q AggregateQuery, now time.Time) (SeriesSummary, error) {
+	ctx = defaultChartBudget(ctx)
 	q.Aggregation = AggCount
 	q.MetricName = sqliteMergedPingLatencyMetric
 	q.PreserveSeries = true
@@ -138,10 +140,10 @@ func (t *Telemetry) PingSummary(ctx context.Context, q AggregateQuery, now time.
 		value := r.stats[key]
 		if stats[key.aggregateSeriesKey] == nil {
 			combined := &telemetryStats{}
-			if err = combined.merge(*value); err != nil {
+			if err = mergeChartStats(ctx, combined, *value); err != nil {
 				return SeriesSummary{}, err
 			}
-			combined.sketch, err = DecodeTDigest(combined.Digest)
+			combined.sketch, err = decodeChartDigest(ctx, combined.Digest)
 			if err != nil {
 				return SeriesSummary{}, err
 			}
@@ -152,7 +154,7 @@ func (t *Telemetry) PingSummary(ctx context.Context, q AggregateQuery, now time.
 			stats[key.aggregateSeriesKey] = combined
 			continue
 		}
-		if err = stats[key.aggregateSeriesKey].merge(*value); err != nil {
+		if err = mergeChartStats(ctx, stats[key.aggregateSeriesKey], *value); err != nil {
 			return SeriesSummary{}, err
 		}
 	}

@@ -82,6 +82,50 @@ async function run(){
  // Now exercise the server's actual staged ZIP restore, not just an in-process
  // reader. The downloaded package contains real Agent history and output.
  system('stop','komari-e2e-panel.service');
+ // Exercise the shipped offline maintenance command after real startup
+ // migration. Install only its verified new file, restart the actual server,
+ // then query through the same authenticated HTTP session. No TOTP scenario.
+ const compacted=path.join(root,'migration-compacted.db'),rollback=path.join(root,'migration-rollback');
+ execFileSync(path.join(root,'bin/komari'),['telemetry-compact','--confirm-offline','--retire-legacy','--output',compacted,'--backup-dir',rollback],{
+  cwd:path.join(root,'migration-panel'),timeout:180000,stdio:['ignore',fs.openSync(path.join(artifacts,'storage-compact-command.log'),'w'),'inherit'],
+ });
+ const compactProof=JSON.parse(fs.readFileSync(path.join(rollback,'compaction.json')));
+ expect(compactProof.retired_legacy).toBe(true);expect(compactProof.bytes).toBeGreaterThan(0);
+ expect(crypto.createHash('sha256').update(fs.readFileSync(compacted)).digest('hex')).toBe(compactProof.sha256);
+ for(const suffix of ['-wal','-shm'])expect(fs.existsSync(source+suffix)).toBe(false);
+ const compactChecks=JSON.parse(execFileSync('python3',['-c',`import sqlite3,json,sys
+# The command has exited and all three files are standalone. Immutable reads
+# must not create fresh WAL/SHM files immediately before the file exchange.
+source=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro&immutable=1',uri=True)
+target=sqlite3.connect('file:'+sys.argv[2]+'?mode=ro&immutable=1',uri=True)
+backup=sqlite3.connect('file:'+sys.argv[3]+'?mode=ro&immutable=1',uri=True)
+print(json.dumps({'source_rows':source.execute('SELECT COUNT(*) FROM metric_points').fetchone()[0],
+'backup_rows':backup.execute('SELECT COUNT(*) FROM metric_points').fetchone()[0],
+'retired':target.execute("SELECT value FROM metric_telemetry_progress WHERE task='legacy_tables_retired'").fetchone()[0],
+'legacy_objects':target.execute("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('metric_points','metric_rollups','metric_point_blocks','metric_rollup_blocks')").fetchone()[0],
+'integrity':target.execute('PRAGMA integrity_check').fetchone()[0],
+'summary_rows':target.execute('SELECT COUNT(*) FROM metric_telemetry_summary').fetchone()[0]}))`,source,compacted,path.join(rollback,'metrics.db')],{encoding:'utf8'}));
+ expect(compactChecks.source_rows).toBe(43200);expect(compactChecks.backup_rows).toBe(43200);
+ expect(compactChecks.retired).toBe(1);expect(compactChecks.legacy_objects).toBe(0);expect(compactChecks.integrity).toBe('ok');expect(compactChecks.summary_rows).toBeGreaterThan(0);
+ for(const suffix of ['-wal','-shm'])expect(fs.existsSync(source+suffix)).toBe(false);
+ fs.renameSync(source,source+'.pre-compact');fs.renameSync(compacted,source);
+ startPanel(path.join(root,'migration-panel'));
+ await expect.poll(async()=>{try{return(await context.request.get('/api/public')).status()}catch{return 0}},{timeout:30000}).toBe(200);
+ const migrationScope=JSON.parse(fs.readFileSync(path.join(root,'migration-manifest.json')));
+ const compactEnd=new Date();
+ const compactHistory=await context.request.post('/komari.metrics.v1.MetricsService/QueryMetrics',{
+  data:{agentIds:[migrationScope.agentId],metrics:['cpu.usage'],startTime:new Date(compactEnd.getTime()-86400_000).toISOString(),endTime:compactEnd.toISOString(),maxPoints:360,downsample:true},
+  headers:{Origin:base,'Connect-Protocol-Version':'1'},
+ });
+ expect(compactHistory.status()).toBe(200);const compactHistoryBody=await compactHistory.json();
+ expect(compactHistoryBody.series?.some(series=>series.queryPoints?.some(point=>Number(point.sampleCount)>0))).toBe(true);
+ const compactTraffic=await context.request.post('/komari.admin.v1.DashboardService/GetDashboardCharts',{
+  data:{charts:['DASHBOARD_CHART_TRAFFIC'],rankingLimit:5},headers:{Origin:base,'Connect-Protocol-Version':'1'},
+ });
+ expect(compactTraffic.status()).toBe(200);const compactBilling=await compactTraffic.json();
+ expect(compactBilling.charts?.traffic?.error||'').toBe('');expect(compactBilling.charts?.traffic?.daily).toHaveLength(30);
+ fs.writeFileSync(path.join(artifacts,'storage-compact.json'),JSON.stringify({proof:compactProof,checks:compactChecks,history:compactHistoryBody,billing:compactBilling},null,2));
+ system('stop','komari-e2e-panel.service');
  const restored=path.join(root,'restore-panel');fs.mkdirSync(path.join(restored,'data'),{recursive:true});
  fs.copyFileSync(path.join(root,'real-full-backup.zip'),path.join(restored,'data/backup.zip'));
  if(process.env.KOMARI_E2E_LOCAL==='1')execFileSync('chown',['-R',process.env.KOMARI_E2E_USER,restored]);

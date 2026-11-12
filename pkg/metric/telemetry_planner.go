@@ -135,7 +135,7 @@ func (t *Telemetry) planChart(ctx context.Context, tx *sql.Tx, q AggregateQuery,
 		}
 		count++
 		bytes += len(raw) + len(tags) + 256
-		if err = reserveChartMemory(ctx, 0, len(raw)+len(tags)+256); err != nil {
+		if err = reserveChartMemory(ctx, 0, len(c.segment)+len(c.series)+len(c.name)+len(c.entity)+4*len(tags)+512); err != nil {
 			break
 		}
 		if count > 100000 || bytes > 32<<20 {
@@ -159,7 +159,7 @@ func (t *Telemetry) planChart(ctx context.Context, tx *sql.Tx, q AggregateQuery,
 		if !matches {
 			continue
 		}
-		if err = json.Unmarshal([]byte(raw), &c.stats); err != nil {
+		if err = decodeChartStats(ctx, raw, &c.stats); err != nil {
 			break
 		}
 		owner := telemetryPlanOwner{c.segment, c.series}
@@ -249,7 +249,7 @@ func (t *Telemetry) planChart(ctx context.Context, tx *sql.Tx, q AggregateQuery,
 				groups[k] = &telemetryStats{}
 				tagsByGroup[k] = c.tags
 			}
-			if err = groups[k].merge(c.stats); err != nil {
+			if err = mergeChartStats(ctx, groups[k], c.stats); err != nil {
 				return nil, err
 			}
 			p.selected[owner] = append(p.selected[owner], telemetryPlanRange{c.bucket, c.bucket + c.resolution, c.through})

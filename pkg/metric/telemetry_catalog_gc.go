@@ -69,6 +69,14 @@ func (t *Telemetry) PruneCatalogChunk(ctx context.Context, now time.Time, limit 
 		if _, err = tx.ExecContext(ctx, t.bind("DELETE FROM "+t.table("series")+" WHERE id=? AND NOT EXISTS (SELECT 1 FROM "+t.table("members")+" WHERE series_id=?) AND NOT EXISTS (SELECT 1 FROM "+t.table("hot")+" WHERE series_id=?) AND NOT EXISTS (SELECT 1 FROM "+t.table("summary")+" WHERE series_id=?)"), sid, sid, sid, sid); err != nil {
 			return 0, err
 		}
+		if t.s.cfg.Driver == DriverSQLite {
+			// Erasure identity must survive GC so a recreated series cannot
+			// expose old immutable records. Unreferenced non-erased identities
+			// can be reclaimed with the same bounded catalog page.
+			if _, err = tx.ExecContext(ctx, "DELETE FROM "+t.table("series_keys")+" WHERE id=CAST(substr(?,2) AS INTEGER) AND '@'||id=? AND NOT EXISTS (SELECT 1 FROM "+t.table("series")+" WHERE id=?) AND NOT EXISTS (SELECT 1 FROM "+t.table("erasures")+" WHERE series_id=?)", sid, sid, sid, sid); err != nil {
+				return 0, err
+			}
+		}
 	}
 	if len(series) < limit {
 		if _, err = tx.ExecContext(ctx, t.bind("DELETE FROM "+t.table("leases")+" WHERE segment_id=?"), id); err != nil {

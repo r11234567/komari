@@ -171,7 +171,7 @@ func (t *Telemetry) ExportRawBatch(ctx context.Context, queries []Query) ([][]Po
 		if e != nil {
 			return nil, e
 		}
-		rows, e := t.s.reader().QueryContext(ctx, t.bind("SELECT e.series_id,e.through_id FROM "+t.table("erasures")+" e JOIN "+t.table("series")+" s ON s.id=e.series_id WHERE s.metric=?"+filter+" LIMIT 16385"), append([]any{physical.MetricName}, args...)...)
+		rows, e := t.s.reader().QueryContext(ctx, t.bind("SELECT "+t.canonicalSeriesSQL("s")+",e.through_id FROM "+t.table("erasures")+" e JOIN "+t.table("series")+" s ON s.id=e.series_id WHERE s.metric=?"+filter+" LIMIT 16385"), append([]any{physical.MetricName}, args...)...)
 		if e != nil {
 			return nil, e
 		}
@@ -385,6 +385,10 @@ func (t *Telemetry) IndexLegacyCoreSegment(ctx context.Context, id string) error
 	}
 	defer tx.Rollback()
 	for sid, m := range members {
+		sid, err = t.seriesKey(ctx, tx, sid)
+		if err != nil {
+			return err
+		}
 		q := "INSERT INTO " + t.table("members") + " (segment_id,series_id,first_observed,last_observed,points) VALUES (?,?,?,?,?)"
 		if t.s.cfg.Driver == DriverMySQL {
 			q += " ON DUPLICATE KEY UPDATE points=VALUES(points),first_observed=VALUES(first_observed),last_observed=VALUES(last_observed)"

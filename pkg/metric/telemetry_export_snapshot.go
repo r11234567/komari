@@ -100,7 +100,7 @@ func (t *Telemetry) FreezeExport(ctx context.Context, queries []Query, dir strin
 		if e != nil {
 			return out, e
 		}
-		rows, e := tx.QueryContext(ctx, t.bind("SELECT e.series_id,e.through_id FROM "+t.table("erasures")+" e JOIN "+t.table("series")+" s ON s.id=e.series_id WHERE s.metric=?"+filter+" LIMIT 16385"), append([]any{p.MetricName}, args...)...)
+		rows, e := tx.QueryContext(ctx, t.bind("SELECT "+t.canonicalSeriesSQL("s")+",e.through_id FROM "+t.table("erasures")+" e JOIN "+t.table("series")+" s ON s.id=e.series_id WHERE s.metric=?"+filter+" LIMIT 16385"), append([]any{p.MetricName}, args...)...)
 		if e != nil {
 			return out, e
 		}

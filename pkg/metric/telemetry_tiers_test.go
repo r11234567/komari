@@ -150,7 +150,7 @@ func TestTelemetryTiersOpenSegmentCannotPromoteAndSchemaUpgradePreservesOldLayou
 	}
 	defer upgraded.Close()
 	var version, layout int
-	if err := s.db.QueryRow("SELECT value FROM " + e.table("progress") + " WHERE task='schema_version'").Scan(&version); err != nil || version != 6 {
+	if err := s.db.QueryRow("SELECT value FROM " + e.table("progress") + " WHERE task='schema_version'").Scan(&version); err != nil || version != 7 {
 		t.Fatal(version, err)
 	}
 	if err := s.db.QueryRow("SELECT summary_version FROM " + e.table("segments")).Scan(&layout); err != nil || layout != 1 {
