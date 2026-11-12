@@ -4,8 +4,11 @@ mkdir -p "$E2E_ARTIFACTS"
 # Collection must not prevent the remaining cleanup after an earlier failure.
 set +e
 sudo journalctl -u komari-e2e-panel.service --no-pager -o short-iso > "$E2E_ARTIFACTS/server.log" 2>&1
-sudo journalctl -u komari-e2e-export.service --no-pager -o short-iso > "$E2E_ARTIFACTS/export-worker.log" 2>&1
-sudo systemctl stop komari-e2e-export.service komari-e2e-panel.service
+if [[ "${KOMARI_E2E_SKIP_CSV:-0}" != 1 ]]; then
+  sudo journalctl -u komari-e2e-export.service --no-pager -o short-iso > "$E2E_ARTIFACTS/export-worker.log" 2>&1
+  sudo systemctl stop komari-e2e-export.service
+fi
+sudo systemctl stop komari-e2e-panel.service
 sudo systemctl stop komari-e2e.slice
 sudo journalctl -u komari-e2e.service --no-pager -o short-iso > "$E2E_ARTIFACTS/agent.log" 2>&1
 sudo systemctl status komari-e2e.service --no-pager > "$E2E_ARTIFACTS/agent-status.txt" 2>&1

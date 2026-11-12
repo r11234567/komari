@@ -1,4 +1,5 @@
-// Actual restricted listener + built browser + native password/TOTP ceremony.
+// Actual restricted listener + built browser + native password login.
+// Full-feature runs may also exercise configured TOTP; database-only runs do not.
 // Only the historical metric input is explicitly synthetic legacy test data.
 const { chromium, expect } = require('@playwright/test');
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
@@ -10,12 +11,14 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const system=(...args)=>execFileSync('sudo',['systemctl',...args],{timeout:30000});
 const source=path.join(root,'migration-panel/data/metrics.db');
 const credentials=JSON.parse(fs.readFileSync(path.join(root,'migration-credentials.json')));
+if(skipCSV&&credentials.secret)throw Error('Database-only migration fixture must use password login without TOTP');
 function totp(secret){const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';const bits=[...secret.toUpperCase().replace(/=+$/,'')].map(c=>alphabet.indexOf(c).toString(2).padStart(5,'0')).join('');const key=Buffer.from((bits.match(/.{8}/g)||[]).map(b=>parseInt(b,2)));const t=Buffer.alloc(8);t.writeBigUInt64BE(BigInt(Math.floor(Date.now()/30000)));const h=crypto.createHmac('sha1',key).update(t).digest();return String((h.readUInt32BE(h.at(-1)&15)&0x7fffffff)%1000000).padStart(6,'0');}
 function startPanel(directory){execFileSync('sudo',['systemd-run','--unit=komari-e2e-panel','--collect','--slice=komari-e2e.slice',`--property=User=${process.env.KOMARI_E2E_USER || process.env.USER}`,`--property=WorkingDirectory=${directory}`,'--property=CPUQuota=100%','--property=MemoryMax=1G',path.join(root,'bin/komari'),'server','--listen','127.0.0.1:29444'],{timeout:30000});}
 function startWorker(directory=path.join(root,'panel')){execFileSync('sudo',['systemd-run','--unit=komari-e2e-export','--collect','--slice=komari-e2e.slice',`--property=User=${process.env.KOMARI_E2E_USER || process.env.USER}`,`--property=WorkingDirectory=${directory}`,'--property=CPUQuota=4%','--property=CPUQuotaPeriodSec=100ms','--property=MemoryMax=128M','--property=MemorySwapMax=0','--setenv=GOMEMLIMIT=90MiB','--setenv=GOMAXPROCS=1',path.join(root,'bin/komari'),'export-worker','--queue',path.join(directory,'data/exports-v2'),`--instance-cgroup=/sys/fs/cgroup${execFileSync('systemctl',['show','komari-e2e-panel.service','--property=ControlGroup','--value'],{encoding:'utf8'}).trim()}`],{timeout:30000});}
 let browser,context,locker;
 async function run(){
- system('stop','komari-e2e-export.service','komari-e2e-panel.service');
+ if(skipCSV)system('stop','komari-e2e-panel.service');
+ else system('stop','komari-e2e-export.service','komari-e2e-panel.service');
  const marker=path.join(root,'migration-lock-ready'),release=path.join(root,'migration-lock-release');
  locker=spawn('python3',['-c',`import sqlite3,time,pathlib,sys\nc=sqlite3.connect(sys.argv[1],timeout=5,isolation_level=None)\nc.execute('BEGIN IMMEDIATE')\npathlib.Path(sys.argv[2]).touch()\nwhile not pathlib.Path(sys.argv[3]).exists(): time.sleep(.05)\nc.rollback()`,source,marker,release],{stdio:['ignore','ignore','inherit']});
  await expect.poll(()=>fs.existsSync(marker),{timeout:10000}).toBe(true);
@@ -121,10 +124,10 @@ async function run(){
   const resumedBytes=await (await original.request.get(`/api/admin/history/export/${resumed.id}/download`)).body();
   expect(crypto.createHash('sha256').update(resumedBytes).digest('hex')).toBe(resumed.sha256);
   fs.writeFileSync(path.join(artifacts,'export-restored-tasks.json'),JSON.stringify({verified,resumed},null,2));
- } finally { await original.close();system('stop','komari-e2e-export.service'); }
+ } finally { await original.close();if(!skipCSV)system('stop','komari-e2e-export.service'); }
 }
 run().catch(async e=>{console.error(e);process.exitCode=1;fs.writeFileSync(path.join(artifacts,'storage-upgrade-error.txt'),e.stack||String(e));if(context)for(const page of context.pages())await page.screenshot({path:path.join(artifacts,'storage-upgrade-error.png'),fullPage:true}).catch(()=>{});}).finally(async()=>{
  if(locker&&locker.exitCode===null)locker.kill();if(context){await context.tracing.stop({path:path.join(artifacts,'storage-upgrade-trace.zip')});await context.close();}if(browser)await browser.close();
  execFileSync('sudo',['journalctl','-u','komari-e2e-panel.service','--no-pager','-o','short-iso'],{stdio:['ignore',fs.openSync(path.join(artifacts,'storage-upgrade-server.log'),'w'),'inherit']});
- system('stop','komari-e2e-panel.service');startPanel(path.join(root,'panel'));startWorker();
+ system('stop','komari-e2e-panel.service');startPanel(path.join(root,'panel'));if(!skipCSV)startWorker();
 });

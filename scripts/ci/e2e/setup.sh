@@ -75,6 +75,7 @@ for attempt in $(seq 1 60); do
   if [[ "$attempt" = 60 ]]; then exit 1; fi
   sleep 1
 done
+if [[ "${KOMARI_E2E_SKIP_CSV:-0}" != 1 ]]; then
 sudo systemd-run --unit=komari-e2e-export --collect \
 	--slice=komari-e2e.slice \
   --property="User=$runner_user" --property="WorkingDirectory=$E2E_ROOT/panel" \
@@ -91,6 +92,9 @@ for attempt in $(seq 1 30); do
   fi
   sleep 1
 done
-systemctl show komari-e2e-panel.service komari-e2e-export.service komari-e2e.slice \
+systemctl show komari-e2e-export.service \
   --property=ControlGroup,CPUQuotaPerSecUSec,MemoryMax > "$E2E_ARTIFACTS/resource-groups.txt"
+fi
+systemctl show komari-e2e-panel.service komari-e2e.slice \
+  --property=ControlGroup,CPUQuotaPerSecUSec,MemoryMax >> "$E2E_ARTIFACTS/resource-groups.txt"
 bash "$(dirname "$0")/install-agent.sh"

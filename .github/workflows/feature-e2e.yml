@@ -34,6 +34,7 @@ jobs:
       GOMEMLIMIT: 3GiB
       NODE_OPTIONS: --max-old-space-size=4096
       CGO_ENABLED: '1'
+      KOMARI_E2E_SKIP_CSV: ${{ inputs.skip_csv && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -72,13 +73,21 @@ jobs:
       - name: Start an isolated HTTPS panel and install a nonroot Agent
         run: bash scripts/ci/run-audit-check.sh e2e-setup bash scripts/ci/e2e/setup.sh
       - name: Real enrollment, fresh 2FA, terminal, clipboard and file round trips
-        if: ${{ !inputs.database_only || inputs.skip_csv }}
+        if: ${{ !inputs.database_only && !inputs.skip_csv }}
         env:
           KOMARI_E2E_SKIP_CSV: ${{ inputs.skip_csv && '1' || '0' }}
           NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
           NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
         run: |
           bash scripts/ci/run-audit-check.sh e2e-browser \
+            "$E2E_TOOLS/node_modules/.bin/playwright" test --config scripts/ci/e2e/playwright.config.cjs
+      - name: Database charts, concurrent reads, ledgers, archives and backup with password login
+        if: inputs.skip_csv
+        env:
+          NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
+        run: |
+          bash scripts/ci/run-audit-check.sh e2e-database-browser \
             "$E2E_TOOLS/node_modules/.bin/playwright" test --config scripts/ci/e2e/playwright.config.cjs
       - name: Prepare only database qualification with an actual reporting Agent and TCP probe
         if: ${{ inputs.database_only && !inputs.skip_csv }}
@@ -97,12 +106,18 @@ jobs:
         if: ${{ !inputs.database_only || inputs.skip_csv }}
         run: bash scripts/ci/run-audit-check.sh e2e-migration-fixture go run ./scripts/ci/migration-fixture
       - name: Verify automatic restricted upgrade, native password and TOTP, failure and retry
-        if: ${{ !inputs.database_only || inputs.skip_csv }}
+        if: ${{ !inputs.database_only && !inputs.skip_csv }}
         env:
           KOMARI_E2E_SKIP_CSV: ${{ inputs.skip_csv && '1' || '0' }}
           NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
           NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
         run: bash scripts/ci/run-audit-check.sh e2e-storage-upgrade node scripts/ci/e2e/storage-upgrade.cjs
+      - name: Database startup migration, failure recovery and ZIP restore with password login
+        if: inputs.skip_csv
+        env:
+          NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
+        run: bash scripts/ci/run-audit-check.sh e2e-database-upgrade node scripts/ci/e2e/storage-upgrade.cjs
       - name: Prepare explicitly synthetic large cold CSV input in the isolated fixture
         if: ${{ inputs.export_qualification && !inputs.skip_csv }}
         run: |
