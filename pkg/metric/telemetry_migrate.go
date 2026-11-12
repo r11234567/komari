@@ -436,7 +436,7 @@ func (t *Telemetry) commitLegacyCells(ctx context.Context, key, name, entity str
 		if _, err = tx.ExecContext(ctx, t.bind(seriesSQL), c.series, name, entity, c.tags); err != nil {
 			return err
 		}
-		encoded, e := c.stats.encode()
+		encoded, e := c.stats.encodeSealed()
 		if e != nil {
 			return e
 		}

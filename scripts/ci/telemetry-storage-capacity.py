@@ -55,6 +55,7 @@ def main():
     parser.add_argument('--maintained-copy-db', type=Path, required=True)
     parser.add_argument('--archive', type=Path, required=True)
     parser.add_argument('--workspace', type=Path, required=True)
+    parser.add_argument('--stats-audit', type=Path, help='Exact decoded before/after statistics audit from the Go incident-copy test')
     args = parser.parse_args()
     source = args.original_db.resolve(strict=True)
     maintained = args.maintained_copy_db.resolve(strict=True)
@@ -96,8 +97,15 @@ def main():
         report['segment_states'] = db.execute(
             'SELECT state,COUNT(*),SUM(points),SUM(file_bytes) FROM metric_telemetry_segments GROUP BY state').fetchall()
         report['summary_tiers'] = db.execute(
-            "SELECT resolution,COUNT(*),SUM(json_extract(stats,'$.attempts')),SUM(LENGTH(stats)) "
+            "SELECT resolution,COUNT(*),SUM(CASE WHEN json_type(stats)='object' THEN json_extract(stats,'$.attempts') ELSE 0 END),SUM(LENGTH(stats)),SUM(CASE WHEN json_type(stats)='text' THEN 1 ELSE 0 END) "
             'FROM metric_telemetry_summary GROUP BY resolution ORDER BY resolution').fetchall()
+        report['summary_tier_columns'] = ['resolution', 'cells', 'attempts_in_unpacked_json_only', 'stats_bytes', 'packed_cells']
+        if args.stats_audit:
+            audit = json.loads(args.stats_audit.read_text())
+            assert audit['canonical_sha256_before'] == audit['canonical_sha256_after'], 'Decoded statistics changed'
+            assert audit['rows'] == sum(row[1] for row in report['summary_tiers']), 'Statistics audit population differs'
+            assert audit['stats_after_bytes'] == sum(row[3] for row in report['summary_tiers']), 'Statistics audit representation differs'
+            report['statistics_exact_audit'] = audit
         for sid, points, checksum, size in db.execute(
                 "SELECT id,points,checksum,file_bytes FROM metric_telemetry_segments "
                 "WHERE state IN ('archived','complete','deleting')"):

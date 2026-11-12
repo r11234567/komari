@@ -254,12 +254,12 @@ func (t *Telemetry) reserveExportSegments(ctx context.Context, queries []Query, 
 			return nil, e
 		}
 		gapArgs := append([]any{physical.MetricName, q.End.UnixNano(), q.Start.UnixNano()}, args...)
-		e = t.s.reader().QueryRowContext(ctx, t.bind("SELECT g.segment_id FROM "+t.table("gaps")+" g JOIN "+t.table("series")+" s ON s.id=g.series_id JOIN "+t.table("segments")+" a ON a.id=g.segment_id LEFT JOIN "+t.table("erasures")+" e ON e.series_id=s.id WHERE s.metric=? AND g.first_observed<=? AND g.last_observed>=? AND (e.through_id IS NULL OR a.last_id>e.through_id)"+filter+" LIMIT 1"), gapArgs...).Scan(&missing)
-		if e == nil {
-			return nil, fmt.Errorf("%w: legacy raw was already removed; select summary mode", ErrTelemetryCoverage)
-		}
-		if !errors.Is(e, sql.ErrNoRows) {
+		hasGap, e := t.exportHasLegacyGap(ctx, t.s.reader(), "s.metric=? AND g.first_observed<=? AND g.last_observed>=? AND (e.through_id IS NULL OR a.last_id>e.through_id)"+filter, gapArgs, q.Start.UnixNano(), q.End.UnixNano())
+		if e != nil {
 			return nil, e
+		}
+		if hasGap {
+			return nil, fmt.Errorf("%w: legacy raw was already removed; select summary mode", ErrTelemetryCoverage)
 		}
 		after := ""
 		for {

@@ -427,9 +427,8 @@ func (q *Queue) Control(ctx context.Context, owner, id, action string) error {
 	}
 	if action == "resume" && j.Status == "paused" {
 		j.Status = "queued"
-		if j.Committed.Offset > 0 {
-			j.Status = "recovering"
-		}
+		// The exclusive worker decides whether its own unchanged checkpoint
+		// can continue. A new worker or changed file still performs recovery.
 		j.WaitReason = ""
 	}
 	if action == "cancel" && j.Status == "failed" {

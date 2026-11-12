@@ -253,7 +253,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	} else if err != nil {
 		return err
 	}
-	if version != 5 && version != 4 && version != 3 && version != 2 && version != 1 && version != -1 {
+	if version != 6 && version != 5 && version != 4 && version != 3 && version != 2 && version != 1 && version != -1 {
 		return fmt.Errorf("unsupported telemetry SQL schema version %d", version)
 	}
 	// Small integer/CHAR keys keep these DDLs portable across SQLite, MySQL and
@@ -295,6 +295,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 		{"segments", "summary_version", "INTEGER NOT NULL DEFAULT 1"},
 		{"summary", "input_through", "BIGINT NOT NULL DEFAULT 0"},
 		{"summary", "promoted_through", "BIGINT NOT NULL DEFAULT 0"},
+		{"gaps", "ranges", "VARCHAR(14000) NOT NULL DEFAULT ''"},
 	} {
 		rows, e := t.s.db.QueryContext(ctx, "SELECT "+column.name+" FROM "+t.table(column.table)+" LIMIT 0")
 		if e == nil {
@@ -361,7 +362,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	// Core schema v1/v2 was never an application format. Existing segments are
 	// indexed lazily from their owned hot rows or verified immutable archives;
 	// opening the store never performs a historical scan.
-	_, err = t.s.db.ExecContext(ctx, "UPDATE "+progressTable+" SET value=5 WHERE task='schema_version' AND value IN (-1,1,2,3,4)")
+	_, err = t.s.db.ExecContext(ctx, "UPDATE "+progressTable+" SET value=6 WHERE task='schema_version' AND value IN (-1,1,2,3,4,5)")
 	if err != nil {
 		return err
 	}

@@ -36,6 +36,7 @@ type Worker struct {
 	activeJob        string
 	RequirePolicy    bool
 	resources        resourceSampler
+	continuations    map[string]checkpointContinuation
 }
 type Availability struct {
 	Available     bool           `json:"available"`
@@ -295,7 +296,13 @@ func (w *Worker) Step(parent context.Context, j *Job) error {
 			}
 		}
 	}()
-	recovering := j.Status == "recovering" || j.Status == "retry_wait"
+	prefixTrusted := j.Committed.Offset == 0 || w.canContinueCheckpoint(j)
+	recovering := j.Status == "recovering" || j.Status == "retry_wait" || !prefixTrusted
+	if recovering {
+		prefixTrusted = j.Committed.Offset == 0
+		delete(w.continuations, j.ID)
+		j.Status = "recovering"
+	}
 	if !recovering && j.Status != "publishing" {
 		j.Status = "running"
 	}
@@ -319,6 +326,7 @@ func (w *Worker) Step(parent context.Context, j *Job) error {
 		j.Status = "recovering"
 		err = w.verifyCheckpoint(ctx, j)
 		if err == nil {
+			prefixTrusted = true
 			j.Status, j.WaitReason = "running", ""
 			err = w.Queue.Save(ctx, j)
 		}
@@ -327,6 +335,11 @@ func (w *Worker) Step(parent context.Context, j *Job) error {
 		err = w.step(ctx, j)
 	}
 	if err == nil {
+		if prefixTrusted {
+			if e := w.rememberCheckpoint(j); e != nil {
+				return e
+			}
+		}
 		return nil
 	}
 	reasonMu.Lock()
@@ -355,6 +368,13 @@ func (w *Worker) Step(parent context.Context, j *Job) error {
 	case "pause", "quota_configuration", "instance_state_unavailable", "foreground_latency", "ingestion_backlog", "telemetry_backlog", "storage_unavailable", "disk_space":
 		j.Status = "paused"
 		j.WaitReason = why
+		// Only the writer which reached this checkpoint can establish this
+		// volatile proof. Never persist it across a worker restart or restore.
+		if prefixTrusted {
+			if e := w.rememberCheckpoint(j); e != nil {
+				return e
+			}
+		}
 	case "cancel":
 		j.Status = "cancelled"
 		j.Phase = "cancelled"
@@ -366,6 +386,7 @@ func (w *Worker) Step(parent context.Context, j *Job) error {
 		j.Error = errExportInvalidated.Error()
 		w.removeWork(j)
 	default:
+		delete(w.continuations, j.ID)
 		j.Status = "failed"
 		j.Error = err.Error()
 		j.WaitReason = ""
@@ -378,6 +399,7 @@ func (w *Worker) Step(parent context.Context, j *Job) error {
 	return w.Queue.Save(context.Background(), j)
 }
 func (w *Worker) removeWork(j *Job) {
+	delete(w.continuations, j.ID)
 	for _, suffix := range []string{".csv.part", ".snapshot", ".spool.db", ".spool.db-wal", ".spool.db-shm"} {
 		p := w.Queue.Path(j.ID, suffix)
 		if suffix == ".snapshot" {

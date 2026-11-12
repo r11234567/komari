@@ -97,7 +97,7 @@ func (t *Telemetry) PromoteSummariesChunk(ctx context.Context, now time.Time, li
 			if n == 0 || n > int(tier.target/tier.source) {
 				return 0, ErrTelemetryCoverage
 			}
-			encoded, e := stats.encode()
+			encoded, e := stats.encodeSealed()
 			if e != nil {
 				return 0, e
 			}

@@ -75,6 +75,21 @@ func telemetryExternal(t *testing.T, cfg Config) {
 		t.Fatal(err)
 	}
 	promoteTelemetryAll(t, e, now.Add(time.Hour))
+	beforeStats, _ := statsSemanticHash(t, e)
+	statsCursor := ""
+	for {
+		n, next, compactErr := e.CompactStatsChunk(ctx, statsCursor, 2)
+		if compactErr != nil {
+			t.Fatal("external SQL statistics compaction", compactErr)
+		}
+		statsCursor = next
+		if n == 0 {
+			break
+		}
+	}
+	if afterStats, _ := statsSemanticHash(t, e); beforeStats != afterStats {
+		t.Fatal("external SQL compaction changed statistics")
+	}
 	if n, err := e.PruneSummaries(ctx, "cpu", 30*24*time.Hour, now.Add(4*time.Hour), 512); err != nil || n == 0 {
 		t.Fatal("external tier handoff/GC", n, err)
 	}
@@ -116,4 +131,5 @@ func telemetryExternal(t *testing.T, cfg Config) {
 	if err != nil || !ran {
 		t.Fatal("external SQL scheduler", ran, err)
 	}
+	testTelemetryPackedGapExports(t, e, now)
 }

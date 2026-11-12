@@ -69,7 +69,7 @@ func (t *Telemetry) PromoteLegacyChunk(ctx context.Context, now time.Time, limit
 		if err = prior.merge(c.stats); err != nil {
 			return 0, err
 		}
-		encoded, err := prior.encode()
+		encoded, err := prior.encodeSealed()
 		if err != nil {
 			return 0, err
 		}

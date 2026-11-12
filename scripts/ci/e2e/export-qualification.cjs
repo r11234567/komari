@@ -149,15 +149,21 @@ async function run() {
   let paused=false,restarted=false,reduced=false,restored=false,reducedAt;
   let nextPairAt=started+300_000;
   const measurePair = async () => {
-    const id=performancePairs.length+1, pair={id,anchor:Date.now(),capacity,state:'pausing',baseline:{},during:{},fingerprints:[]};
+    const id=performancePairs.length+1, pair={id,anchor:Date.now(),capacity,state:'pausing',baseline:{},during:{},fingerprints:[],control_observations:[]};
     performancePairs.push(pair);
     const savePair = () => fs.writeFileSync(path.join(artifacts,'export-performance-pairs.json'),JSON.stringify(performancePairs,null,2));
+    const readPairState = async () => {
+      const current=(await api(`/api/admin/history/export/${job.id}`,undefined,'GET')).body.data;
+      job=current;latestStatus=current.status;
+      pair.control_observations.push({at:new Date().toISOString(),status:current.status,phase:current.phase,wait_reason:current.wait_reason,output_bytes:current.output_bytes,verification:current.checkpoint_verification});
+      savePair();return current;
+    };
     savePair();
     const pauseAt=Date.now();
     await api(`/api/admin/history/export/${job.id}/pause`,{});
     let state;
     do {
-      state=(await api(`/api/admin/history/export/${job.id}`,undefined,'GET')).body.data;
+      state=await readPairState();
       if(state.status==='paused') break;
       assert(Date.now()-pauseAt<1000,'Running pause did not respond within one second');
       await sleep(25);
@@ -171,13 +177,13 @@ async function run() {
       savePair();
       await sleep(500);
     }
-    state=(await api(`/api/admin/history/export/${job.id}`,undefined,'GET')).body.data;
+    state=await readPairState();
     assert(state.status==='paused' && state.output_bytes===pausedBytes,'Export advanced during its no-export baseline');
     await api(`/api/admin/history/export/${job.id}/resume`,{});
     userPausedMS+=Date.now()-offAt;
     const resumeAt=Date.now();
     do {
-      state=(await api(`/api/admin/history/export/${job.id}`,undefined,'GET')).body.data;
+      state=await readPairState();
       assert(!['done','failed','cancelled','expired'].includes(state.status),'Export ended before the paired running window');
       if(state.status==='running') break;
       assert(Date.now()-resumeAt<30000,'Export did not resume for paired measurement');
@@ -192,7 +198,7 @@ async function run() {
       savePair();
       await sleep(500);
     }
-    state=(await api(`/api/admin/history/export/${job.id}`,undefined,'GET')).body.data;
+    state=await readPairState();
     assert(state.output_bytes>pausedBytes,'No actual CSV work occurred during paired measurement');
     pair.output_bytes_after=state.output_bytes;pair.state='complete';
     paused=true;measurementPhase='live';savePair();
