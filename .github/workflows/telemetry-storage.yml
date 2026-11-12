@@ -8,6 +8,33 @@ concurrency:
   group: telemetry-storage-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  independent:
+    name: Telemetry / historical matrix and isolated decoder resources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOMAXPROCS: '2'
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Raw-oracle historical windows after migration, retention and restart
+        env:
+          KOMARI_TELEMETRY_INDEPENDENT_OUTPUT: ${{ github.workspace }}/ci-artifacts/independent
+        run: bash scripts/ci/run-audit-check.sh telemetry-history-matrix go test -race -count=1 -timeout=12m ./pkg/metric -run '^TestTelemetryIndependentHistoricalMatrix$'
+      - name: Build separate archive measurement process
+        run: go test -c ./pkg/metric -o /var/tmp/komari-metric-resource.test
+      - name: Isolated decoder CPU and process RSS with enforced limits
+        run: sudo -n python3 scripts/ci/telemetry-independent-resources.py --binary /var/tmp/komari-metric-resource.test --output ci-artifacts/independent/archive
+      - name: Retain independent measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: telemetry-independent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
   storage:
     name: Telemetry / SQLite, PostgreSQL, MySQL and MariaDB
     runs-on: ubuntu-24.04

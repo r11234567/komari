@@ -1,0 +1,530 @@
+{
+  "date": "2026-11-12",
+  "runtime_source": "2df97821e6cc863b4fdb14aa8163a070bd5241dd",
+  "scope": "finite independent database verification; no GitHub result query or local sustained qualification",
+  "historical_matrix": {
+    "passed": true,
+    "windows": [
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 1,
+        "interval_seconds": 10,
+        "mode": "online",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 6,
+        "interval_seconds": 60,
+        "mode": "online",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 12,
+        "interval_seconds": 120,
+        "mode": "online",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 24,
+        "interval_seconds": 240,
+        "mode": "online",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 336,
+        "hot_rows_after_restart": 0,
+        "hours": 168,
+        "interval_seconds": 1800,
+        "mode": "online",
+        "ping.latency_ms_buckets": 336,
+        "ping_attempts": 1008,
+        "ping_failures": 144,
+        "raw_points": 2017
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 360,
+        "interval_seconds": 3600,
+        "mode": "online",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 720,
+        "interval_seconds": 7200,
+        "mode": "online",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 1080,
+        "interval_seconds": 10800,
+        "mode": "online",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 1440,
+        "interval_seconds": 14400,
+        "mode": "online",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 300,
+        "hot_rows_after_restart": 0,
+        "hours": 1800,
+        "interval_seconds": 21600,
+        "mode": "online",
+        "ping.latency_ms_buckets": 300,
+        "ping_attempts": 900,
+        "ping_failures": 128,
+        "raw_points": 1801
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 309,
+        "hot_rows_after_restart": 0,
+        "hours": 2160,
+        "interval_seconds": 25200,
+        "mode": "online",
+        "ping.latency_ms_buckets": 309,
+        "ping_attempts": 927,
+        "ping_failures": 133,
+        "raw_points": 1855
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 2520,
+        "interval_seconds": 25200,
+        "mode": "online",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 1,
+        "interval_seconds": 10,
+        "mode": "migrated",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 6,
+        "interval_seconds": 60,
+        "mode": "migrated",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 12,
+        "interval_seconds": 120,
+        "mode": "migrated",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 24,
+        "interval_seconds": 240,
+        "mode": "migrated",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 336,
+        "hot_rows_after_restart": 0,
+        "hours": 168,
+        "interval_seconds": 1800,
+        "mode": "migrated",
+        "ping.latency_ms_buckets": 336,
+        "ping_attempts": 1008,
+        "ping_failures": 144,
+        "raw_points": 2017
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 360,
+        "interval_seconds": 3600,
+        "mode": "migrated",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 720,
+        "interval_seconds": 7200,
+        "mode": "migrated",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 1080,
+        "interval_seconds": 10800,
+        "mode": "migrated",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 1440,
+        "interval_seconds": 14400,
+        "mode": "migrated",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 300,
+        "hot_rows_after_restart": 0,
+        "hours": 1800,
+        "interval_seconds": 21600,
+        "mode": "migrated",
+        "ping.latency_ms_buckets": 300,
+        "ping_attempts": 900,
+        "ping_failures": 128,
+        "raw_points": 1801
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 309,
+        "hot_rows_after_restart": 0,
+        "hours": 2160,
+        "interval_seconds": 25200,
+        "mode": "migrated",
+        "ping.latency_ms_buckets": 309,
+        "ping_attempts": 927,
+        "ping_failures": 133,
+        "raw_points": 1855
+      },
+      {
+        "cold_root_closed": true,
+        "cpu_buckets": 360,
+        "hot_rows_after_restart": 0,
+        "hours": 2520,
+        "interval_seconds": 25200,
+        "mode": "migrated",
+        "ping.latency_ms_buckets": 360,
+        "ping_attempts": 1080,
+        "ping_failures": 154,
+        "raw_points": 2161
+      }
+    ]
+  },
+  "archive_resources": {
+    "synthetic": true,
+    "preparation_measured_separately": true,
+    "measurement": "production VisitExportInputProgress; decode, scope, checksum, streaming callback",
+    "cases": [
+      {
+        "compressed_bytes_read": 499637,
+        "cpu.max": "10000 100000",
+        "cpu.stat": "usage_usec 371021\nuser_usec 350020\nsystem_usec 21001\nnice_usec 0\nnr_periods 39\nnr_throttled 35\nthrottled_usec 3415117\nnr_bursts 0\nburst_usec 0",
+        "decoded_records": 65536,
+        "frames_or_streams": 512,
+        "gomaxprocs": 1,
+        "memory.max": "134217728",
+        "memory.peak": "17260544",
+        "memory.swap.max": "0",
+        "name": "small_repetitive_frames",
+        "plain_record_bytes": 13188910,
+        "points": 65536,
+        "proc_vmhwm": "15856 kB",
+        "process_maxrss_kib": 15580,
+        "queries": 2,
+        "sha256": "3fae6c330ae121a2864cb72085cb8adf776aab1cb90b296809b23aa35dffa3f0",
+        "system_cpu_seconds": 0.006388,
+        "user_cpu_seconds": 0.342714,
+        "wall_seconds": 3.451214815,
+        "fresh_process": true,
+        "page_cache": "warm/unspecified; not a cold disk benchmark"
+      },
+      {
+        "compressed_bytes_read": 26604201,
+        "cpu.max": "10000 100000",
+        "cpu.stat": "usage_usec 505195\nuser_usec 464148\nsystem_usec 41047\nnice_usec 0\nnr_periods 52\nnr_throttled 49\nthrottled_usec 4799932\nnr_bursts 0\nburst_usec 0",
+        "decoded_records": 16384,
+        "frames_or_streams": 128,
+        "gomaxprocs": 1,
+        "memory.max": "134217728",
+        "memory.peak": "18329600",
+        "memory.swap.max": "0",
+        "name": "entropy_labels_frames",
+        "plain_record_bytes": 54077252,
+        "points": 16384,
+        "proc_vmhwm": "16396 kB",
+        "process_maxrss_kib": 16396,
+        "queries": 2,
+        "sha256": "47870f510429db881ab4cf4e5f8f53c4968238e51f48dd05d5f285d22ee4899f",
+        "system_cpu_seconds": 0.026001,
+        "user_cpu_seconds": 0.456625,
+        "wall_seconds": 4.831114867,
+        "fresh_process": true,
+        "page_cache": "warm/unspecified; not a cold disk benchmark"
+      },
+      {
+        "compressed_bytes_read": 64760972,
+        "cpu.max": "10000 100000",
+        "cpu.stat": "usage_usec 405337\nuser_usec 372063\nsystem_usec 33273\nnice_usec 0\nnr_periods 41\nnr_throttled 39\nthrottled_usec 3586043\nnr_bursts 0\nburst_usec 0",
+        "decoded_records": 1024,
+        "frames_or_streams": 64,
+        "gomaxprocs": 1,
+        "memory.max": "134217728",
+        "memory.peak": "18141184",
+        "memory.swap.max": "0",
+        "name": "near_record_limit_frames",
+        "plain_record_bytes": 64744908,
+        "points": 1024,
+        "proc_vmhwm": "16716 kB",
+        "process_maxrss_kib": 16716,
+        "queries": 2,
+        "sha256": "1f43f97fe2ac2487e98ce173c5d0f7d3e70cc79a0847768f4cc1eca6bc1a4d14",
+        "system_cpu_seconds": 0.018875999999999997,
+        "user_cpu_seconds": 0.364865,
+        "wall_seconds": 3.770998781,
+        "fresh_process": true,
+        "page_cache": "warm/unspecified; not a cold disk benchmark"
+      },
+      {
+        "compressed_bytes_read": 467560,
+        "cpu.max": "10000 100000",
+        "cpu.stat": "usage_usec 301804\nuser_usec 277977\nsystem_usec 23826\nnice_usec 0\nnr_periods 31\nnr_throttled 29\nthrottled_usec 2659027\nnr_bursts 0\nburst_usec 0",
+        "decoded_records": 65536,
+        "frames_or_streams": 1,
+        "gomaxprocs": 1,
+        "memory.max": "134217728",
+        "memory.peak": "19296256",
+        "memory.swap.max": "0",
+        "name": "legacy_single_stream",
+        "plain_record_bytes": 13188910,
+        "points": 65536,
+        "proc_vmhwm": "17936 kB",
+        "process_maxrss_kib": 17700,
+        "queries": 2,
+        "sha256": "3fae6c330ae121a2864cb72085cb8adf776aab1cb90b296809b23aa35dffa3f0",
+        "system_cpu_seconds": 0.006249999999999999,
+        "user_cpu_seconds": 0.27757200000000004,
+        "wall_seconds": 2.734138076,
+        "fresh_process": true,
+        "page_cache": "warm/unspecified; not a cold disk benchmark"
+      }
+    ]
+  },
+  "capacity": {
+    "verdict": "measurement complete; storage-size optimization NOT accepted",
+    "source": "consistent copy of stopped incident migration fixture; inherited schema 4 upgraded by current runtime to schema 5",
+    "cutoff": "2026-07-20T13:05:52.959659Z",
+    "maintenance": {
+      "legacy_promoted": 299105,
+      "summaries_pruned": 0
+    },
+    "method": "SQLite backup, production schema upgrade and bounded legacy promotion/pruning at original capture cutoff; separate legacy-only and telemetry-only projections; VACUUM each projection",
+    "same_population": {
+      "legacy_raw_points": 11583271,
+      "legacy_rollback_tables_preserved": true,
+      "segment_states": [
+        [
+          "complete",
+          12620,
+          11583271,
+          151590607
+        ],
+        [
+          "legacy",
+          34867,
+          0,
+          0
+        ]
+      ],
+      "archive_files_sha_verified": 12620,
+      "catalog_archive_points": 11583271,
+      "checks": "full compressed-file SHA/length and catalog raw counts, not a full legacy-vs-archive observation hash",
+      "legacy_table_content_sha256": {
+        "metric_compaction_watermarks": "a45325a84383a9a9543b9c854fa9def1c1af9ad31cbfa493f9af32ce07f9614d",
+        "metric_definitions": "b8b91cef4ff95a16fb50e6c7477d049975fc9924256651a19b7d885f40bf7fd8",
+        "metric_point_axes": "3255a273e234d434ec9a92d8434ba85af899a19103c791c51575ada1429e544c",
+        "metric_point_blocks": "8ffb10d1b7ae7f16b17dc36cdf4da0e3b5d607bb53d5a833e9118fadf8bbb9b3",
+        "metric_point_values": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "metric_rollup_axes": "900a1bf08a3db98537f66f6a67a0563ae72119957d0db9babb28e4528b4c5009",
+        "metric_rollup_blocks": "033dabe5045187fda954238f335bad77d17c599cc6b266f5f99189f842d23bc8",
+        "metric_rollup_values": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "metric_series": "4ffc11e3659a2eb323a2a2fa16102646dabc6cd25c9cd8c181891ae48d764073"
+      },
+      "source_legacy_tables_equal_projection": true
+    },
+    "legacy_compact_bytes": 85028864,
+    "telemetry_online_compact_bytes": 649359360,
+    "archive_bytes": 151590607,
+    "online_plus_archive_bytes": 800949967,
+    "ratio": {
+      "online_vs_legacy_compact": 7.636928561106027,
+      "online_plus_archive_vs_legacy_compact": 9.41974206547085
+    },
+    "online_object_groups_bytes": {
+      "gaps": 103546880,
+      "members": 28770304,
+      "progress": 5058560,
+      "receipts": 18370560,
+      "segments": 8708096,
+      "summary": 480276480
+    },
+    "remaining_online_objects_bytes": 4628480,
+    "original_mixed_file_bytes": 948400128,
+    "mixed_file_after_maintenance_bytes": 1011032064,
+    "mixed_freelist_pages_after_maintenance": 58974,
+    "page_size": 4096,
+    "online_table_rows": {
+      "metric_definitions": 25,
+      "metric_telemetry_progress": 34877,
+      "metric_telemetry_receipts": 56149,
+      "metric_telemetry_series": 203,
+      "metric_telemetry_hot": 0,
+      "metric_telemetry_segments": 47487,
+      "metric_telemetry_summary": 234694,
+      "metric_telemetry_outbox": 0,
+      "metric_telemetry_leases": 0,
+      "metric_telemetry_work": 0,
+      "metric_telemetry_members": 78889,
+      "metric_telemetry_erasures": 0,
+      "metric_telemetry_identity": 1,
+      "metric_telemetry_traffic_ingress": 0,
+      "metric_telemetry_gaps": 305896,
+      "metric_telemetry_schedule": 0
+    },
+    "summary_tiers": [
+      [
+        10000000000,
+        1295,
+        1295,
+        406457
+      ],
+      [
+        300000000000,
+        35439,
+        1721137,
+        48133105
+      ],
+      [
+        900000000000,
+        83357,
+        6685412,
+        127706948
+      ],
+      [
+        3600000000000,
+        114603,
+        4825016,
+        116420029
+      ]
+    ],
+    "limitations": [
+      "Not a fresh replay of all 11,583,271 source observations through a new schema-5 migration.",
+      "Legacy table contents match the original source, and all archive lengths/SHA256 plus catalog point counts match. This is not a full old-vs-new observation-level hash.",
+      "Archive files and original legacy rollback tables are retained, not silently removed to improve ratios.",
+      "Database projections contain the same retained history; expired fine-grained data is not invented.",
+      "Reducing query work and removing hot rows does not by itself establish smaller SQLite or total storage."
+    ]
+  },
+  "local_checks": {
+    "historical_matrix_race": "passed: 24 online/migrated cases, 1h through 105d",
+    "database_packages_race": {
+      "pkg/metric": 31.09,
+      "database/metricstore": 4.44,
+      "database/trafficledger": 10.928,
+      "pkg/historyexport": 24.067
+    },
+    "actionlint": "passed: telemetry-storage.yml",
+    "database_packages_vet": "passed: metric, metricstore, trafficledger, historyexport",
+    "capacity_reproduction": "scripts/ci/telemetry-storage-capacity.py reproduced the same sizes and ratios with source table hashes and all archive SHA256 verified",
+    "github_ci": "new independent job added; remote results not queried"
+  },
+  "open_items": [
+    "storage-size amplification",
+    "sustained exact-source foreground latency/CPU/memory acceptance",
+    "deployment-specific 24h soak"
+  ]
+}
