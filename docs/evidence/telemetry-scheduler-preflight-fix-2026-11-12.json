@@ -1,0 +1,39 @@
+{
+  "date": "2026-11-12",
+  "failed_head": "efd1afa89692dca8278f8df6f916266c3ce9a736",
+  "runs": [
+    {
+      "id": 43200931863,
+      "mode": "database-only CSV sustained qualification",
+      "failed_at": "2026-11-12T10:32:35Z",
+      "observed": {"legacy_hot_points": 0, "hot_points": 29, "receipts": 3, "summaries": 15, "complete_archives": 0, "raw_blocks": 0, "rollup_blocks": 0, "scheduled_tasks": 16, "task_failures": 0}
+    },
+    {
+      "id": 43200948282,
+      "mode": "database-only no-CSV E2E",
+      "failed_at": "2026-11-12T10:33:35Z",
+      "observed": {"legacy_hot_points": 0, "hot_points": 219, "receipts": 24, "summaries": 44, "complete_archives": 0, "raw_blocks": 0, "rollup_blocks": 0, "scheduled_tasks": 16, "task_failures": 0}
+    }
+  ],
+  "diagnosis": "Both failed the same retirement preflight: the production scheduler gained stats and gaps maintenance, but the check still required exactly 14 rows. The two-hour CSV qualification did not start. Neither run provides a sustained runtime verdict.",
+  "correction": "Validate exact task responsibilities, individual attempts and last_error instead of an opaque numeric count; save diagnostics before rejecting an invariant. Preserve the existing legacy-retirement and positive-ingestion invariants and fixture-only CLI guard.",
+  "regression": {
+    "test": "TestTelemetrySchedulerMatchesE2ERetirementContract",
+    "healthy": "Production metric.Open, actual ingest and summarization, production ensureTelemetrySchedule, exact Python inspector/validator against the resulting read-only SQLite connection.",
+    "negative_cases": ["Renamed stats responsibility with unchanged task count must fail and identify missing stats", "A failed gaps task must fail", "A last_error with zero attempts must fail"],
+    "dispatch": "Force stats and gaps individually due and run the actual production scheduler dispatch; inspect the durable result after each."
+  },
+  "local_verification": {
+    "race": "go test -race ./database/metricstore -count=1 -timeout=10m",
+    "vet": "go vet ./database/metricstore",
+    "python_syntax": "ast.parse of the exact retirement check without creating bytecode",
+    "status": "passed"
+  },
+  "acceptance": {
+    "replacement_remote_runs": "Dispatch after committing and pushing; confirm each run head and started/queued status once, without polling.",
+    "sustained_csv": "pending",
+    "no_csv_e2e_at_replacement_head": "pending",
+    "capacity": "still unaccepted; the previous source fixes reduce online size but it remains 3.17x old compact SQL, 4.95x including archives",
+    "thresholds": "CPU 10%, foreground p95 1.2x, ordinary resume 30 seconds, checksum, retention and chart fidelity unchanged"
+  }
+}

@@ -887,3 +887,13 @@ CI/E2E 证据记录精确代码/协议/Web/部署配置版本、源数据 manife
 两小时 CSV 资格、无 CSV 数据库 E2E 和精确 head CI 仍需远端结果；不新增 TOTP、终端或 Agent 升级场景。本轮有限实验不会重启之前用户停止的本地长测环境。
 
 完整数值和结论边界见 [修复证据](evidence/telemetry-capacity-and-resume-fix-2026-11-12.json)。
+
+### 2026-11-12：长短测共同的调度前置检查遗漏
+
+提交 `efd1afa8` 的两轮 GitHub E2E 都未到最终验收：CSV 长测 `43200931863` 在 `10:32:35Z`、无 CSV 数据库 E2E `43200948282` 在 `10:33:35Z` 被同一处 retirement 检查拒绝。实际持久调度表已有 16 个任务、失败次数均为零；源码新增 `stats/gaps` 两个维护职责后，检查器仍要求恰好 14 行。这是实现与验证契约未同步的遗漏。两小时 CSV 资格步骤尚未开始，不能据此认定 CSV 性能再次失败，也不能认定新数据库已经通过。
+
+修复为逐个核对完整的任务职责集合、每项 attempts 与 last_error，并在断言失败前保存诊断。保留原有旧表退出、实际新表摄入检查及隔离环境限制，不修改 CPU、p95、恢复期限、校验和或留存门槛。未将 `complete_archives=0` 加为前置失败条件；归档完成由后续真实归档阶段独立验证。
+
+新增 `TestTelemetrySchedulerMatchesE2ERetirementContract`，通过生产 Store 初始化、实际摄入及汇总、生产调度初始化生成数据库，再运行 E2E 使用的同一份 Python 检查。相同行数下更换任务名、任务失败及零 attempts 但残留 last_error 均必须被拒绝；随后分别调度实际 `stats/gaps` 分支并重新检查。它在现有数据库包 CI 中执行，使下次职责变化在远程环境及长测启动前暴露，不再只改数字。
+
+本地完整 `database/metricstore` race、vet 和 Python 语法验证通过；不启动本地长测，不加入 TOTP、终端或 Agent 升级验证。新提交将分开重跑两小时 CSV 资格和无 CSV 数据库 E2E，仅确认运行及准确提交后停止查询。容量仍未验收，长测通过也不自动关闭容量问题。原始失败计数、验证范围及剩余边界见 [前置检查修复证据](evidence/telemetry-scheduler-preflight-fix-2026-11-12.json)。
