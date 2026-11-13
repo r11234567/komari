@@ -70,7 +70,14 @@ func decodeChartStats(ctx context.Context, raw string, out *telemetryStats) erro
 	if err := json.Unmarshal([]byte(raw), out); err != nil {
 		return err
 	}
-	scratch -= cap(out.Digest)
+	if scalar, _ := ctx.Value(telemetryScalarStatsKey{}).(bool); scalar {
+		// Mean/count/min/max/variance charts never consume a distribution.
+		// Retaining every input/output digest turns a small scalar result into
+		// source-sized memory. Decoding scratch is still reserved beforehand.
+		out.Digest, out.sketch = nil, nil
+	} else {
+		scratch -= cap(out.Digest)
+	}
 	return nil
 }
 
@@ -137,7 +144,23 @@ func mergeChartStats(ctx context.Context, dst *telemetryStats, src telemetryStat
 	if err = dst.merge(src); err != nil {
 		return err
 	}
-	scratch -= max(0, chartStatsBytes(dst)-before)
+	if card, _ := ctx.Value(telemetryStatisticsCardKey{}).(bool); card && dst.N > 0 {
+		if dst.sketch == nil {
+			dst.sketch, err = DecodeTDigest(dst.Digest)
+			if err != nil {
+				return err
+			}
+		}
+		if dst.sketch != nil {
+			// Match the final card's existing higher-precision merge, including
+			// the first source cell, within the already reserved merge scratch.
+			dst.sketch.compression = max(dst.sketch.compression, 400)
+		}
+	}
+	// A recompressed sketch can shrink as well as grow. Its previous retained
+	// allocation was already charged; refund the signed change so repeated
+	// merges do not accumulate a budget for centroids that no longer exist.
+	scratch -= chartStatsBytes(dst) - before
 	return nil
 }
 
@@ -177,6 +200,9 @@ func addChartStats(ctx context.Context, dst *telemetryStats, p Point, ingest int
 		return err
 	}
 	dst.add(p, ingest, ordinal)
-	releaseChartMemory(ctx, scratch-max(0, chartStatsBytes(dst)-before))
+	if scalar, _ := ctx.Value(telemetryScalarStatsKey{}).(bool); scalar {
+		dst.Digest, dst.sketch = nil, nil
+	}
+	releaseChartMemory(ctx, scratch-(chartStatsBytes(dst)-before))
 	return nil
 }

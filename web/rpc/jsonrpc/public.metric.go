@@ -18,7 +18,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
-const defaultMetricQueryPoints = 500
+const defaultMetricQueryPoints = 600
 const maxMetricQueryPoints = 10_000
 const historicalQueryTimeout = 20 * time.Second
 const maxRawMetricQueryRange = time.Hour

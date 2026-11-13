@@ -196,7 +196,9 @@ func TestTelemetryChartHighCardinalityResourceBudget(t *testing.T) {
 	if err = tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(time.Minute - time.Nanosecond)}, Interval: time.Minute, Aggregation: AggAvg, PreserveSeries: true}
+	// Exercise a real distribution consumer. Scalar mean charts deliberately
+	// discard digests now and no longer have the same resident-memory floor.
+	q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(time.Minute - time.Nanosecond)}, Interval: time.Minute, Aggregation: AggP50, PreserveSeries: true}
 	runtime.GC()
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)

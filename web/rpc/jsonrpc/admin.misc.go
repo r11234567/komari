@@ -133,6 +133,7 @@ var metricStoreConfigKeys = map[string]struct{}{
 	"metric_archive_directory":        {},
 	"metric_archive_retention_days":   {},
 	"metric_hot_window_minutes":       {},
+	"metric_hot_retention_minutes":    {},
 	"metric_archive_segment_minutes":  {},
 	"metric_hot_budget_mib":           {},
 	metricstore.MetricDBDriverKey:     {},
@@ -310,7 +311,7 @@ func mergedMetricConfig(cfg map[string]interface{}) (*metricstore.MetricStoreCon
 		merged.MaxIdleConns = toInt(v, merged.MaxIdleConns)
 	}
 	telemetry := map[string]any{}
-	for _, key := range []string{"metric_archive_directory", "metric_archive_retention_days", "metric_hot_window_minutes", "metric_archive_segment_minutes", "metric_hot_budget_mib"} {
+	for _, key := range []string{"metric_archive_directory", "metric_archive_retention_days", "metric_hot_window_minutes", "metric_hot_retention_minutes", "metric_archive_segment_minutes", "metric_hot_budget_mib"} {
 		if value, ok := cfg[key]; ok {
 			telemetry[key] = value
 		}

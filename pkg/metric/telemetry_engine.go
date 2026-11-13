@@ -32,9 +32,13 @@ type TelemetryConfig struct {
 	SegmentPoints    int64
 	SegmentBytes     int64
 	RawWindow        time.Duration
-	MaxLateness      time.Duration
-	MaxHotBytes      int64
-	WorkLease        time.Duration
+	// RawRetention controls safe hot-row retirement independently of the
+	// bounded online exact-read window. Runtime sets one day; zero preserves
+	// the historical explicit-engine configuration contract for offline tools.
+	RawRetention time.Duration
+	MaxLateness  time.Duration
+	MaxHotBytes  int64
+	WorkLease    time.Duration
 	// Fault is used by integration tests at durable state transitions. It is
 	// never configured from HTTP or persisted settings.
 	Fault func(string) error `json:"-"`
@@ -52,6 +56,9 @@ func (c TelemetryConfig) defaults() TelemetryConfig {
 	}
 	if c.RawWindow == 0 {
 		c.RawWindow = 15 * time.Minute
+	}
+	if c.RawRetention == 0 {
+		c.RawRetention = c.RawWindow
 	}
 	if c.MaxLateness == 0 {
 		c.MaxLateness = 48 * time.Hour
@@ -175,7 +182,7 @@ func (s *Store) OpenTelemetry(ctx context.Context, cfg TelemetryConfig) (*Teleme
 		return nil, err
 	}
 	cfg = cfg.defaults()
-	if cfg.ArchiveDirectory == "" || cfg.SegmentDuration <= 0 || cfg.SegmentPoints <= 0 || cfg.SegmentBytes < 4096 || cfg.RawWindow <= 0 || cfg.MaxLateness < cfg.RawWindow || cfg.MaxHotBytes < cfg.SegmentBytes || cfg.WorkLease < 10*time.Millisecond || cfg.WorkLease > 5*time.Minute {
+	if cfg.ArchiveDirectory == "" || cfg.SegmentDuration <= 0 || cfg.SegmentPoints <= 0 || cfg.SegmentBytes < 4096 || cfg.RawWindow <= 0 || cfg.RawRetention < cfg.RawWindow || cfg.MaxLateness < cfg.RawWindow || cfg.MaxHotBytes < cfg.SegmentBytes || cfg.WorkLease < 10*time.Millisecond || cfg.WorkLease > 5*time.Minute {
 		return nil, fmt.Errorf("%w: telemetry configuration", ErrInvalidArgument)
 	}
 	if s.cfg.Driver == DriverSQLite {

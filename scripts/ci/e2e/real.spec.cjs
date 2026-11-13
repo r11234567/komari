@@ -719,7 +719,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
     await stage('real reports archive, charts survive raw deletion, CSV and complete backup use cold history', async () => {
       // Public settings, not forged timestamps or seeded history, shorten the
       // fixture rotation. All samples still come from the installed Agent.
-      await request('/api/admin/settings/', { metric_hot_window_minutes: 1, metric_archive_segment_minutes: 1 });
+      await request('/api/admin/settings/', { metric_hot_window_minutes: 1, metric_hot_retention_minutes: 1, metric_archive_segment_minutes: 1 });
       let storage;
       await expect.poll(() => {
         storage = JSON.parse(execFileSync('python3', ['scripts/ci/e2e/check-telemetry-retirement.py'], { encoding: 'utf8' }));

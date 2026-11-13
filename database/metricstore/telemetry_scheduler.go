@@ -177,16 +177,21 @@ func runTelemetryPass(ctx context.Context, s *metric.Store, now time.Time) (Sche
 		var err error
 		switch task.Name {
 		case "summary":
+			drained := false
 			for time.Since(began) < 200*time.Millisecond {
 				var n int
 				n, err = t.SummarizeNext(work)
 				out.Progress += n
+				drained = err == nil && n == 0
 				if err != nil || n == 0 {
 					break
 				}
 			}
 			if out.Progress > 0 {
 				out.Delay = 200 * time.Millisecond
+				if drained {
+					err = errors.Join(err, t.ExpediteSchedule(work, []string{"tiers"}, now))
+				}
 			}
 		case "traffic":
 			if c := activeTelemetryConsumer.Load(); c != nil && c.apply != nil {
@@ -200,9 +205,8 @@ func runTelemetryPass(ctx context.Context, s *metric.Store, now time.Time) (Sche
 			n, err = t.SealDue(work, now)
 			out.Progress = int(n)
 			out.Delay = time.Minute
-			err = errors.Join(err, t.ExpediteSchedule(work, []string{"tiers"}, time.Now()))
 			if n > 0 {
-				err = errors.Join(err, t.ExpediteSchedule(work, []string{"archive", "delete"}, time.Now()))
+				err = errors.Join(err, t.ExpediteSchedule(work, []string{"tiers", "archive", "delete"}, time.Now()))
 			}
 		case "archive":
 			var ok bool
@@ -223,6 +227,8 @@ func runTelemetryPass(ctx context.Context, s *metric.Store, now time.Time) (Sche
 			out.Progress, err = t.PromoteSummariesChunk(work, now, chunk)
 			if out.Progress > 0 {
 				out.Delay = time.Second
+			} else if err == nil {
+				out.Delay, err = t.NextSummaryPromotion(work, now)
 			}
 		case "promotion":
 			out.Progress, err = t.PromoteLegacyChunk(work, now, chunk)

@@ -15,14 +15,18 @@ func TelemetryChartInterval(span time.Duration, points int) time.Duration {
 	if span <= 0 || points <= 0 {
 		return 10 * time.Second
 	}
-	quantum := 10 * time.Second
-	switch {
-	case span > 14*24*time.Hour:
-		quantum = time.Hour
-	case span > 48*time.Hour:
-		quantum = 15 * time.Minute
-	case span > 3*time.Hour:
-		quantum = time.Minute
+	quantum := telemetryResolution(span)
+	// First-party charts use a 600-point budget but aim at 360. Prefer a
+	// compatible finer grid over dropping a populated preset below 300 cells.
+	// Explicit smaller budgets remain hard limits. Never split a physical cell.
+	if points >= 600 {
+		step := max(int64(1), (int64(span)+360*int64(quantum)-1)/(360*int64(quantum)))
+		if step > 1 && int64(span)/(step*int64(quantum)) < 300 {
+			step--
+		}
+		if (int64(span)+step*int64(quantum)-1)/(step*int64(quantum)) <= int64(points) {
+			return time.Duration(step) * quantum
+		}
 	}
 	needed := (int64(span) + int64(points) - 1) / int64(points)
 	return time.Duration((needed+int64(quantum)-1)/int64(quantum)) * quantum

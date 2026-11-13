@@ -39,6 +39,72 @@ func TestTelemetryMariaDBIntegration(t *testing.T) {
 
 func telemetryExternal(t *testing.T, cfg Config) {
 	t.Helper()
+	t.Run("legacy_migration", func(t *testing.T) {
+		ctx, e := telemetryExternalFixture(t, cfg)
+		s, archive := e.s, e.cfg
+		if err := e.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CreateMetric(ctx, Definition{Name: "migration-cpu", RetentionDays: 30}); err != nil {
+			t.Fatal(err)
+		}
+		at := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
+		batch := telemetryBatch("", at, 2, 5, 9)
+		for i := range batch.Points {
+			batch.Points[i].MetricName = "migration-cpu"
+		}
+		if err := s.WriteBatch(ctx, batch.Points); err != nil {
+			t.Fatal(err)
+		}
+		// Exercise the retained-tier selection SQL on actual legacy rows, not
+		// only an empty rollup table. Expired daily history must not block
+		// importing an otherwise supported hourly population on any driver.
+		if err := s.CreateMetric(ctx, Definition{Name: "migration-expired", RetentionDays: 1}); err != nil {
+			t.Fatal(err)
+		}
+		for _, tier := range []struct {
+			metric string
+			at     time.Time
+			step   time.Duration
+			values []float64
+		}{
+			{"migration-cpu", at, time.Hour, []float64{2, 5, 9}},
+			{"migration-expired", at.Add(-5 * 24 * time.Hour).Truncate(24 * time.Hour), 24 * time.Hour, []float64{42}},
+		} {
+			bucket := newRollupBucket(100)
+			bucket.tagsJSON = `{"device":"0"}`
+			for i, value := range tier.values {
+				bucket.addPoint(value, tier.at.Add(time.Duration(i)*time.Millisecond).UnixNano())
+			}
+			tx, err := s.db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = s.writeRollupBucketsTx(ctx, tier.metric, tier.step, map[rollupKey]*rollupBucket{{entityID: "node", bucket: tier.at.UnixNano()}: bucket}, tx); err != nil {
+				tx.Rollback()
+				t.Fatal(err)
+			}
+			if err = tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.MigrateLegacy(ctx, archive, nil); err != nil {
+			t.Fatal("legacy driver migration", err)
+		}
+		if err := s.EnableTelemetry(ctx, archive); err != nil {
+			t.Fatal(err)
+		}
+		defer s.Telemetry().Close()
+		q := Query{MetricName: "migration-cpu", EntityID: "node", Start: at, End: at.Add(time.Minute)}
+		got, err := s.Telemetry().ExportRawBatch(WithTelemetryEntities(ctx, []string{"node"}), []Query{q})
+		if err != nil || len(got) != 1 || len(got[0]) != 3 || got[0][0].Value != 2 || got[0][1].Value != 5 || got[0][2].Value != 9 {
+			t.Fatalf("legacy driver raw population changed: %+v %v", got, err)
+		}
+		chart, err := s.Telemetry().Chart(ctx, AggregateQuery{Query: Query{MetricName: "migration-cpu", EntityID: "node", Start: at, End: at.Add(time.Hour - time.Nanosecond)}, Interval: time.Hour, Aggregation: AggSum, PreserveSeries: true}, time.Now().UTC())
+		if err != nil || len(chart.Gaps) != 0 || len(chart.Points) != 1 || chart.Points[0].Count != 3 || chart.Points[0].Value != 16 {
+			t.Fatalf("legacy driver rollup population changed: %+v %v", chart, err)
+		}
+	})
 	t.Run("storage_contracts", func(t *testing.T) {
 		ctx, e := telemetryExternalFixture(t, cfg)
 		testTelemetryExternalStorage(t, ctx, e)
@@ -50,6 +116,36 @@ func telemetryExternal(t *testing.T, cfg Config) {
 	t.Run("mixed_historical_parent_with_exact_hot_edge", func(t *testing.T) {
 		_, e := telemetryExternalFixture(t, cfg)
 		testTelemetryPingMixedHistoricalParentWithExactHotEdge(t, e)
+	})
+	t.Run("half_day_and_daily_retention_handoff", func(t *testing.T) {
+		ctx, e := telemetryExternalFixture(t, cfg)
+		at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+		if _, err := e.Accept(ctx, telemetryBatch("daily-tier-driver", at, 2, 5, 9), at); err != nil {
+			t.Fatal(err)
+		}
+		summarizeAll(t, e)
+		if _, err := e.SealDue(ctx, at.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		now := at.Add(400 * 24 * time.Hour)
+		promoteTelemetryAll(t, e, now)
+		for {
+			n, err := e.PruneSummaries(ctx, "cpu", 500*24*time.Hour, now, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n == 0 {
+				break
+			}
+		}
+		if n := telemetryCount(t, e, "summary"); n != 1 {
+			t.Fatal("fine tiers retained", n)
+		}
+		q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(24*time.Hour - time.Nanosecond)}, Interval: 24 * time.Hour, Aggregation: AggSum, PreserveSeries: true}
+		r, err := e.Chart(ctx, q, now)
+		if err != nil || len(r.Gaps) != 0 || len(r.Points) != 1 || r.Points[0].Value != 16 || r.Points[0].Count != 3 {
+			t.Fatal("daily SQL population", r, err)
+		}
 	})
 }
 

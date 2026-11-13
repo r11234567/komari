@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// Imported cells have one canonical owner, unlike online deltas which already
-// contain every tier. Promote and delete together, never prune the only copy.
+// Imported cells have one canonical owner. Promote and delete together, never
+// prune the only copy; online immutable owners use a separate handoff marker.
 func (t *Telemetry) PromoteLegacyChunk(ctx context.Context, now time.Time, limit int) (int, error) {
 	if limit < 1 || limit > 512 {
 		return 0, ErrInvalidArgument
@@ -24,38 +24,57 @@ func (t *Telemetry) PromoteLegacyChunk(ctx context.Context, now time.Time, limit
 		return 0, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, t.bind("SELECT b.segment_id,b.series_id,b.resolution,b.bucket,b.stats FROM "+t.table("summary")+" b JOIN "+t.table("segments")+" a ON a.id=b.segment_id WHERE a.state='legacy' AND ((b.resolution<? AND b.bucket+b.resolution<=?) OR (b.resolution<? AND b.bucket+b.resolution<=?) OR (b.resolution<? AND b.bucket+b.resolution<=?)) ORDER BY b.bucket,b.segment_id,b.series_id LIMIT ?"), int64(time.Minute), now.Add(-3*time.Hour).UnixNano(), int64(15*time.Minute), now.Add(-48*time.Hour).UnixNano(), int64(time.Hour), now.Add(-14*24*time.Hour).UnixNano(), limit)
-	if err != nil {
-		return 0, err
-	}
 	type cell struct {
 		key   telemetrySummaryKey
 		stats telemetryStats
 	}
 	var cells []cell
-	for rows.Next() {
-		var c cell
-		var raw string
-		if err = rows.Scan(&c.key.segment, &c.key.series, &c.key.resolution, &c.key.bucket, &raw); err != nil {
+	// Seek each distinct resolution through the existing (resolution,bucket)
+	// index, then bound its bucket range before checking segment ownership.
+	// A join plus OR and a global time sort rescans every legacy cell per
+	// 512-row chunk, making a source-sized migration backlog quadratic.
+	for lower := int64(0); lower < int64(24*time.Hour) && len(cells) < limit; {
+		var resolution sql.NullInt64
+		if err = tx.QueryRowContext(ctx, t.bind("SELECT MIN(resolution) FROM "+t.table("summary")+" WHERE resolution>=? AND resolution<?"), lower, int64(24*time.Hour)).Scan(&resolution); err != nil {
+			return 0, err
+		}
+		if !resolution.Valid {
 			break
 		}
-		if err = json.Unmarshal([]byte(raw), &c.stats); err != nil {
-			break
+		r := time.Duration(resolution.Int64)
+		if r <= 0 {
+			return 0, ErrTelemetryCoverage
 		}
-		cells = append(cells, c)
-	}
-	re := rows.Err()
-	rows.Close()
-	if err != nil {
-		return 0, err
-	}
-	if re != nil {
-		return 0, re
+		age := telemetrySummaryKeep(r)
+		rows, e := tx.QueryContext(ctx, t.bind("SELECT b.segment_id,b.series_id,b.resolution,b.bucket,b.stats FROM "+t.table("summary")+" b WHERE b.resolution=? AND b.bucket<=? AND EXISTS (SELECT 1 FROM "+t.table("segments")+" a WHERE a.id=b.segment_id AND a.state='legacy') ORDER BY b.bucket LIMIT ?"), resolution.Int64, now.Add(-age).UnixNano()-resolution.Int64, limit-len(cells))
+		if e != nil {
+			return 0, e
+		}
+		for rows.Next() {
+			var c cell
+			var raw string
+			if e = rows.Scan(&c.key.segment, &c.key.series, &c.key.resolution, &c.key.bucket, &raw); e != nil {
+				break
+			}
+			if e = json.Unmarshal([]byte(raw), &c.stats); e != nil {
+				break
+			}
+			cells = append(cells, c)
+		}
+		re := rows.Err()
+		rows.Close()
+		if e != nil {
+			return 0, e
+		}
+		if re != nil {
+			return 0, re
+		}
+		lower = resolution.Int64 + 1
 	}
 	for _, c := range cells {
 		k := c.key
-		r := telemetryLCM(time.Duration(k.resolution), telemetryResolution(now.Sub(time.Unix(0, k.bucket+k.resolution))))
-		bucket := time.Unix(0, k.bucket).UTC().Truncate(r).UnixNano()
+		r := legacyRetainedResolution(k.bucket, time.Duration(k.resolution), now)
+		bucket := alignTime(time.Unix(0, k.bucket).UTC(), r).UnixNano()
 		var raw string
 		var prior telemetryStats
 		err = tx.QueryRowContext(ctx, t.bind("SELECT stats FROM "+t.table("summary")+" WHERE segment_id=? AND series_id=? AND resolution=? AND bucket=?"), k.segment, k.series, int64(r), bucket).Scan(&raw)
@@ -90,4 +109,18 @@ func (t *Telemetry) PromoteLegacyChunk(ctx context.Context, now time.Time, limit
 		return 0, err
 	}
 	return len(cells), tx.Commit()
+}
+
+// Use the same inclusive bucket-end boundaries as the promotion selector.
+// Looking up telemetryResolution(age) at an exact boundary would select the
+// source tier again, upsert into its own key, then delete that only copy.
+func legacyRetainedResolution(bucket int64, resolution time.Duration, now time.Time) time.Duration {
+	end := bucket + int64(resolution)
+	target := telemetrySummaryTiers[0].resolution
+	for i := 0; i+1 < len(telemetrySummaryTiers); i++ {
+		if end <= now.Add(-telemetrySummaryTiers[i].keep).UnixNano() {
+			target = telemetrySummaryTiers[i+1].resolution
+		}
+	}
+	return telemetryLCM(resolution, target)
 }

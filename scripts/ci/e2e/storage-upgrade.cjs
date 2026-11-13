@@ -74,7 +74,8 @@ async function run(){
  // intermediate URL with /admin/dashboard. Wait for the completed route.
  await expect(page).toHaveURL(`${base}/admin/dashboard`,{timeout:20000});
  const checks=JSON.parse(execFileSync('python3',['-c',`import sqlite3,json,sys\nc=sqlite3.connect(sys.argv[1])\np=dict(c.execute("SELECT task,value FROM metric_telemetry_progress WHERE task IN ('legacy_migration_complete','legacy_ledger_complete')"))\nprint(json.dumps({'progress':p,'source_rows':c.execute('SELECT COUNT(*) FROM metric_points').fetchone()[0],'summary_rows':c.execute('SELECT COUNT(*) FROM metric_telemetry_summary').fetchone()[0]}))`,source],{encoding:'utf8'}));
- expect(checks.progress.legacy_migration_complete).toBe(1);expect(checks.progress.legacy_ledger_complete).toBe(1);expect(checks.source_rows).toBe(43200);expect(checks.summary_rows).toBeGreaterThan(0);
+ const fixtureManifest=JSON.parse(fs.readFileSync(path.join(root,'migration-manifest.json')));
+ expect(checks.progress.legacy_migration_complete).toBe(1);expect(checks.progress.legacy_ledger_complete).toBe(1);expect(checks.source_rows).toBe(fixtureManifest.synthetic_points);expect(checks.summary_rows).toBeGreaterThan(0);
  await expect(page.getByText('Daily billable traffic',{exact:true})).toBeVisible({timeout:30000});
  await expect(page.getByRole('heading',{name:'Telemetry storage upgrade',exact:true})).toHaveCount(0);
  await page.screenshot({path:path.join(artifacts,'storage-upgrade-complete.png'),fullPage:true});
@@ -105,7 +106,7 @@ print(json.dumps({'source_rows':source.execute('SELECT COUNT(*) FROM metric_poin
 'legacy_objects':target.execute("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('metric_points','metric_rollups','metric_point_blocks','metric_rollup_blocks')").fetchone()[0],
 'integrity':target.execute('PRAGMA integrity_check').fetchone()[0],
 'summary_rows':target.execute('SELECT COUNT(*) FROM metric_telemetry_summary').fetchone()[0]}))`,source,compacted,path.join(rollback,'metrics.db')],{encoding:'utf8'}));
- expect(compactChecks.source_rows).toBe(43200);expect(compactChecks.backup_rows).toBe(43200);
+ expect(compactChecks.source_rows).toBe(fixtureManifest.synthetic_points);expect(compactChecks.backup_rows).toBe(fixtureManifest.synthetic_points);
  expect(compactChecks.retired).toBe(1);expect(compactChecks.legacy_objects).toBe(0);expect(compactChecks.integrity).toBe('ok');expect(compactChecks.summary_rows).toBeGreaterThan(0);
  for(const suffix of ['-wal','-shm'])expect(fs.existsSync(source+suffix)).toBe(false);
  fs.renameSync(source,source+'.pre-compact');fs.renameSync(compacted,source);
@@ -125,6 +126,8 @@ print(json.dumps({'source_rows':source.execute('SELECT COUNT(*) FROM metric_poin
  expect(compactTraffic.status()).toBe(200);const compactBilling=await compactTraffic.json();
  expect(compactBilling.charts?.traffic?.error||'').toBe('');expect(compactBilling.charts?.traffic?.daily).toHaveLength(30);
  fs.writeFileSync(path.join(artifacts,'storage-compact.json'),JSON.stringify({proof:compactProof,checks:compactChecks,history:compactHistoryBody,billing:compactBilling},null,2));
+ await require('./storage-curves.cjs').verifyStorageCurves({context,page,root,artifacts,base,agentId:migrationScope.agentId});
+ execFileSync('python3',['scripts/ci/e2e/storage-table-audit.py'],{stdio:'inherit',timeout:30000});
  system('stop','komari-e2e-panel.service');
  const restored=path.join(root,'restore-panel');fs.mkdirSync(path.join(restored,'data'),{recursive:true});
  fs.copyFileSync(path.join(root,'real-full-backup.zip'),path.join(restored,'data/backup.zip'));

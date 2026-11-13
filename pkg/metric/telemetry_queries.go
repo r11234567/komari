@@ -11,6 +11,12 @@ type telemetrySnapshotKey struct{}
 type telemetryChartBudgetKey struct{}
 type telemetryChartBudget struct{ points, bytes int }
 
+// Statistics cards consume distributions even though their chart pass asks
+// for counts. Ordinary scalar charts only need moments and ordering metadata.
+type telemetryDistributionStatsKey struct{}
+type telemetryScalarStatsKey struct{}
+type telemetryStatisticsCardKey struct{}
+
 // ChartBatchBounded shares one allocation budget across every query. Export
 // manifests must reject excessive cardinality before materializing the result,
 // not after the worker has already exhausted its memory cgroup.
@@ -113,6 +119,8 @@ func (t *Telemetry) ChartBatch(ctx context.Context, queries []AggregateQuery, no
 // weighting latency averages by failed attempts would change their meaning.
 func (t *Telemetry) PingSummary(ctx context.Context, q AggregateQuery, now time.Time) (SeriesSummary, error) {
 	ctx = defaultChartBudget(ctx)
+	ctx = context.WithValue(ctx, telemetryDistributionStatsKey{}, true)
+	ctx = context.WithValue(ctx, telemetryStatisticsCardKey{}, true)
 	q.Aggregation = AggCount
 	q.MetricName = sqliteMergedPingLatencyMetric
 	q.PreserveSeries = true

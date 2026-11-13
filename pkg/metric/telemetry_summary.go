@@ -115,6 +115,9 @@ func (s *telemetryStats) merge(o telemetryStats) error {
 	}
 	s.N += o.N
 	s.Sum += o.Sum
+	if s.sketch == nil && o.sketch == nil && len(s.Digest) == 0 && len(o.Digest) == 0 {
+		return nil
+	}
 	if s.sketch == nil {
 		var err error
 		s.sketch, err = DecodeTDigest(s.Digest)
@@ -282,19 +285,6 @@ func (t *Telemetry) SummarizeNext(ctx context.Context) (int, error) {
 	return max(n, 1), tx.Commit()
 }
 
-func telemetryResolution(age time.Duration) time.Duration {
-	switch {
-	case age <= 3*time.Hour:
-		return 10 * time.Second
-	case age <= 48*time.Hour:
-		return time.Minute
-	case age <= 14*24*time.Hour:
-		return 15 * time.Minute
-	default:
-		return time.Hour
-	}
-}
-
 type TelemetryQueryResult struct {
 	stats            map[aggregateGroupKey]*telemetryStats
 	Points           []AggregatePoint
@@ -333,6 +323,9 @@ func (t *Telemetry) aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 		q.MetricName = sqliteMergedPingLatencyMetric
 		q.Aggregation = pingLossPhysicalAggregation(q.Aggregation)
 	}
+	_, quantile := parsePercentile(q.Aggregation)
+	keepDistribution, _ := ctx.Value(telemetryDistributionStatsKey{}).(bool)
+	ctx = context.WithValue(ctx, telemetryScalarStatsKey{}, !quantile && !keepDistribution)
 	if q.Interval < 10*time.Second || q.Interval%(10*time.Second) != 0 {
 		return out, ErrTelemetryCoverage
 	}
@@ -425,6 +418,9 @@ func (t *Telemetry) aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 			}
 			out.Sources = append(out.Sources, TelemetrySourceSpan{MetricName: p.MetricName, EntityID: p.EntityID, Tags: p.Tags, Start: p.Timestamp, End: p.Timestamp.Add(time.Nanosecond)})
 			key := aggregateGroupKey{bucket: alignTime(p.Timestamp, q.Interval).UnixNano()}
+			if card, _ := ctx.Value(telemetryStatisticsCardKey{}).(bool); card {
+				key.bucket = 0
+			}
 			if q.PreserveSeries {
 				h, _, fingerprintErr := tagsFingerprint(p.Tags)
 				if fingerprintErr != nil {
@@ -484,7 +480,7 @@ func (t *Telemetry) aggregate(ctx context.Context, q AggregateQuery, now time.Ti
 			}
 			before := chartStatsBytes(st)
 			st.sketch.process()
-			releaseChartMemory(ctx, scratch-max(0, chartStatsBytes(st)-before))
+			releaseChartMemory(ctx, scratch-(chartStatsBytes(st)-before))
 		}
 		v, e := st.value(q.Aggregation)
 		if e != nil {

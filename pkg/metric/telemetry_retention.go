@@ -27,12 +27,19 @@ func (t *Telemetry) PruneSummaries(ctx context.Context, name string, retention t
 	defer tx.Rollback()
 	where := "s.metric=? AND a.state<>'legacy' AND ("
 	args := []any{name}
-	for i, tier := range []struct{ r, keep time.Duration }{{10 * time.Second, 3 * time.Hour}, {time.Minute, 48 * time.Hour}, {5 * time.Minute, 48 * time.Hour}, {15 * time.Minute, 14 * 24 * time.Hour}, {time.Hour, retention}} {
+	tiers := append([]struct{ resolution, keep time.Duration }(nil), telemetrySummaryTiers[:]...)
+	tiers = append(tiers, struct{ resolution, keep time.Duration }{15 * time.Minute, 2 * 24 * time.Hour})
+	for i, tier := range tiers {
 		if i > 0 {
 			where += " OR "
 		}
-		where += "(b.resolution=? AND b.bucket<=? AND (a.summary_version=1 OR b.promoted_through>=a.last_id OR b.bucket+b.resolution<=?))"
-		args = append(args, int64(tier.r), now.Add(-min(tier.keep, retention)).Add(-tier.r).UnixNano())
+		where += "(b.resolution=? AND b.bucket<=? AND ((a.summary_version=1 AND b.resolution<?) OR b.promoted_through>=a.last_id OR b.bucket+b.resolution<=?))"
+		keep := tier.keep
+		if keep == 0 {
+			keep = retention
+		}
+		args = append(args, int64(tier.resolution), now.Add(-min(keep, retention)).Add(-tier.resolution).UnixNano())
+		args = append(args, int64(15*time.Minute))
 		args = append(args, now.Add(-retention).UnixNano())
 	}
 	where += ") OR (s.metric=? AND a.state='legacy' AND b.bucket+b.resolution<=?)"

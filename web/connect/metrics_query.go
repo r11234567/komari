@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	connectDefaultMetricPoints = 500
+	connectDefaultMetricPoints = 600
 	connectMaxMetricPoints     = 10_000
 	connectMaxRawMetricRange   = time.Hour
 	connectMetricMemoryTotal   = "memory.total"

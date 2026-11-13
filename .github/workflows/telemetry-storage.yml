@@ -24,6 +24,10 @@ jobs:
         env:
           KOMARI_TELEMETRY_INDEPENDENT_OUTPUT: ${{ github.workspace }}/ci-artifacts/independent
         run: bash scripts/ci/run-audit-check.sh telemetry-history-matrix go test -race -count=1 -timeout=12m ./pkg/metric -run '^TestTelemetryIndependentHistoricalMatrix$'
+      - name: Production schema and exact synthetic browser fixture migration
+        env:
+          KOMARI_TELEMETRY_MIGRATION_CURVE_FIXTURE: '1'
+        run: bash scripts/ci/run-audit-check.sh telemetry-curve-fixture go test -race -count=1 -timeout=10m ./scripts/ci/migration-fixture -run '^TestSyntheticMigrationCurveFixture$' -v
       - name: Build separate archive measurement process
         run: go test -c ./pkg/metric -o /var/tmp/komari-metric-resource.test
       - name: Isolated decoder CPU and process RSS with enforced limits

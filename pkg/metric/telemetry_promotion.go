@@ -8,10 +8,6 @@ import (
 	"time"
 )
 
-var telemetryPromotionTiers = [...]struct{ source, target time.Duration }{
-	{10 * time.Second, time.Minute}, {time.Minute, 15 * time.Minute}, {15 * time.Minute, time.Hour},
-}
-
 // PromoteSummariesChunk visits bounded closed buckets, never every report or
 // every historical bucket. A sealed segment's last_id is its immutable input
 // identity: later observations get another segment, including late timestamps.
@@ -39,27 +35,40 @@ func (t *Telemetry) PromoteSummariesChunk(ctx context.Context, now time.Time, li
 	done := 0
 	for done < limit {
 		progress := false
-		for _, tier := range telemetryPromotionTiers {
+		for _, tier := range telemetryPromotionTiers() {
 			if done >= limit {
 				break
 			}
 			var segment, series string
 			var bucket, input int64
-			q := "SELECT b.segment_id,b.series_id,b.bucket,a.last_id FROM " + t.table("summary") + " b JOIN " + t.table("segments") + " a ON a.id=b.segment_id WHERE b.resolution=? AND b.promoted_through=0 AND b.bucket<? AND a.summary_version=2 AND a.state NOT IN ('open','legacy') AND a.last_id<=? ORDER BY b.bucket,b.segment_id,b.series_id LIMIT 1"
-			err = tx.QueryRowContext(ctx, t.bind(q), int64(tier.source), now.UTC().Truncate(tier.target).UnixNano(), through).Scan(&segment, &series, &bucket, &input)
+			cutoff := alignTime(now.Add(-tier.keep+telemetryPromotionLead(tier.keep, tier.target)).UTC(), tier.target)
+			q := "SELECT b.segment_id,b.series_id,b.bucket,a.last_id FROM " + t.table("summary") + " b JOIN " + t.table("segments") + " a ON a.id=b.segment_id WHERE b.resolution=? AND b.promoted_through=0 AND b.bucket<? AND (a.summary_version=2 OR (a.summary_version=1 AND b.resolution>=?)) AND a.state NOT IN ('open','legacy') AND a.last_id<=? ORDER BY b.bucket,b.segment_id,b.series_id LIMIT 1"
+			err = tx.QueryRowContext(ctx, t.bind(q), int64(tier.source), cutoff.UnixNano(), int64(15*time.Minute), through).Scan(&segment, &series, &bucket, &input)
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
 			}
 			if err != nil {
 				return 0, err
 			}
-			from := time.Unix(0, bucket).UTC().Truncate(tier.target).UnixNano()
+			// A pre-policy v2 owner may already have handed some 5m children
+			// to 15m. Finish that same intermediate representation first. A new
+			// 30m parent from only the remaining 5m cells would hide old input.
+			if tier.source == 5*time.Minute {
+				var old int
+				e := tx.QueryRowContext(ctx, t.bind("SELECT 1 FROM "+t.table("summary")+" WHERE segment_id=? AND series_id=? AND resolution=? LIMIT 1"), segment, series, int64(15*time.Minute)).Scan(&old)
+				if e == nil {
+					tier.target = 15 * time.Minute
+				} else if !errors.Is(e, sql.ErrNoRows) {
+					return 0, e
+				}
+			}
+			from := alignTime(time.Unix(0, bucket).UTC(), tier.target).UnixNano()
 			end := from + int64(tier.target)
 			// A target may not claim the whole range while any lower tier in
 			// that range is still awaiting handoff. Otherwise the first minute
 			// would publish a partial 15m parent and hide the other 14 minutes.
 			var pending int
-			err = tx.QueryRowContext(ctx, t.bind("SELECT 1 FROM "+t.table("summary")+" WHERE segment_id=? AND series_id=? AND resolution<? AND promoted_through=0 AND bucket>=? AND bucket<? LIMIT 1"), segment, series, int64(tier.source), from, end).Scan(&pending)
+			err = tx.QueryRowContext(ctx, t.bind("SELECT 1 FROM "+t.table("summary")+" b JOIN "+t.table("segments")+" a ON a.id=b.segment_id WHERE b.segment_id=? AND b.series_id=? AND b.resolution<? AND b.promoted_through=0 AND b.bucket>=? AND b.bucket<? AND a.summary_version=2 LIMIT 1"), segment, series, int64(tier.source), from, end).Scan(&pending)
 			if err == nil {
 				continue
 			}

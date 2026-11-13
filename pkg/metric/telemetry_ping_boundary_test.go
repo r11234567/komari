@@ -39,6 +39,10 @@ func testTelemetryPingMixedHistoricalParentWithExactHotEdge(t *testing.T, e *Tel
 			t.Fatal(err)
 		}
 	}
+	// This regression deliberately needs the old already-published hour parent
+	// as independent evidence of the removed fine population. New stores defer
+	// parents until expiry; do not manufacture an early parent in production.
+	useLegacyOnlineTiers(t, e)
 	summarizeAll(t, e)
 	if _, err := e.SealDue(ctx, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)

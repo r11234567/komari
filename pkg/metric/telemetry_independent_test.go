@@ -23,27 +23,26 @@ func TestTelemetryIndependentHistoricalMatrix(t *testing.T) {
 	now := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Hour)
 	var report []map[string]any
 	for _, mode := range []string{"online", "migrated"} {
-		for _, hours := range []int{1, 6, 12, 24, 168, 360, 720, 1080, 1440, 1800, 2160, 2520} {
+		for _, hours := range []int{1, 6, 12, 24, 168, 360, 720, 1080, 1440, 1800, 2160, 2520, 2880, 4320, 8760, 9120} {
 			t.Run(fmt.Sprintf("%s/%dh", mode, hours), func(t *testing.T) {
+				now := now
 				dir := t.TempDir()
 				s, e := telemetryFixture(t, dir)
-				e.cfg.MaxLateness = 130 * 24 * time.Hour
+				e.cfg.MaxLateness = 400 * 24 * time.Hour
 				cfg := e.cfg
 				for _, name := range []string{"cpu", sqliteMergedPingLatencyMetric} {
-					if err := s.CreateMetric(ctx, Definition{Name: name, RetentionDays: 130}); err != nil {
+					if err := s.CreateMetric(ctx, Definition{Name: name, RetentionDays: 400}); err != nil {
 						t.Fatal(err)
 					}
 				}
 				span := time.Duration(hours) * time.Hour
-				points := 360
-				if hours == 1800 {
-					points = 300
-				}
-				if hours == 2160 {
-					points = 309
-				}
+				points := 600
 				interval := TelemetryChartInterval(span, points)
-				end := alignTime(now.Add(-time.Hour), interval)
+				// Preset retention is measured from the current query end. A
+				// deliberately older 1h request no longer promises ten-second
+				// detail: that belongs to the explicit precision-gap tests.
+				end := alignTime(now, interval)
+				now = end
 				start := end.Add(-span)
 				// Align both bounds to the actual epoch grid, including 7h output.
 				start = alignTime(start, interval)
@@ -129,7 +128,7 @@ func TestTelemetryIndependentHistoricalMatrix(t *testing.T) {
 				}
 				for _, name := range []string{"cpu", sqliteMergedPingLatencyMetric} {
 					for {
-						n, err := e.PruneSummaries(ctx, name, 130*24*time.Hour, now, 512)
+						n, err := e.PruneSummaries(ctx, name, 400*24*time.Hour, now, 512)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -170,7 +169,7 @@ func TestTelemetryIndependentHistoricalMatrix(t *testing.T) {
 							t.Fatal(err)
 						}
 						got, err := e.Chart(WithTelemetryEntities(ctx, []string{"node"}), q, now)
-						if err != nil || len(got.Gaps) != 0 || len(got.Points) != len(want) || len(got.Points) < 300 || len(got.Points) > 361 {
+						if err != nil || len(got.Gaps) != 0 || len(got.Points) != len(want) || len(got.Points) < 300 || len(got.Points) > 600 {
 							t.Fatalf("%s/%s points=%d/%d gaps=%d err=%v", name, agg, len(got.Points), len(want), len(got.Gaps), err)
 						}
 						for i, p := range got.Points {

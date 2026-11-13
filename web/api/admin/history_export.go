@@ -159,7 +159,11 @@ func backgroundSource(cfg *metricstore.MetricStoreConfig) (historyexport.Source,
 	if budget <= 0 {
 		budget = 1024
 	}
-	return historyexport.Source{DSN: path, Prefix: prefix, Telemetry: metric.TelemetryConfig{ArchiveDirectory: archive, RawWindow: time.Duration(hot) * time.Minute, SegmentDuration: time.Duration(segment) * time.Minute, MaxHotBytes: int64(budget) << 20}}, nil
+	retention := cfg.HotRetentionMinutes
+	if retention <= 0 {
+		retention = 1440
+	}
+	return historyexport.Source{DSN: path, Prefix: prefix, Telemetry: metric.TelemetryConfig{ArchiveDirectory: archive, RawWindow: time.Duration(hot) * time.Minute, RawRetention: time.Duration(retention) * time.Minute, SegmentDuration: time.Duration(segment) * time.Minute, MaxHotBytes: int64(budget) << 20}}, nil
 }
 func (a *backgroundExportAPI) create(c *gin.Context) {
 	owner, ok := a.owner(c)
@@ -230,7 +234,7 @@ func (a *backgroundExportAPI) create(c *gin.Context) {
 	if aggregation == "" {
 		aggregation = metric.AggAvg
 	}
-	interval := metric.TelemetryChartInterval(end.Sub(start), 360)
+	interval := metric.TelemetryChartInterval(end.Sub(start), 600)
 	if r.IntervalSeconds > 0 {
 		interval = time.Duration(r.IntervalSeconds) * time.Second
 	}

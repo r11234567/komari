@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 )
@@ -45,7 +46,7 @@ func TestTelemetryTiersManySeriesAvoidReportTimeWriteAmplification(t *testing.T)
 	started = time.Now()
 	promoteTelemetryAll(t, e, now)
 	t.Logf("128 series / 768 points: finest summary %s, one-time promotion %s", baseTime, time.Since(started))
-	if n := telemetryCount(t, e, "summary"); n != 1152 {
+	if n := telemetryCount(t, e, "summary"); n != 896 {
 		t.Fatal("unbounded duplicate parent cells", n)
 	}
 	r, err := e.Chart(ctx, AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(time.Minute - time.Nanosecond)}, Interval: time.Minute, Aggregation: AggAvg, PreserveSeries: true}, now)
@@ -60,20 +61,14 @@ func TestTelemetryTiersManySeriesAvoidReportTimeWriteAmplification(t *testing.T)
 }
 
 func TestTelemetryTiersAllChartWindowsMatchRawAfterRetention(t *testing.T) {
-	for _, hours := range []int{1, 6, 12, 24, 168, 360, 720, 1080, 1440, 1800, 2160, 2520} {
+	for _, hours := range []int{1, 6, 12, 24, 168, 360, 720, 1080, 1440, 1800, 2160, 2520, 2880, 4320, 8760, 9120} {
 		t.Run(fmt.Sprint(hours), func(t *testing.T) {
 			_, e := telemetryFixture(t, "")
 			ctx := context.Background()
 			now := time.Now().UTC().Truncate(24 * time.Hour)
 			span := time.Duration(hours) * time.Hour
-			e.cfg.MaxLateness = 120 * 24 * time.Hour
-			points := 360
-			if hours == 1800 {
-				points = 300
-			}
-			if hours == 2160 {
-				points = 309
-			}
+			e.cfg.MaxLateness = 400 * 24 * time.Hour
+			points := 600
 			interval := TelemetryChartInterval(span, points)
 			start := alignTime(now.Add(-span), interval)
 			b := TelemetryBatch{Source: "node", Identity: "windows"}
@@ -92,7 +87,7 @@ func TestTelemetryTiersAllChartWindowsMatchRawAfterRetention(t *testing.T) {
 			}
 			promoteTelemetryAll(t, e, now)
 			for {
-				n, err := e.PruneSummaries(ctx, "cpu", 120*24*time.Hour, now, 512)
+				n, err := e.PruneSummaries(ctx, "cpu", 400*24*time.Hour, now, 512)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -106,7 +101,7 @@ func TestTelemetryTiersAllChartWindowsMatchRawAfterRetention(t *testing.T) {
 				t.Fatal(err)
 			}
 			r, err := e.Chart(ctx, q, now)
-			if err != nil || len(r.Points) != len(want) || len(r.Gaps) > 0 || len(r.Points) < 300 || len(r.Points) > 361 {
+			if err != nil || len(r.Points) != len(want) || len(r.Gaps) > 0 || len(r.Points) < 300 || len(r.Points) > 600 {
 				t.Fatalf("%dh: %d/%d points gaps %d err %v", hours, len(r.Points), len(want), len(r.Gaps), err)
 			}
 			for i, p := range r.Points {
@@ -299,5 +294,77 @@ func promoteTelemetryAll(t *testing.T, e *Telemetry, now time.Time) {
 		if n == 0 {
 			return
 		}
+	}
+}
+
+// Exercise the production ingest -> seal -> promotion -> pruning -> SQL chart
+// path at the actual expiry boundaries. Expiring a child must neither remove
+// the only population nor count it twice through a retained ancestor.
+func TestTelemetryTiersExpireFineCellsWithoutChangingStatistics(t *testing.T) {
+	_, e := telemetryFixture(t, "")
+	ctx := context.Background()
+	at := time.Date(2025, 4, 1, 12, 0, 0, 0, time.UTC)
+	e.cfg.MaxLateness = 40 * 24 * time.Hour
+	b := TelemetryBatch{Source: "node", Identity: "retention-statistics"}
+	for i, value := range []float64{1, 3, 7, 9} {
+		b.Points = append(b.Points, Point{MetricName: "cpu", EntityID: "node", Timestamp: at.Add(time.Duration(i*9+1) * time.Second), Value: value})
+	}
+	now := at.Add(24 * time.Hour)
+	if _, err := e.Accept(ctx, b, now); err != nil {
+		t.Fatal(err)
+	}
+	summarizeAll(t, e)
+	if _, err := e.SealDue(ctx, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	promoteTelemetryAll(t, e, now.Add(time.Hour))
+	for _, stage := range []struct {
+		now    time.Time
+		finest time.Duration
+	}{
+		{now: at.Add(24*time.Hour + time.Minute - time.Nanosecond), finest: time.Minute},
+		{now: at.Add(24*time.Hour + time.Minute), finest: 5 * time.Minute},
+		{now: at.Add(2*24*time.Hour + 5*time.Minute - time.Nanosecond), finest: 5 * time.Minute},
+		{now: at.Add(2*24*time.Hour + 5*time.Minute), finest: 30 * time.Minute},
+		{now: at.Add(7*24*time.Hour + 30*time.Minute), finest: time.Hour},
+	} {
+		promoteTelemetryAll(t, e, stage.now)
+		for {
+			n, err := e.PruneSummaries(ctx, "cpu", 30*24*time.Hour, stage.now, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n == 0 {
+				break
+			}
+		}
+		var finest int64
+		if err := e.s.db.QueryRow("SELECT MIN(resolution) FROM " + e.table("summary")).Scan(&finest); err != nil || time.Duration(finest) != stage.finest {
+			t.Fatalf("%s retained the wrong tier: %s want %s, %v", stage.now, time.Duration(finest), stage.finest, err)
+		}
+		q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(time.Hour - time.Nanosecond)}, Interval: time.Hour, PreserveSeries: true}
+		for _, aggregation := range []struct {
+			kind Aggregation
+			want float64
+		}{{AggCount, 4}, {AggSum, 20}, {AggAvg, 5}, {AggStdDev, math.Sqrt(10)}, {AggMin, 1}, {AggMax, 9}, {AggFirst, 1}, {AggLast, 9}} {
+			q.Aggregation = aggregation.kind
+			got, err := e.Chart(ctx, q, stage.now)
+			if err != nil || len(got.Gaps) != 0 || len(got.Points) != 1 || got.Points[0].Count != 4 || math.Abs(got.Points[0].Value-aggregation.want) > 1e-8 {
+				t.Fatalf("%s/%s lost or duplicated statistics: %+v %v", stage.now, aggregation.kind, got, err)
+			}
+		}
+	}
+	// The metric's own shorter retention wins over every physical tier.
+	for {
+		n, err := e.PruneSummaries(ctx, "cpu", 12*time.Hour, now, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+	}
+	if n := telemetryCount(t, e, "summary"); n != 0 {
+		t.Fatal("physical retention exceeded metric retention", n)
 	}
 }

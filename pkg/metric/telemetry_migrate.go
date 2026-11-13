@@ -50,15 +50,15 @@ func (s *Store) MigrateLegacy(ctx context.Context, cfg TelemetryConfig, observe 
 	if err != nil {
 		return err
 	}
-	if checkpoint.Complete {
-		return nil
-	}
 	t, err := s.OpenTelemetry(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	defer t.Close()
 	now := checkpoint.Cutoff
+	if checkpoint.Complete {
+		return t.finishLegacyMigrationRetention(ctx, now)
+	}
 	defs, err := s.ListMetrics(ctx)
 	if err != nil {
 		return err
@@ -80,31 +80,53 @@ func (s *Store) MigrateLegacy(ctx context.Context, cfg TelemetryConfig, observe 
 			globalStart = first
 		}
 		if table.column == "bucket_nano" || table.table == s.tables.rollupBlocks {
-			rows, e := s.reader().QueryContext(ctx, "SELECT DISTINCT resolution_nano FROM "+table.table+" LIMIT 33")
-			if e != nil {
-				return e
+			// Old retention can leave obsolete tiers in the source. Only rows
+			// intersecting a metric's migration range constrain this import.
+			// Include the complete last bucket when testing overlap so a coarse
+			// retained boundary cannot be mistaken for expired history.
+			statement := "SELECT DISTINCT r.resolution_nano FROM " + table.table + " r"
+			metricColumn := "r.metric_name"
+			if s.sqliteStorageV4 {
+				statement += " JOIN " + s.tables.series + " s ON s.id=r.series_id"
+				metricColumn = "s.metric_name"
 			}
-			for rows.Next() {
-				var n int64
-				if e = rows.Scan(&n); e != nil {
-					break
+			first, last := "r."+table.column, "r."+table.column
+			if table.table == s.tables.rollupBlocks {
+				last = "r.end_nano"
+			}
+			statement += " WHERE " + metricColumn + "=? AND (" + last + "+r.resolution_nano)>? AND " + first + "<=? LIMIT 33"
+			for _, def := range defs {
+				if def.RetentionDays <= 0 || def.Name == sqliteVirtualPingLossMetric {
+					continue
 				}
-				if n <= 0 || 3*int64(time.Hour)%n != 0 {
-					e = fmt.Errorf("unsupported legacy interval %d; preserve source and request a migration adapter", n)
-					break
+				from := now.Add(-time.Duration(def.RetentionDays) * 24 * time.Hour).Truncate(3 * time.Hour)
+				until := now.Truncate(3 * time.Hour).Add(3*time.Hour - time.Nanosecond)
+				rows, e := s.reader().QueryContext(ctx, t.bind(statement), def.Name, from.UnixNano(), until.UnixNano())
+				if e != nil {
+					return e
 				}
-				resolutions[time.Duration(n)] = true
-			}
-			re := rows.Err()
-			rows.Close()
-			if e != nil {
-				return e
-			}
-			if re != nil {
-				return re
-			}
-			if len(resolutions) > 32 {
-				return ErrTelemetryBackpressure
+				for rows.Next() {
+					var n int64
+					if e = rows.Scan(&n); e != nil {
+						break
+					}
+					if n <= 0 || 3*int64(time.Hour)%n != 0 {
+						e = fmt.Errorf("unsupported legacy interval %d; preserve source and request a migration adapter", n)
+						break
+					}
+					resolutions[time.Duration(n)] = true
+				}
+				re := rows.Err()
+				rows.Close()
+				if e != nil {
+					return e
+				}
+				if re != nil {
+					return re
+				}
+				if len(resolutions) > 32 {
+					return ErrTelemetryBackpressure
+				}
 			}
 		}
 	}
@@ -144,6 +166,17 @@ func (s *Store) MigrateLegacy(ctx context.Context, cfg TelemetryConfig, observe 
 					if e != nil {
 						return e
 					}
+					// An offline source cannot acquire new rows in an empty range.
+					// Rechecking it after an interrupted import is cheap; committing
+					// thousands of empty markers and running archive/GC per gap is
+					// not. Keep durable checkpoints only for actual source input.
+					if count == 0 && len(cells) == 0 {
+						continue
+					}
+					cells, e = coarsenLegacyMigrationCells(cells, now)
+					if e != nil {
+						return e
+					}
 					if e = t.commitLegacyCells(ctx, key, def.Name, entity, cells); e != nil {
 						return e
 					}
@@ -176,6 +209,12 @@ func (s *Store) MigrateLegacy(ctx context.Context, cfg TelemetryConfig, observe 
 			}
 		}
 	}
+	// A restart may retain windows committed by an older importer. Converge
+	// those cells before publishing completion instead of handing a source-
+	// sized fine-tier backlog to the first online scheduler/query requests.
+	if err = t.finishLegacyMigrationRetention(ctx, now); err != nil {
+		return err
+	}
 	tx, err := t.begin(ctx)
 	if err != nil {
 		return err
@@ -189,10 +228,83 @@ func (s *Store) MigrateLegacy(ctx context.Context, cfg TelemetryConfig, observe 
 	return tx.Commit()
 }
 
+func coarsenLegacyMigrationCells(cells []telemetryMigrationCell, now time.Time) ([]telemetryMigrationCell, error) {
+	sort.Slice(cells, func(i, j int) bool {
+		if cells[i].series != cells[j].series {
+			return cells[i].series < cells[j].series
+		}
+		return cells[i].bucket < cells[j].bucket
+	})
+	groups := make(map[telemetrySummaryKey]int)
+	var out []telemetryMigrationCell
+	for _, c := range cells {
+		r := legacyRetainedResolution(c.bucket, c.resolution, now)
+		key := telemetrySummaryKey{series: c.series, resolution: int64(r), bucket: alignTime(time.Unix(0, c.bucket).UTC(), r).UnixNano()}
+		index, ok := groups[key]
+		if !ok {
+			groups[key] = len(out)
+			next := telemetryMigrationCell{series: c.series, tags: c.tags, bucket: key.bucket, resolution: r}
+			// stats/raw often share the original raw sketch. Seed through merge
+			// so subsequent statistics merging never mutates the raw proof too.
+			if err := next.stats.merge(c.stats); err != nil {
+				return nil, err
+			}
+			if err := next.raw.merge(c.raw); err != nil {
+				return nil, err
+			}
+			out = append(out, next)
+			continue
+		}
+		if err := out[index].stats.merge(c.stats); err != nil {
+			return nil, err
+		}
+		if err := out[index].raw.merge(c.raw); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (t *Telemetry) finishLegacyMigrationRetention(ctx context.Context, now time.Time) error {
+	if done, err := t.progress(ctx, t.s.db, "legacy_retention_policy"); err == nil && done == 2 {
+		return nil
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	for {
+		n, err := t.PromoteLegacyChunk(ctx, now, 512)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			break
+		}
+	}
+	tx, err := t.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = t.setProgress(ctx, tx, "legacy_retention_complete", 1); err != nil {
+		return err
+	}
+	if err = t.setProgress(ctx, tx, "legacy_retention_policy", 2); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) legacyMigrationCells(ctx context.Context, name, entity string, start, end time.Time, tiers []time.Duration) ([]telemetryMigrationCell, error) {
 	var out []telemetryMigrationCell
 	for _, resolution := range tiers {
+		sort.Slice(out, func(i, j int) bool {
+			if out[i].series != out[j].series {
+				return out[i].series < out[j].series
+			}
+			return out[i].bucket < out[j].bucket
+		})
 		refinements := map[int][]telemetryMigrationCell{}
+		var additional []telemetryMigrationCell
 		rows, err := s.scanRollupRowsBetween(ctx, name, entity, nil, int64(resolution), start.UnixNano(), end.UnixNano(), true)
 		if err != nil {
 			return nil, err
@@ -206,14 +318,26 @@ func (s *Store) legacyMigrationCells(ctx context.Context, name, entity string, s
 			tagBytes, _ := json.Marshal(tags)
 			sid := telemetryMigrationKey(name + "\x00" + entity + "\x00" + string(tagBytes))
 			overlap := -1
+			alternate := false
 			for i, c := range out {
 				if c.series == sid && row.bucket < c.bucket+int64(c.resolution) && row.bucket+int64(resolution) > c.bucket {
 					if row.bucket < c.bucket || row.bucket+int64(resolution) > c.bucket+int64(c.resolution) {
+						// Legacy 45m and 1h tiers are alternate representations
+						// but are not nested. Keep the selected coarse population
+						// when it covers every observed part of this alternative.
+						// An uncovered extension still needs a migration adapter.
+						if legacyMigrationObservedRangeCovered(out, sid, b.firstTS, b.lastTS) {
+							alternate = true
+							break
+						}
 						return nil, fmt.Errorf("%w: partially overlapping legacy tiers for %s/%s; source retained", ErrTelemetryCoverage, name, entity)
 					}
 					overlap = i
 					break
 				}
+			}
+			if alternate {
+				continue
 			}
 			n := b.count - b.lossCount
 			st := telemetryStats{N: n, Attempts: b.count, Loss: b.lossCount, Sum: b.sum, Min: b.min, Max: b.max, First: b.firstVal, Last: b.lastVal, FirstNano: b.firstTS, LastNano: b.lastTS}
@@ -228,9 +352,9 @@ func (s *Store) legacyMigrationCells(ctx context.Context, name, entity string, s
 			if overlap >= 0 {
 				refinements[overlap] = append(refinements[overlap], cell)
 			} else {
-				out = append(out, cell)
+				additional = append(additional, cell)
 			}
-			if len(out) > 16384 {
+			if len(out)+len(additional) > 16384 {
 				return nil, ErrTelemetryBackpressure
 			}
 		}
@@ -252,12 +376,34 @@ func (s *Store) legacyMigrationCells(ctx context.Context, name, entity string, s
 				refined = append(refined, parent)
 			}
 		}
-		if len(refined) > 16384 {
+		if len(refined)+len(additional) > 16384 {
 			return nil, ErrTelemetryBackpressure
 		}
-		out = refined
+		out = append(refined, additional...)
 	}
 	return out, nil
+}
+
+func legacyMigrationObservedRangeCovered(cells []telemetryMigrationCell, series string, first, last int64) bool {
+	if first > last {
+		return false
+	}
+	index := sort.Search(len(cells), func(i int) bool { return cells[i].series >= series })
+	cursor := first
+	for ; index < len(cells) && cells[index].series == series; index++ {
+		cell := cells[index]
+		if cell.stats.Attempts == 0 {
+			continue
+		}
+		if cell.bucket > cursor {
+			return false
+		}
+		cursor = max(cursor, cell.bucket+int64(cell.resolution))
+		if cursor > last {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) migrateLegacyRawWindow(ctx context.Context, t *Telemetry, name, entity string, start, end, now time.Time, key string, cells *[]telemetryMigrationCell) (int64, error) {
@@ -284,19 +430,20 @@ func (s *Store) migrateLegacyRawWindow(ctx context.Context, t *Telemetry, name, 
 				if c.series == sid && p.Timestamp.UnixNano() >= c.bucket && p.Timestamp.UnixNano() < c.bucket+int64(c.resolution) {
 					c.raw.add(p, total+1, 0)
 					r := telemetryResolution(now.Sub(p.Timestamp))
-					if r < c.resolution {
-						k := telemetrySummaryKey{series: sid, resolution: int64(r), bucket: p.Timestamp.Truncate(r).UnixNano()}
-						if inside[i] == nil {
-							inside[i] = map[telemetrySummaryKey]*telemetryMigrationCell{}
-						}
-						if inside[i][k] == nil {
-							inside[i][k] = &telemetryMigrationCell{series: sid, tags: string(tags), bucket: k.bucket, resolution: r}
-							insideCount++
-						}
-						inside[i][k].stats.add(p, total+1, 0)
-						if insideCount > 16384 {
-							return ErrTelemetryBackpressure
-						}
+					// Partition every raw point, including equal-tier points on a
+					// retention boundary. A 45m source also needs rebucketing onto
+					// 1h from raw, rather than being relabelled with its 3h LCM.
+					k := telemetrySummaryKey{series: sid, resolution: int64(r), bucket: p.Timestamp.Truncate(r).UnixNano()}
+					if inside[i] == nil {
+						inside[i] = map[telemetrySummaryKey]*telemetryMigrationCell{}
+					}
+					if inside[i][k] == nil {
+						inside[i][k] = &telemetryMigrationCell{series: sid, tags: string(tags), bucket: k.bucket, resolution: r}
+						insideCount++
+					}
+					inside[i][k].stats.add(p, total+1, 0)
+					if insideCount > 16384 {
+						return ErrTelemetryBackpressure
 					}
 					if p.Timestamp.UnixNano() > c.stats.LastNano {
 						c.extra.add(p, total+1, 0)
@@ -326,7 +473,8 @@ func (s *Store) migrateLegacyRawWindow(ctx context.Context, t *Telemetry, name, 
 	var refined []telemetryMigrationCell
 	for i := range *cells {
 		c := &(*cells)[i]
-		if c.raw.Attempts >= c.stats.Attempts {
+		rawOwnsPopulation := c.raw.Attempts >= c.stats.Attempts
+		if rawOwnsPopulation {
 			if c.raw.FirstNano > c.stats.FirstNano || c.raw.LastNano < c.stats.LastNano {
 				return total, fmt.Errorf("%w: raw population does not cover legacy range; source retained", ErrTelemetryCoverage)
 			}
@@ -348,7 +496,10 @@ func (s *Store) migrateLegacyRawWindow(ctx context.Context, t *Telemetry, name, 
 				return total, err
 			}
 		}
-		if len(children) > 0 && equivalentLegacyPopulation(c.stats, combined) {
+		// These children were built from the exact same visited raw points as
+		// c.raw. Independently compressed digests need not have identical
+		// centroids after partition/merge; that is not evidence of missing raw.
+		if len(children) > 0 && (rawOwnsPopulation || equivalentLegacyPopulation(c.stats, combined)) {
 			refined = append(refined, children...)
 		} else {
 			refined = append(refined, *c)

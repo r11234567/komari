@@ -431,7 +431,7 @@ func (t *Telemetry) DeleteArchivedChunk(ctx context.Context, now time.Time, limi
 	}
 	var candidate, stateBefore string
 	eligible := " FROM " + t.table("segments") + " a JOIN " + t.table("receipts") + " r ON r.ingest_id=a.last_id WHERE a.state IN ('archived','deleting') AND a.last_id<=? AND r.received<=? AND NOT EXISTS (SELECT 1 FROM " + t.table("outbox") + " o WHERE o.ingest_id>=a.first_id AND o.ingest_id<=a.last_id AND o.delivered=0) AND NOT EXISTS (SELECT 1 FROM " + t.table("leases") + " l WHERE l.segment_id=a.id AND l.expires>" + fmt.Sprintf("%d", time.Now().UnixNano()) + ")"
-	err = t.s.reader().QueryRowContext(ctx, t.bind("SELECT a.id,a.state"+eligible+" ORDER BY a.created,a.id LIMIT 1"), coverage, now.Add(-t.cfg.RawWindow).UnixNano()).Scan(&candidate, &stateBefore)
+	err = t.s.reader().QueryRowContext(ctx, t.bind("SELECT a.id,a.state"+eligible+" ORDER BY a.created,a.id LIMIT 1"), coverage, now.Add(-t.cfg.RawRetention).UnixNano()).Scan(&candidate, &stateBefore)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -467,7 +467,7 @@ func (t *Telemetry) DeleteArchivedChunk(ctx context.Context, now time.Time, limi
 		return 0, err
 	}
 	var id string
-	err = tx.QueryRowContext(ctx, t.bind("SELECT a.id"+eligible+" AND a.id=?"), coverage, now.Add(-t.cfg.RawWindow).UnixNano(), candidate).Scan(&id)
+	err = tx.QueryRowContext(ctx, t.bind("SELECT a.id"+eligible+" AND a.id=?"), coverage, now.Add(-t.cfg.RawRetention).UnixNano(), candidate).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
