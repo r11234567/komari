@@ -56,7 +56,7 @@ func TestTelemetryOfflineLedgerAndFirstOnlineDelta(t *testing.T) {
 	report := v1.Report{UUID: "client-a", UpdatedAt: now.Add(time.Second)}
 	report.Network.TotalUp = 137
 	report.Network.TotalDown = 261
-	_, err = metricstore.WriteReport(metricstore.WithReportIdentity(ctx, "online/1", ""), report)
+	_, err = metricstore.WriteReport(metricstore.WithReportIdentity(ctx, "online/1"), report)
 	require.NoError(t, err)
 	// Delivery is background-owned. Reads must not secretly consume the outbox.
 	n, err := metricstore.DeliverTelemetryTraffic(ctx, 128, ConsumeTelemetry)

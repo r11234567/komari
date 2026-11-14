@@ -40,6 +40,13 @@ func (t *Telemetry) EnsureSchedule(ctx context.Context, tasks []ScheduleTask) er
 		return err
 	}
 	defer tx.Rollback()
+	if t.scalar {
+		// Scalar aging is owned by tiers; there are no compressed statistics
+		// to rewrite. Retire persisted v7 jobs before dispatching the queue.
+		if _, err = tx.ExecContext(ctx, "DELETE FROM "+t.table("schedule")+" WHERE task IN ('promotion','stats')"); err != nil {
+			return err
+		}
+	}
 	for _, task := range tasks {
 		if task.Name == "" || len(task.Name) > 64 {
 			return ErrInvalidArgument

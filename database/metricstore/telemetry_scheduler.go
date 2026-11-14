@@ -28,7 +28,7 @@ func ensureTelemetrySchedule(ctx context.Context, t *metric.Telemetry, now time.
 		return nil
 	}
 	var tasks []metric.ScheduleTask
-	for _, name := range []string{"traffic", "summary", "seal", "archive", "delete", "promotion", "tiers", "summaries", "expire", "receipts", "erased", "checkpoint", "catalog", "ledger", "stats", "gaps"} {
+	for _, name := range []string{"traffic", "summary", "seal", "archive", "delete", "tiers", "summaries", "expire", "receipts", "erased", "checkpoint", "catalog", "ledger", "gaps"} {
 		tasks = append(tasks, metric.ScheduleTask{Name: name, Due: now})
 	}
 	if err := t.EnsureSchedule(ctx, tasks); err != nil {
@@ -229,17 +229,6 @@ func runTelemetryPass(ctx context.Context, s *metric.Store, now time.Time) (Sche
 				out.Delay = time.Second
 			} else if err == nil {
 				out.Delay, err = t.NextSummaryPromotion(work, now)
-			}
-		case "promotion":
-			out.Progress, err = t.PromoteLegacyChunk(work, now, chunk)
-			if out.Progress > 0 {
-				out.Delay = time.Second
-			}
-		case "stats":
-			out.Progress, out.Cursor, err = t.CompactStatsChunk(work, task.Cursor, chunk)
-			out.Delay = 24 * time.Hour
-			if out.Progress > 0 {
-				out.Delay = time.Second
 			}
 		case "gaps":
 			out.Progress, out.Cursor, err = t.CompactGapsChunk(work, task.Cursor, chunk)

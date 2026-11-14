@@ -62,7 +62,7 @@ func ValidateTelemetryBackup(ctx context.Context, databasePath, archiveDirectory
 	if err = db.QueryRowContext(ctx, "SELECT value FROM "+quote(prefix+"progress")+" WHERE task='schema_version'").Scan(&version); err != nil {
 		return err
 	}
-	if version != 3 && version != 4 && version != 5 && version != 6 && version != 7 {
+	if version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 {
 		return fmt.Errorf("unsupported restored telemetry schema %d", version)
 	}
 	root, err := os.OpenRoot(archiveDirectory)
@@ -100,7 +100,7 @@ func ValidateTelemetryBackup(ctx context.Context, databasePath, archiveDirectory
 	}
 	files := make(map[string]telemetryBackupFile, len(manifest.Files))
 	for _, file := range manifest.Files {
-		if file.Path == "" || !filepath.IsLocal(filepath.FromSlash(file.Path)) || strings.Contains(file.Path, `\`) || filepath.ToSlash(filepath.Clean(file.Path)) != file.Path || file.Bytes < 0 || len(file.SHA256) != 64 {
+		if file.Path == "" || !filepath.IsLocal(filepath.FromSlash(file.Path)) || strings.Contains(file.Path, `\`) || filepath.ToSlash(filepath.Clean(file.Path)) != file.Path || file.Bytes < 0 || (file.SHA256 != "" && len(file.SHA256) != 64) {
 			return fmt.Errorf("invalid telemetry manifest file")
 		}
 		if _, ok := files[file.Path]; ok {
@@ -108,21 +108,29 @@ func ValidateTelemetryBackup(ctx context.Context, databasePath, archiveDirectory
 		}
 		files[file.Path] = file
 	}
-	rows, err = db.QueryContext(ctx, "SELECT id,checksum,file_bytes,created FROM "+quote(prefix+"segments")+" WHERE state IN ('archived','deleting','complete')")
+	dayColumn := "0"
+	if version >= 8 {
+		dayColumn = "archive_day"
+	}
+	rows, err = db.QueryContext(ctx, "SELECT id,checksum,file_bytes,created,"+dayColumn+" FROM "+quote(prefix+"segments")+" WHERE state IN ('archived','deleting','complete')")
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id, hash string
-		var size, created int64
-		if err = rows.Scan(&id, &hash, &size, &created); err != nil {
+		var size, created, archiveDay int64
+		if err = rows.Scan(&id, &hash, &size, &created, &archiveDay); err != nil {
 			return err
 		}
 		if len(id) != 32 {
 			return fmt.Errorf("invalid restored segment identity")
 		}
-		rel := time.Unix(0, created).UTC().Format("2006/01/02") + "/" + id + ".jsonl.zst"
+		day := time.Unix(0, created).UTC()
+		if archiveDay != 0 {
+			day = time.Unix(archiveDay, 0).UTC()
+		}
+		rel := day.Format("2006/01/02") + "/" + id + ".jsonl.zst"
 		file, ok := files[rel]
 		if !ok || file.Bytes != size || file.SHA256 != hash {
 			return fmt.Errorf("telemetry manifest/catalog mismatch: %s", id)
@@ -133,6 +141,10 @@ func ValidateTelemetryBackup(ctx context.Context, databasePath, archiveDirectory
 		}
 		if !info.Mode().IsRegular() || info.Size() != size {
 			return fmt.Errorf("restored archive type/size mismatch: %s", id)
+		}
+		if hash == "" {
+			delete(files, rel)
+			continue
 		}
 		f, err := root.Open(filepath.FromSlash(rel))
 		if err != nil {

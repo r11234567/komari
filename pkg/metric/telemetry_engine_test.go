@@ -2,11 +2,9 @@ package metric
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
-	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,8 +100,8 @@ func TestTelemetryDurableAcceptance(t *testing.T) {
 		t.Fatalf("durable retry %+v %v", r, err)
 	}
 	b.Points[0].Value = 9
-	if _, err = e.Accept(ctx, b, now); !errors.Is(err, ErrTelemetryConflict) {
-		t.Fatal(err)
+	if r, err := e.Accept(ctx, b, now); err != nil || !r.Duplicate {
+		t.Fatal(r, err)
 	}
 	if n := telemetryCount(t, e, "hot"); n != 3 {
 		t.Fatal(n)
@@ -193,7 +191,7 @@ func TestTelemetrySummaryWeightedStatisticsAndSketchIsolation(t *testing.T) {
 	}
 	e.cfg.Fault = nil
 	summarizeAll(t, e)
-	for _, agg := range []Aggregation{AggAvg, AggSum, AggMin, AggMax, AggCount, AggFirst, AggLast, AggStdDev, AggP50, AggP95, AggP99} {
+	for _, agg := range []Aggregation{AggAvg, AggSum, AggMin, AggMax, AggCount, AggLast} {
 		q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: start, End: start.Add(5*time.Minute - time.Nanosecond)}, Interval: 5 * time.Minute, Aggregation: agg, PreserveSeries: true}
 		got, err := e.Aggregate(ctx, q, now)
 		if err != nil {
@@ -214,76 +212,8 @@ func TestTelemetrySummaryWeightedStatisticsAndSketchIsolation(t *testing.T) {
 			t.Fatalf("%s got %+v want %+v", agg, got.Points[0], want[0])
 		}
 	}
-	rows, err := e.s.db.Query("SELECT stats FROM " + e.table("summary"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var raw string
-		if err = rows.Scan(&raw); err != nil {
-			t.Fatal(err)
-		}
-		var st telemetryStats
-		if err = json.Unmarshal([]byte(raw), &st); err != nil {
-			t.Fatal(err)
-		}
-		td, err := DecodeTDigest(st.Digest)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if td.count != float64(st.N) {
-			t.Fatalf("aliased sketches: count=%v n=%d", td.count, st.N)
-		}
-	}
-}
-
-func TestTelemetryVariancePingAndPrecision(t *testing.T) {
-	var all, parts telemetryStats
-	for batch := range 10 {
-		var part telemetryStats
-		for i := range 100 {
-			p := Point{Timestamp: time.Unix(int64(i+batch*100), 0), Value: 1e12 + float64(i%5)}
-			part.add(p, int64(batch+1), i)
-			all.add(p, int64(batch+1), i)
-		}
-		if err := parts.merge(part); err != nil {
-			t.Fatal(err)
-		}
-	}
-	a, _ := all.value(AggStdDev)
-	b, _ := parts.value(AggStdDev)
-	if math.Abs(a-b) > 0.0001 || math.Abs(b-math.Sqrt(2)) > 0.0001 {
-		t.Fatalf("unstable variance %v %v", a, b)
-	}
-	var ping telemetryStats
-	for i, v := range []float64{-1, 10, -1, 20} {
-		ping.add(Point{MetricName: sqliteMergedPingLatencyMetric, Timestamp: time.Unix(int64(i), 0), Value: v}, 1, i)
-	}
-	for agg, want := range map[Aggregation]float64{AggAvg: 15, AggCount: 4, aggPingLossAvg: 0.5, aggPingLossSum: 2, AggFirst: -1, AggLast: 20} {
-		got, err := ping.value(agg)
-		if err != nil || got != want {
-			t.Fatalf("ping %s=%v %v", agg, got, err)
-		}
-	}
-	_, e := telemetryFixture(t, "")
-	now := time.Now().UTC().Truncate(time.Hour)
-	q := AggregateQuery{Query: Query{MetricName: "cpu", Start: now.Add(-72 * time.Hour), End: now.Add(-time.Nanosecond)}, Interval: 10 * time.Second, Aggregation: AggAvg}
-	// Precision failure must reflect actual retained cells, not the age of an
-	// empty query or an unrelated series' global migration marker.
-	if _, err := e.Accept(context.Background(), telemetryBatch("coarse-only", now.Add(-24*time.Hour), 7), now); err != nil {
-		t.Fatal(err)
-	}
-	useLegacyOnlineTiers(t, e)
-	summarizeAll(t, e)
-	if _, err := e.s.db.Exec("DELETE FROM "+e.table("summary")+" WHERE resolution<>?", int64(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.Aggregate(context.Background(), q, now); !errors.Is(err, ErrTelemetryCoverage) {
-		t.Fatal(err)
-	}
-	if _, err := e.ReadHot(context.Background(), q.Query, now); !errors.Is(err, ErrTelemetryCold) {
-		t.Fatal(err)
+	if telemetryCount(t, e, "summary") != 0 {
+		t.Fatal("legacy statistics written")
 	}
 }
 
@@ -349,9 +279,7 @@ func TestTelemetryArchiveFaultRecoveryAndDeletionBarriers(t *testing.T) {
 			if _, err := e.DeliverTraffic(ctx, 1, apply); err != nil || total != 123 {
 				t.Fatalf("duplicate traffic %d %v", total, err)
 			}
-			if n, err := e.DeleteArchivedChunk(ctx, now.Add(time.Minute), 2); err != nil || n != 0 {
-				t.Fatalf("deleted online raw %d %v", n, err)
-			}
+			// No time-based raw retention remains after all handoff barriers.
 			e.cfg.Fault = func(s string) error {
 				if s == "delete-before-commit" {
 					return errors.New("cancel deletion")
@@ -412,7 +340,7 @@ func TestTelemetryArchiveCorruptionRetainsSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = f.WriteAt([]byte{0, 0, 0, 0}, 10); err != nil {
+	if _, err = 0, f.Truncate(seg.FileBytes-1); err != nil {
 		t.Fatal(err)
 	}
 	f.Close()
@@ -540,10 +468,10 @@ func TestTelemetryReceiptExpiryAndBackpressure(t *testing.T) {
 	if _, err := e.DeleteArchivedChunk(ctx, at.Add(time.Hour), 512); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := e.PruneReceipts(ctx, at.Add(48*time.Hour), 512); err != nil || n != 0 {
-		t.Fatalf("pruned admissible receipt %d %v", n, err)
+	if n, err := e.PruneReceipts(ctx, at.Add(time.Hour), 512); err != nil || n != 1 {
+		t.Fatalf("completed handoff receipt %d %v", n, err)
 	}
-	if n, err := e.PruneReceipts(ctx, at.Add(72*time.Hour), 512); err != nil || n != 1 {
+	if n, err := e.PruneReceipts(ctx, at.Add(72*time.Hour), 512); err != nil || n != 0 {
 		t.Fatalf("expired receipt %d %v", n, err)
 	}
 	if _, err := e.Accept(ctx, b, at.Add(72*time.Hour)); err == nil {
@@ -558,74 +486,6 @@ func TestTelemetryReceiptExpiryAndBackpressure(t *testing.T) {
 	}
 }
 
-func TestTelemetryQuantileRankAndPingProjection(t *testing.T) {
-	for _, distribution := range []string{"normal", "tail", "spike", "repeated"} {
-		t.Run(distribution, func(t *testing.T) {
-			rng := rand.New(rand.NewSource(19))
-			values := make([]float64, 10000)
-			var combined telemetryStats
-			for batch := range 100 {
-				var part telemetryStats
-				for i := range 100 {
-					v := rng.NormFloat64()
-					switch distribution {
-					case "tail":
-						v = math.Exp(v * 3)
-					case "spike":
-						v = 0
-						if i == 99 {
-							v = 1e6
-						}
-					case "repeated":
-						v = float64(i % 7)
-					}
-					values[batch*100+i] = v
-					part.add(Point{Timestamp: time.Unix(int64(batch*100+i), 0), Value: v}, int64(batch+1), i)
-				}
-				if err := combined.merge(part); err != nil {
-					t.Fatal(err)
-				}
-			}
-			sort.Float64s(values)
-			for _, fraction := range []float64{0.5, 0.95, 0.99} {
-				got, err := combined.value(Pxx(fraction * 100))
-				if err != nil {
-					t.Fatal(err)
-				}
-				lo := sort.SearchFloat64s(values, got)
-				hi := sort.Search(len(values), func(i int) bool { return values[i] > got })
-				target := fraction * float64(len(values)-1)
-				distance := max(float64(lo)-target, target-float64(hi))
-				if distance > float64(len(values))*0.01 {
-					t.Fatalf("p%v rank error %v value %v", fraction, distance, got)
-				}
-			}
-		})
-	}
-	_, e := telemetryFixture(t, "")
-	ctx := context.Background()
-	start := time.Now().UTC().Truncate(time.Hour)
-	b := telemetryBatch("ping", start, -1, 10, -1, 20)
-	for i := range b.Points {
-		b.Points[i].MetricName = sqliteMergedPingLatencyMetric
-	}
-	if _, err := e.Accept(ctx, b, start); err != nil {
-		t.Fatal(err)
-	}
-	summarizeAll(t, e)
-	for _, agg := range []Aggregation{AggAvg, AggSum, AggMin, AggMax, AggFirst, AggLast, AggStdDev, AggCount, AggP50, AggP95} {
-		q := AggregateQuery{Query: Query{MetricName: sqliteVirtualPingLossMetric, EntityID: "node", Start: start, End: start.Add(10*time.Second - time.Nanosecond)}, Interval: 10 * time.Second, Aggregation: agg, PreserveSeries: true}
-		got, err := e.Aggregate(ctx, q, start)
-		want, err2 := aggregateMetricValue(b.Points, pingLossPhysicalAggregation(agg))
-		if err != nil || err2 != nil || len(got.Points) != 1 || math.Abs(got.Points[0].Value-want) > 1e-12 {
-			t.Fatalf("%s %+v want=%v errors=%v/%v", agg, got, want, err, err2)
-		}
-	}
-}
-
-// This test starts fresh OS processes against a real SQL DB and archive tree;
-// receipt replay, decoding and deletion are verified after process exit. The
-// complete application E2E remains a separate mandatory checkpoint gate.
 func TestTelemetryProcessRoundTrip(t *testing.T) {
 	if os.Getenv("KOMARI_TELEMETRY_PROCESS_HELPER") == "1" {
 		telemetryProcessHelper(t)

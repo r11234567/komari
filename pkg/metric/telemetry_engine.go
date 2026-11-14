@@ -32,9 +32,10 @@ type TelemetryConfig struct {
 	SegmentPoints    int64
 	SegmentBytes     int64
 	RawWindow        time.Duration
-	// RawRetention controls safe hot-row retirement independently of the
-	// bounded online exact-read window. Runtime sets one day; zero preserves
-	// the historical explicit-engine configuration contract for offline tools.
+	// RawRetention is a compatibility field for offline callers. Runtime does
+	// not retain archived raw rows: charts own their scalar rollups, and CSV
+	// reads the immutable archive. A zero value retires raw input immediately
+	// after archive, summary and accounting handoff have committed.
 	RawRetention time.Duration
 	MaxLateness  time.Duration
 	MaxHotBytes  int64
@@ -52,19 +53,16 @@ func (c TelemetryConfig) defaults() TelemetryConfig {
 		c.SegmentPoints = 5_000_000
 	}
 	if c.SegmentBytes == 0 {
-		c.SegmentBytes = 64 << 20
+		c.SegmentBytes = 4 << 20
 	}
 	if c.RawWindow == 0 {
 		c.RawWindow = 15 * time.Minute
-	}
-	if c.RawRetention == 0 {
-		c.RawRetention = c.RawWindow
 	}
 	if c.MaxLateness == 0 {
 		c.MaxLateness = 48 * time.Hour
 	}
 	if c.MaxHotBytes == 0 {
-		c.MaxHotBytes = 1 << 30
+		c.MaxHotBytes = 16 << 20
 	}
 	if c.WorkLease == 0 {
 		c.WorkLease = time.Minute
@@ -88,6 +86,7 @@ type Telemetry struct {
 	instance         string
 	legacyUntil      int64
 	legacyResolution time.Duration
+	scalar           bool
 	closeOnce        sync.Once
 	closeErr         error
 }
@@ -107,13 +106,9 @@ type TelemetryBatch struct {
 	Source string `json:"source"`
 	// Identity is supplied by the authenticated adapter. Legacy Agent identity
 	// includes sequence AND observed time; process-local sequence alone is unsafe.
-	Identity string `json:"identity"`
-	// PayloadProof binds fields validated by a protocol adapter but not stored
-	// as chart points. Deterministic wire SHA256 prevents altered retries from
-	// becoming an ACK merely because those fields were projected away.
-	PayloadProof string            `json:"payload_proof,omitempty"`
-	Points       []Point           `json:"points"`
-	Traffic      *TelemetryTraffic `json:"traffic,omitempty"`
+	Identity string            `json:"identity"`
+	Points   []Point           `json:"points"`
+	Traffic  *TelemetryTraffic `json:"traffic,omitempty"`
 }
 
 type TelemetryReceipt struct {
@@ -129,6 +124,8 @@ type telemetrySegment struct {
 	Hash                                         string
 	FileBytes                                    int64
 	StagingOwner                                 string
+	ArchiveEntity                                string `json:",omitempty"`
+	ArchiveDay                                   int64  `json:",omitempty"`
 }
 
 func telemetryID() string {
@@ -182,7 +179,7 @@ func (s *Store) OpenTelemetry(ctx context.Context, cfg TelemetryConfig) (*Teleme
 		return nil, err
 	}
 	cfg = cfg.defaults()
-	if cfg.ArchiveDirectory == "" || cfg.SegmentDuration <= 0 || cfg.SegmentPoints <= 0 || cfg.SegmentBytes < 4096 || cfg.RawWindow <= 0 || cfg.RawRetention < cfg.RawWindow || cfg.MaxLateness < cfg.RawWindow || cfg.MaxHotBytes < cfg.SegmentBytes || cfg.WorkLease < 10*time.Millisecond || cfg.WorkLease > 5*time.Minute {
+	if cfg.ArchiveDirectory == "" || cfg.SegmentDuration <= 0 || cfg.SegmentPoints <= 0 || cfg.SegmentBytes < 4096 || cfg.RawWindow <= 0 || cfg.RawRetention < 0 || cfg.MaxLateness < cfg.RawWindow || cfg.MaxHotBytes < cfg.SegmentBytes || cfg.WorkLease < 10*time.Millisecond || cfg.WorkLease > 5*time.Minute {
 		return nil, fmt.Errorf("%w: telemetry configuration", ErrInvalidArgument)
 	}
 	if s.cfg.Driver == DriverSQLite {
@@ -260,14 +257,19 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	} else if err != nil {
 		return err
 	}
-	if version != 7 && version != 6 && version != 5 && version != 4 && version != 3 && version != 2 && version != 1 && version != -1 {
+	if version != 9 && version != -9 && version != 8 && version != -8 && version != 7 && version != 6 && version != 5 && version != 4 && version != 3 && version != 2 && version != 1 && version != -1 {
 		return fmt.Errorf("unsupported telemetry SQL schema version %d", version)
+	}
+	if version == 8 {
+		if _, err := t.s.db.ExecContext(ctx, "UPDATE "+progressTable+" SET value=-9 WHERE task='schema_version'"); err != nil {
+			return err
+		}
 	}
 	// Small integer/CHAR keys keep these DDLs portable across SQLite, MySQL and
 	// PostgreSQL. JSON payloads use TEXT, not backend-dependent JSON operators.
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS %sprogress (task VARCHAR(64) PRIMARY KEY, value BIGINT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS %sreceipts (ingest_id BIGINT PRIMARY KEY, identity_hash CHAR(64) NOT NULL UNIQUE, payload_hash CHAR(64) NOT NULL, source VARCHAR(255) NOT NULL, observed BIGINT NOT NULL, received BIGINT NOT NULL, points INTEGER NOT NULL, segment_id CHAR(32) NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS %sreceipts (ingest_id BIGINT PRIMARY KEY, source VARCHAR(255) NOT NULL, identity VARCHAR(256) NOT NULL, observed BIGINT NOT NULL, received BIGINT NOT NULL, points INTEGER NOT NULL, segment_id CHAR(32) NOT NULL, importing INTEGER NOT NULL DEFAULT 0, UNIQUE(source,identity))`,
 		`CREATE TABLE IF NOT EXISTS %sseries (id CHAR(64) PRIMARY KEY, metric VARCHAR(255) NOT NULL, entity VARCHAR(255) NOT NULL, tags TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS %shot (ingest_id BIGINT NOT NULL, ordinal INTEGER NOT NULL, series_id CHAR(64) NOT NULL, observed BIGINT NOT NULL, received BIGINT NOT NULL, value DOUBLE PRECISION NOT NULL, labels TEXT NOT NULL, segment_id CHAR(32) NOT NULL, PRIMARY KEY(ingest_id, ordinal))`,
 		`CREATE TABLE IF NOT EXISTS %ssegments (id CHAR(32) PRIMARY KEY, state VARCHAR(16) NOT NULL, first_id BIGINT NOT NULL, last_id BIGINT NOT NULL, points BIGINT NOT NULL, bytes BIGINT NOT NULL, created BIGINT NOT NULL, deleted BIGINT NOT NULL, checksum CHAR(64) NOT NULL, file_bytes BIGINT NOT NULL, staging_owner CHAR(32) NOT NULL, summary_version INTEGER NOT NULL DEFAULT 1)`,
@@ -305,6 +307,8 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	// crash between ALTERs resumes safely without scanning historical payloads.
 	for _, column := range []struct{ table, name, definition string }{
 		{"segments", "summary_version", "INTEGER NOT NULL DEFAULT 1"},
+		{"segments", "archive_entity", "VARCHAR(255) NOT NULL DEFAULT ''"},
+		{"segments", "archive_day", "BIGINT NOT NULL DEFAULT 0"},
 		{"summary", "input_through", "BIGINT NOT NULL DEFAULT 0"},
 		{"summary", "promoted_through", "BIGINT NOT NULL DEFAULT 0"},
 		{"gaps", "ranges", "VARCHAR(14000) NOT NULL DEFAULT ''"},
@@ -316,12 +320,16 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 			return e
 		}
 	}
+	if err := t.simplifyReceiptSchema(ctx); err != nil {
+		return err
+	}
 	for _, idx := range []struct{ name, table, cols string }{
 		{"hot_series", "hot", "series_id,observed,ingest_id,ordinal"},
 		{"hot_segment", "hot", "segment_id,ingest_id,ordinal"},
 		{"series_metric", "series", "metric,entity,id"},
 		{"series_entity", "series", "entity,id"},
 		{"segments_state", "segments", "state,created,id"},
+		{"segments_partition", "segments", "state,archive_entity,archive_day,created,id"},
 		{"outbox_pending", "outbox", "delivered,ingest_id"},
 		{"summary_series", "summary", "series_id,resolution,bucket"},
 		{"receipt_age", "receipts", "received,ingest_id"},
@@ -398,7 +406,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	} else if !errors.Is(e, sql.ErrNoRows) {
 		return e
 	}
-	return nil
+	return t.createScalarSchema(ctx)
 }
 
 func (t *Telemetry) progress(ctx context.Context, q querier, task string) (int64, error) {
@@ -437,11 +445,6 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 		return result, fmt.Errorf("%w: telemetry batch", ErrInvalidArgument)
 	}
 	b.Points = append([]Point(nil), b.Points...)
-	if b.PayloadProof != "" {
-		if p, e := hex.DecodeString(b.PayloadProof); e != nil || len(p) != 32 {
-			return result, ErrInvalidArgument
-		}
-	}
 	oldest := now.UnixNano()
 	resolvedKeys := make(map[string]string)
 	for i, p := range b.Points {
@@ -475,9 +478,6 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 	if batchBytes > t.cfg.SegmentBytes || int64(len(b.Points)) > t.cfg.SegmentPoints || len(payload) > 4<<20 {
 		return result, fmt.Errorf("%w: telemetry payload budget", ErrInvalidArgument)
 	}
-	id := sha256.Sum256([]byte(b.Source + "\x00" + b.Identity))
-	hash := sha256.Sum256(payload)
-	idHex, hashHex := hex.EncodeToString(id[:]), hex.EncodeToString(hash[:])
 	release, err := t.acquire(ctx)
 	if err != nil {
 		return result, err
@@ -488,12 +488,11 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 		return result, err
 	}
 	defer tx.Rollback()
-	var existing string
-	err = tx.QueryRowContext(ctx, t.bind("SELECT ingest_id,points,payload_hash FROM "+t.table("receipts")+" WHERE identity_hash=?"), idHex).Scan(&result.IngestID, &result.Points, &existing)
+	err = tx.QueryRowContext(ctx, t.bind("SELECT ingest_id,points FROM "+t.table("receipts")+" WHERE source=? AND identity=?"), b.Source, b.Identity).Scan(&result.IngestID, &result.Points)
+	if importing && errors.Is(err, sql.ErrNoRows) {
+		err = t.legacyImportReceipt(ctx, tx, b.Source, b.Identity, &result)
+	}
 	if err == nil {
-		if existing != hashHex {
-			return TelemetryReceipt{}, ErrTelemetryConflict
-		}
 		result.Duplicate = true
 		return result, tx.Commit()
 	}
@@ -524,12 +523,17 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 	if hotBytes > t.cfg.MaxHotBytes-batchBytes {
 		return result, ErrTelemetryBackpressure
 	}
-	seg, err := t.activeSegment(ctx, tx, now, int64(len(b.Points)), batchBytes)
+	entity, day := telemetryBatchPartition(b.Points)
+	seg, err := t.activeSegment(ctx, tx, now, int64(len(b.Points)), batchBytes, entity, day)
 	if err != nil {
 		return result, err
 	}
 	result = TelemetryReceipt{IngestID: last + 1, Points: len(b.Points)}
-	if _, err = tx.ExecContext(ctx, t.bind("INSERT INTO "+t.table("receipts")+" (ingest_id,identity_hash,payload_hash,source,observed,received,points,segment_id) VALUES (?,?,?,?,?,?,?,?)"), result.IngestID, idHex, hashHex, b.Source, oldest, now.UnixNano(), len(b.Points), seg.ID); err != nil {
+	importFlag := 0
+	if importing {
+		importFlag = 1
+	}
+	if _, err = tx.ExecContext(ctx, t.bind("INSERT INTO "+t.table("receipts")+" (ingest_id,source,identity,observed,received,points,segment_id,importing) VALUES (?,?,?,?,?,?,?,?)"), result.IngestID, b.Source, b.Identity, oldest, now.UnixNano(), len(b.Points), seg.ID, importFlag); err != nil {
 		return result, err
 	}
 	seen := make(map[string]bool)
@@ -624,9 +628,27 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 	return result, t.fault("ingest-after-commit")
 }
 
-func (t *Telemetry) activeSegment(ctx context.Context, tx *sql.Tx, now time.Time, points, bytes int64) (telemetrySegment, error) {
+// Reports from a machine share a file only with that machine and observation
+// day. Generic mixed batches retain the compatibility partition; their v3
+// frames still carry entity/time selection metadata.
+func telemetryBatchPartition(points []Point) (string, int64) {
+	if len(points) == 0 {
+		return "", 0
+	}
+	entity := points[0].EntityID
+	day := points[0].Timestamp.UTC().Truncate(24 * time.Hour).Unix()
+	for _, p := range points[1:] {
+		if p.EntityID != entity || p.Timestamp.UTC().Truncate(24*time.Hour).Unix() != day {
+			return "", 0
+		}
+	}
+	return entity, day
+}
+
+func (t *Telemetry) activeSegment(ctx context.Context, tx *sql.Tx, now time.Time, points, bytes int64, entity string, day int64) (telemetrySegment, error) {
 	var seg telemetrySegment
-	err := tx.QueryRowContext(ctx, "SELECT id,points,bytes,created FROM "+t.table("segments")+" WHERE state='open' ORDER BY created,id LIMIT 1").Scan(&seg.ID, &seg.Points, &seg.Bytes, &seg.Created)
+	seg.ArchiveEntity, seg.ArchiveDay = entity, day
+	err := tx.QueryRowContext(ctx, t.bind("SELECT id,points,bytes,created FROM "+t.table("segments")+" WHERE state='open' AND archive_entity=? AND archive_day=? ORDER BY created,id LIMIT 1"), entity, day).Scan(&seg.ID, &seg.Points, &seg.Bytes, &seg.Created)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return seg, err
 	}
@@ -642,7 +664,7 @@ func (t *Telemetry) activeSegment(ctx context.Context, tx *sql.Tx, now time.Time
 		if err != nil {
 			return seg, err
 		}
-		_, err = tx.ExecContext(ctx, t.bind("INSERT INTO "+t.table("segments")+" (id,state,first_id,last_id,points,bytes,created,deleted,checksum,file_bytes,staging_owner,summary_version) VALUES (?,'open',?,?,0,0,?,0,'',0,'',2)"), seg.ID, last+1, last, now.UnixNano())
+		_, err = tx.ExecContext(ctx, t.bind("INSERT INTO "+t.table("segments")+" (id,state,first_id,last_id,points,bytes,created,deleted,checksum,file_bytes,staging_owner,summary_version,archive_entity,archive_day) VALUES (?,'open',?,?,0,0,?,0,'',0,'',3,?,?)"), seg.ID, last+1, last, now.UnixNano(), entity, day)
 		if err != nil {
 			return seg, err
 		}
@@ -656,7 +678,7 @@ func (t *Telemetry) SealDue(ctx context.Context, now time.Time) (int64, error) {
 		return 0, err
 	}
 	defer release()
-	r, err := t.s.db.ExecContext(ctx, t.bind("UPDATE "+t.table("segments")+" SET state='sealed' WHERE state='open' AND (created<=? OR points>=? OR bytes>=?)"), now.Add(-t.cfg.SegmentDuration).UnixNano(), t.cfg.SegmentPoints, t.cfg.SegmentBytes)
+	r, err := t.s.db.ExecContext(ctx, t.bind("UPDATE "+t.table("segments")+" SET state='sealed' WHERE state='open' AND (created<=? OR points>=? OR bytes>=? OR (SELECT value FROM "+t.table("progress")+" WHERE task='hot_bytes')>=?)"), now.Add(-t.cfg.SegmentDuration).UnixNano(), t.cfg.SegmentPoints, t.cfg.SegmentBytes, t.cfg.MaxHotBytes/2)
 	if err != nil {
 		return 0, err
 	}

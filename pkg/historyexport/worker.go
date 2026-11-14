@@ -37,6 +37,7 @@ type Worker struct {
 	RequirePolicy    bool
 	resources        resourceSampler
 	continuations    map[string]checkpointContinuation
+	snapshots        map[string]cachedExportSnapshot
 }
 type Availability struct {
 	Available     bool           `json:"available"`
@@ -54,6 +55,14 @@ const maxExportOutput = 8 << 30
 const exportFileCacheWindow = 4 << 20
 
 func atomicJSON(path string, value any) error {
+	return writeJSON(path, value, true)
+}
+
+// Heartbeat and policy files describe the current live process. Losing the
+// latest update across a crash is harmless: freshness already fails closed.
+func liveJSON(path string, value any) error { return writeJSON(path, value, false) }
+
+func writeJSON(path string, value any, durable bool) error {
 	b, e := json.Marshal(value)
 	if e != nil {
 		return e
@@ -63,7 +72,7 @@ func atomicJSON(path string, value any) error {
 		return e
 	}
 	_, e = f.Write(b)
-	if e == nil {
+	if e == nil && durable {
 		e = f.Sync()
 	}
 	ce := f.Close()
@@ -76,7 +85,10 @@ func atomicJSON(path string, value any) error {
 	if e = os.Rename(path+".tmp", path); e != nil {
 		return e
 	}
-	return syncDir(filepath.Dir(path))
+	if durable {
+		return syncDir(filepath.Dir(path))
+	}
+	return nil
 }
 func syncDir(path string) error {
 	f, e := os.Open(path)
@@ -128,7 +140,7 @@ func (w *Worker) heartbeat(ctx context.Context) error {
 	if e != nil {
 		a.Error = e.Error()
 	}
-	if err := atomicJSON(filepath.Join(w.Queue.Dir, "worker.json"), a); err != nil {
+	if err := liveJSON(filepath.Join(w.Queue.Dir, "worker.json"), a); err != nil {
 		return err
 	}
 	return e
@@ -181,7 +193,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-// Step executes one immutable input unit, then gives another account a turn.
+// Step executes a bounded batch, then gives another account a turn.
 // The complete process, including planning and checkpoints, shares one cgroup.
 func (w *Worker) Step(parent context.Context, j *Job) error {
 	release, lockErr := w.Queue.guard(parent)
@@ -400,6 +412,7 @@ func (w *Worker) Step(parent context.Context, j *Job) error {
 }
 func (w *Worker) removeWork(j *Job) {
 	delete(w.continuations, j.ID)
+	delete(w.snapshots, j.ID)
 	for _, suffix := range []string{".csv.part", ".snapshot", ".spool.db", ".spool.db-wal", ".spool.db-shm"} {
 		p := w.Queue.Path(j.ID, suffix)
 		if suffix == ".snapshot" {
@@ -450,6 +463,17 @@ func (w *Worker) snapshot(ctx context.Context, j *Job) (metric.ExportSnapshot, e
 	dir := w.Queue.Path(j.ID, ".snapshot")
 	path := filepath.Join(dir, "manifest.json")
 	var snapshot metric.ExportSnapshot
+	if cached, ok := w.snapshots[j.ID]; ok {
+		info, e := os.Lstat(path)
+		if e != nil {
+			return snapshot, e
+		}
+		if !sameSnapshotFile(cached.file, info) || (j.Generation != "" && j.Generation != cached.generation) {
+			return snapshot, errExportInvalidated
+		}
+		j.Generation = cached.generation
+		return cached.snapshot, nil
+	}
 	if info, e := os.Lstat(path); e == nil && (!info.Mode().IsRegular() || info.Size() > 16<<20) {
 		return snapshot, errors.New("invalid manifest size/type")
 	}
@@ -467,7 +491,14 @@ func (w *Worker) snapshot(ctx context.Context, j *Job) (metric.ExportSnapshot, e
 			return snapshot, errExportInvalidated
 		}
 		h := sha256.Sum256(b)
-		j.Generation = hex.EncodeToString(h[:])
+		generation := hex.EncodeToString(h[:])
+		if j.Generation != "" && j.Generation != generation {
+			return snapshot, errExportInvalidated
+		}
+		j.Generation = generation
+		if e = w.cacheSnapshot(j, path, snapshot); e != nil {
+			return snapshot, e
+		}
 		return snapshot, nil
 	} else if !os.IsNotExist(e) {
 		return snapshot, e
@@ -556,6 +587,9 @@ func (w *Worker) snapshot(ctx context.Context, j *Job) (metric.ExportSnapshot, e
 	j.Generation = hex.EncodeToString(h.Sum(nil))
 	j.LastProgress = time.Now().UTC()
 	if e = w.Queue.Save(ctx, j); e != nil {
+		return snapshot, e
+	}
+	if e = w.cacheSnapshot(j, path, snapshot); e != nil {
 		return snapshot, e
 	}
 	return snapshot, nil
@@ -709,9 +743,11 @@ func (w *Worker) output(ctx context.Context, j *Job) (*outputWriter, *csv.Writer
 		}
 		return nil, nil, errors.New("export checkpoint output is missing or truncated; retry from a new snapshot")
 	}
-	if e = f.Truncate(j.Committed.Offset); e != nil {
-		f.Close()
-		return nil, nil, e
+	if info.Size() != j.Committed.Offset {
+		if e = f.Truncate(j.Committed.Offset); e != nil {
+			f.Close()
+			return nil, nil, e
+		}
 	}
 	if _, e = f.Seek(j.Committed.Offset, io.SeekStart); e != nil {
 		f.Close()
@@ -772,14 +808,11 @@ func (w *Worker) step(ctx context.Context, j *Job) error {
 	if e != nil {
 		return e
 	}
-	j.CompletedInputBytes = 0
 	completed := j.Committed.Unit
 	if j.Mode == "sample30s" {
 		completed = j.Checkpoint
 	}
-	for i := 0; i < completed && i < len(snapshot.Units); i++ {
-		j.CompletedInputBytes += snapshot.Units[i].Segment.FileBytes
-	}
+	j.CompletedInputBytes = w.snapshotInputBytes(j.ID, completed)
 	if j.Mode == "sample30s" {
 		return w.sample(ctx, j, snapshot)
 	}
@@ -842,8 +875,9 @@ func (w *Worker) step(ctx context.Context, j *Job) error {
 			return e
 		}
 		j.PhaseCompleted = int64(j.Committed.Unit)
-		if j.Committed.Unit < len(snapshot.Units) {
-			i := j.Committed.Unit
+		batchStart, firstUnit := time.Now(), j.Committed.Unit
+		batchBytes := int64(0)
+		for i := firstUnit; i < len(snapshot.Units); i++ {
 			lastSave := time.Now()
 			e = metric.VisitExportInputProgress(metric.WithTelemetryEntities(ctx, []string{j.UUID}), w.Queue.Path(j.ID, ".snapshot"), snapshot, i, func(records, bytes int64) { j.DecodedRecords += records; j.ScannedInputBytes += bytes }, func(ob metric.ExportObservation) error {
 				if e := ctx.Err(); e != nil {
@@ -883,11 +917,15 @@ func (w *Worker) step(ctx context.Context, j *Job) error {
 			}
 			j.CompletedInputBytes += snapshot.Units[i].Segment.FileBytes
 			j.PhaseCompleted = int64(i + 1)
-			if e = w.checkpoint(ctx, j, o, c, i+1); e != nil {
-				return e
-			}
-			if i+1 < len(snapshot.Units) {
-				return nil
+			batchBytes += snapshot.Units[i].Segment.FileBytes
+			if i+1 == len(snapshot.Units) || i-firstUnit+1 >= 32 || batchBytes >= 4<<20 || time.Since(batchStart) >= 2*time.Second {
+				if e = w.checkpoint(ctx, j, o, c, i+1); e != nil {
+					return e
+				}
+				if i+1 < len(snapshot.Units) {
+					return nil
+				}
+				break
 			}
 		}
 	}
@@ -904,9 +942,6 @@ func (w *Worker) publish(ctx context.Context, j *Job, o *outputWriter, c *csv.Wr
 		return e
 	}
 	if e = wPhase(w, ctx, j, "syncing"); e != nil {
-		return e
-	}
-	if e := o.f.Sync(); e != nil {
 		return e
 	}
 	j.SHA256 = hex.EncodeToString(o.h.Sum(nil))
@@ -978,7 +1013,9 @@ func (w *Worker) sample(ctx context.Context, j *Job, snapshot metric.ExportSnaps
 			return e
 		}
 		j.PhaseCompleted = int64(j.Checkpoint)
-		i := j.Checkpoint
+		firstUnit := j.Checkpoint
+		batchStart, batchBytes := time.Now(), int64(0)
+		nextUnit := firstUnit
 		tx, e := spool.BeginTx(ctx, nil)
 		if e != nil {
 			return e
@@ -989,33 +1026,40 @@ func (w *Worker) sample(ctx context.Context, j *Job, snapshot metric.ExportSnaps
 			}
 		}()
 		pending := 0
-		e = metric.VisitExportInputProgress(metric.WithTelemetryEntities(ctx, []string{j.UUID}), w.Queue.Path(j.ID, ".snapshot"), snapshot, i, func(records, bytes int64) { j.DecodedRecords += records; j.ScannedInputBytes += bytes }, func(ob metric.ExportObservation) error {
-			if e := ctx.Err(); e != nil {
-				return e
-			}
-			p := ob.Point
-			tags, _ := json.Marshal(p.Tags)
-			slot := metric.TelemetryBucketStart(p.Timestamp, 30*time.Second).UnixNano()
-			_, e := tx.ExecContext(ctx, `INSERT INTO samples(slot,metric,tags,observed,ingest,ordinal,value,unit) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(slot,metric,tags) DO UPDATE SET observed=excluded.observed,ingest=excluded.ingest,ordinal=excluded.ordinal,value=excluded.value,unit=excluded.unit WHERE (excluded.observed,excluded.ingest,excluded.ordinal)<(samples.observed,samples.ingest,samples.ordinal)`, slot, p.MetricName, string(tags), p.Timestamp.UnixNano(), ob.Ingest, ob.Ordinal, p.Value, ob.Unit)
+		for i := firstUnit; i < len(snapshot.Units); i++ {
+			e = metric.VisitExportInputProgress(metric.WithTelemetryEntities(ctx, []string{j.UUID}), w.Queue.Path(j.ID, ".snapshot"), snapshot, i, func(records, bytes int64) { j.DecodedRecords += records; j.ScannedInputBytes += bytes }, func(ob metric.ExportObservation) error {
+				if e := ctx.Err(); e != nil {
+					return e
+				}
+				p := ob.Point
+				tags, _ := json.Marshal(p.Tags)
+				slot := metric.TelemetryBucketStart(p.Timestamp, 30*time.Second).UnixNano()
+				_, e := tx.ExecContext(ctx, `INSERT INTO samples(slot,metric,tags,observed,ingest,ordinal,value,unit) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(slot,metric,tags) DO UPDATE SET observed=excluded.observed,ingest=excluded.ingest,ordinal=excluded.ordinal,value=excluded.value,unit=excluded.unit WHERE (excluded.observed,excluded.ingest,excluded.ordinal)<(samples.observed,samples.ingest,samples.ordinal)`, slot, p.MetricName, string(tags), p.Timestamp.UnixNano(), ob.Ingest, ob.Ordinal, p.Value, ob.Unit)
+				if e != nil {
+					return e
+				}
+				pending++
+				if pending >= 128 {
+					if e = w.space(j); e != nil {
+						return e
+					}
+					if w.io != nil {
+						if e = w.io.wait(ctx); e != nil {
+							return e
+						}
+					}
+					pending = 0
+				}
+				return nil
+			})
 			if e != nil {
 				return e
 			}
-			pending++
-			if pending >= 128 {
-				if e = w.space(j); e != nil {
-					return e
-				}
-				if w.io != nil {
-					if e = w.io.wait(ctx); e != nil {
-						return e
-					}
-				}
-				pending = 0
+			nextUnit = i + 1
+			batchBytes += snapshot.Units[i].Segment.FileBytes
+			if i-firstUnit+1 >= 32 || batchBytes >= 4<<20 || time.Since(batchStart) >= 2*time.Second {
+				break
 			}
-			return nil
-		})
-		if e != nil {
-			return e
 		}
 		// Do not commit candidates from a unit whose checksum is unverified.
 		// This transaction touches only the private spool, never the live DB.
@@ -1028,14 +1072,14 @@ func (w *Worker) sample(ctx context.Context, j *Job, snapshot metric.ExportSnaps
 		if e = w.fault("sample-unit-after-commit"); e != nil {
 			return e
 		}
-		j.Checkpoint = i + 1
-		j.PhaseCompleted = int64(i + 1)
-		j.CompletedInputBytes += snapshot.Units[i].Segment.FileBytes
+		j.Checkpoint = nextUnit
+		j.PhaseCompleted = int64(nextUnit)
+		j.CompletedInputBytes = w.snapshotInputBytes(j.ID, nextUnit)
 		j.LastProgress = time.Now().UTC()
 		if e = w.Queue.Save(ctx, j); e != nil {
 			return e
 		}
-		if i+1 < len(snapshot.Units) {
+		if nextUnit < len(snapshot.Units) {
 			return nil
 		}
 	}
@@ -1126,6 +1170,7 @@ func (w *Worker) sample(ctx context.Context, j *Job, snapshot metric.ExportSnaps
 	}
 	defer rows.Close()
 	current := int64(-1)
+	assemblyStart, assemblyOffset, assemblyRows := time.Now(), o.n, j.WrittenRows
 	record := make([]string, len(header))
 	yield := errors.New("sample output checkpoint confirmed")
 	flush := func() error {
@@ -1137,7 +1182,7 @@ func (w *Worker) sample(ctx context.Context, j *Job, snapshot metric.ExportSnaps
 		}
 		j.WrittenRows++
 		o.sampleSlot = current
-		if j.WrittenRows%128 == 0 {
+		if j.WrittenRows-assemblyRows >= 4096 || o.n-assemblyOffset >= 4<<20 || time.Since(assemblyStart) >= 2*time.Second {
 			if e = w.fault("sample-row-before-checkpoint"); e != nil {
 				return e
 			}

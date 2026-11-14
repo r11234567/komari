@@ -42,18 +42,24 @@ func (w *telemetryHashWriter) Write(b []byte) (int, error) {
 	if e == nil && n != len(b) {
 		e = io.ErrShortWrite
 	}
-	w.h.Write(b[:n])
+	if w.h != nil {
+		w.h.Write(b[:n])
+	}
 	w.n += int64(n)
 	return n, e
 }
 
 func (t *Telemetry) segmentPath(seg telemetrySegment) string {
-	return filepath.Join(time.Unix(0, seg.Created).UTC().Format("2006/01/02"), seg.ID+".jsonl.zst")
+	day := time.Unix(0, seg.Created).UTC()
+	if seg.ArchiveDay != 0 {
+		day = time.Unix(seg.ArchiveDay, 0).UTC()
+	}
+	return filepath.Join(day.Format("2006/01/02"), seg.ID+".jsonl.zst")
 }
 
 func (t *Telemetry) segment(ctx context.Context, q querier, id string) (telemetrySegment, error) {
 	var s telemetrySegment
-	err := q.QueryRowContext(ctx, t.bind("SELECT id,state,first_id,last_id,points,bytes,created,deleted,checksum,file_bytes,staging_owner FROM "+t.table("segments")+" WHERE id=?"), id).Scan(&s.ID, &s.State, &s.First, &s.Last, &s.Points, &s.Bytes, &s.Created, &s.Deleted, &s.Hash, &s.FileBytes, &s.StagingOwner)
+	err := q.QueryRowContext(ctx, t.bind("SELECT id,state,first_id,last_id,points,bytes,created,deleted,checksum,file_bytes,staging_owner,archive_entity,archive_day FROM "+t.table("segments")+" WHERE id=?"), id).Scan(&s.ID, &s.State, &s.First, &s.Last, &s.Points, &s.Bytes, &s.Created, &s.Deleted, &s.Hash, &s.FileBytes, &s.StagingOwner, &s.ArchiveEntity, &s.ArchiveDay)
 	// PostgreSQL pads empty CHAR fields; identities themselves are fixed hex.
 	s.StagingOwner = strings.TrimSpace(s.StagingOwner)
 	return s, err
@@ -86,8 +92,8 @@ func (t *Telemetry) segmentPage(ctx context.Context, seg string, ingest int64, o
 }
 
 // ArchiveNext streams one fixed segment. The writing state survives restart.
-// A file becomes readable only after close+fsync+rename+directory fsync, full
-// verification and the catalog commit. Retry rewrites only this unregistered
+// A file becomes readable only after close+fsync+rename+directory fsync and
+// the catalog commit. Retry rewrites only this unregistered
 // attempt from still-owned SQL rows, never an already published archive.
 func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 	select {
@@ -172,13 +178,14 @@ func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 			f.Close()
 		}
 	}()
-	compressed := &telemetryHashWriter{w: f, h: sha256.New()}
+	compressed := &telemetryHashWriter{w: f}
 	frames, err := newTelemetryFrameWriter(compressed, id)
 	if err != nil {
 		return false, err
 	}
 	defer frames.encoder.Close()
 	var count, after int64
+	lastRenewal := time.Now()
 	ordinal := -1
 	for {
 		if err = ctx.Err(); err != nil {
@@ -208,8 +215,11 @@ func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 		if err = t.fault("archive-page-written"); err != nil {
 			return false, err
 		}
-		if err = t.renewWork(ctx, t.s.db, "archive"); err != nil {
-			return false, err
+		if time.Since(lastRenewal) >= t.cfg.WorkLease/3 {
+			if err = t.renewWork(ctx, t.s.db, "archive"); err != nil {
+				return false, err
+			}
+			lastRenewal = time.Now()
 		}
 		if err = telemetryYield(ctx); err != nil {
 			return false, err
@@ -231,11 +241,10 @@ func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	closed = true
-	seg.Hash = hex.EncodeToString(compressed.h.Sum(nil))
+	seg.Hash = ""
 	seg.FileBytes = compressed.n
-	if err = t.visitArchivePath(ctx, seg, part, nil); err != nil {
-		return false, err
-	}
+	// The writer already checked input counts, every write, compressor close
+	// and file sync. Do not reread/decompress the file merely to publish it.
 	if err = t.fault("archive-before-rename"); err != nil {
 		return false, err
 	}
@@ -303,8 +312,10 @@ func (t *Telemetry) visitArchivePath(ctx context.Context, seg telemetrySegment, 
 		return err
 	}
 	if index != nil {
-		if err = verifyTelemetryArchiveFile(ctx, f, seg); err != nil {
-			return err
+		if index.Version == 2 {
+			if err = verifyTelemetryArchiveFile(ctx, f, seg); err != nil {
+				return err
+			}
 		}
 		var lastIngest int64
 		lastOrdinal := -1
@@ -330,6 +341,9 @@ func (t *Telemetry) visitArchivePath(ctx context.Context, seg telemetrySegment, 
 	return t.visitArchiveStream(ctx, seg, f, visit)
 }
 func (t *Telemetry) visitArchiveStream(ctx context.Context, seg telemetrySegment, input io.Reader, visit func(telemetryRecord) error) error {
+	if seg.Hash == "" {
+		return t.visitScalarArchiveFrame(ctx, seg, input, visit)
+	}
 	compressedHash := sha256.New()
 	compressed := io.TeeReader(input, compressedHash)
 	zr, err := zstd.NewReader(compressed, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(16<<20), zstd.WithDecoderMaxWindow(8<<20))
@@ -338,7 +352,7 @@ func (t *Telemetry) visitArchiveStream(ctx context.Context, seg telemetrySegment
 	}
 	defer zr.Close()
 	// Bound the complete decoded stream as well as each JSONL record.
-	scanner := bufio.NewScanner(io.LimitReader(zr, t.cfg.SegmentBytes*4+(1<<20)))
+	scanner := bufio.NewScanner(io.LimitReader(zr, max(t.cfg.SegmentBytes, 64<<20)*4+(1<<20)))
 	scanner.Buffer(make([]byte, 32<<10), 64<<10)
 	h := sha256.New()
 	var count int64
@@ -422,9 +436,8 @@ func (t *Telemetry) DeleteArchivedChunk(ctx context.Context, now time.Time, limi
 		return 0, err
 	}
 	defer func() { release() }()
-	// Full compressed-file verification precedes the first destructive chunk,
-	// outside a write transaction. Subsequent chunks check the immutable file's
-	// identity/size; they never decompress or rehash it for every 512 rows.
+	// Archive publication committed only after the completed file and directory
+	// were synced. Cleanup checks presence/length; it does not decode it again.
 	coverage, err := t.progress(ctx, t.s.reader(), "summary")
 	if err != nil {
 		return 0, err
@@ -438,25 +451,8 @@ func (t *Telemetry) DeleteArchivedChunk(ctx context.Context, now time.Time, limi
 	if err != nil {
 		return 0, err
 	}
-	if stateBefore == "archived" {
-		seg, e := t.segment(ctx, t.s.reader(), candidate)
-		if e != nil {
-			return 0, e
-		}
-		// Immutable-file verification may yield for CPU pacing. Ingestion must
-		// not wait behind decompression or those pauses. Eligibility is checked
-		// again in the destructive transaction after reacquiring the writer.
-		release()
-		release = func() {}
-		if e = t.visitArchive(ctx, seg, nil); e != nil {
-			return 0, e
-		}
-		release, err = t.acquire(ctx)
-		if err != nil {
-			release = func() {}
-			return 0, err
-		}
-	}
+	// Publication is the durable archive boundary. Repeated deletion chunks
+	// only check the immutable file's presence and length below.
 	tx, err := t.begin(ctx)
 	if err != nil {
 		return 0, err
@@ -478,8 +474,7 @@ func (t *Telemetry) DeleteArchivedChunk(ctx context.Context, now time.Time, limi
 	if err != nil {
 		return 0, err
 	}
-	// Check file identity/size at every short chunk; the full checksum was
-	// verified before publication. A missing/truncated file fails closed.
+	// A missing or truncated published file retains the SQL handoff input.
 	info, err := t.root.Lstat(t.segmentPath(seg))
 	if err != nil {
 		return 0, err

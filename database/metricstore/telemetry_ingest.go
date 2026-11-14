@@ -12,14 +12,14 @@ import (
 )
 
 type reportIdentityKey struct{}
-type reportIdentity struct{ id, proof string }
+type reportIdentity struct{ id string }
 
 // WithReportIdentity is called only after authentication and protocol
 // validation. The old Agent's process-local sequence is paired with its exact
 // observed timestamp. A retry keeps both; a restarted Agent's new sample does
 // not collide merely because its sequence starts at one again.
-func WithReportIdentity(ctx context.Context, id, proof string) context.Context {
-	return context.WithValue(ctx, reportIdentityKey{}, reportIdentity{id, proof})
+func WithReportIdentity(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, reportIdentityKey{}, reportIdentity{id})
 }
 func HasReportIdentity(ctx context.Context) bool {
 	_, ok := ctx.Value(reportIdentityKey{}).(reportIdentity)
@@ -93,7 +93,7 @@ func writeTelemetryReport(ctx context.Context, s *metric.Store, report v1.Report
 	if len(filtered) > 256 {
 		return v1.Report{}, fmt.Errorf("report exceeds telemetry point budget")
 	}
-	_, err = s.Telemetry().Accept(ctx, metric.TelemetryBatch{Source: report.UUID, Identity: id.id, PayloadProof: id.proof, Points: filtered, Traffic: &metric.TelemetryTraffic{ObservedAt: report.UpdatedAt.UnixNano(), TotalUp: report.Network.TotalUp, TotalDown: report.Network.TotalDown, Up: report.Network.Up, Down: report.Network.Down}}, time.Now().UTC())
+	_, err = s.Telemetry().Accept(ctx, metric.TelemetryBatch{Source: report.UUID, Identity: id.id, Points: filtered, Traffic: &metric.TelemetryTraffic{ObservedAt: report.UpdatedAt.UnixNano(), TotalUp: report.Network.TotalUp, TotalDown: report.Network.TotalDown, Up: report.Network.Up, Down: report.Network.Down}}, time.Now().UTC())
 	if err != nil {
 		return v1.Report{}, err
 	}

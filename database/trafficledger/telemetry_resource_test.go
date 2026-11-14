@@ -226,7 +226,7 @@ func TestTelemetryResourceAcceptance(t *testing.T) {
 			sequence++
 			r := v1.Report{UUID: fmt.Sprintf("load-node-%02d", sequence%10), UpdatedAt: time.Now().UTC(), CPU: v1.CPUReport{Usage: float64(sequence % 100)}, Ram: v1.RamReport{Total: 1 << 30, Used: 256 << 20}, Network: v1.NetworkReport{Up: 4096, Down: 8192, TotalUp: int64(sequence) * 4096, TotalDown: int64(sequence) * 8192}}
 			writeCtx, done := context.WithTimeout(context.Background(), 10*time.Second)
-			writeCtx = metricstore.WithReportIdentity(writeCtx, fmt.Sprintf("resource/%d", sequence), "")
+			writeCtx = metricstore.WithReportIdentity(writeCtx, fmt.Sprintf("resource/%d", sequence))
 			start := time.Now()
 			_, err := metricstore.WriteReport(writeCtx, r)
 			samples.record("ingest", start, err)

@@ -19,50 +19,6 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-func TestTelemetryChartBudgetIncludesDecodedStatistics(t *testing.T) {
-	_, e := telemetryFixture(t, "")
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Hour)
-	at := now.Add(-time.Hour)
-	values := make([]float64, 256)
-	for i := range values {
-		values[i] = float64(i % 8)
-	}
-	if _, err := e.Accept(ctx, telemetryBatch("decoded-budget", at, values...), now); err != nil {
-		t.Fatal(err)
-	}
-	summarizeAll(t, e)
-	var raw string
-	if err := e.s.db.QueryRow("SELECT stats FROM " + e.table("summary") + " LIMIT 1").Scan(&raw); err != nil {
-		t.Fatal(err)
-	}
-	var stats telemetryStats
-	if err := json.Unmarshal([]byte(raw), &stats); err != nil {
-		t.Fatal(err)
-	}
-	sealed, err := stats.encodeSealed()
-	if err != nil {
-		t.Fatal(err)
-	}
-	budget := len(sealed) + len(`{"device":"0"}`) + 512
-	if len(stats.Digest) <= budget {
-		t.Fatal("fixture does not expand beyond the SQL-length budget")
-	}
-	q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(time.Minute - time.Nanosecond)}, Interval: time.Minute, Aggregation: AggAvg, PreserveSeries: true}
-	for _, encoded := range []string{raw, sealed} {
-		if _, err = e.s.db.Exec("UPDATE "+e.table("summary")+" SET stats=?", encoded); err != nil {
-			t.Fatal(err)
-		}
-		if _, err = e.ChartBatchBounded(ctx, []AggregateQuery{q}, now, 100, budget); !errors.Is(err, ErrTelemetryBackpressure) {
-			t.Fatal("decoded allocation escaped its budget", err)
-		}
-		r, err := e.ChartBatchBounded(ctx, []AggregateQuery{q}, now, 100, 128<<10)
-		if err != nil || len(r[0].Points) != 1 || r[0].Points[0].Value != 3.5 || r[0].Points[0].Count != 256 {
-			t.Fatal("valid budget changed statistics", r, err)
-		}
-	}
-}
-
 func TestTelemetryChartBudgetMalformedFramesAndLegacyDigest(t *testing.T) {
 	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithSingleSegment(true))
 	if err != nil {
@@ -111,39 +67,6 @@ func TestTelemetryChartBudgetMalformedFramesAndLegacyDigest(t *testing.T) {
 	}
 }
 
-func TestTelemetryChartSharedBudgetAndHotQuantiles(t *testing.T) {
-	_, e := telemetryFixture(t, "")
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Hour)
-	at := now.Add(-time.Minute)
-	if _, err := e.Accept(ctx, telemetryBatch("summary", at, 1, 2, 3), now); err != nil {
-		t.Fatal(err)
-	}
-	summarizeAll(t, e)
-	if _, err := e.Accept(ctx, telemetryBatch("hot", at.Add(3*time.Millisecond), 100, 101, 102), now); err != nil {
-		t.Fatal(err)
-	}
-	q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(time.Minute - time.Nanosecond)}, Interval: time.Minute, Aggregation: AggP50, PreserveSeries: true}
-	r, err := e.Chart(ctx, q, now)
-	if err != nil || len(r.Points) != 1 || r.Points[0].Count != 6 || r.Points[0].Value != 51.5 {
-		t.Fatal("summary/hot quantile lost population", r, err)
-	}
-	b := &telemetryChartBudget{points: 10, bytes: 1}
-	ctx = context.WithValue(ctx, telemetryChartBudgetKey{}, b)
-	q.MetricName = sqliteMergedPingLatencyMetric
-	// An explicit caller budget must never be silently replaced by a default.
-	if defaultChartBudget(ctx).Value(telemetryChartBudgetKey{}) != b {
-		t.Fatal("caller budget replaced")
-	}
-	_, _ = e.PingSummary(ctx, q, now)
-	if b.bytes != 1 {
-		t.Fatal("empty Ping changed budget")
-	}
-}
-
-// Opt-in fresh-process memory measurement. The summaries are real production
-// encodings; thousands of independent identities make retained decoded data
-// dominate compressed SQL bytes. Both chart and summary-CSV budgets are tested.
 func TestTelemetryChartHighCardinalityResourceBudget(t *testing.T) {
 	output := os.Getenv("KOMARI_TELEMETRY_CHART_MEMORY_OUTPUT")
 	if output == "" {
@@ -157,57 +80,37 @@ func TestTelemetryChartHighCardinalityResourceBudget(t *testing.T) {
 	for i := 0; i < 256; i++ {
 		stats.add(Point{MetricName: "cpu", Timestamp: at.Add(time.Second), Value: float64(i % 8)}, 1, i)
 	}
-	sealed, err := stats.encodeSealed()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Obtain an ordinary online ownership row from production ingestion, then
-	// populate independently named summary series in one isolated transaction.
-	if _, err = e.Accept(ctx, telemetryBatch("resource", at, 1), now); err != nil {
-		t.Fatal(err)
-	}
-	summarizeAll(t, e)
-	var segment string
-	if err = e.s.db.QueryRow("SELECT segment_id FROM " + e.table("summary") + " LIMIT 1").Scan(&segment); err != nil {
-		t.Fatal(err)
-	}
 	tx, err := e.begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"summary", "members", "hot", "series"} {
-		if _, err = tx.Exec("DELETE FROM " + e.table(table)); err != nil {
-			t.Fatal(err)
-		}
-	}
 	for i := 0; i < 4096; i++ {
-		sid := fmt.Sprintf("resource-%d", i)
+		source := fmt.Sprintf("resource-%d", i)
 		tags := fmt.Sprintf(`{"device":"%d"}`, i)
-		if _, err = tx.Exec("INSERT INTO "+e.table("series")+" (id,metric,entity,tags) VALUES (?,'cpu','node',?)", sid, tags); err != nil {
+		if _, err = tx.Exec("INSERT INTO "+e.table("series")+" (id,metric,entity,tags) VALUES (?,'cpu','node',?)", source, tags); err != nil {
 			t.Fatal(err)
 		}
-		if _, err = tx.Exec("INSERT INTO "+e.table("members")+" (segment_id,series_id,first_observed,last_observed,points) VALUES (?,?,?,?,256)", segment, sid, at.UnixNano(), at.Add(time.Second).UnixNano()); err != nil {
+		id, err := e.scalarKey(ctx, tx, source)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err = tx.Exec("INSERT INTO "+e.table("summary")+" (segment_id,series_id,resolution,bucket,stats) VALUES (?,?,?,?,?)", segment, sid, int64(time.Minute), at.UnixNano(), sealed); err != nil {
+		if err = e.putScalar(ctx, tx, scalarCell{id, 60, at.Unix(), stats}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err = tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	// Exercise a real distribution consumer. Scalar mean charts deliberately
-	// discard digests now and no longer have the same resident-memory floor.
-	q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(time.Minute - time.Nanosecond)}, Interval: time.Minute, Aggregation: AggP50, PreserveSeries: true}
+	q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(time.Minute - time.Nanosecond)}, Interval: time.Minute, Aggregation: AggAvg, PreserveSeries: true}
 	runtime.GC()
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
-	if _, err = e.ChartBatchBounded(ctx, []AggregateQuery{q}, now, 20000, 8<<20); !errors.Is(err, ErrTelemetryBackpressure) {
-		t.Fatal("8MiB summary export escaped", err)
+	if _, err = e.ChartBatchBounded(ctx, []AggregateQuery{q}, now, 20000, 1<<20); !errors.Is(err, ErrTelemetryBackpressure) {
+		t.Fatal("scalar result escaped the shared budget", err)
 	}
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
-	r, err := e.ChartBatchBounded(ctx, []AggregateQuery{q}, now, 20000, 32<<20)
+	r, err := e.ChartBatchBounded(ctx, []AggregateQuery{q}, now, 20000, 16<<20)
 	if err != nil || len(r[0].Points) != 4096 {
 		t.Fatal("valid full query rejected", err)
 	}
@@ -217,7 +120,7 @@ func TestTelemetryChartHighCardinalityResourceBudget(t *testing.T) {
 		}
 	}
 	status, _ := os.ReadFile("/proc/self/status")
-	report := map[string]any{"series": 4096, "encoded_cell_bytes": len(sealed), "retained_digest_bytes": cap(stats.sketch.encodeRaw()), "small_budget": 8 << 20, "large_budget": 32 << 20, "small_query_heap_alloc_delta": int64(after.HeapAlloc) - int64(before.HeapAlloc), "small_query_total_alloc_delta": after.TotalAlloc - before.TotalAlloc, "process_status": string(status)}
+	report := map[string]any{"series": 4096, "retained_digest_bytes": 0, "small_budget": 1 << 20, "large_budget": 16 << 20, "small_query_heap_alloc_delta": int64(after.HeapAlloc) - int64(before.HeapAlloc), "small_query_total_alloc_delta": after.TotalAlloc - before.TotalAlloc, "process_status": string(status)}
 	if group, readErr := os.ReadFile("/proc/self/cgroup"); readErr == nil {
 		for _, line := range strings.Split(string(group), "\n") {
 			if strings.HasPrefix(line, "0::") {

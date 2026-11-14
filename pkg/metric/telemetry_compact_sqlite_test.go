@@ -45,6 +45,9 @@ func compactFixture(t *testing.T) (*Store, *Telemetry, time.Time) {
 			t.Fatal(err)
 		}
 	}
+	if _, err := s.db.Exec("UPDATE " + e.table("rollup_keys") + " SET source_id=(SELECT canonical FROM " + e.table("series_keys") + " k WHERE '@'||k.id=source_id)"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.db.Exec("UPDATE " + e.table("series") + " SET id=(SELECT canonical FROM " + e.table("series_keys") + " k WHERE '@'||k.id=" + e.table("series") + ".id)"); err != nil {
 		t.Fatal(err)
 	}
@@ -143,6 +146,9 @@ func TestTelemetryOfflineCompactRetiresLegacyAndPreservesQueriesAndBackup(t *tes
 		t.Fatal(err)
 	}
 	engine := target.Telemetry()
+	if n := telemetryCount(t, engine, "leases"); n != 0 {
+		t.Fatalf("offline replacement inherited %d transient snapshot pins", n)
+	}
 	q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(time.Minute - time.Nanosecond)}, Interval: time.Minute, Aggregation: AggSum, PreserveSeries: true}
 	r, err := engine.Chart(ctx, q, at.Add(2*time.Hour))
 	if err != nil || len(r.Points) != 1 || r.Points[0].Value != 10 || r.Points[0].Count != 2 {

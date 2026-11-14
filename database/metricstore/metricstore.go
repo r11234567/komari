@@ -61,9 +61,9 @@ type MetricStoreConfig struct {
 	ArchiveDirectory                 string `json:"metric_archive_directory" default:"./data/telemetry"`
 	ArchiveRetentionDays             int    `json:"metric_archive_retention_days" default:"30"`
 	HotWindowMinutes                 int    `json:"metric_hot_window_minutes" default:"15"`
-	HotRetentionMinutes              int    `json:"metric_hot_retention_minutes" default:"1440"`
+	HotRetentionMinutes              int    `json:"metric_hot_retention_minutes" default:"0"` // retired: raw is removed after durable handoff
 	ArchiveSegmentMinutes            int    `json:"metric_archive_segment_minutes" default:"15"`
-	HotBudgetMiB                     int    `json:"metric_hot_budget_mib" default:"1024"`
+	HotBudgetMiB                     int    `json:"metric_hot_budget_mib" default:"16"`
 	Driver                           string `json:"metric_db_driver" default:"sqlite"`                          // 数据库类型: sqlite, mysql, postgresql
 	DSN                              string `json:"metric_db_dsn" default:"./data/metrics.db"`                  // 数据库连接串
 	DownsamplingEnabled              bool   `json:"metric_downsampling_enabled" default:"false"`                // true=降采样并删除已汇总原始点；false=保留原始点并仅生成查询加速 rollup

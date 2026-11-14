@@ -102,6 +102,16 @@ func (t *Telemetry) ExportRawBatch(ctx context.Context, queries []Query) ([][]Po
 			release()
 			return nil, fmt.Errorf("%w: legacy raw was already removed before migration", ErrTelemetryCoverage)
 		}
+		if t.scalar {
+			missing, err := t.scalarExportHasGapFrom(ctx, tx, physical)
+			if err != nil || missing {
+				release()
+				if err != nil {
+					return nil, err
+				}
+				return nil, fmt.Errorf("%w: migrated history has no original observations", ErrTelemetryCoverage)
+			}
+		}
 		statement := "SELECT DISTINCT m.segment_id FROM " + t.table("members") + " m JOIN " + t.table("series") + " s ON s.id=m.series_id JOIN " + t.table("segments") + " a ON a.id=m.segment_id LEFT JOIN " + t.table("erasures") + " e ON e.series_id=s.id WHERE s.metric=? AND m.first_observed<=? AND m.last_observed>=? AND a.first_id<=? AND a.state<>'legacy' AND (e.through_id IS NULL OR a.last_id>e.through_id)" + filter + " LIMIT 2049"
 		values := []any{physical.MetricName, q.End.UnixNano(), q.Start.UnixNano(), watermark}
 		values = append(values, args...)

@@ -188,8 +188,13 @@ func (t *Telemetry) BackupBundleAfterSnapshot(ctx context.Context, databasePath,
 				src.Close()
 				return e
 			}
+			var output io.Writer = out
+			var hash string
 			h := sha256.New()
-			n, e := io.Copy(io.MultiWriter(out, h), &telemetryContextReader{ctx: ctx, r: src})
+			if seg.Hash != "" {
+				output = io.MultiWriter(out, h)
+			}
+			n, e := io.Copy(output, &telemetryContextReader{ctx: ctx, r: src})
 			src.Close()
 			if e == nil {
 				e = out.Sync()
@@ -201,7 +206,9 @@ func (t *Telemetry) BackupBundleAfterSnapshot(ctx context.Context, databasePath,
 			if ce != nil {
 				return ce
 			}
-			hash := hex.EncodeToString(h.Sum(nil))
+			if seg.Hash != "" {
+				hash = hex.EncodeToString(h.Sum(nil))
+			}
 			if n != seg.FileBytes || hash != seg.Hash {
 				return fmt.Errorf("backup checksum mismatch: %s", id)
 			}

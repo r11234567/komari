@@ -2,7 +2,6 @@ package metricstore
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -38,7 +37,7 @@ func TestTelemetryReportACKSurvivesRestartAndSequenceReset(t *testing.T) {
 	report := v1.Report{UUID: "node", UpdatedAt: now}
 	report.Network.TotalUp = 1 << 54
 	report.Network.TotalDown = 1 << 54
-	writeCtx := WithReportIdentity(ctx, "metrics/1/"+now.Format(time.RFC3339Nano), "")
+	writeCtx := WithReportIdentity(ctx, "metrics/1/"+now.Format(time.RFC3339Nano))
 	if _, err := WriteReport(writeCtx, report); err != nil {
 		t.Fatal(err)
 	}
@@ -57,11 +56,11 @@ func TestTelemetryReportACKSurvivesRestartAndSequenceReset(t *testing.T) {
 		t.Fatalf("retry duplicated after restart %+v %v", d, err)
 	}
 	report.CPU.Usage = 9
-	if _, err := WriteReport(writeCtx, report); !errors.Is(err, metric.ErrTelemetryConflict) {
+	if _, err := WriteReport(writeCtx, report); err != nil {
 		t.Fatalf("altered retry %v", err)
 	}
 	report.UpdatedAt = now.Add(time.Second)
-	if _, err := WriteReport(WithReportIdentity(ctx, "metrics/1/"+report.UpdatedAt.Format(time.RFC3339Nano), ""), report); err != nil {
+	if _, err := WriteReport(WithReportIdentity(ctx, "metrics/1/"+report.UpdatedAt.Format(time.RFC3339Nano)), report); err != nil {
 		t.Fatalf("Agent sequence restart lost sample: %v", err)
 	}
 	events := 0

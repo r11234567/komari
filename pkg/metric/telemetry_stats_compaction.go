@@ -18,6 +18,9 @@ type telemetryStatsCursor struct {
 // recompresses history; cancellation rolls back the entire page. A repeated
 // page is harmless and already compact cells are never recompressed.
 func (t *Telemetry) CompactStatsChunk(ctx context.Context, cursor string, limit int) (int, string, error) {
+	if t.scalar {
+		return 0, "", nil
+	}
 	if limit < 1 || limit > 512 {
 		return 0, cursor, ErrInvalidArgument
 	}

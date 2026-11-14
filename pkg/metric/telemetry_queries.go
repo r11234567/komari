@@ -64,14 +64,22 @@ func (t *Telemetry) PingWindow(start, end time.Time, interval time.Duration, now
 	interval = t.compatibleInterval(start, now, interval)
 	cutoff := now.Add(-t.cfg.RawWindow)
 	if start.Before(cutoff) {
-		aligned := alignTime(start.UTC(), interval)
+		grid := interval
+		if t.scalar {
+			grid = telemetryLCM(grid, telemetryResolution(now.Sub(start)))
+		}
+		aligned := alignTime(start.UTC(), grid)
 		if aligned.Before(start) {
-			aligned = aligned.Add(interval)
+			aligned = aligned.Add(grid)
 		}
 		start = aligned
 	}
 	if end.Before(cutoff) {
-		end = alignTime(end.UTC().Add(time.Nanosecond), interval).Add(-time.Nanosecond)
+		grid := interval
+		if t.scalar {
+			grid = telemetryLCM(grid, telemetryResolution(now.Sub(end)))
+		}
+		end = alignTime(end.UTC().Add(time.Nanosecond), grid).Add(-time.Nanosecond)
 	}
 	if end.Before(start) {
 		return start, end, ErrTelemetryCoverage
@@ -118,6 +126,9 @@ func (t *Telemetry) ChartBatch(ctx context.Context, queries []AggregateQuery, no
 // evaluating percentiles and variance. Averaging per-bucket percentiles or
 // weighting latency averages by failed attempts would change their meaning.
 func (t *Telemetry) PingSummary(ctx context.Context, q AggregateQuery, now time.Time) (SeriesSummary, error) {
+	if t.scalar {
+		return t.scalarPingSummary(ctx, q, now)
+	}
 	ctx = defaultChartBudget(ctx)
 	ctx = context.WithValue(ctx, telemetryDistributionStatsKey{}, true)
 	ctx = context.WithValue(ctx, telemetryStatisticsCardKey{}, true)

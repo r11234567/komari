@@ -115,7 +115,7 @@ func telemetryExternal(t *testing.T, cfg Config) {
 	})
 	t.Run("mixed_historical_parent_with_exact_hot_edge", func(t *testing.T) {
 		_, e := telemetryExternalFixture(t, cfg)
-		testTelemetryPingMixedHistoricalParentWithExactHotEdge(t, e)
+		testScalarExternalBoundary(t, e)
 	})
 	t.Run("half_day_and_daily_retention_handoff", func(t *testing.T) {
 		ctx, e := telemetryExternalFixture(t, cfg)
@@ -138,7 +138,7 @@ func telemetryExternal(t *testing.T, cfg Config) {
 				break
 			}
 		}
-		if n := telemetryCount(t, e, "summary"); n != 1 {
+		if n := telemetryCount(t, e, "rollup"); n != 1 {
 			t.Fatal("fine tiers retained", n)
 		}
 		q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(24*time.Hour - time.Nanosecond)}, Interval: 24 * time.Hour, Aggregation: AggSum, PreserveSeries: true}
@@ -220,7 +220,7 @@ func testTelemetryExternalStorage(t *testing.T, ctx context.Context, e *Telemetr
 	if afterStats, _ := statsSemanticHash(t, e); beforeStats != afterStats {
 		t.Fatal("external SQL compaction changed statistics")
 	}
-	if n, err := e.PruneSummaries(ctx, "cpu", 30*24*time.Hour, now.Add(4*time.Hour), 512); err != nil || n == 0 {
+	if n, err := e.PruneSummaries(ctx, "cpu", 30*24*time.Hour, now.Add(4*time.Hour), 512); err != nil || n != 0 {
 		t.Fatal("external tier handoff/GC", n, err)
 	}
 	if ok, err := e.ArchiveNext(ctx); err != nil || !ok {
@@ -251,7 +251,7 @@ func testTelemetryExternalStorage(t *testing.T, ctx context.Context, e *Telemetr
 	if err != nil || len(mixed.Points) != 2 || mixed.Points[0].Value != 21 || mixed.Points[1].Value != 57 || len(mixed.Gaps) != 0 {
 		t.Fatalf("external mixed resolution planner: %+v %v", mixed, err)
 	}
-	testTelemetryPingWindowExcludesKnownOutsideChildren(t, e)
+	testScalarExternalBoundary(t, e)
 	if err = e.EnsureSchedule(ctx, []ScheduleTask{{Name: "summary", Due: time.Now().Add(-time.Second)}}); err != nil {
 		t.Fatal(err)
 	}

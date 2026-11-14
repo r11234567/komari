@@ -57,7 +57,17 @@ func (s *Store) MigrateLegacy(ctx context.Context, cfg TelemetryConfig, observe 
 	defer t.Close()
 	now := checkpoint.Cutoff
 	if checkpoint.Complete {
-		return t.finishLegacyMigrationRetention(ctx, now)
+		if err = t.finishLegacyMigrationRetention(ctx, now); err != nil {
+			return err
+		}
+		if err = t.finishLegacyRawHandoff(ctx); err != nil {
+			return err
+		}
+		_, err = t.s.db.ExecContext(ctx, "DELETE FROM "+t.table("progress")+" WHERE task LIKE 'm/%'")
+		if err != nil {
+			return err
+		}
+		return t.finishLegacyReceipts(ctx)
 	}
 	defs, err := s.ListMetrics(ctx)
 	if err != nil {
@@ -184,7 +194,10 @@ func (s *Store) MigrateLegacy(ctx context.Context, cfg TelemetryConfig, observe 
 						observe(def.Name+"/"+entity, count)
 					}
 					// Bound hot ownership even while an incident-sized source is read.
-					if _, e = t.SealDue(ctx, now); e != nil {
+					// Historical observation time is not a wall-clock flush timer.
+					// Keep each machine/day open until its byte budget is filled;
+					// sealing every sparse 3h metric window creates tiny files.
+					if _, e = t.s.db.ExecContext(ctx, t.bind("UPDATE "+t.table("segments")+" SET state='sealed' WHERE state='open' AND (points>=? OR bytes>=? OR (SELECT value FROM "+t.table("progress")+" WHERE task='hot_bytes')>=?)"), t.cfg.SegmentPoints, t.cfg.SegmentBytes, t.cfg.MaxHotBytes/2); e != nil {
 						return e
 					}
 					for {
@@ -215,17 +228,76 @@ func (s *Store) MigrateLegacy(ctx context.Context, cfg TelemetryConfig, observe 
 	if err = t.finishLegacyMigrationRetention(ctx, now); err != nil {
 		return err
 	}
+	if err = t.finishLegacyRawHandoff(ctx); err != nil {
+		return err
+	}
 	tx, err := t.begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	// Window checkpoints are needed only until the global completion marker.
+	// Retire them in that same commit, so interruption cannot re-add population.
+	if _, err = tx.ExecContext(ctx, "DELETE FROM "+t.table("progress")+" WHERE task LIKE 'm/%'"); err != nil {
+		return err
+	}
 	for key, value := range map[string]int64{"legacy_migration_complete": 1, "legacy_until": now.UnixNano(), "legacy_resolution": int64(legacyResolution)} {
 		if err = t.setProgress(ctx, tx, key, value); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return t.finishLegacyReceipts(ctx)
+}
+
+func (t *Telemetry) finishLegacyReceipts(ctx context.Context) error {
+	for {
+		n, err := t.PruneReceipts(ctx, time.Now().UTC(), 512)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+	}
+}
+
+// The service is stopped, so the last short segment has no future writer.
+// Publish it as well before declaring migration complete. A completed-window
+// checkpoint must not leave the final raw SQL tail stranded across restarts.
+func (t *Telemetry) finishLegacyRawHandoff(ctx context.Context) error {
+	for {
+		n, err := t.SummarizeNext(ctx)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			break
+		}
+	}
+	if _, err := t.s.db.ExecContext(ctx, "UPDATE "+t.table("segments")+" SET state='sealed' WHERE state='open'"); err != nil {
+		return err
+	}
+	for {
+		ok, err := t.ArchiveNext(ctx)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			break
+		}
+	}
+	for {
+		n, err := t.DeleteArchivedChunk(ctx, time.Now().UTC(), 512)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+	}
 }
 
 func coarsenLegacyMigrationCells(cells []telemetryMigrationCell, now time.Time) ([]telemetryMigrationCell, error) {
@@ -305,7 +377,7 @@ func (s *Store) legacyMigrationCells(ctx context.Context, name, entity string, s
 		})
 		refinements := map[int][]telemetryMigrationCell{}
 		var additional []telemetryMigrationCell
-		rows, err := s.scanRollupRowsBetween(ctx, name, entity, nil, int64(resolution), start.UnixNano(), end.UnixNano(), true)
+		rows, err := s.scanRollupRowsBetween(ctx, name, entity, nil, int64(resolution), start.UnixNano(), end.UnixNano(), false)
 		if err != nil {
 			return nil, err
 		}
@@ -343,10 +415,6 @@ func (s *Store) legacyMigrationCells(ctx context.Context, name, entity string, s
 			st := telemetryStats{N: n, Attempts: b.count, Loss: b.lossCount, Sum: b.sum, Min: b.min, Max: b.max, First: b.firstVal, Last: b.lastVal, FirstNano: b.firstTS, LastNano: b.lastTS}
 			if n > 0 {
 				st.Mean = b.sum / float64(n)
-				st.M2 = max(0, b.sumSq-b.sum*b.sum/float64(n))
-			}
-			if b.digest != nil {
-				st.Digest = b.digest.encodeRaw()
 			}
 			cell := telemetryMigrationCell{series: sid, tags: string(tagBytes), bucket: row.bucket, resolution: resolution, stats: st}
 			if overlap >= 0 {
@@ -413,11 +481,10 @@ func (s *Store) migrateLegacyRawWindow(ctx context.Context, t *Telemetry, name, 
 	insideCount := 0
 	batchIndex := 0
 	err := s.visitLegacyMigrationRaw(ctx, t, name, entity, start, end, func(points []Point) error {
-		received := end
-		if received.After(now) {
-			received = now
-		}
-		if _, err := t.accept(ctx, TelemetryBatch{Source: entity, Identity: fmt.Sprintf("legacy/%s/%d", key, batchIndex), Points: points}, received, true); err != nil {
+		// Use one import clock for segment lifetime. Advancing the receipt
+		// clock through historical windows would expire a sparse segment on
+		// every window, even though only milliseconds of import work elapsed.
+		if _, err := t.accept(ctx, TelemetryBatch{Source: entity, Identity: fmt.Sprintf("legacy/%s/%d", key, batchIndex), Points: points}, now, true); err != nil {
 			return err
 		}
 		batchIndex++
@@ -516,8 +583,7 @@ func (s *Store) migrateLegacyRawWindow(ctx context.Context, t *Telemetry, name, 
 func equivalentLegacyPopulation(a, b telemetryStats) bool {
 	return a.Attempts == b.Attempts && a.N == b.N && a.Loss == b.Loss &&
 		a.FirstNano == b.FirstNano && a.LastNano == b.LastNano && a.First == b.First && a.Last == b.Last &&
-		a.Min == b.Min && a.Max == b.Max && math.Abs(a.Sum-b.Sum) <= 1e-10*max(1, math.Abs(a.Sum)) &&
-		math.Abs(a.M2-b.M2) <= 1e-8*max(1, math.Abs(a.M2), math.Abs(b.M2)) && equivalentLegacyDigest(a, b)
+		a.Min == b.Min && a.Max == b.Max && math.Abs(a.Sum-b.Sum) <= 1e-10*max(1, math.Abs(a.Sum))
 }
 
 // Scalar moments alone do not identify a population. Compare the retained
@@ -551,6 +617,9 @@ func equivalentLegacyDigest(a, b telemetryStats) bool {
 }
 
 func (t *Telemetry) commitLegacyCells(ctx context.Context, key, name, entity string, cells []telemetryMigrationCell) error {
+	if t.scalar {
+		return t.commitScalarLegacyCells(ctx, key, name, entity, cells)
+	}
 	tx, err := t.begin(ctx)
 	if err != nil {
 		return err

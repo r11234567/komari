@@ -11,6 +11,9 @@ import (
 // through summary_pending. It reads keys, never historical stats or digests.
 // The durable scheduler stores the resulting deadline and does no work early.
 func (t *Telemetry) NextSummaryPromotion(ctx context.Context, now time.Time) (time.Duration, error) {
+	if t.scalar {
+		return t.scalarPromotionDelay(ctx, now)
+	}
 	through, err := t.progress(ctx, t.s.reader(), "summary")
 	if err != nil {
 		return 0, err

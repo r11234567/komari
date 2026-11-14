@@ -33,7 +33,7 @@ func WritePolicy(dir string, p Policy) error {
 		return e
 	}
 	p.At = time.Now().UTC()
-	return atomicJSON(filepath.Join(dir, "policy.json"), p)
+	return liveJSON(filepath.Join(dir, "policy.json"), p)
 }
 
 var errExportInvalidated = errors.New("export authorization, source generation or history epoch changed; create a new task")

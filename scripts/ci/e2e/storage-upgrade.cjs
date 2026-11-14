@@ -73,7 +73,7 @@ async function run(){
  // storage_update.tsx hands off to /admin; routes.ts then replaces that
  // intermediate URL with /admin/dashboard. Wait for the completed route.
  await expect(page).toHaveURL(`${base}/admin/dashboard`,{timeout:20000});
- const checks=JSON.parse(execFileSync('python3',['-c',`import sqlite3,json,sys\nc=sqlite3.connect(sys.argv[1])\np=dict(c.execute("SELECT task,value FROM metric_telemetry_progress WHERE task IN ('legacy_migration_complete','legacy_ledger_complete')"))\nprint(json.dumps({'progress':p,'source_rows':c.execute('SELECT COUNT(*) FROM metric_points').fetchone()[0],'summary_rows':c.execute('SELECT COUNT(*) FROM metric_telemetry_summary').fetchone()[0]}))`,source],{encoding:'utf8'}));
+ const checks=JSON.parse(execFileSync('python3',['-c',`import sqlite3,json,sys\nc=sqlite3.connect(sys.argv[1])\np=dict(c.execute("SELECT task,value FROM metric_telemetry_progress WHERE task IN ('legacy_migration_complete','legacy_ledger_complete')"))\nprint(json.dumps({'progress':p,'source_rows':c.execute('SELECT COUNT(*) FROM metric_points').fetchone()[0],'summary_rows':c.execute('SELECT COUNT(*) FROM metric_telemetry_rollup').fetchone()[0]}))`,source],{encoding:'utf8'}));
  const fixtureManifest=JSON.parse(fs.readFileSync(path.join(root,'migration-manifest.json')));
  expect(checks.progress.legacy_migration_complete).toBe(1);expect(checks.progress.legacy_ledger_complete).toBe(1);expect(checks.source_rows).toBe(fixtureManifest.synthetic_points);expect(checks.summary_rows).toBeGreaterThan(0);
  await expect(page.getByText('Daily billable traffic',{exact:true})).toBeVisible({timeout:30000});
@@ -105,7 +105,7 @@ print(json.dumps({'source_rows':source.execute('SELECT COUNT(*) FROM metric_poin
 'retired':target.execute("SELECT value FROM metric_telemetry_progress WHERE task='legacy_tables_retired'").fetchone()[0],
 'legacy_objects':target.execute("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('metric_points','metric_rollups','metric_point_blocks','metric_rollup_blocks')").fetchone()[0],
 'integrity':target.execute('PRAGMA integrity_check').fetchone()[0],
-'summary_rows':target.execute('SELECT COUNT(*) FROM metric_telemetry_summary').fetchone()[0]}))`,source,compacted,path.join(rollback,'metrics.db')],{encoding:'utf8'}));
+'summary_rows':target.execute('SELECT COUNT(*) FROM metric_telemetry_rollup').fetchone()[0]}))`,source,compacted,path.join(rollback,'metrics.db')],{encoding:'utf8'}));
  expect(compactChecks.source_rows).toBe(fixtureManifest.synthetic_points);expect(compactChecks.backup_rows).toBe(fixtureManifest.synthetic_points);
  expect(compactChecks.retired).toBe(1);expect(compactChecks.legacy_objects).toBe(0);expect(compactChecks.integrity).toBe('ok');expect(compactChecks.summary_rows).toBeGreaterThan(0);
  for(const suffix of ['-wal','-shm'])expect(fs.existsSync(source+suffix)).toBe(false);

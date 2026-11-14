@@ -62,33 +62,47 @@ func TestSampleSpoolUnitIsAtomicAndReplayable(t *testing.T) {
 	}
 }
 
-func TestSampleAssemblyDoesNotReturnToDecodingBetweenCheckpoints(t *testing.T) {
-	w, j := workerFixture(t, "sample30s")
+// More than one output batch is necessary to exercise durable assembly resume.
+// Keep observations disjoint from the two slots in workerFixture.
+func addSampleAssemblyHistory(t *testing.T, w *Worker, j *Job) int64 {
+	t.Helper()
 	ctx := context.Background()
 	s, err := metric.Open(ctx, metric.SQLite(j.Source.DSN, metric.WithTablePrefix(j.Source.Prefix), metric.WithRetiredLegacyStorage(), metric.WithSQLiteProfile(metric.SQLiteProfileDurable)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tel, err := s.OpenTelemetry(ctx, j.Source.Telemetry)
-	if err != nil {
-		s.Close()
-		t.Fatal(err)
-	}
-	at := j.Start.Add(-3 * time.Hour)
-	points := make([]metric.Point, 256)
-	for i := range points {
-		points[i] = metric.Point{MetricName: "cpu", EntityID: j.UUID, Timestamp: at.Add(time.Duration(i) * 30 * time.Second), Value: float64(i)}
-	}
-	_, err = tel.Accept(ctx, metric.TelemetryBatch{Source: j.UUID, Identity: "assembly-phase", Points: points}, time.Now())
-	tel.Close()
-	s.Close()
+	defer s.Close()
+	cfg := j.Source.Telemetry
+	cfg.MaxLateness = 3 * 24 * time.Hour
+	tel, err := s.OpenTelemetry(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
+	}
+	defer tel.Close()
+	at := j.Start.Add(-40 * time.Hour)
+	const count = 17 * 256
+	for offset := 0; offset < count; offset += 256 {
+		points := make([]metric.Point, 256)
+		for i := range points {
+			ordinal := offset + i
+			points[i] = metric.Point{MetricName: "cpu", EntityID: j.UUID, Timestamp: at.Add(time.Duration(ordinal) * 30 * time.Second), Value: float64(ordinal)}
+		}
+		if _, err = tel.Accept(ctx, metric.TelemetryBatch{Source: j.UUID, Identity: at.Add(time.Duration(offset) * 30 * time.Second).Format(time.RFC3339), Points: points}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	j.Start = at
 	if err = w.Queue.Save(ctx, j); err != nil {
 		t.Fatal(err)
 	}
+	return count + 2
+}
+
+func TestSampleAssemblyDoesNotReturnToDecodingBetweenCheckpoints(t *testing.T) {
+	w, j := workerFixture(t, "sample30s")
+	ctx := context.Background()
+	wantRows := addSampleAssemblyHistory(t, w, j)
+	var err error
 	var phaseStart time.Time
 	var checkpoint int
 	for i := 0; i < 20; i++ {
@@ -114,38 +128,18 @@ func TestSampleAssemblyDoesNotReturnToDecodingBetweenCheckpoints(t *testing.T) {
 			break
 		}
 	}
-	if phaseStart.IsZero() || j.Status != "done" || j.WrittenRows != 258 {
+	if phaseStart.IsZero() || j.Status != "done" || j.WrittenRows != wantRows {
 		t.Fatalf("did not exercise repeated assembly checkpoints: phase=%v rows=%d status=%s", phaseStart, j.WrittenRows, j.Status)
 	}
 }
 
-func TestSampleWideRowsResumeAcross128RowCheckpoint(t *testing.T) {
+func TestSampleWideRowsResumeAcrossOutputCheckpoint(t *testing.T) {
 	for _, boundary := range []string{"sample-row-before-checkpoint", "sample-row-after-checkpoint"} {
 		t.Run(boundary, func(t *testing.T) {
 			w, j := workerFixture(t, "sample30s")
 			ctx := context.Background()
-			s, e := metric.Open(ctx, metric.SQLite(j.Source.DSN, metric.WithTablePrefix(j.Source.Prefix), metric.WithRetiredLegacyStorage(), metric.WithSQLiteProfile(metric.SQLiteProfileDurable)))
-			if e != nil {
-				t.Fatal(e)
-			}
-			tel, e := s.OpenTelemetry(ctx, j.Source.Telemetry)
-			if e != nil {
-				t.Fatal(e)
-			}
-			at := j.Start.Add(-3 * time.Hour)
-			points := make([]metric.Point, 256)
-			for i := range points {
-				points[i] = metric.Point{MetricName: "cpu", EntityID: j.UUID, Timestamp: at.Add(time.Duration(i) * 30 * time.Second), Value: float64(i)}
-			}
-			if _, e = tel.Accept(ctx, metric.TelemetryBatch{Source: j.UUID, Identity: "wide-rows", Points: points}, time.Now()); e != nil {
-				t.Fatal(e)
-			}
-			tel.Close()
-			s.Close()
-			j.Start = at
-			if e = w.Queue.Save(ctx, j); e != nil {
-				t.Fatal(e)
-			}
+			wantRows := addSampleAssemblyHistory(t, w, j)
+			var e error
 			hit := false
 			w.Fault = func(stage string) error {
 				if stage == boundary && !hit {
@@ -162,11 +156,14 @@ func TestSampleWideRowsResumeAcross128RowCheckpoint(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
+				if j.Status == "done" {
+					t.Fatal("published without exercising the requested fault boundary")
+				}
 			}
 			if !hit || j.Status != "failed" {
 				t.Fatalf("not exercised: %+v", j)
 			}
-			if boundary == "sample-row-after-checkpoint" && (j.Committed.Rows != 128 || !j.Committed.SampleOutput) {
+			if boundary == "sample-row-after-checkpoint" && (j.Committed.Rows <= 0 || j.Committed.Rows >= wantRows || !j.Committed.SampleOutput) {
 				t.Fatalf("missing row checkpoint: %+v", j.Committed)
 			}
 			f, e := os.OpenFile(w.Queue.Path(j.ID, ".csv.part"), os.O_APPEND|os.O_WRONLY, 0600)
@@ -185,7 +182,7 @@ func TestSampleWideRowsResumeAcross128RowCheckpoint(t *testing.T) {
 			}
 			j = finishWorker(t, w, j)
 			rows := readCSV(t, w, j)
-			if len(rows) != 259 {
+			if int64(len(rows)) != wantRows+1 {
 				t.Fatal("lost or duplicated sampled rows", len(rows))
 			}
 			seen := map[string]bool{}

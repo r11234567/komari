@@ -10,6 +10,6 @@ function aggregateObservations(observations, start, end, intervalSeconds, ping =
     if (!ping || p.value >= 0) { s.valid++; s.sum += p.value; }
     buckets.set(key, s);
   }
-  return [...buckets.entries()].sort((a,b) => a[0]-b[0]).map(([,s]) => ({ ...s, value: s.valid ? s.sum/s.valid : 0 }));
+  return [...buckets.entries()].sort((a,b) => a[0]-b[0]).filter(([,s]) => !ping || s.valid > 0).map(([,s]) => ({ ...s, attempts: s.count, loss: (s.count-s.valid)/s.count, count: ping ? s.valid : s.count, value: s.valid ? s.sum/s.valid : 0 }));
 }
 module.exports = { aggregateObservations };

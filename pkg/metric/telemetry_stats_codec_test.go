@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -118,70 +117,6 @@ func statsSemanticHash(t *testing.T, e *Telemetry) (string, int64) {
 	return hex.EncodeToString(h.Sum(nil)), size
 }
 
-func TestTelemetryStatsCompactionBoundedRestartRollback(t *testing.T) {
-	s, e := telemetryFixture(t, "")
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Hour)
-	for i := 0; i < 5; i++ {
-		if _, err := e.Accept(ctx, telemetryBatch(fmt.Sprint(i), now.Add(time.Duration(i)*20*time.Second), 1, 2, 3, 4), now); err != nil {
-			t.Fatal(err)
-		}
-	}
-	summarizeAll(t, e)
-	before, bytesBefore := statsSemanticHash(t, e)
-	if n, _, err := e.CompactStatsChunk(ctx, "", 2); err != nil || n != 0 {
-		t.Fatal("mutable cells compacted", n, err)
-	}
-	if _, err := e.SealDue(ctx, now.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	e.cfg.Fault = func(stage string) error {
-		if stage == "stats-before-compaction-commit" {
-			return errors.New("crash")
-		}
-		return nil
-	}
-	if _, _, err := e.CompactStatsChunk(ctx, "", 2); err == nil {
-		t.Fatal("fault not reached")
-	}
-	if hash, n := statsSemanticHash(t, e); hash != before || n != bytesBefore {
-		t.Fatal("failed page committed")
-	}
-	e.cfg.Fault = nil
-	n, cursor, err := e.CompactStatsChunk(ctx, "", 2)
-	if err != nil || n != 2 || len(cursor) > 255 {
-		t.Fatal(n, cursor, err)
-	}
-	if err = e.Close(); err != nil {
-		t.Fatal(err)
-	}
-	e, err = s.OpenTelemetry(ctx, e.cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer e.Close()
-	for i := 0; i < 10; i++ {
-		n, cursor, err = e.CompactStatsChunk(ctx, cursor, 2)
-		if err != nil || n > 2 {
-			t.Fatal(n, err)
-		}
-		if n == 0 {
-			break
-		}
-		if i == 9 {
-			t.Fatal("cursor did not finish")
-		}
-	}
-	if hash, n := statsSemanticHash(t, e); hash != before || n >= bytesBefore {
-		t.Fatal("compaction lost exact statistics or did not shrink", n, bytesBefore)
-	}
-	if _, _, err = e.CompactStatsChunk(ctx, "invalid", 2); err == nil {
-		t.Fatal("invalid cursor accepted")
-	}
-}
-
-// Opt-in finite incident-copy experiment. The caller must create a disposable
-// directory with an explicit marker; never point this at a live installation.
 func TestTelemetryStatsCompactionIncidentCopy(t *testing.T) {
 	dir := os.Getenv("KOMARI_TELEMETRY_COMPACTION_COPY")
 	if dir == "" {

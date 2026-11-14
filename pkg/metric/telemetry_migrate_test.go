@@ -2,12 +2,10 @@ package metric
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"math"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -244,36 +242,11 @@ func TestTelemetryLegacyMigrationAppliesRetainedResolution(t *testing.T) {
 				t.Fatal(err)
 			}
 			var finest int64
-			if err = s.db.QueryRow("SELECT MIN(resolution) FROM " + e.table("summary")).Scan(&finest); err != nil || time.Duration(finest) != tc.want {
+			if err = s.db.QueryRow("SELECT MIN(resolution) FROM " + e.table("rollup")).Scan(&finest); err != nil || time.Duration(finest)*time.Second != tc.want {
 				t.Fatalf("migration deferred required retention coarsening to the online backlog: resolution=%s want=%s error=%v", time.Duration(finest), tc.want, err)
 			}
-			rows, err := s.db.Query("SELECT stats FROM " + e.table("summary"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			for rows.Next() {
-				var encoded string
-				var st telemetryStats
-				if err = rows.Scan(&encoded); err != nil {
-					rows.Close()
-					t.Fatal(err)
-				}
-				if err = json.Unmarshal([]byte(encoded), &st); err != nil {
-					rows.Close()
-					t.Fatal(err)
-				}
-				digest, decodeErr := DecodeTDigest(st.Digest)
-				if decodeErr != nil || digest == nil || digest.count != float64(st.N) {
-					rows.Close()
-					t.Fatalf("coarsening aliased a mutable sketch: observations=%d digest=%+v error=%v", st.N, digest, decodeErr)
-				}
-			}
-			if err = rows.Err(); err != nil {
-				rows.Close()
-				t.Fatal(err)
-			}
-			if err = rows.Close(); err != nil {
-				t.Fatal(err)
+			if telemetryCount(t, e, "summary") != 0 {
+				t.Fatal("legacy envelopes retained")
 			}
 			if err = s.EnableTelemetry(ctx, cfg); err != nil {
 				t.Fatal(err)
@@ -315,7 +288,7 @@ func TestTelemetryLegacyPromotionExactRetentionBoundary(t *testing.T) {
 				t.Fatal(n, err)
 			}
 			var resolution int64
-			if err := e.s.db.QueryRow("SELECT MIN(resolution) FROM " + e.table("summary")).Scan(&resolution); err != nil || time.Duration(resolution) != tc.want {
+			if err := e.s.db.QueryRow("SELECT MIN(resolution) FROM " + e.table("rollup")).Scan(&resolution); err != nil || time.Duration(resolution)*time.Second != tc.want {
 				t.Fatalf("legacy retention boundary deleted source or failed to advance: resolution=%s error=%v", time.Duration(resolution), err)
 			}
 			from := at.Truncate(tc.want)
@@ -327,97 +300,6 @@ func TestTelemetryLegacyPromotionExactRetentionBoundary(t *testing.T) {
 				t.Fatal("boundary replay not idempotent", n, err)
 			}
 		})
-	}
-}
-
-func TestTelemetryLegacyPromotionMixedResolutionsAndOwners(t *testing.T) {
-	s, e := telemetryFixture(t, "")
-	ctx := context.Background()
-	now := time.Date(2025, 4, 15, 12, 0, 0, 0, time.UTC)
-	var cells []telemetryMigrationCell
-	for i, tc := range []struct {
-		age, resolution time.Duration
-	}{
-		{30 * time.Minute, 10 * time.Second},
-		{6 * time.Hour, 10 * time.Second},
-		{3 * 24 * time.Hour, time.Minute},
-		{3 * 24 * time.Hour, 3 * time.Minute},
-		{20 * 24 * time.Hour, 15 * time.Minute},
-		{20 * 24 * time.Hour, 45 * time.Minute},
-	} {
-		at := now.Add(-tc.age).Truncate(tc.resolution)
-		if tc.resolution == 3*time.Minute {
-			at = at.Add(3 * time.Minute)
-		} else if tc.resolution == 45*time.Minute {
-			at = at.Add(-3 * time.Hour)
-		}
-		var st telemetryStats
-		st.add(Point{MetricName: "cpu", Timestamp: at, Value: float64(i + 1)}, 1, i)
-		cells = append(cells, telemetryMigrationCell{series: telemetryMigrationKey("cpu\x00node\x00{}"), tags: "{}", bucket: at.UnixNano(), resolution: tc.resolution, stats: st})
-	}
-	if err := e.commitLegacyCells(ctx, "mixed-tiers", "cpu", "node", cells); err != nil {
-		t.Fatal(err)
-	}
-	other := cells[1]
-	other.series = telemetryMigrationKey("cpu\x00online\x00{}")
-	if err := e.commitLegacyCells(ctx, "online-owner", "cpu", "online", []telemetryMigrationCell{other}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec("UPDATE "+e.table("segments")+" SET state='open' WHERE id=?", telemetryMigrationKey("online-owner")[:32]); err != nil {
-		t.Fatal(err)
-	}
-	processed := 0
-	for steps := 0; ; steps++ {
-		if steps > 10 {
-			t.Fatal("promotion did not converge")
-		}
-		n, err := e.PromoteLegacyChunk(ctx, now, 1)
-		if err != nil || n > 1 {
-			t.Fatal(n, err)
-		}
-		processed += n
-		if n == 0 {
-			break
-		}
-	}
-	if processed != 5 {
-		t.Fatal("eligible legacy population", processed)
-	}
-	rows, err := s.db.Query("SELECT b.resolution,b.stats,a.state FROM " + e.table("summary") + " b JOIN " + e.table("segments") + " a ON a.id=b.segment_id")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var attempts int64
-	var sum float64
-	var resolutions []int64
-	for rows.Next() {
-		var resolution int64
-		var raw, state string
-		if err = rows.Scan(&resolution, &raw, &state); err != nil {
-			t.Fatal(err)
-		}
-		var st telemetryStats
-		if err = json.Unmarshal([]byte(raw), &st); err != nil {
-			t.Fatal(err)
-		}
-		if state == "open" {
-			if resolution != int64(10*time.Second) || st.Attempts != 1 || st.Sum != 2 {
-				t.Fatal("online ownership changed", resolution, st)
-			}
-			continue
-		}
-		resolutions = append(resolutions, resolution)
-		attempts += st.Attempts
-		sum += st.Sum
-	}
-	if err = rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	sort.Slice(resolutions, func(i, j int) bool { return resolutions[i] < resolutions[j] })
-	want := []int64{int64(10 * time.Second), int64(time.Minute), int64(30 * time.Minute), int64(2 * time.Hour), int64(6 * time.Hour)}
-	if !reflect.DeepEqual(resolutions, want) || attempts != 6 || sum != 21 {
-		t.Fatal("promotion changed imported statistics", resolutions, attempts, sum)
 	}
 }
 
@@ -449,7 +331,7 @@ func TestTelemetryLegacyMigrationResumesRetentionCheckpoint(t *testing.T) {
 			cfg := e.cfg
 			fail := true
 			cfg.Fault = func(stage string) error {
-				if fail && stage == "legacy-before-promotion-commit" {
+				if fail && stage == "tier-before-commit" {
 					fail = false
 					return errors.New("retention restart")
 				}
@@ -462,7 +344,7 @@ func TestTelemetryLegacyMigrationResumesRetentionCheckpoint(t *testing.T) {
 				t.Fatal("retention checkpoint was bypassed")
 			}
 			var sourceCells int
-			if err := s.db.QueryRow("SELECT COUNT(*) FROM "+e.table("summary")+" WHERE resolution=?", int64(time.Minute)).Scan(&sourceCells); err != nil || sourceCells != 2 {
+			if err := s.db.QueryRow("SELECT COUNT(*) FROM "+e.table("rollup")+" WHERE resolution=?", int64(60)).Scan(&sourceCells); err != nil || sourceCells != 2 {
 				t.Fatalf("failed retention transaction changed source: %d %v", sourceCells, err)
 			}
 			if err := s.MigrateLegacy(ctx, cfg, nil); err != nil {
@@ -700,7 +582,7 @@ func TestTelemetryLegacyCanonicalPromotionAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.cfg.Fault = func(stage string) error {
-		if stage == "legacy-before-promotion-commit" {
+		if stage == "tier-before-commit" {
 			return errors.New("power loss")
 		}
 		return nil
@@ -708,14 +590,14 @@ func TestTelemetryLegacyCanonicalPromotionAtomic(t *testing.T) {
 	if _, err := e.PromoteLegacyChunk(ctx, at.Add(4*time.Hour), 512); err == nil {
 		t.Fatal("missing failure")
 	}
-	if n := telemetryCount(t, e, "summary"); n != 2 {
+	if n := telemetryCount(t, e, "rollup"); n != 2 {
 		t.Fatal("promotion lost source", n)
 	}
 	e.cfg.Fault = nil
 	if n, err := e.PromoteLegacyChunk(ctx, at.Add(4*time.Hour), 512); err != nil || n != 2 {
 		t.Fatal(n, err)
 	}
-	if n := telemetryCount(t, e, "summary"); n != 1 {
+	if n := telemetryCount(t, e, "rollup"); n != 1 {
 		t.Fatal("not merged", n)
 	}
 	if n, err := e.PruneSummaries(ctx, "cpu", 30*24*time.Hour, at.Add(3*time.Hour), 512); err != nil || n != 0 {

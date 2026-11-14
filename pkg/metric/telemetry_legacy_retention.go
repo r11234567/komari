@@ -11,6 +11,9 @@ import (
 // Imported cells have one canonical owner. Promote and delete together, never
 // prune the only copy; online immutable owners use a separate handoff marker.
 func (t *Telemetry) PromoteLegacyChunk(ctx context.Context, now time.Time, limit int) (int, error) {
+	if t.scalar {
+		return t.promoteScalar(ctx, now, limit)
+	}
 	if limit < 1 || limit > 512 {
 		return 0, ErrInvalidArgument
 	}

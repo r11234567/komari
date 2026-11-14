@@ -84,12 +84,12 @@ module.validate_storage(result)
 		}
 	}
 	// Same row count must not conceal a missing responsibility.
-	mutate("UPDATE metric_telemetry_schedule SET task='wrong-stats' WHERE task='stats'")
+	mutate("UPDATE metric_telemetry_schedule SET task='wrong-tiers' WHERE task='tiers'")
 	bad := inspect(false)
-	if bad["scheduled_tasks"] != initial["scheduled_tasks"] || len(bad["missing_tasks"].([]any)) != 1 || bad["missing_tasks"].([]any)[0] != "stats" {
+	if bad["scheduled_tasks"] != initial["scheduled_tasks"] || len(bad["missing_tasks"].([]any)) != 1 || bad["missing_tasks"].([]any)[0] != "tiers" {
 		t.Fatal("missing task not diagnosed", bad)
 	}
-	mutate("UPDATE metric_telemetry_schedule SET task='stats' WHERE task='wrong-stats'")
+	mutate("UPDATE metric_telemetry_schedule SET task='tiers' WHERE task='wrong-tiers'")
 	mutate("UPDATE metric_telemetry_schedule SET attempts=1,last_error='injected maintenance failure' WHERE task='gaps'")
 	inspect(false)
 	mutate("UPDATE metric_telemetry_schedule SET attempts=0 WHERE task='gaps'")
@@ -98,7 +98,7 @@ module.validate_storage(result)
 	inspect(true)
 	// Dispatch the newly added maintenance tasks through the actual switch,
 	// and confirm an idle page succeeds without triggering failure backoff.
-	for _, name := range []string{"stats", "gaps"} {
+	for _, name := range []string{"tiers", "gaps"} {
 		mutate("UPDATE metric_telemetry_schedule SET due=?", now.Add(time.Hour).UnixNano())
 		mutate("UPDATE metric_telemetry_schedule SET due=0 WHERE task=?", name)
 		if _, err = runTelemetryPass(ctx, s, now); err != nil {

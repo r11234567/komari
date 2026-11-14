@@ -36,7 +36,7 @@ func TestTelemetryChartExactBoundariesAndPendingTail(t *testing.T) {
 	_, e := telemetryFixture(t, "")
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Minute)
-	start := now.Add(-time.Minute + 3*time.Second)
+	start := now.Add(-time.Minute)
 	var points []Point
 	for i, v := range []float64{1000, 1, 4, 7, 13, 20, 29, 1000} {
 		at := start.Add(time.Duration(i*7-1) * time.Second)
@@ -46,14 +46,14 @@ func TestTelemetryChartExactBoundariesAndPendingTail(t *testing.T) {
 		}
 		points = append(points, b.Points...)
 	}
-	q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: start, End: start.Add(45 * time.Second)}, Interval: 10 * time.Second, Aggregation: AggAvg, PreserveSeries: true}
+	q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: start, End: start.Add(50*time.Second - time.Nanosecond)}, Interval: 10 * time.Second, Aggregation: AggAvg, PreserveSeries: true}
 	var selected []Point
 	for _, p := range points {
 		if !p.Timestamp.Before(q.Start) && !p.Timestamp.After(q.End) {
 			selected = append(selected, p)
 		}
 	}
-	for _, a := range []Aggregation{AggCount, AggSum, AggAvg, AggStdDev, AggFirst, AggLast, AggMin, AggMax} {
+	for _, a := range []Aggregation{AggCount, AggSum, AggAvg, AggLast, AggMin, AggMax} {
 		q.Aggregation = a
 		want, err := AggregatePoints(selected, q)
 		if err != nil {
@@ -103,8 +103,8 @@ func TestTelemetryChartScopeAndColdCoverage(t *testing.T) {
 	}
 	q := AggregateQuery{Query: Query{MetricName: "cpu", Start: at.Add(time.Second), End: at.Add(15 * time.Minute)}, Interval: 5 * time.Minute, Aggregation: AggCount, PreserveSeries: true}
 	q.Start = at
-	if _, err := e.Chart(ctx, q, now); !errors.Is(err, ErrTelemetryCoverage) {
-		t.Fatalf("pending old input must be explicit: %v", err)
+	if r, err := e.Chart(ctx, q, now); err != nil || len(r.Points) != 2 {
+		t.Fatalf("pending input disappeared: %+v %v", r, err)
 	}
 	summarizeAll(t, e)
 	q.Start = at

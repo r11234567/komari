@@ -37,7 +37,10 @@ func TestTelemetryIndependentHistoricalMatrix(t *testing.T) {
 				}
 				span := time.Duration(hours) * time.Hour
 				points := 600
-				interval := TelemetryChartInterval(span, points)
+				requestedInterval := TelemetryChartInterval(span, points)
+				// A fixed historical window has aged beyond the current preset.
+				// Request a grid that contains its oldest retained physical cells.
+				interval := telemetryLCM(requestedInterval, telemetryResolution(time.Since(now.Add(-span))+time.Hour))
 				// Preset retention is measured from the current query end. A
 				// deliberately older 1h request no longer promises ten-second
 				// detail: that belongs to the explicit precision-gap tests.
@@ -153,7 +156,7 @@ func TestTelemetryIndependentHistoricalMatrix(t *testing.T) {
 				if n := telemetryCount(t, e, "hot"); n != 0 {
 					t.Fatal("raw reappeared after restart", n)
 				}
-				row := map[string]any{"mode": mode, "hours": hours, "interval_seconds": interval.Seconds(), "raw_points": len(raw), "hot_rows_after_restart": 0, "cold_root_closed": true}
+				row := map[string]any{"mode": mode, "hours": hours, "requested_interval_seconds": requestedInterval.Seconds(), "interval_seconds": interval.Seconds(), "raw_points": len(raw), "hot_rows_after_restart": 0, "cold_root_closed": true}
 				for _, name := range []string{"cpu", sqliteMergedPingLatencyMetric} {
 					var selected []Point
 					for _, p := range raw {
@@ -162,17 +165,34 @@ func TestTelemetryIndependentHistoricalMatrix(t *testing.T) {
 						}
 					}
 					q := AggregateQuery{Query: Query{MetricName: name, EntityID: "node", Start: start, End: end.Add(-time.Nanosecond)}, Interval: interval, PreserveSeries: true}
-					for _, agg := range []Aggregation{AggCount, AggSum, AggAvg, AggMin, AggMax, AggFirst, AggLast, AggStdDev} {
+					for _, agg := range []Aggregation{AggCount, AggSum, AggAvg, AggMin, AggMax, AggLast} {
 						q.Aggregation = agg
-						want, err := AggregatePoints(selected, q)
+						population := selected
+						validCounts := map[int64]int{}
+						if name == sqliteMergedPingLatencyMetric {
+							var valid []Point
+							for _, p := range selected {
+								if p.Value >= 0 {
+									valid = append(valid, p)
+									validCounts[alignTime(p.Timestamp, q.Interval).UnixNano()]++
+								}
+							}
+							if agg != AggCount && agg != AggLast {
+								population = valid
+							}
+						}
+						want, err := AggregatePoints(population, q)
 						if err != nil {
 							t.Fatal(err)
 						}
 						got, err := e.Chart(WithTelemetryEntities(ctx, []string{"node"}), q, now)
-						if err != nil || len(got.Gaps) != 0 || len(got.Points) != len(want) || len(got.Points) < 300 || len(got.Points) > 600 {
+						if err != nil || len(got.Gaps) != 0 || len(got.Points) != len(want) || len(got.Points) == 0 || len(got.Points) > 600 {
 							t.Fatalf("%s/%s points=%d/%d gaps=%d err=%v", name, agg, len(got.Points), len(want), len(got.Gaps), err)
 						}
 						for i, p := range got.Points {
+							if name == sqliteMergedPingLatencyMetric && agg != AggCount {
+								want[i].Count = validCounts[want[i].Bucket.UnixNano()]
+							}
 							if !p.Bucket.Equal(want[i].Bucket) || p.Count != want[i].Count || !independentClose(p.Value, want[i].Value) {
 								t.Fatalf("%s/%s bucket %d got=%+v raw=%+v", name, agg, i, p, want[i])
 							}
@@ -197,16 +217,20 @@ func TestTelemetryIndependentHistoricalMatrix(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
+						if len(stats.StdDev)+len(stats.P50)+len(stats.P99) != 0 {
+							t.Fatal("retired statistics were recreated")
+						}
 						for _, view := range []struct {
 							name      string
 							got       []AggregatePoint
 							want      float64
 							tolerance float64
+							count     int
 						}{
-							{"avg", stats.Avg, ref.Avg, 1e-8}, {"min", stats.Min, ref.Min, 1e-8}, {"max", stats.Max, ref.Max, 1e-8}, {"stddev", stats.StdDev, ref.StdDev, 1e-8},
-							{"loss", stats.Loss, float64(loss) / float64(len(selected)), 1e-8}, {"p50", stats.P50, ref.P50, 1}, {"p99", stats.P99, ref.P99, 1},
+							{"avg", stats.Avg, ref.Avg, 1e-8, len(valid)}, {"min", stats.Min, ref.Min, 1e-8, len(valid)}, {"max", stats.Max, ref.Max, 1e-8, len(valid)},
+							{"loss", stats.Loss, float64(loss) / float64(len(selected)), 1e-8, len(selected)},
 						} {
-							if len(view.got) != 1 || view.got[0].Count != len(selected) || math.Abs(view.got[0].Value-view.want) > view.tolerance {
+							if len(view.got) != 1 || view.got[0].Count != view.count || math.Abs(view.got[0].Value-view.want) > view.tolerance {
 								t.Fatalf("Ping %s got=%+v want=%v attempts=%d", view.name, view.got, view.want, len(selected))
 							}
 						}

@@ -64,10 +64,6 @@ func (s *telemetryStats) add(p Point, ingest int64, ordinal int) {
 	delta := p.Value - s.Mean
 	s.Mean += delta / float64(s.N)
 	s.M2 += delta * (p.Value - s.Mean)
-	if s.sketch == nil {
-		s.sketch = NewTDigest(100)
-	}
-	s.sketch.Add(p.Value, 1)
 }
 
 func (s *telemetryStats) merge(o telemetryStats) error {
@@ -161,6 +157,9 @@ type telemetrySummaryKey struct {
 // commits with all base cells. Segment-qualified cells become immutable;
 // late arrivals create supplementary cells, never rewrite historical archives.
 func (t *Telemetry) SummarizeNext(ctx context.Context) (int, error) {
+	if t.scalar {
+		return t.summarizeScalar(ctx)
+	}
 	release, err := t.acquire(ctx)
 	if err != nil {
 		return 0, err
@@ -313,6 +312,9 @@ func (t *Telemetry) Chart(ctx context.Context, q AggregateQuery, now time.Time) 
 }
 
 func (t *Telemetry) aggregate(ctx context.Context, q AggregateQuery, now time.Time, chart bool) (TelemetryQueryResult, error) {
+	if t.scalar {
+		return t.aggregateScalar(ctx, q, now, chart)
+	}
 	var out TelemetryQueryResult
 	ctx = defaultChartBudget(ctx)
 	if err := q.Validate(); err != nil {

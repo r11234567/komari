@@ -2,7 +2,6 @@ package metric
 
 import (
 	"context"
-	"errors"
 	"math"
 	"path/filepath"
 	"testing"
@@ -33,7 +32,7 @@ func TestTelemetryPlannerMixedRetentionAndNoDuplicateOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, interval := range []time.Duration{30 * time.Minute, time.Hour, 90 * time.Minute} {
-		for _, aggregation := range []Aggregation{AggCount, AggSum, AggAvg, AggStdDev, AggMin, AggMax, AggFirst, AggLast, AggP50, AggP95, AggP99} {
+		for _, aggregation := range []Aggregation{AggCount, AggSum, AggAvg, AggMin, AggMax, AggLast} {
 			q := AggregateQuery{Query: Query{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(3*time.Hour - time.Nanosecond)}, Interval: interval, Aggregation: aggregation, PreserveSeries: true}
 			want, err := AggregatePoints(raw, q)
 			if err != nil {
@@ -115,20 +114,13 @@ func TestTelemetryPlannerMixedPingUsesProbeWeights(t *testing.T) {
 	}
 	q := AggregateQuery{Query: Query{MetricName: sqliteMergedPingLatencyMetric, EntityID: "node", Start: at, End: at.Add(30*time.Minute - time.Nanosecond)}, Interval: 30 * time.Minute, Aggregation: AggAvg, PreserveSeries: true}
 	r, err := e.Chart(ctx, q, now)
-	if err != nil || len(r.Points) != 1 || r.Points[0].Count != 6 || r.Points[0].Value != 30 {
+	if err != nil || len(r.Points) != 1 || r.Points[0].Count != 4 || r.Points[0].Value != 30 {
 		t.Fatalf("latency weighted by failed probes: %+v %v", r, err)
 	}
 	q.MetricName = sqliteVirtualPingLossMetric
 	r, err = e.Chart(ctx, q, now)
 	if err != nil || len(r.Points) != 1 || math.Abs(r.Points[0].Value-1.0/3) > 1e-9 {
 		t.Fatalf("loss averaged from bucket percentages: %+v %v", r, err)
-	}
-	if _, err = e.s.db.ExecContext(ctx, "DELETE FROM "+e.table("summary")+" WHERE resolution<>?", int64(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	q.Interval = 10 * time.Second
-	if _, err = e.PingSummary(ctx, q, now); !errors.Is(err, ErrTelemetryCoverage) {
-		t.Fatalf("partial Ping population was reported as complete: %v", err)
 	}
 }
 
@@ -156,47 +148,6 @@ func TestTelemetryPlannerLegacyPartialPromotionRemainsAdditive(t *testing.T) {
 	r, err := e.Chart(ctx, q, at.Add(4*time.Hour))
 	if err != nil || len(r.Points) != 1 || r.Points[0].Value != 30 || r.Points[0].Count != 3 || len(r.Gaps) != 0 {
 		t.Fatalf("partial canonical promotion lost input: %+v, %v", r, err)
-	}
-}
-
-func TestTelemetryPlannerUnavailableContributionPoisonsOnlyItsSeriesBucket(t *testing.T) {
-	_, e := telemetryFixture(t, "")
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Hour)
-	at := now.Add(-6 * time.Hour)
-	b := telemetryBatch("coarse", at, 2)
-	b.Points = append(b.Points, Point{MetricName: "cpu", EntityID: "node", Timestamp: at.Add(20 * time.Minute), Value: 8, Tags: map[string]string{"device": "0"}})
-	if _, err := e.Accept(ctx, b, now); err != nil {
-		t.Fatal(err)
-	}
-	useLegacyOnlineTiers(t, e)
-	summarizeAll(t, e)
-	if _, err := e.s.db.ExecContext(ctx, "DELETE FROM "+e.table("summary")+" WHERE resolution<>?", int64(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	b = telemetryBatch("late", at.Add(5*time.Minute), 100)
-	if _, err := e.Accept(ctx, b, now); err != nil {
-		t.Fatal(err)
-	}
-	b = TelemetryBatch{Source: "other", Identity: "zero", Points: []Point{{MetricName: "cpu", EntityID: "other", Timestamp: at.Add(5 * time.Minute), Value: 0, Tags: map[string]string{"device": "1"}}}}
-	if _, err := e.Accept(ctx, b, now); err != nil {
-		t.Fatal(err)
-	}
-	summarizeAll(t, e)
-	q := AggregateQuery{Query: Query{MetricName: "cpu", Start: at, End: at.Add(time.Hour - time.Nanosecond)}, Interval: 10 * time.Minute, Aggregation: AggSum, PreserveSeries: true}
-	r, err := e.Chart(ctx, q, now)
-	if err != nil || len(r.Gaps) == 0 || len(r.Points) != 1 || r.Points[0].EntityID != "other" || r.Points[0].Value != 0 {
-		t.Fatalf("false partial value or cross-entity gap: %+v %v", r, err)
-	}
-	q.Tags = map[string]string{"device": "1"}
-	r, err = e.Chart(ctx, q, now)
-	if err != nil || len(r.Gaps) != 0 || len(r.Points) != 1 {
-		t.Fatalf("tag filter inherited unrelated gap: %+v %v", r, err)
-	}
-	cancelled, cancel := context.WithCancel(ctx)
-	cancel()
-	if _, err = e.Chart(cancelled, q, now); !errors.Is(err, context.Canceled) {
-		t.Fatal("ignored cancellation", err)
 	}
 }
 

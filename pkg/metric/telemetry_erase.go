@@ -83,6 +83,14 @@ func (t *Telemetry) EraseSeries(ctx context.Context, q Query) (int64, error) {
 			return total, e
 		}
 		for _, id := range ids {
+			if t.scalar {
+				for _, table := range []string{"rollup", "rollup_due", "raw_gaps"} {
+					if _, e = tx.ExecContext(ctx, t.bind("DELETE FROM "+t.table(table)+" WHERE series_id IN (SELECT id FROM "+t.table("rollup_keys")+" WHERE source_id=?)"), id); e != nil {
+						tx.Rollback()
+						return total, e
+					}
+				}
+			}
 			statement := "INSERT INTO " + t.table("erasures") + " (series_id,through_id) VALUES (?,?)"
 			if t.s.cfg.Driver == DriverMySQL {
 				statement += " ON DUPLICATE KEY UPDATE through_id=GREATEST(through_id,VALUES(through_id))"

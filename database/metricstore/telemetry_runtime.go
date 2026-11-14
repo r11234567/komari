@@ -61,16 +61,18 @@ func telemetryConfig(cfg *MetricStoreConfig) (metric.TelemetryConfig, error) {
 		segment = 15
 	}
 	if budget == 0 {
-		budget = 1024
+		budget = 16
+	} else if budget == 1024 {
+		// Replace the retired one-GiB default, rather than carrying it into a
+		// store whose hot table is only a bounded handoff queue.
+		budget = 16
 	}
-	retention := cfg.HotRetentionMinutes
-	if retention == 0 {
-		retention = 1440
-	}
-	if hot < 1 || hot > 120 || retention < hot || retention > 10080 || segment < 1 || segment > 1440 || budget < 64 || budget > 65536 || cfg.ArchiveRetentionDays < 0 || cfg.ArchiveRetentionDays > 3650 {
+	// HotRetentionMinutes is a retired setting. Raw SQL rows are only a durable
+	// handoff queue; a saved one-day setting must not keep duplicating archives.
+	if hot < 1 || hot > 120 || segment < 1 || segment > 1440 || budget < 4 || budget > 65536 || cfg.ArchiveRetentionDays < 0 || cfg.ArchiveRetentionDays > 3650 {
 		return metric.TelemetryConfig{}, fmt.Errorf("invalid telemetry retention/capacity settings")
 	}
-	return metric.TelemetryConfig{ArchiveDirectory: dir, RawWindow: time.Duration(hot) * time.Minute, RawRetention: time.Duration(retention) * time.Minute, SegmentDuration: time.Duration(segment) * time.Minute, MaxHotBytes: int64(budget) << 20}, nil
+	return metric.TelemetryConfig{ArchiveDirectory: dir, RawWindow: time.Duration(hot) * time.Minute, SegmentDuration: time.Duration(segment) * time.Minute, MaxHotBytes: int64(budget) << 20}, nil
 }
 
 func enableTelemetryStore(ctx context.Context, s *metric.Store, cfg *MetricStoreConfig) error {

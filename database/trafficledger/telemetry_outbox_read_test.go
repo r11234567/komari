@@ -42,7 +42,7 @@ func TestTelemetryForegroundDoesNotDrain128Or129Reports(t *testing.T) {
 				report.Network.TotalDown = int64(200 + 2*i)
 				report.Network.Up = 1
 				report.Network.Down = 2
-				_, err = metricstore.WriteReport(metricstore.WithReportIdentity(ctx, fmt.Sprintf("pending-%d", i), ""), report)
+				_, err = metricstore.WriteReport(metricstore.WithReportIdentity(ctx, fmt.Sprintf("pending-%d", i)), report)
 				require.NoError(t, err)
 			}
 			pending, err := metricstore.TelemetryTrafficPending(ctx)

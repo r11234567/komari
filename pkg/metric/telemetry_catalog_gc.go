@@ -66,7 +66,7 @@ func (t *Telemetry) PruneCatalogChunk(ctx context.Context, now time.Time, limit 
 		}
 		// Identity dictionaries only disappear after their final hot, summary and
 		// cold ownership is gone. A new acceptance recreates the canonical ID.
-		if _, err = tx.ExecContext(ctx, t.bind("DELETE FROM "+t.table("series")+" WHERE id=? AND NOT EXISTS (SELECT 1 FROM "+t.table("members")+" WHERE series_id=?) AND NOT EXISTS (SELECT 1 FROM "+t.table("hot")+" WHERE series_id=?) AND NOT EXISTS (SELECT 1 FROM "+t.table("summary")+" WHERE series_id=?)"), sid, sid, sid, sid); err != nil {
+		if _, err = tx.ExecContext(ctx, t.bind("DELETE FROM "+t.table("series")+" WHERE id=? AND NOT EXISTS (SELECT 1 FROM "+t.table("members")+" WHERE series_id=?) AND NOT EXISTS (SELECT 1 FROM "+t.table("hot")+" WHERE series_id=?) AND NOT EXISTS (SELECT 1 FROM "+t.table("summary")+" WHERE series_id=?) AND NOT EXISTS (SELECT 1 FROM "+t.table("rollup")+" b JOIN "+t.table("rollup_keys")+" k ON k.id=b.series_id WHERE k.source_id=?)"), sid, sid, sid, sid, sid); err != nil {
 			return 0, err
 		}
 		if t.s.cfg.Driver == DriverSQLite {

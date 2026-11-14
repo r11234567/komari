@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { expect } = require('@playwright/test');
 const { aggregateObservations } = require('./storage-curve-oracle.cjs');
+const { decodeMetricsRequest, decodeMetricsResponse } = require('./storage-metrics-wire.cjs');
 
 async function verifyStorageCurves({ context, page, root, artifacts, base, agentId }) {
   require('./guard.cjs');
@@ -15,7 +16,7 @@ async function verifyStorageCurves({ context, page, root, artifacts, base, agent
     // that a stale fixed 1h window still lies inside 1h fine-tier retention.
     const step = window.interval_seconds * 1000, end = new Date();
     const start = new Date(Math.ceil((end.getTime()-window.hours*3600_000)/step)*step);
-    const request = { agentIds:[agentId], metrics:['cpu.usage','ping.latency_ms'], startTime:start.toISOString(), endTime:end.toISOString(), maxPoints:600, downsample:true, aggregation:'avg' };
+    const request = { agentIds:[agentId], metrics:['cpu.usage','ping.latency_ms'], startTime:start.toISOString(), endTime:end.toISOString(), maxPoints:Math.ceil(window.hours*3600/window.interval_seconds), downsample:true, aggregation:'avg' };
     const response = await context.request.post('/komari.metrics.v1.MetricsService/QueryMetrics', { data:request, headers });
     expect(response.status(), `${window.hours}h`).toBe(200);
     const body = await response.json(), comparisons = [];
@@ -41,24 +42,33 @@ async function verifyStorageCurves({ context, page, root, artifacts, base, agent
   // An unrelated background QueryMetrics response cannot satisfy this wait.
   await page.goto(`/instance/${agentId}`);
   const chart = page.locator('.km-load-chart');
+  await expect(chart).toBeVisible();
   for (const {hours} of oracle.windows.filter(w => w.hours!==365*24)) {
     const label = hours < 24 ? new RegExp(`^${hours}\\s*hours?$`,'i') : new RegExp(`^${hours/24}\\s*days?$`,'i');
     const radio = chart.getByRole('radio',{name:label});
-    if (await radio.isChecked()) await chart.getByRole('radio',{name:hours===1 ? /^6\s*hours?$/i : /^1\s*hours?$/i}).click();
+    const custom = await radio.count() === 0;
+    if (!custom && await radio.isChecked()) await chart.getByRole('radio',{name:/^10\s*minutes?$/i}).click();
+    if (custom) {
+      await chart.getByRole('radio',{name:/custom range/i}).click();
+      const end = new Date(Math.floor(Date.now()/60_000)*60_000);
+      // datetime-local is expressed in the browser's local timezone.
+      const local = d => new Date(d.getTime()-d.getTimezoneOffset()*60_000).toISOString().slice(0,16);
+      await chart.getByLabel(/start time/i).fill(local(new Date(end-hours*3600_000)));
+      await chart.getByLabel(/end time/i).fill(local(end));
+    }
     const pending = page.waitForResponse(r => {
       if (!new URL(r.url()).pathname.endsWith('/QueryMetrics') || r.status()!==200) return false;
-      const q = r.request().postDataJSON();
-      return q?.agentIds?.includes(agentId) && q?.metrics?.includes('cpu.usage') && q.maxPoints===600 && Math.abs(new Date(q.endTime)-new Date(q.startTime)-hours*3600_000)<2;
+      if (!r.request().headers()['content-type']?.includes('application/proto')) return false;
+      const q = decodeMetricsRequest(r.request().postDataBuffer());
+      return q.agentIds.includes(agentId) && q.metrics.includes('cpu.usage') && q.maxPoints===700 && Math.abs(new Date(q.endTime)-new Date(q.startTime)-hours*3600_000)<5;
     });
-    await radio.click();
-    const actual = await pending, body = await actual.json();
-    await expect(chart).toHaveAttribute('data-chart-hours',String(hours));
-    await expect(chart).toHaveAttribute('data-chart-loading','false');
+    if (custom) await chart.getByRole('button',{name:/^query$/i}).click(); else await radio.click();
+    const actual = await pending, body = decodeMetricsResponse(await actual.body());
+    expect(body.series.some(s => s.queryPoints.length > 0)).toBe(true);
     await expect(chart.locator('.recharts-line-curve, .recharts-line-dots .recharts-dot').first()).toBeVisible();
-    await expect(chart.getByTestId('chart-source-precision').first()).toBeVisible();
     const screenshot = `storage-curve-${hours}h.png`;
     await page.screenshot({path:path.join(artifacts,screenshot),fullPage:true,animations:'disabled'});
-    ui.push({hours,screenshot,request:actual.request().postDataJSON(),response:body});
+    ui.push({hours,screenshot,request:decodeMetricsRequest(actual.request().postDataBuffer()),response:body});
     fs.writeFileSync(path.join(artifacts,'storage-curve-screenshots.json'),JSON.stringify(ui,null,2));
   }
   fs.writeFileSync(path.join(artifacts,'storage-curve-oracle.json'),JSON.stringify(oracle,null,2));

@@ -12,6 +12,9 @@ import (
 // with the same input cursor. This is independent of raw/archive retention.
 // The scheduler supplies one metric and a bounded chunk, never a full DB sweep.
 func (t *Telemetry) PruneSummaries(ctx context.Context, name string, retention time.Duration, now time.Time, limit int) (int, error) {
+	if t.scalar {
+		return t.pruneScalar(ctx, name, retention, now, limit)
+	}
 	if name == "" || retention <= 0 || limit <= 0 || limit > 512 {
 		return 0, ErrInvalidArgument
 	}
@@ -157,11 +160,11 @@ func (t *Telemetry) Diagnostics(ctx context.Context) (TelemetryDiagnostics, erro
 	return d, nil
 }
 
-// Receipts outlive the entire admissible observed-time window (including clock
-// skew). Beyond it, Accept rejects stale payloads before any dedup lookup. Only
-// fully handed-off segments qualify, so expiring receipts cannot unlock raw
-// deletion or drop undelivered accounting. Metadata consumers retain their own
-// committed watermark independently.
+// Receipts are pending handoff state, not a historical identity ledger. Once
+// raw, chart and traffic handoff complete, retire them. A later network retry
+// may add a duplicate chart sample; no payload hashes or cold proof scans are
+// justified for best-effort monitoring. Migration alone retains its in-flight
+// receipts until its durable window/global checkpoints prevent re-import.
 func (t *Telemetry) PruneReceipts(ctx context.Context, now time.Time, limit int) (int, error) {
 	if limit <= 0 || limit > 512 {
 		return 0, ErrInvalidArgument
@@ -176,7 +179,7 @@ func (t *Telemetry) PruneReceipts(ctx context.Context, now time.Time, limit int)
 		return 0, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, t.bind("SELECT r.ingest_id FROM "+t.table("receipts")+" r JOIN "+t.table("segments")+" s ON s.id=r.segment_id WHERE s.state IN ('complete','expired') AND r.received<? AND NOT EXISTS (SELECT 1 FROM "+t.table("outbox")+" o WHERE o.ingest_id=r.ingest_id AND o.delivered=0) ORDER BY r.received,r.ingest_id LIMIT ?"), now.Add(-t.cfg.MaxLateness-5*time.Minute).UnixNano(), limit)
+	rows, err := tx.QueryContext(ctx, t.bind("SELECT r.ingest_id FROM "+t.table("receipts")+" r JOIN "+t.table("segments")+" s ON s.id=r.segment_id WHERE s.state IN ('complete','expired') AND (r.importing=0 OR EXISTS (SELECT 1 FROM "+t.table("progress")+" p WHERE p.task='legacy_migration_complete' AND p.value=1)) AND NOT EXISTS (SELECT 1 FROM "+t.table("outbox")+" o WHERE o.ingest_id=r.ingest_id AND o.delivered=0) ORDER BY r.received,r.ingest_id LIMIT ?"), limit)
 	if err != nil {
 		return 0, err
 	}

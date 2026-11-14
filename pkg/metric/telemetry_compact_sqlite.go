@@ -154,6 +154,16 @@ func (t *Telemetry) CompactSQLite(ctx context.Context, destination, backupDirect
 		return result, err
 	}
 	defer tx.Rollback()
+	// A replacement file has no running export/backup owner. Snapshot pins and
+	// worker leases belong to the source process, not to its offline copy.
+	for _, suffix := range []string{"leases", "work"} {
+		if _, err = tx.ExecContext(ctx, "DELETE FROM "+t.table(suffix)); err != nil {
+			return result, err
+		}
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE "+t.table("schedule")+" SET owner='',expires=0"); err != nil {
+		return result, err
+	}
 	if err = t.compactSeriesKeys(ctx, tx); err != nil {
 		return result, err
 	}
@@ -279,7 +289,7 @@ func (t *Telemetry) compactSeriesKeys(ctx context.Context, tx *sql.Tx) error {
 	// A full hash is retained once; never truncate hashes or change canonical
 	// identity. Existing @ keys must resolve before any rewrite is attempted.
 	var invalid int
-	for _, ref := range []struct{ table, column string }{{"series", "id"}, {"hot", "series_id"}, {"summary", "series_id"}, {"members", "series_id"}, {"erasures", "series_id"}, {"gaps", "series_id"}} {
+	for _, ref := range []struct{ table, column string }{{"series", "id"}, {"hot", "series_id"}, {"summary", "series_id"}, {"members", "series_id"}, {"erasures", "series_id"}, {"gaps", "series_id"}, {"rollup_keys", "source_id"}} {
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+t.table(ref.table)+" s WHERE substr(s."+ref.column+",1,1)='@' AND NOT EXISTS (SELECT 1 FROM "+keys+" k WHERE k.id=CAST(substr(s."+ref.column+",2) AS INTEGER) AND '@'||k.id=s."+ref.column+")").Scan(&invalid); err != nil {
 			return err
 		}
@@ -294,6 +304,9 @@ func (t *Telemetry) compactSeriesKeys(ctx context.Context, tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, "UPDATE "+t.table(table)+" SET series_id=(SELECT '@'||k.id FROM "+keys+" k WHERE k.canonical=series_id) WHERE substr(series_id,1,1)<>'@'"); err != nil {
 			return err
 		}
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE "+t.table("rollup_keys")+" SET source_id=(SELECT '@'||k.id FROM "+keys+" k WHERE k.canonical=source_id) WHERE substr(source_id,1,1)<>'@'"); err != nil {
+		return err
 	}
 	_, err := tx.ExecContext(ctx, "UPDATE "+t.table("series")+" SET id=(SELECT '@'||k.id FROM "+keys+" k WHERE k.canonical="+t.table("series")+".id) WHERE substr(id,1,1)<>'@'")
 	return err
@@ -315,7 +328,7 @@ func (t *Telemetry) compactStateHash(ctx context.Context, db querier) (string, e
 		h.Write(b)
 		return nil
 	}
-	for _, suffix := range []string{"definitions", "receipts", "series", "hot", "segments", "summary", "outbox", "members", "erasures", "identity", "traffic_ingress", "gaps", "progress"} {
+	for _, suffix := range []string{"definitions", "receipts", "series", "hot", "segments", "summary", "rollup_keys", "rollup", "rollup_due", "raw_gaps", "outbox", "members", "erasures", "identity", "traffic_ingress", "gaps", "progress"} {
 		name := t.table(suffix)
 		if suffix == "definitions" {
 			name = t.s.tables.definitions
@@ -336,7 +349,7 @@ func (t *Telemetry) compactStateHash(ctx context.Context, db querier) (string, e
 			if pk > 0 {
 				order[pk] = len(columns) + 1
 			}
-			if column == "series_id" || (suffix == "series" && column == "id") {
+			if (column == "series_id" && suffix != "rollup" && suffix != "rollup_due" && suffix != "raw_gaps") || (suffix == "series" && column == "id") || (suffix == "rollup_keys" && column == "source_id") {
 				column = "COALESCE((SELECT canonical FROM " + t.table("series_keys") + " k WHERE k.id=CASE WHEN substr(r." + column + ",1,1)='@' THEN CAST(substr(r." + column + ",2) AS INTEGER) END),r." + column + ")"
 			} else {
 				column = "r." + column

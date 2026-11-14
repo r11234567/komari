@@ -47,9 +47,9 @@ func (w *Worker) rememberCheckpoint(j *Job) error {
 		if err = f.Truncate(j.Committed.Offset); err != nil {
 			return err
 		}
-	}
-	if err = f.Sync(); err != nil {
-		return err
+		if err = f.Sync(); err != nil {
+			return err
+		}
 	}
 	info, err = f.Stat()
 	if err != nil {

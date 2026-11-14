@@ -770,9 +770,9 @@ func connectPingStats(agentID string, summary metric.SeriesSummary, tasksByID ma
 		if len(filter) > 0 && !filter[id] {
 			continue
 		}
-		total := aggregateCount(avg[id])
+		total := aggregateCount(loss[id])
 		if total == 0 {
-			total = aggregateCount(loss[id])
+			total = aggregateCount(avg[id])
 		}
 		if total == 0 {
 			continue

@@ -204,7 +204,7 @@ func (t *Telemetry) FreezeExport(ctx context.Context, queries []Query, dir strin
 			return out, e
 		}
 		index, e := readTelemetryArchiveIndex(f, seg)
-		if e == nil && index != nil {
+		if e == nil && index != nil && index.Version == 2 {
 			e = verifyTelemetryArchiveFile(ctx, f, seg)
 		}
 		f.Close()
@@ -218,6 +218,9 @@ func (t *Telemetry) FreezeExport(ctx context.Context, queries []Query, dir strin
 			out.Units = append(out.Units, ExportInput{Segment: seg, File: name})
 		} else {
 			for _, frame := range index.Frames {
+				if !telemetryFrameMatches(ctx, frame, queries) {
+					continue
+				}
 				if len(out.Units) >= 16384 {
 					return out, ErrTelemetryBackpressure
 				}
@@ -252,6 +255,15 @@ func (t *Telemetry) reserveExportSegments(ctx context.Context, queries []Query, 
 		filter, args, e := t.seriesFilter(ctx, physical, "s")
 		if e != nil {
 			return nil, e
+		}
+		if t.scalar {
+			missing, e := t.scalarExportHasGap(ctx, physical)
+			if e != nil {
+				return nil, e
+			}
+			if missing {
+				return nil, fmt.Errorf("%w: original observations were already removed before migration; select summary mode", ErrTelemetryCoverage)
+			}
 		}
 		gapArgs := append([]any{physical.MetricName, q.End.UnixNano(), q.Start.UnixNano()}, args...)
 		hasGap, e := t.exportHasLegacyGap(ctx, t.s.reader(), "s.metric=? AND g.first_observed<=? AND g.last_observed>=? AND (e.through_id IS NULL OR a.last_id>e.through_id)"+filter, gapArgs, q.Start.UnixNano(), q.End.UnixNano())
@@ -377,7 +389,7 @@ func (t *Telemetry) freezeHotSegment(ctx context.Context, seg telemetrySegment, 
 		return seg, err
 	}
 	defer f.Close()
-	compressed := &telemetryHashWriter{w: f, h: sha256.New()}
+	compressed := &telemetryHashWriter{w: f}
 	frames, err := newTelemetryFrameWriter(compressed, seg.ID)
 	if err != nil {
 		return seg, err
@@ -426,7 +438,7 @@ func (t *Telemetry) freezeHotSegment(ctx context.Context, seg telemetrySegment, 
 	}
 	seg.Points = count
 	seg.FileBytes = compressed.n
-	seg.Hash = hex.EncodeToString(compressed.h.Sum(nil))
+	seg.Hash = ""
 	return seg, nil
 }
 
@@ -454,6 +466,7 @@ func VisitExportInputProgress(ctx context.Context, dir string, snapshot ExportSn
 	defer root.Close()
 	reader := &Telemetry{root: root, cfg: TelemetryConfig{SegmentBytes: 1 << 30}}
 	metrics := map[string]bool{}
+	erasureBySeries := map[string]int64{}
 	for _, q := range snapshot.Queries {
 		metrics[q.MetricName] = true
 	}
@@ -468,10 +481,18 @@ func VisitExportInputProgress(ctx context.Context, dir string, snapshot ExportSn
 		if !metrics[p.MetricName] && !(p.MetricName == sqliteMergedPingLatencyMetric && metrics[sqliteVirtualPingLossMetric]) {
 			return nil
 		}
-		encoded, _ := json.Marshal(p.Tags)
-		h := sha256.Sum256([]byte(p.MetricName + "\x00" + p.EntityID + "\x00" + string(encoded)))
-		if r.Ingest <= snapshot.Erased[hex.EncodeToString(h[:])] {
-			return nil
+		if len(snapshot.Erased) != 0 {
+			encoded, _ := json.Marshal(p.Tags)
+			key := p.MetricName + "\x00" + p.EntityID + "\x00" + string(encoded)
+			through, ok := erasureBySeries[key]
+			if !ok {
+				h := sha256.Sum256([]byte(key))
+				through = snapshot.Erased[hex.EncodeToString(h[:])]
+				erasureBySeries[key] = through
+			}
+			if r.Ingest <= through {
+				return nil
+			}
 		}
 		for _, q := range snapshot.Queries {
 			candidate := p

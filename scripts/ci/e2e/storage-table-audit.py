@@ -27,15 +27,18 @@ with sqlite3.connect(source.as_uri() + "?mode=ro", uri=True) as db:
                        "columns": list(db.execute(f'PRAGMA table_info("{name}")')),
                        "indexes": indexes,
                        "rows": db.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]})
-    tiers = list(db.execute("SELECT resolution/1000000000,COUNT(*),SUM(length(stats)) FROM metric_telemetry_summary GROUP BY resolution ORDER BY resolution"))
+    tiers = list(db.execute("SELECT resolution,COUNT(*),SUM(n+loss) FROM metric_telemetry_rollup GROUP BY resolution ORDER BY resolution"))
     assert all(tier[0] in {10,60,300,1800,3600,7200,21600,43200,86400} for tier in tiers), tiers
+    assert db.execute("SELECT COUNT(*) FROM metric_telemetry_summary").fetchone()[0] == 0
+    columns = list(db.execute("PRAGMA table_info(metric_telemetry_rollup)"))
+    assert all(column[1] not in {"stats", "digest", "payload"} and column[2].upper() not in {"TEXT", "BLOB"} for column in columns)
     assert db.execute("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('metric_points','metric_rollups','metric_point_blocks','metric_rollup_blocks')").fetchone()[0] == 0
     pages = list(db.execute("SELECT name,COUNT(*),SUM(pgsize),SUM(payload),SUM(unused) FROM dbstat GROUP BY name ORDER BY SUM(pgsize) DESC"))
     report = {"origin": oracle["origin"], "source_points": manifest["synthetic_points"],
               "integrity": integrity, "file_bytes": source.stat().st_size,
               "freelist_pages": db.execute("PRAGMA freelist_count").fetchone()[0],
-              "tables": tables, "tiers_seconds_cells_payload": tiers, "page_allocation": pages,
-              "statistics_encoding":list(db.execute("SELECT CASE WHEN stats LIKE '\"TSC1:%' THEN 'sealed-zstd' ELSE 'plain-json' END,COUNT(*),SUM(length(stats)) FROM metric_telemetry_summary GROUP BY 1")),
-              "summary_lookup_plan":list(db.execute("EXPLAIN QUERY PLAN SELECT bucket FROM metric_telemetry_summary WHERE resolution=60000000000 AND promoted_through=0 ORDER BY bucket LIMIT 1"))}
+              "tables": tables, "tiers_seconds_cells_observations": tiers, "page_allocation": pages,
+              "statistics_encoding": "ordinary scalar columns",
+              "summary_lookup_plan":list(db.execute("EXPLAIN QUERY PLAN SELECT bucket FROM metric_telemetry_rollup WHERE series_id=1 AND resolution=60 AND bucket>=0 ORDER BY bucket LIMIT 1"))}
 output = Path(os.environ["E2E_ARTIFACTS"]) / "storage-synthetic-table-audit.json"
 output.write_text(json.dumps(report, indent=2) + "\n")

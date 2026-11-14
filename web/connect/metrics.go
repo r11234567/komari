@@ -2,8 +2,6 @@ package connectapi
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -24,7 +22,6 @@ import (
 	clientapi "github.com/komari-monitor/komari/web/api/client"
 	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
 	metricsv1connect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -96,12 +93,7 @@ func ingestMetricBatch(ctx context.Context, meta *rpc.ContextMeta, batch *metric
 	}
 	var sequence *metricAgentSequence
 	if metricstore.TelemetryEnabled() {
-		wire, encodeErr := (proto.MarshalOptions{Deterministic: true}).Marshal(batch)
-		if encodeErr != nil {
-			return nil, connectError(connect.CodeInvalidArgument, encodeErr)
-		}
-		digest := sha256.Sum256(wire)
-		ctx = metricstore.WithReportIdentity(ctx, fmt.Sprintf("metrics/%d/%d", batch.Sequence, report.UpdatedAt.UnixNano()), hex.EncodeToString(digest[:]))
+		ctx = metricstore.WithReportIdentity(ctx, fmt.Sprintf("metrics/%d/%d", batch.Sequence, report.UpdatedAt.UnixNano()))
 	} else {
 		sequence = metricSequenceFor(agentID)
 		sequence.Lock()

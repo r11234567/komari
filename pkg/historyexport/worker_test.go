@@ -35,7 +35,7 @@ func workerFixture(t *testing.T, mode string) (*Worker, *Job) {
 	}
 	defer tel.Close()
 	now := time.Now().UTC().Truncate(time.Minute)
-	at := now.Add(-time.Hour)
+	at := now.Add(-30 * time.Minute)
 	points := []metric.Point{{MetricName: "cpu", EntityID: "node", Timestamp: at.Add(2 * time.Second), Value: 20}, {MetricName: "cpu", EntityID: "node", Timestamp: at.Add(time.Second), Value: 10}, {MetricName: "cpu", EntityID: "node", Timestamp: at.Add(31 * time.Second), Value: 30}}
 	if _, e = tel.Accept(ctx, metric.TelemetryBatch{Source: "node", Identity: "test", Points: points}, now); e != nil {
 		t.Fatal(e)

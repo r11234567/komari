@@ -8,9 +8,9 @@ from pathlib import Path
 # Assert responsibilities, not a magic row count. The Go scheduler contract
 # test runs this exact inspector against a store initialized by production code.
 REQUIRED_TASKS = {
-    "traffic", "summary", "seal", "archive", "delete", "promotion", "tiers",
+    "traffic", "summary", "seal", "archive", "delete", "tiers",
     "summaries", "expire", "receipts", "erased", "checkpoint", "catalog",
-    "ledger", "stats", "gaps",
+    "ledger", "gaps",
 }
 
 
@@ -23,7 +23,8 @@ def inspect_storage(db):
         "legacy_hot_points": db.execute("SELECT COUNT(*) FROM metric_point_values").fetchone()[0],
         "hot_points": db.execute("SELECT COUNT(*) FROM metric_telemetry_hot").fetchone()[0],
         "receipts": db.execute("SELECT COUNT(*) FROM metric_telemetry_receipts").fetchone()[0],
-        "summaries": db.execute("SELECT COUNT(*) FROM metric_telemetry_summary").fetchone()[0],
+        "summaries": db.execute("SELECT COUNT(*) FROM metric_telemetry_rollup").fetchone()[0],
+        "legacy_summaries": db.execute("SELECT COUNT(*) FROM metric_telemetry_summary").fetchone()[0],
         "complete_archives": db.execute("SELECT COUNT(*) FROM metric_telemetry_segments WHERE state='complete' AND points>0").fetchone()[0],
         "raw_blocks": db.execute("SELECT COUNT(*) FROM metric_point_blocks").fetchone()[0],
         "rollup_blocks": db.execute("SELECT COUNT(*) FROM metric_rollup_blocks").fetchone()[0],
@@ -36,7 +37,7 @@ def inspect_storage(db):
 
 
 def validate_storage(result):
-    if (result["hot_points"] <= 0 or result["receipts"] <= 0 or result["summaries"] <= 0
+    if (result["summaries"] <= 0 or result["legacy_summaries"] != 0
             or result["legacy_hot_points"] != 0 or result["raw_blocks"] != 0 or result["rollup_blocks"] != 0):
         raise ValueError("Legacy retirement invariant failed: " + json.dumps(result))
     if (result["missing_tasks"] or result["unexpected_tasks"] or result["task_failures"] != 0

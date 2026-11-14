@@ -69,30 +69,21 @@ func TestRetiredStartupMigrationCheckpointSurvivesReopen(t *testing.T) {
 	}
 }
 
-func TestLegacyPopulationRequiresVarianceAndDistribution(t *testing.T) {
+func TestLegacyPopulationComparesRetainedScalars(t *testing.T) {
 	at := time.Now()
-	var a, b telemetryStats
+	var a telemetryStats
 	for i, v := range []float64{0, 1, 4, 5, 9, 10} {
-		a.add(Point{Value: v, Timestamp: at.Add(time.Duration(i)), MetricName: "cpu"}, 1, i)
+		a.add(Point{Value: v, Timestamp: at.Add(time.Duration(i))}, 1, i)
 	}
-	for i, v := range []float64{0, 2, 3, 5, 9, 10} {
-		b.add(Point{Value: v, Timestamp: at.Add(time.Duration(i)), MetricName: "cpu"}, 1, i)
-	}
-	if equivalentLegacyPopulation(a, b) {
-		t.Fatal("changed variance accepted")
-	}
-	b = a
+	b := a
 	b.M2++
-	if equivalentLegacyPopulation(a, b) {
-		t.Fatal("changed M2 accepted")
-	}
-	b = a
-	b.sketch = nil
 	b.Digest = nil
-	if equivalentLegacyPopulation(a, b) {
-		t.Fatal("missing distribution accepted")
+	b.sketch = nil
+	if !equivalentLegacyPopulation(a, b) {
+		t.Fatal("unretained distribution constrained scalar migration")
 	}
-	if !equivalentLegacyPopulation(a, a) {
-		t.Fatal("same population rejected")
+	b.Sum++
+	if equivalentLegacyPopulation(a, b) {
+		t.Fatal("changed retained sum accepted")
 	}
 }
