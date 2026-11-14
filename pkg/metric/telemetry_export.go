@@ -149,6 +149,10 @@ func (t *Telemetry) ExportRawBatch(ctx context.Context, queries []Query) ([][]Po
 			release()
 			return nil, e
 		}
+		if seg.State == "expired" || seg.State == "expiring" {
+			release()
+			return nil, fmt.Errorf("%w: raw telemetry history has expired", ErrTelemetryCoverage)
+		}
 		if _, e = tx.ExecContext(ctx, t.bind("INSERT INTO "+t.table("leases")+" (id,segment_id,expires) VALUES (?,?,?)"), lease, id, time.Now().Add(10*time.Minute).UnixNano()); e != nil {
 			release()
 			return nil, e

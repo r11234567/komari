@@ -2,6 +2,7 @@ package metric
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,6 +40,48 @@ func TestTelemetryMariaDBIntegration(t *testing.T) {
 
 func telemetryExternal(t *testing.T, cfg Config) {
 	t.Helper()
+	t.Run("catalog_coalescence_precision_and_expiry", func(t *testing.T) {
+		ctx, e := telemetryExternalFixture(t, cfg)
+		if err := e.s.CreateMetric(ctx, Definition{Name: "cpu", RetentionDays: 365}); err != nil {
+			t.Fatal(err)
+		}
+		at := time.Now().UTC().Add(-48 * time.Hour).Truncate(24 * time.Hour).Add(time.Hour)
+		for i := 0; i < 2; i++ {
+			pointAt := at.Add(time.Duration(i) * 20 * time.Minute)
+			if _, err := e.Accept(ctx, telemetryBatch(fmt.Sprint(i), pointAt, 1, 3), pointAt); err != nil {
+				t.Fatal(err)
+			}
+			lifecycleArchiveAll(t, e, pointAt.Add(time.Minute))
+		}
+		auditDrainCatalog(t, e, time.Now())
+		if n := telemetryCount(t, e, "segments"); n != 1 {
+			t.Fatal("unmerged driver catalog", n)
+		}
+		scoped := WithTelemetryEntities(ctx, []string{"node"})
+		queries := []Query{{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(time.Hour)}}
+		got, err := e.ExportRawBatch(scoped, queries)
+		if err != nil || len(got) != 1 || len(got[0]) != 4 {
+			t.Fatal("composite driver export", err)
+		}
+		if ok, err := e.ExpireArchiveNext(ctx, time.Now(), 24*time.Hour); err != nil || !ok {
+			t.Fatal(ok, err)
+		}
+		if _, err := e.FreezeExport(scoped, queries, t.TempDir(), 4<<20); !errors.Is(err, ErrTelemetryCoverage) {
+			t.Fatal("expired driver snapshot", err)
+		}
+		auditDrainCatalog(t, e, time.Now())
+		if n := telemetryCount(t, e, "segments"); n != 0 {
+			t.Fatal("expired driver owners", n)
+		}
+		q, interval, err := e.PlanChart(ctx, queries[0], time.Now(), 600, 365)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := e.Chart(ctx, AggregateQuery{Query: q, Interval: interval, Aggregation: AggSum, PreserveSeries: true}, time.Now())
+		if err != nil || len(r.Gaps) > 0 || len(r.Points) == 0 {
+			t.Fatal("expired raw lost driver charts", err)
+		}
+	})
 	t.Run("legacy_migration", func(t *testing.T) {
 		ctx, e := telemetryExternalFixture(t, cfg)
 		s, archive := e.s, e.cfg

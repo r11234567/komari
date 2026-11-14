@@ -331,7 +331,7 @@ func TestScalarMigrationFencesAndResumesOldStatistics(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err := s.db.QueryRow("SELECT value FROM " + e.table("progress") + " WHERE task='schema_version'").Scan(&version); err != nil || version != -10 {
+	if err := s.db.QueryRow("SELECT value FROM " + e.table("progress") + " WHERE task='schema_version'").Scan(&version); err != nil || version != -11 {
 		t.Fatal(version, err)
 	}
 	cfg.Fault = nil

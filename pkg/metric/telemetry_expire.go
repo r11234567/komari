@@ -36,13 +36,25 @@ func (t *Telemetry) ExpireArchiveNext(ctx context.Context, now time.Time, retent
 		return false, err
 	}
 	defer tx.Rollback()
+	// Raw availability has its own lifetime. Publish the floor in the same
+	// transaction as expiry, before removing any bytes, even with no candidates.
+	// Chart retention must never delay this boundary.
+	var floor int64
+	if err = tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(value),0) FROM "+t.table("progress")+" WHERE task='raw_history_floor'").Scan(&floor); err != nil {
+		return false, err
+	}
+	if cutoff := now.Add(-retention).UnixNano(); cutoff > floor {
+		if err = t.setProgress(ctx, tx, "raw_history_floor", cutoff); err != nil {
+			return false, err
+		}
+	}
 	if _, err = tx.ExecContext(ctx, t.bind("DELETE FROM "+t.table("leases")+" WHERE expires<=?"), now.UnixNano()); err != nil {
 		return false, err
 	}
 	var id string
 	err = tx.QueryRowContext(ctx, t.bind("SELECT a.id FROM "+t.table("segments")+" a WHERE (a.state='expiring' OR (a.state='complete' AND a.created<?)) AND NOT EXISTS (SELECT 1 FROM "+t.table("leases")+" l WHERE l.segment_id=a.id AND l.expires>?) ORDER BY a.created,a.id LIMIT 1"), now.Add(-retention).UnixNano(), now.UnixNano()).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return false, tx.Commit()
 	}
 	if err != nil {
 		return false, err

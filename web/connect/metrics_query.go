@@ -312,6 +312,7 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 	}
 
 	downsample := req.Msg.Downsample == nil || *req.Msg.Downsample
+	now := time.Now().UTC()
 	aggregation := metric.Aggregation(strings.ToLower(strings.TrimSpace(req.Msg.Aggregation)))
 	if aggregation == "" {
 		aggregation = metric.AggAvg
@@ -338,6 +339,7 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		agentID    string
 		definition metric.Definition
 		interval   time.Duration
+		start, end time.Time
 	}
 	pendingDownsample := make([]pending, 0)
 	pendingRaw := make([]pending, 0)
@@ -349,9 +351,10 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		if !ok {
 			return nil, connectError(connect.CodeInvalidArgument, fmtRange("unknown metric %q", metricName))
 		}
-		interval := store.CompatibleSeriesIntervalForMetric(ctx, metricName, start, time.Now().UTC(), baseInterval)
+		query := metric.Query{MetricName: metricName, Start: start, End: end, Tags: req.Msg.Tags, Order: metric.OrderAsc}
+		interval := store.CompatibleSeriesIntervalForMetric(ctx, metricName, start, now, baseInterval)
 		if telemetry := store.Telemetry(); telemetry != nil && downsample {
-			interval, err = telemetry.ChartInterval(ctx, metric.Query{MetricName: metricName, Start: start, End: end, Tags: req.Msg.Tags}, time.Now().UTC(), baseInterval)
+			query, interval, err = telemetry.PlanChart(ctx, query, now, maxPoints, definition.RetentionDays)
 			if err != nil {
 				return nil, connectMetricStoreError(err)
 			}
@@ -367,7 +370,7 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 				continue
 			}
 			if downsample {
-				pendingDownsample = append(pendingDownsample, pending{index: len(resultParts), queryIndex: queryIndex, metricName: metricName, agentID: agentID, definition: definition, interval: interval})
+				pendingDownsample = append(pendingDownsample, pending{index: len(resultParts), queryIndex: queryIndex, metricName: metricName, agentID: agentID, definition: definition, interval: interval, start: query.Start, end: query.End})
 				resultParts = append(resultParts, nil)
 				hasPhysicalQuery = true
 				continue
@@ -378,16 +381,6 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		}
 		if !hasPhysicalQuery {
 			continue
-		}
-		query := metric.Query{MetricName: metricName, Start: start, End: end, Tags: req.Msg.Tags, Order: metric.OrderAsc}
-		if store.Telemetry() != nil && downsample && definition.RetentionDays > 0 {
-			cutoff := time.Now().UTC().Add(-time.Duration(definition.RetentionDays) * 24 * time.Hour)
-			if cutoff.After(query.Start) {
-				query.Start = cutoff
-			}
-			if query.Start.After(end) {
-				query.Start = end
-			}
 		}
 		if downsample {
 			queries = append(queries, metric.AggregateQuery{Query: query, Aggregation: aggregation, Interval: interval, PreserveSeries: true})
@@ -403,7 +396,7 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		// snapshot. This avoids one block/axis scan per metric in a six-metric
 		// page while retaining SeriesBatch for percentile/rate compatibility.
 		if telemetry := store.Telemetry(); telemetry != nil {
-			telemetryBatch, queryErr = telemetry.ChartBatch(ctx, queries, time.Now().UTC())
+			telemetryBatch, queryErr = telemetry.ChartBatch(ctx, queries, now)
 			batch = make([][]metric.AggregatePoint, len(telemetryBatch))
 			for i, result := range telemetryBatch {
 				batch[i] = result.Points
@@ -429,7 +422,10 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 			}
 			points := grouped[item.queryIndex][item.agentID]
 			if telemetryBatch != nil {
-				resultParts[item.index] = connectTelemetryAggregateSeries(item.metricName, item.agentID, item.definition, aggregation, item.interval, req.Msg.FillEmpty, start, end, telemetryBatch[item.queryIndex], points)
+				resultParts[item.index] = connectTelemetryAggregateSeries(item.metricName, item.agentID, item.definition, aggregation, item.interval, req.Msg.FillEmpty, item.start, item.end, telemetryBatch[item.queryIndex], points)
+				for _, series := range resultParts[item.index] {
+					series.BoundaryAdjusted = series.BoundaryAdjusted || !item.start.Equal(start) || !item.end.Equal(end)
+				}
 			} else if len(points) > 0 {
 				resultParts[item.index] = connectAggregateSeries(item.metricName, item.agentID, item.definition, aggregation, item.interval, req.Msg.FillEmpty, start, end, batch[item.queryIndex], points)
 			}
@@ -585,28 +581,27 @@ func (s *metricsService) getPingStats(ctx context.Context, req *connect.Request[
 		taskFilter[strconv.FormatUint(id, 10)] = true
 	}
 	interval := metric.CeilStandardInterval(time.Duration((end.Sub(start).Nanoseconds() + int64(maxPoints) - 1) / int64(maxPoints)))
-	if store.Telemetry() != nil {
-		interval = metric.TelemetryChartInterval(end.Sub(start), maxPoints)
-	}
-	interval = store.CompatibleSeriesIntervalForMetric(ctx, metricstore.MetricPingLatency, start, time.Now().UTC(), interval)
+	now := time.Now().UTC()
 	if telemetry := store.Telemetry(); telemetry != nil {
-		interval, err = telemetry.ChartInterval(ctx, metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end}, time.Now().UTC(), interval)
+		definition, e := store.GetMetric(ctx, metricstore.MetricPingLatency)
+		if e != nil {
+			return nil, connectMetricStoreError(e)
+		}
+		q := metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end}
+		q, interval, err = telemetry.PlanChart(ctx, q, now, maxPoints, definition.RetentionDays)
 		if err != nil {
 			return nil, connectMetricStoreError(err)
 		}
-	}
-	if telemetry := store.Telemetry(); telemetry != nil {
-		start, end, err = telemetry.PingWindow(start, end, interval, time.Now().UTC())
-		if err != nil {
-			return nil, connectMetricStoreError(err)
-		}
+		start, end = q.Start, q.End
+	} else {
+		interval = store.CompatibleSeriesIntervalForMetric(ctx, metricstore.MetricPingLatency, start, now, interval)
 	}
 	result := make([]*metricsv1.PingStat, 0)
 	for _, agentID := range entityIDs {
 		if err := ctx.Err(); err != nil {
 			return nil, connectMetricStoreError(err)
 		}
-		summary, queryErr := store.PingSeriesSummary(ctx, metric.AggregateQuery{Query: metric.Query{MetricName: metricstore.MetricPingLatency, EntityID: agentID, Start: start, End: end, Order: metric.OrderAsc}, Interval: interval, PreserveSeries: true}, time.Now().UTC())
+		summary, queryErr := store.PingSeriesSummary(ctx, metric.AggregateQuery{Query: metric.Query{MetricName: metricstore.MetricPingLatency, EntityID: agentID, Start: start, End: end, Order: metric.OrderAsc}, Interval: interval, PreserveSeries: true}, now)
 		if queryErr != nil {
 			return nil, connectMetricStoreError(queryErr)
 		}

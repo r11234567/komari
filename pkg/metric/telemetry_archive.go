@@ -63,7 +63,7 @@ func (t *Telemetry) segmentPath(seg telemetrySegment) string {
 
 func (t *Telemetry) segment(ctx context.Context, q querier, id string) (telemetrySegment, error) {
 	var s telemetrySegment
-	err := q.QueryRowContext(ctx, t.bind("SELECT id,state,first_id,last_id,points,bytes,created,deleted,checksum,file_bytes,staging_owner,archive_entity,archive_day,archive_file,archive_offset FROM "+t.table("segments")+" WHERE id=?"), id).Scan(&s.ID, &s.State, &s.First, &s.Last, &s.Points, &s.Bytes, &s.Created, &s.Deleted, &s.Hash, &s.FileBytes, &s.StagingOwner, &s.ArchiveEntity, &s.ArchiveDay, &s.ArchiveFile, &s.ArchiveOffset)
+	err := q.QueryRowContext(ctx, t.bind("SELECT id,state,first_id,last_id,points,bytes,created,deleted,checksum,file_bytes,staging_owner,archive_entity,archive_day,archive_file,archive_offset,archive_frames,archive_parts,archive_index_bytes FROM "+t.table("segments")+" WHERE id=?"), id).Scan(&s.ID, &s.State, &s.First, &s.Last, &s.Points, &s.Bytes, &s.Created, &s.Deleted, &s.Hash, &s.FileBytes, &s.StagingOwner, &s.ArchiveEntity, &s.ArchiveDay, &s.ArchiveFile, &s.ArchiveOffset, &s.ArchiveFrames, &s.ArchiveParts, &s.ArchiveIndexBytes)
 	// PostgreSQL pads empty CHAR fields; identities themselves are fixed hex.
 	s.StagingOwner = strings.TrimSpace(s.StagingOwner)
 	s.ArchiveFile = strings.TrimSpace(s.ArchiveFile)
@@ -276,7 +276,7 @@ func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 	if err = t.fault("archive-before-catalog"); err != nil {
 		return false, err
 	}
-	r, err := tx.ExecContext(ctx, t.bind("UPDATE "+t.table("segments")+" SET state='archived',checksum=?,file_bytes=?,archive_file=?,archive_offset=? WHERE id=? AND state='writing'"), seg.Hash, seg.FileBytes, seg.ArchiveFile, seg.ArchiveOffset, id)
+	r, err := tx.ExecContext(ctx, t.bind("UPDATE "+t.table("segments")+" SET state='archived',checksum=?,file_bytes=?,archive_file=?,archive_offset=?,archive_frames=?,archive_parts=1,archive_index_bytes=? WHERE id=? AND state='writing'"), seg.Hash, seg.FileBytes, seg.ArchiveFile, seg.ArchiveOffset, len(frames.index.Frames), frames.indexBytes, id)
 	if err != nil {
 		return false, err
 	}

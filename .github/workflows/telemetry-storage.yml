@@ -11,7 +11,7 @@ jobs:
   independent:
     name: Telemetry / historical matrix and isolated decoder resources
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       GOMAXPROCS: '2'
       CGO_ENABLED: '1'
@@ -36,6 +36,13 @@ jobs:
         run: bash scripts/ci/run-audit-check.sh telemetry-sustained go test -count=1 -timeout=8m ./pkg/metric -run '^TestTelemetrySustainedLifecycle$' -v
       - name: Isolated decoder CPU and process RSS with enforced limits
         run: sudo -n python3 scripts/ci/telemetry-independent-resources.py --binary /var/tmp/komari-metric-resource.test --output ci-artifacts/independent/archive
+      - name: Thirty days of six-node catalog turnover without VACUUM
+        env:
+          KOMARI_TELEMETRY_CATALOG_LONG: '1'
+          KOMARI_TELEMETRY_CATALOG_OUTPUT: ${{ github.workspace }}/ci-artifacts/independent/catalog
+        run: |
+          bash scripts/ci/run-audit-check.sh telemetry-catalog go test -count=1 -timeout=15m ./pkg/metric -run '^TestTelemetryThirtyDayCatalogTurnover$' -v
+          python3 scripts/ci/telemetry-catalog-size.py "$KOMARI_TELEMETRY_CATALOG_OUTPUT"
       - name: Decoded chart budgets under high series cardinality in a fresh bounded process
         run: |
           mkdir -p ci-artifacts/independent/chart

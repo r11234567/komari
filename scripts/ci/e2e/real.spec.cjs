@@ -371,14 +371,22 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       fs.writeFileSync(path.join(artifacts,'metric-rendered-1h.json'),JSON.stringify(rendered,null,2));
       await page.screenshot({path:path.join(artifacts,'chart-source-precision.png'),fullPage:true});
       const windows = [];
-      // The right edge deliberately lags wall time by 15s, so the oldest
-      // edge of 1h/7d/15d is already in the next retention tier. Assert that
-      // age-aware grid exactly; the 24h preset uses compatible 5m cells.
-      for (const [hours, interval] of [[1,60],[6,60],[12,120],[24,300],[168,3600],[360,7200],[720,7200]]) {
+      // This fresh installation retains CPU for one day. Longer requests
+      // must be clipped before choosing precision. The 400-day synthetic
+      // migration fixture separately enforces the actual 7d/15d/30d grids.
+      const cpuDefinition = (await rpc('metrics','ListMetricDefinitions')).definitions.find(d=>d.name==='cpu.usage');
+      expect(cpuDefinition.retentionDays).toBe(1);
+      for (const [hours, interval] of [[1,10],[6,60],[12,120],[24,300],[168,300],[360,300],[720,300]]) {
         const last = new Date(Date.now()-15_000);
         const result = await rpc('metrics','QueryMetrics',{agentIds:[agentId],metrics:['cpu.usage'],startTime:new Date(last.getTime()-hours*3600_000).toISOString(),endTime:last.toISOString(),maxPoints:360,downsample:true});
         expect(result.series.length).toBeGreaterThan(0);
-        for (const series of result.series) expect(series.interval).toBe(`${interval}s`);
+        for (const series of result.series) {
+          expect(series.interval).toBe(`${interval}s`);
+          if (hours>24) {
+            expect(series.boundaryAdjusted).toBe(true);
+            expect(Date.parse(series.coverageStart)).toBeGreaterThanOrEqual(last.getTime()-86400_000);
+          }
+        }
         windows.push({hours,result});
       }
       for (const hours of [6,12]) {

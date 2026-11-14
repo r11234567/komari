@@ -286,7 +286,7 @@ func (t *Telemetry) reserveExportSegments(ctx context.Context, queries []Query, 
 				return nil, e
 			}
 			params := append([]any{physical.MetricName, q.End.UnixNano(), q.Start.UnixNano(), watermark, after}, args...)
-			rows, e := tx.QueryContext(ctx, t.bind("SELECT DISTINCT m.segment_id FROM "+t.table("members")+" m JOIN "+t.table("series")+" s ON s.id=m.series_id JOIN "+t.table("segments")+" a ON a.id=m.segment_id LEFT JOIN "+t.table("erasures")+" e ON e.series_id=s.id WHERE s.metric=? AND m.first_observed<=? AND m.last_observed>=? AND a.first_id<=? AND a.id>? AND a.state NOT IN ('legacy','expired') AND (e.through_id IS NULL OR a.last_id>e.through_id)"+filter+" ORDER BY m.segment_id LIMIT 32"), params...)
+			rows, e := tx.QueryContext(ctx, t.bind("SELECT DISTINCT m.segment_id FROM "+t.table("members")+" m JOIN "+t.table("series")+" s ON s.id=m.series_id JOIN "+t.table("segments")+" a ON a.id=m.segment_id LEFT JOIN "+t.table("erasures")+" e ON e.series_id=s.id WHERE s.metric=? AND m.first_observed<=? AND m.last_observed>=? AND a.first_id<=? AND a.id>? AND a.state<>'legacy' AND (e.through_id IS NULL OR a.last_id>e.through_id)"+filter+" ORDER BY m.segment_id LIMIT 32"), params...)
 			if e != nil {
 				tx.Rollback()
 				return nil, e
@@ -321,6 +321,10 @@ func (t *Telemetry) reserveExportSegments(ctx context.Context, queries []Query, 
 				if e != nil {
 					tx.Rollback()
 					return nil, e
+				}
+				if seg.State == "expired" || seg.State == "expiring" {
+					tx.Rollback()
+					return nil, fmt.Errorf("%w: raw telemetry history has expired", ErrTelemetryCoverage)
 				}
 				if _, e = tx.ExecContext(ctx, t.bind("INSERT INTO "+t.table("leases")+" (id,segment_id,expires) VALUES (?,?,?)"), lease, id, time.Now().Add(10*time.Minute).UnixNano()); e != nil {
 					tx.Rollback()

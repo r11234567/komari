@@ -11,6 +11,7 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"sort"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -43,6 +44,7 @@ type telemetryFrameWriter struct {
 	points, first, last, observedFirst, observedLast int64
 	entity                                           string
 	totalPlain                                       int64
+	indexBytes                                       int64
 }
 
 func newTelemetryFrameWriter(out *telemetryHashWriter, id string) (*telemetryFrameWriter, error) {
@@ -109,6 +111,7 @@ func (w *telemetryFrameWriter) close() error {
 	if len(b) > telemetryIndexLimit {
 		return errors.New("archive frame index exceeds budget")
 	}
+	w.indexBytes = int64(len(b) + 24)
 	trailer := make([]byte, 16)
 	binary.LittleEndian.PutUint32(trailer[:4], uint32(len(b)))
 	binary.LittleEndian.PutUint32(trailer[4:8], crc32.ChecksumIEEE(b))
@@ -124,55 +127,113 @@ func (w *telemetryFrameWriter) close() error {
 	return nil
 }
 func readTelemetryArchiveIndex(f io.ReaderAt, seg telemetrySegment) (*telemetryArchiveIndex, error) {
-	if seg.FileBytes < 24 {
-		return nil, nil
+	// Each immutable append already ends in its own skippable index. Walk
+	// those tails backwards to discover a coalesced catalog extent without
+	// writing another index or recompressing a published byte.
+	var parts []telemetryArchiveIndex
+	var count, indexBytes int64
+	var frameCount int
+	for end := seg.FileBytes; end > 0; {
+		index, start, err := readTelemetryArchiveIndexPart(f, seg, end)
+		if err != nil {
+			return nil, err
+		}
+		if index == nil {
+			if end == seg.FileBytes {
+				return nil, nil
+			}
+			return nil, errors.New("missing archive extent index")
+		}
+		if start == 0 && index.Segment != seg.ID || start > 0 && index.Version != 3 {
+			return nil, errors.New("invalid archive index identity")
+		}
+		if len(parts) > 0 && index.Version != 3 {
+			return nil, errors.New("legacy archive cannot be coalesced")
+		}
+		var dataBytes int64
+		for i := range index.Frames {
+			index.Frames[i].Offset += start
+			count += index.Frames[i].Points
+			dataBytes += index.Frames[i].Bytes
+		}
+		frameCount += len(index.Frames)
+		indexBytes += end - start - dataBytes
+		if frameCount > 16384 || len(parts) >= 4096 || indexBytes > 8<<20 {
+			return nil, errors.New("archive catalog extent exceeds budget")
+		}
+		parts = append(parts, *index)
+		end = start
+	}
+	if len(parts) == 0 || count != seg.Points {
+		return nil, errors.New("archive index coverage mismatch")
+	}
+	out := &telemetryArchiveIndex{Version: parts[0].Version, Segment: seg.ID}
+	for i := len(parts) - 1; i >= 0; i-- {
+		out.Frames = append(out.Frames, parts[i].Frames...)
+	}
+	// Publication may differ from acceptance order. Preserve frame order
+	// within an ingest that spans two frames while sorting complete extents.
+	sort.SliceStable(out.Frames, func(i, j int) bool { return out.Frames[i].First < out.Frames[j].First })
+	var after int64
+	for _, frame := range out.Frames {
+		if frame.First < after {
+			return nil, errors.New("archive extent ingest overlap")
+		}
+		after = frame.Last
+	}
+	return out, nil
+}
+
+func readTelemetryArchiveIndexPart(f io.ReaderAt, seg telemetrySegment, end int64) (*telemetryArchiveIndex, int64, error) {
+	if end < 24 {
+		return nil, 0, nil
 	}
 	trailer := make([]byte, 16)
-	if _, e := f.ReadAt(trailer, seg.FileBytes-16); e != nil {
-		return nil, e
+	if _, e := f.ReadAt(trailer, end-16); e != nil {
+		return nil, 0, e
 	}
 	magic := string(trailer[8:])
 	if magic != telemetryIndexMagic && magic != telemetryIndexMagicV3 {
-		return nil, nil
+		return nil, 0, nil
 	}
 	n := int64(binary.LittleEndian.Uint64(trailer))
 	if magic == telemetryIndexMagicV3 {
 		n = int64(binary.LittleEndian.Uint32(trailer[:4]))
 	}
-	if n < 1 || n > telemetryIndexLimit || n+24 > seg.FileBytes {
-		return nil, errors.New("invalid archive index size")
+	if n < 1 || n > telemetryIndexLimit || n+24 > end {
+		return nil, 0, errors.New("invalid archive index size")
 	}
-	offset := seg.FileBytes - n - 24
+	offset := end - n - 24
 	b := make([]byte, n+8)
 	if _, e := f.ReadAt(b, offset); e != nil {
-		return nil, e
+		return nil, 0, e
 	}
 	if binary.LittleEndian.Uint32(b) != 0x184d2a50 || int64(binary.LittleEndian.Uint32(b[4:])) != n+16 {
-		return nil, errors.New("invalid archive index framing")
+		return nil, 0, errors.New("invalid archive index framing")
 	}
 	if magic == telemetryIndexMagicV3 && crc32.ChecksumIEEE(b[8:]) != binary.LittleEndian.Uint32(trailer[4:8]) {
-		return nil, errors.New("archive index checksum mismatch")
+		return nil, 0, errors.New("archive index checksum mismatch")
 	}
 	var index telemetryArchiveIndex
 	if e := json.Unmarshal(b[8:], &index); e != nil {
-		return nil, e
+		return nil, 0, e
 	}
-	if (index.Version != 2 && index.Version != 3) || (index.Version == 3 && magic != telemetryIndexMagicV3) || index.Segment != seg.ID || len(index.Frames) > 16384 {
-		return nil, errors.New("invalid archive index identity")
+	if (index.Version != 2 && index.Version != 3) || (index.Version == 3 && magic != telemetryIndexMagicV3) || len(index.Segment) != 32 || len(index.Frames) == 0 || len(index.Frames) > 16384 {
+		return nil, 0, errors.New("invalid archive index identity")
 	}
 	var pos, count, after int64
 	for _, frame := range index.Frames {
 		if frame.Offset != pos || frame.Bytes < 1 || frame.Bytes > 2<<20 || frame.Points < 1 || frame.Points > 100000 || frame.First < seg.First || frame.Last > seg.Last || frame.First > frame.Last || frame.First < after || (index.Version == 2 && (frame.Points > 128 || len(frame.Hash) != 64)) || (index.Version == 3 && (frame.Version != 3 || frame.ObservedFirst > frame.ObservedLast)) {
-			return nil, errors.New("invalid archive frame extent")
+			return nil, 0, errors.New("invalid archive frame extent")
 		}
 		pos += frame.Bytes
 		count += frame.Points
 		after = frame.Last
 	}
-	if pos != offset || count != seg.Points {
-		return nil, errors.New("archive index coverage mismatch")
+	if pos > offset || count > seg.Points {
+		return nil, 0, errors.New("archive index coverage mismatch")
 	}
-	return &index, nil
+	return &index, offset - pos, nil
 }
 func verifyTelemetryArchiveFile(ctx context.Context, f *os.File, seg telemetrySegment) error {
 	h := sha256.New()

@@ -33,13 +33,21 @@ func TestTelemetryRetentionCycleKeepsMissingHistoryExplicit(t *testing.T) {
 			break
 		}
 	}
-	// Within chart retention the catalog cannot disappear, even if the raw
-	// file expires under a shorter independently configured policy.
+	// Raw ownership retires independently while chart cells remain usable.
 	if ok, err := e.ExpireArchiveNext(ctx, now.Add(3*24*time.Hour), 24*time.Hour); err != nil || !ok {
 		t.Fatal(ok, err)
 	}
 	if n, err := e.PruneCatalogChunk(ctx, now.Add(3*24*time.Hour), 128); err != nil || n != 0 {
-		t.Fatal("catalog pruned before chart history", n, err)
+		t.Fatal("catalog pruned before receipts", n, err)
+	}
+	if _, err := e.PruneReceipts(ctx, now.Add(3*24*time.Hour), 512); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := e.PruneCatalogChunk(ctx, now.Add(3*24*time.Hour), 128); err != nil || n == 0 {
+		t.Fatal("expired raw waits for chart retention", n, err)
+	}
+	if n := telemetryCount(t, e, "rollup"); n == 0 {
+		t.Fatal("catalog GC removed chart")
 	}
 	late := now.Add(40 * 24 * time.Hour)
 	if _, err := e.PruneSummaries(ctx, "cpu", 30*24*time.Hour, late, 512); err != nil {
@@ -49,7 +57,7 @@ func TestTelemetryRetentionCycleKeepsMissingHistoryExplicit(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n, err := e.PruneCatalogChunk(ctx, late, 128); err != nil || n == 0 {
-		t.Fatal("expired catalog never reclaimed", n, err)
+		t.Fatal("unused dictionaries survived chart expiry", n, err)
 	}
 	for _, table := range []string{"hot", "summary", "receipts", "members", "segments", "series", "series_keys"} {
 		if n := telemetryCount(t, e, table); n != 0 {

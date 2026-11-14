@@ -84,7 +84,7 @@ func TestScalarFreshInputDoesNotGenerateAncestors(t *testing.T) {
 	if err := e.s.db.QueryRow("SELECT MAX(resolution) FROM " + e.table("rollup")).Scan(&resolution); err != nil || resolution != 10 || telemetryCount(t, e, "rollup") != 1 {
 		t.Fatal(resolution, err)
 	}
-	promoteTelemetryAll(t, e, at.Add(time.Hour+10*time.Second))
+	promoteTelemetryAll(t, e, at.Add(time.Hour+telemetryTierGrace+10*time.Second))
 	if err := e.s.db.QueryRow("SELECT MAX(resolution) FROM " + e.table("rollup")).Scan(&resolution); err != nil || resolution != 60 || telemetryCount(t, e, "rollup") != 1 {
 		t.Fatal(resolution, err)
 	}

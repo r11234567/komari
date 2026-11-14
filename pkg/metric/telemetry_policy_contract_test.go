@@ -48,7 +48,7 @@ func TestTelemetryPolicyPromotionSurvivesImmediateRawHandoff(t *testing.T) {
 	if _, err := e.SealDue(ctx, at.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if delay, err := e.NextSummaryPromotion(ctx, at.Add(30*time.Minute)); err != nil || delay != 30*time.Minute+10*time.Second {
+	if delay, err := e.NextSummaryPromotion(ctx, at.Add(30*time.Minute)); err != nil || delay != 30*time.Minute+telemetryTierGrace+10*time.Second {
 		t.Fatal("wrong indexed promotion deadline", delay, err)
 	}
 	for {
@@ -67,7 +67,7 @@ func TestTelemetryPolicyPromotionSurvivesImmediateRawHandoff(t *testing.T) {
 	if _, err := e.ReadHot(ctx, q, at.Add(23*time.Hour)); err == nil {
 		t.Fatal("one-day safety rows enabled unbounded online raw reads")
 	}
-	if delay, err := e.NextSummaryPromotion(ctx, at.Add(30*time.Minute)); err != nil || delay != 30*time.Minute+10*time.Second {
+	if delay, err := e.NextSummaryPromotion(ctx, at.Add(30*time.Minute)); err != nil || delay != 30*time.Minute+telemetryTierGrace+10*time.Second {
 		t.Fatal("raw handoff changed chart promotion deadline", delay, err)
 	}
 	chart, err := e.Chart(ctx, AggregateQuery{Query: q, Interval: time.Minute, Aggregation: AggAvg}, at.Add(30*time.Minute))

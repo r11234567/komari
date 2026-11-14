@@ -264,20 +264,20 @@ func TestTelemetryLegacyMigrationAppliesRetainedResolution(t *testing.T) {
 
 func TestTelemetryLegacyPromotionExactRetentionBoundary(t *testing.T) {
 	for _, tc := range []struct{ age, source, want time.Duration }{
-		{time.Hour, 10 * time.Second, time.Minute},
-		{24 * time.Hour, time.Minute, 5 * time.Minute},
-		{2 * 24 * time.Hour, 5 * time.Minute, 30 * time.Minute},
-		{7 * 24 * time.Hour, 30 * time.Minute, time.Hour},
-		{15 * 24 * time.Hour, time.Hour, 2 * time.Hour},
-		{60 * 24 * time.Hour, 2 * time.Hour, 6 * time.Hour},
-		{180 * 24 * time.Hour, 6 * time.Hour, 12 * time.Hour},
-		{365 * 24 * time.Hour, 12 * time.Hour, 24 * time.Hour},
+		{time.Hour + telemetryTierGrace, 10 * time.Second, time.Minute},
+		{12*time.Hour + telemetryTierGrace, time.Minute, 5 * time.Minute},
+		{2*24*time.Hour + telemetryTierGrace, 5 * time.Minute, 30 * time.Minute},
+		{7*24*time.Hour + telemetryTierGrace, 30 * time.Minute, time.Hour},
+		{15*24*time.Hour + telemetryTierGrace, time.Hour, 2 * time.Hour},
+		{60*24*time.Hour + telemetryTierGrace, 2 * time.Hour, 6 * time.Hour},
+		{180*24*time.Hour + telemetryTierGrace, 6 * time.Hour, 12 * time.Hour},
+		{365*24*time.Hour + telemetryTierGrace, 12 * time.Hour, 24 * time.Hour},
 	} {
 		t.Run(tc.age.String(), func(t *testing.T) {
 			_, e := telemetryFixture(t, "")
 			ctx := context.Background()
 			now := time.Date(2025, 4, 15, 12, 0, 0, 0, time.UTC)
-			at := now.Add(-tc.age - tc.source)
+			at := alignTime(now.Add(-tc.age-tc.source), tc.source)
 			var st telemetryStats
 			st.add(Point{MetricName: "cpu", Timestamp: at.Add(time.Second), Value: 7}, 1, 0)
 			cell := telemetryMigrationCell{series: telemetryMigrationKey("cpu\x00node\x00{}"), tags: "{}", bucket: at.UnixNano(), resolution: tc.source, stats: st, raw: st}

@@ -84,6 +84,9 @@ type publicMetricSeries struct {
 	FillEmpty           bool                `json:"fill_empty,omitempty"`
 	MaxPoints           int                 `json:"max_points,omitempty"`
 	IntervalSeconds     float64             `json:"interval_seconds,omitempty"`
+	CoverageStart       *time.Time          `json:"coverage_start,omitempty"`
+	CoverageEnd         *time.Time          `json:"coverage_end,omitempty"`
+	BoundaryAdjusted    bool                `json:"boundary_adjusted,omitempty"`
 	Count               int                 `json:"count"`
 	Points              []publicMetricPoint `json:"points"`
 }
@@ -240,8 +243,10 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 
 		interval := time.Duration(0)
 		if metricDownsample {
-			interval = metricDownsampleInterval(end.Sub(start), maxPoints)
-			interval = store.CompatibleSeriesIntervalForMetric(ctx, metricKey, start, now, interval)
+			if store.Telemetry() == nil {
+				interval = metricDownsampleInterval(end.Sub(start), maxPoints)
+				interval = store.CompatibleSeriesIntervalForMetric(ctx, metricKey, start, now, interval)
+			}
 		}
 		for _, entityID := range entityIDs {
 			query := metric.Query{
@@ -251,6 +256,12 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				End:        end,
 				Tags:       params.Tags,
 				Order:      metric.OrderAsc,
+			}
+			if telemetry := store.Telemetry(); telemetry != nil && metricDownsample {
+				query, interval, err = telemetry.PlanChart(ctx, query, now, maxPoints, def.RetentionDays)
+				if err != nil {
+					return nil, metricQueryError(err, "Failed to resolve chart window")
+				}
 			}
 			plan := publicMetricBatchPlan{
 				metricKey:   metricKey,
@@ -270,6 +281,11 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				rawSlot:       -1,
 			}
 			if metricDownsample {
+				if store.Telemetry() != nil {
+					actualStart, actualEnd := query.Start, query.End
+					plan.item.CoverageStart, plan.item.CoverageEnd = &actualStart, &actualEnd
+					plan.item.BoundaryAdjusted = !query.Start.Equal(start) || !query.End.Equal(end)
+				}
 				plan.item.DownsampleAlgorithm = string(algorithm)
 				plan.item.IntervalSeconds = interval.Seconds()
 				plan.aggregateSlot = len(aggregateQueries)
@@ -319,7 +335,14 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		}
 		for _, split := range splitPublicMetricSeries(item) {
 			if item.FillEmpty {
-				split = adaptiveFillPublicMetricSeries(split, start, end)
+				fillStart, fillEnd := start, end
+				if item.CoverageStart != nil {
+					fillStart = *item.CoverageStart
+				}
+				if item.CoverageEnd != nil {
+					fillEnd = *item.CoverageEnd
+				}
+				split = adaptiveFillPublicMetricSeries(split, fillStart, fillEnd)
 			}
 			series = append(series, split)
 		}
@@ -389,15 +412,19 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 	}
 	now := time.Now().UTC()
 	interval := metricDownsampleInterval(end.Sub(start), maxPoints)
-	if store.Telemetry() != nil {
-		interval = metric.TelemetryChartInterval(end.Sub(start), maxPoints)
-	}
-	interval = store.CompatibleSeriesIntervalForMetric(ctx, metricstore.MetricPingLatency, start, now, interval)
 	if telemetry := store.Telemetry(); telemetry != nil {
-		start, end, err = telemetry.PingWindow(start, end, interval, now)
+		definition, e := store.GetMetric(ctx, metricstore.MetricPingLatency)
+		if e != nil {
+			return nil, metricQueryError(e, "Failed to resolve ping retention")
+		}
+		q := metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end}
+		q, interval, err = telemetry.PlanChart(ctx, q, now, maxPoints, definition.RetentionDays)
 		if err != nil {
 			return nil, metricQueryError(err, "Failed to resolve ping statistics window")
 		}
+		start, end = q.Start, q.End
+	} else {
+		interval = store.CompatibleSeriesIntervalForMetric(ctx, metricstore.MetricPingLatency, start, now, interval)
 	}
 
 	queries := make([]metric.AggregateQuery, 0, len(entityIDs))

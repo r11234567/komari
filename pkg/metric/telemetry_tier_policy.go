@@ -5,15 +5,18 @@ import "time"
 // Keep the importer, online promotion, pruning and chart grid on one nested
 // hierarchy. The final tier expires with the metric itself (keep == 0).
 // Short-lived fine cells must not become a second permanent raw store.
+const telemetryTierGrace = 5 * time.Minute
+
 var telemetrySummaryTiers = [...]struct{ resolution, keep time.Duration }{
-	{10 * time.Second, time.Hour},
-	{time.Minute, 24 * time.Hour},
-	{5 * time.Minute, 2 * 24 * time.Hour},
-	{30 * time.Minute, 7 * 24 * time.Hour},
-	{time.Hour, 15 * 24 * time.Hour},
-	{2 * time.Hour, 60 * 24 * time.Hour},
-	{6 * time.Hour, 180 * 24 * time.Hour},
-	{12 * time.Hour, 365 * 24 * time.Hour},
+	{10 * time.Second, time.Hour + telemetryTierGrace},
+	// 6h and 12h presets use 1m source cells; the 24h preset uses 5m.
+	{time.Minute, 12*time.Hour + telemetryTierGrace},
+	{5 * time.Minute, 2*24*time.Hour + telemetryTierGrace},
+	{30 * time.Minute, 7*24*time.Hour + telemetryTierGrace},
+	{time.Hour, 15*24*time.Hour + telemetryTierGrace},
+	{2 * time.Hour, 60*24*time.Hour + telemetryTierGrace},
+	{6 * time.Hour, 180*24*time.Hour + telemetryTierGrace},
+	{12 * time.Hour, 365*24*time.Hour + telemetryTierGrace},
 	{24 * time.Hour, 0},
 }
 

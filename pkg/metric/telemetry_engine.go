@@ -118,16 +118,17 @@ type TelemetryReceipt struct {
 }
 
 type telemetrySegment struct {
-	ID                                           string
-	State                                        string
-	First, Last, Points, Bytes, Created, Deleted int64
-	Hash                                         string
-	FileBytes                                    int64
-	StagingOwner                                 string
-	ArchiveEntity                                string `json:",omitempty"`
-	ArchiveDay                                   int64  `json:",omitempty"`
-	ArchiveFile                                  string `json:",omitempty"`
-	ArchiveOffset                                int64  `json:",omitempty"`
+	ID                                             string
+	State                                          string
+	First, Last, Points, Bytes, Created, Deleted   int64
+	Hash                                           string
+	FileBytes                                      int64
+	StagingOwner                                   string
+	ArchiveEntity                                  string `json:",omitempty"`
+	ArchiveDay                                     int64  `json:",omitempty"`
+	ArchiveFile                                    string `json:",omitempty"`
+	ArchiveOffset                                  int64  `json:",omitempty"`
+	ArchiveFrames, ArchiveParts, ArchiveIndexBytes int64  `json:",omitempty"`
 }
 
 func telemetryID() string {
@@ -259,8 +260,15 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	} else if err != nil {
 		return err
 	}
-	if version != 10 && version != -10 && version != 9 && version != -9 && version != 8 && version != -8 && version != 7 && version != 6 && version != 5 && version != 4 && version != 3 && version != 2 && version != 1 && version != -1 {
+	if version != 11 && version != -11 && version != 10 && version != -10 && version != 9 && version != -9 && version != 8 && version != -8 && version != 7 && version != 6 && version != 5 && version != 4 && version != 3 && version != 2 && version != 1 && version != -1 {
 		return fmt.Errorf("unsupported telemetry SQL schema version %d", version)
+	}
+	// Coalesced catalog owners require the v11 multi-extent reader. Fence a
+	// v10 binary before any directory rewrite; interruption resumes here.
+	if version == 10 {
+		if _, err = t.s.db.ExecContext(ctx, "UPDATE "+progressTable+" SET value=-11 WHERE task='schema_version'"); err != nil {
+			return err
+		}
 	}
 	if version == 9 {
 		if _, err = t.s.db.ExecContext(ctx, "UPDATE "+progressTable+" SET value=-10 WHERE task='schema_version'"); err != nil {
@@ -318,6 +326,9 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 		{"segments", "archive_day", "BIGINT NOT NULL DEFAULT 0"},
 		{"segments", "archive_file", "CHAR(32) NOT NULL DEFAULT ''"},
 		{"segments", "archive_offset", "BIGINT NOT NULL DEFAULT 0"},
+		{"segments", "archive_frames", "BIGINT NOT NULL DEFAULT 0"},
+		{"segments", "archive_parts", "BIGINT NOT NULL DEFAULT 0"},
+		{"segments", "archive_index_bytes", "BIGINT NOT NULL DEFAULT 0"},
 		{"summary", "input_through", "BIGINT NOT NULL DEFAULT 0"},
 		{"summary", "promoted_through", "BIGINT NOT NULL DEFAULT 0"},
 		{"gaps", "ranges", "VARCHAR(14000) NOT NULL DEFAULT ''"},

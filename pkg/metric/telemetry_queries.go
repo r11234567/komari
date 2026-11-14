@@ -69,9 +69,9 @@ func (t *Telemetry) ChartInterval(ctx context.Context, q Query, now time.Time, r
 	}
 	quantum := telemetryResolution(now.Sub(q.Start))
 	if t.scalar {
-		statement := "SELECT DISTINCT d.resolution FROM " + t.table("series") + " s JOIN " + t.table("rollup_keys") + " k ON k.source_id=s.id JOIN " + t.table("rollup_due") + " d ON d.series_id=k.id WHERE s.metric=?" + filter + " AND EXISTS (SELECT 1 FROM " + t.table("rollup") + " b WHERE b.series_id=d.series_id AND b.resolution=d.resolution AND b.bucket>=? AND b.bucket<=? AND b.bucket+b.resolution>?)"
+		statement := "SELECT DISTINCT d.resolution FROM " + t.table("series") + " s JOIN " + t.table("rollup_keys") + " k ON k.source_id=s.id JOIN " + t.table("rollup_due") + " d ON d.series_id=k.id WHERE s.metric=?" + filter + " AND EXISTS (SELECT 1 FROM " + t.table("rollup") + " b WHERE b.series_id=d.series_id AND b.resolution=d.resolution AND b.bucket>=? AND b.bucket<=? AND b.bucket+b.resolution>? AND b.bucket*1000000000+b.last_offset>=? AND b.bucket*1000000000+b.first_offset<=?)"
 		values := append([]any{name}, args...)
-		values = append(values, q.Start.Add(-24*time.Hour).Unix(), q.End.Unix(), q.Start.Unix())
+		values = append(values, q.Start.Add(-24*time.Hour).Unix(), q.End.Unix(), q.Start.Unix(), q.Start.UnixNano(), q.End.UnixNano())
 		rows, e := t.s.reader().QueryContext(ctx, t.bind(statement), values...)
 		if e != nil {
 			return 0, e
@@ -99,11 +99,26 @@ func (t *Telemetry) ChartInterval(ctx context.Context, q Query, now time.Time, r
 	return requested, nil
 }
 
-// PingWindow returns the interval which can be answered from retained cells.
+// PlanChart applies retention before inspecting source precision and resolves
+// the actual answerable window once, shared by both public protocols.
+func (t *Telemetry) PlanChart(ctx context.Context, q Query, now time.Time, points, retentionDays int) (Query, time.Duration, error) {
+	if retentionDays > 0 {
+		q.Start = maxTelemetryTime(q.Start, now.Add(-time.Duration(retentionDays)*24*time.Hour))
+		q.Start = minTime(q.Start, q.End)
+	}
+	interval, err := t.ChartInterval(ctx, q, now, TelemetryChartInterval(q.End.Sub(q.Start), points))
+	if err != nil {
+		return q, 0, err
+	}
+	q.Start, q.End, err = t.ChartWindow(q.Start, q.End, interval, now)
+	return q, interval, err
+}
+
+// ChartWindow returns the interval which can be answered from retained cells.
 // Historical edges move inward to the output grid. Recent hot edges remain
 // exact. Callers return these actual bounds with the statistics so the probe
 // denominator always describes the advertised window.
-func (t *Telemetry) PingWindow(start, end time.Time, interval time.Duration, now time.Time) (time.Time, time.Time, error) {
+func (t *Telemetry) ChartWindow(start, end time.Time, interval time.Duration, now time.Time) (time.Time, time.Time, error) {
 	if end.Before(start) || interval <= 0 {
 		return start, end, ErrInvalidArgument
 	}
@@ -131,6 +146,10 @@ func (t *Telemetry) PingWindow(start, end time.Time, interval time.Duration, now
 		return start, end, ErrTelemetryCoverage
 	}
 	return start, end, nil
+}
+
+func (t *Telemetry) PingWindow(start, end time.Time, interval time.Duration, now time.Time) (time.Time, time.Time, error) {
+	return t.ChartWindow(start, end, interval, now)
 }
 
 func (t *Telemetry) SeriesBatch(ctx context.Context, queries []AggregateQuery, now time.Time) ([][]AggregatePoint, error) {
