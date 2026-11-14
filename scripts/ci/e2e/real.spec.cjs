@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
+const { decodeMetricsRequest, decodeMetricsResponse } = require('./storage-metrics-wire.cjs');
 const { createRequire } = require('node:module');
 // Use the pinned Web's already-installed protobuf runtime for its wire format.
 const webRequire = createRequire(path.resolve(__dirname, '../../../third_party/komari-web/package.json'));
@@ -352,9 +353,22 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       }
       expect(total).toBe(rawCount);
       await page.goto(`/instance/${agentId}`);
-      await page.locator('.km-load-chart').getByRole('radio', { name:/^1\s*hour$/i }).click();
+      const chart = page.locator('.km-load-chart');
+      const chartResponse = page.waitForResponse(response => {
+        if (!new URL(response.url()).pathname.endsWith('/QueryMetrics') || response.status() !== 200 || !response.request().headers()['content-type']?.includes('application/proto')) return false;
+        const request = decodeMetricsRequest(response.request().postDataBuffer());
+        return request.agentIds.includes(agentId) && request.metrics.includes('cpu.usage') && request.maxPoints === 600 && new Date(request.endTime)-new Date(request.startTime) === 3600_000;
+      });
+      await chart.getByRole('radio', { name:/^1\s*hour$/i }).click();
+      const rendered = decodeMetricsResponse(await (await chartResponse).body());
+      const renderedCPU = rendered.series.find(series => series.metric === 'cpu.usage');
+      expect(renderedCPU?.queryPoints.length).toBeGreaterThan(0);
+      expect(renderedCPU.coverage).toBe('complete');
       await expect(page.getByTestId('chart-source-precision').first()).toBeVisible();
-      await expect(page.locator('.recharts-line-curve').first()).toBeVisible();
+      // A fresh Agent may occupy only one retained minute. Verify that actual
+      // observation as a dot; multiple observations must produce a line.
+      await expect(chart.locator(renderedCPU.queryPoints.length === 1 ? '.recharts-line-dots .recharts-dot' : '.recharts-line-curve').first()).toBeVisible();
+      fs.writeFileSync(path.join(artifacts,'metric-rendered-1h.json'),JSON.stringify(rendered,null,2));
       await page.screenshot({path:path.join(artifacts,'chart-source-precision.png'),fullPage:true});
       const windows = [];
       // The right edge deliberately lags wall time by 15s, so the oldest
