@@ -1578,7 +1578,6 @@ func TestSQLiteStorageV4ConcurrentReadWriteAndSeal(t *testing.T) {
 	}
 }
 
-
 func mustFileSize(t *testing.T, path string) int64 {
 	t.Helper()
 	info, err := os.Stat(path)
