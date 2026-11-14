@@ -82,6 +82,7 @@ async function run(){
  await expect(page.getByText('Daily billable traffic',{exact:true})).toBeVisible({timeout:30000});
  await expect(page.getByRole('heading',{name:'Telemetry storage upgrade',exact:true})).toHaveCount(0);
  await page.screenshot({path:path.join(artifacts,'storage-upgrade-complete.png'),fullPage:true});
+ await require('./storage-curves.cjs').verifyRealtimeRetention({context,page,root,artifacts,base,agentId:fixtureManifest.agentId,phase:'after-migration'});
  fs.writeFileSync(path.join(artifacts,'storage-upgrade.json'),JSON.stringify({checks,responses,final_url:page.url(),synthetic_input:true,native_password:true,totp:!!credentials.secret,restarted_after_failure:true},null,2));
  // Now exercise the server's actual staged ZIP restore, not just an in-process
  // reader. The downloaded package contains real Agent history and output.
@@ -95,6 +96,9 @@ async function run(){
  });
  const compactProof=JSON.parse(fs.readFileSync(path.join(rollback,'compaction.json')));
  expect(compactProof.retired_legacy).toBe(true);expect(compactProof.bytes).toBeGreaterThan(0);
+ // Local orchestration runs as root while the test panel remains nonroot.
+ // Preserve the intended service ownership when installing its replacement.
+ if(process.env.KOMARI_E2E_LOCAL==='1')execFileSync('chown',[process.env.KOMARI_E2E_USER,compacted]);
  expect(crypto.createHash('sha256').update(fs.readFileSync(compacted)).digest('hex')).toBe(compactProof.sha256);
  for(const suffix of ['-wal','-shm'])expect(fs.existsSync(source+suffix)).toBe(false);
  const compactChecks=JSON.parse(execFileSync('python3',['-c',`import sqlite3,json,sys
@@ -116,6 +120,7 @@ print(json.dumps({'source_rows':source.execute('SELECT COUNT(*) FROM metric_poin
  startPanel(path.join(root,'migration-panel'));
  await expect.poll(async()=>{try{return(await context.request.get('/api/public')).status()}catch{return 0}},{timeout:30000}).toBe(200);
  const migrationScope=JSON.parse(fs.readFileSync(path.join(root,'migration-manifest.json')));
+ await require('./storage-curves.cjs').verifyRealtimeRetention({context,page,root,artifacts,base,agentId:migrationScope.agentId,phase:'after-compact-restart'});
  const compactEnd=new Date();
  const compactHistory=await context.request.post('/komari.metrics.v1.MetricsService/QueryMetrics',{
   data:{agentIds:[migrationScope.agentId],metrics:['cpu.usage'],startTime:new Date(compactEnd.getTime()-86400_000).toISOString(),endTime:compactEnd.toISOString(),maxPoints:360,downsample:true},

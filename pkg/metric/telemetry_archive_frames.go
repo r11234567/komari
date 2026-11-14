@@ -123,7 +123,7 @@ func (w *telemetryFrameWriter) close() error {
 	}
 	return nil
 }
-func readTelemetryArchiveIndex(f *os.File, seg telemetrySegment) (*telemetryArchiveIndex, error) {
+func readTelemetryArchiveIndex(f io.ReaderAt, seg telemetrySegment) (*telemetryArchiveIndex, error) {
 	if seg.FileBytes < 24 {
 		return nil, nil
 	}

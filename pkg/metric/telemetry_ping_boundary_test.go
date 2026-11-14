@@ -18,8 +18,9 @@ func TestTelemetryPingWindowKeepsHotEdgesAndAdvertisesHistoricalGrid(t *testing.
 	}
 	for _, interval := range []time.Duration{10 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 30 * time.Minute, time.Hour, 2 * time.Hour, 7 * time.Hour} {
 		start, end = now.Add(-48*time.Hour), now.Add(-time.Hour)
+		chosen := e.compatibleInterval(start, now, interval)
 		actualStart, actualEnd, err = e.PingWindow(start, end, interval, now)
-		if err != nil || actualStart.Before(start) || actualEnd.After(end) || !alignTime(actualStart, interval).Equal(actualStart) || !alignTime(actualEnd.Add(time.Nanosecond), interval).Equal(actualEnd.Add(time.Nanosecond)) {
+		if chosen%(5*time.Minute) != 0 || err != nil || actualStart.Before(start) || actualEnd.After(end) || !alignTime(actualStart, chosen).Equal(actualStart) || !alignTime(actualEnd.Add(time.Nanosecond), chosen).Equal(actualEnd.Add(time.Nanosecond)) {
 			t.Fatalf("%s historical bounds: %v %v %v", interval, actualStart, actualEnd, err)
 		}
 	}

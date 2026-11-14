@@ -47,7 +47,7 @@ type TelemetryConfig struct {
 func (c TelemetryConfig) defaults() TelemetryConfig {
 	c.RawRetention = 0
 	if c.SegmentDuration == 0 {
-		c.SegmentDuration = 15 * time.Minute
+		c.SegmentDuration = 24 * time.Hour
 	}
 	if c.SegmentPoints == 0 {
 		c.SegmentPoints = 5_000_000
@@ -126,6 +126,8 @@ type telemetrySegment struct {
 	StagingOwner                                 string
 	ArchiveEntity                                string `json:",omitempty"`
 	ArchiveDay                                   int64  `json:",omitempty"`
+	ArchiveFile                                  string `json:",omitempty"`
+	ArchiveOffset                                int64  `json:",omitempty"`
 }
 
 func telemetryID() string {
@@ -257,8 +259,13 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	} else if err != nil {
 		return err
 	}
-	if version != 9 && version != -9 && version != 8 && version != -8 && version != 7 && version != 6 && version != 5 && version != 4 && version != 3 && version != 2 && version != 1 && version != -1 {
+	if version != 10 && version != -10 && version != 9 && version != -9 && version != 8 && version != -8 && version != 7 && version != 6 && version != 5 && version != 4 && version != 3 && version != 2 && version != 1 && version != -1 {
 		return fmt.Errorf("unsupported telemetry SQL schema version %d", version)
+	}
+	if version == 9 {
+		if _, err = t.s.db.ExecContext(ctx, "UPDATE "+progressTable+" SET value=-10 WHERE task='schema_version'"); err != nil {
+			return err
+		}
 	}
 	if version == 8 {
 		if _, err := t.s.db.ExecContext(ctx, "UPDATE "+progressTable+" SET value=-9 WHERE task='schema_version'"); err != nil {
@@ -309,6 +316,8 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 		{"segments", "summary_version", "INTEGER NOT NULL DEFAULT 1"},
 		{"segments", "archive_entity", "VARCHAR(255) NOT NULL DEFAULT ''"},
 		{"segments", "archive_day", "BIGINT NOT NULL DEFAULT 0"},
+		{"segments", "archive_file", "CHAR(32) NOT NULL DEFAULT ''"},
+		{"segments", "archive_offset", "BIGINT NOT NULL DEFAULT 0"},
 		{"summary", "input_through", "BIGINT NOT NULL DEFAULT 0"},
 		{"summary", "promoted_through", "BIGINT NOT NULL DEFAULT 0"},
 		{"gaps", "ranges", "VARCHAR(14000) NOT NULL DEFAULT ''"},
@@ -326,10 +335,12 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 	for _, idx := range []struct{ name, table, cols string }{
 		{"hot_series", "hot", "series_id,observed,ingest_id,ordinal"},
 		{"hot_segment", "hot", "segment_id,ingest_id,ordinal"},
+		{"hot_live_age", "hot", "segment_id,observed,ingest_id,ordinal"},
 		{"series_metric", "series", "metric,entity,id"},
 		{"series_entity", "series", "entity,id"},
 		{"segments_state", "segments", "state,created,id"},
 		{"segments_partition", "segments", "state,archive_entity,archive_day,created,id"},
+		{"segments_file", "segments", "archive_file,archive_offset"},
 		{"outbox_pending", "outbox", "delivered,ingest_id"},
 		{"summary_series", "summary", "series_id,resolution,bucket"},
 		{"receipt_age", "receipts", "received,ingest_id"},
@@ -366,7 +377,10 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 			}
 		}
 	}
-	for _, task := range []string{"ingest", "summary", "hot_bytes", "export_epoch"} {
+	if err := t.createLatestSchema(ctx); err != nil {
+		return err
+	}
+	for _, task := range []string{"ingest", "summary", "hot_bytes", "live_bytes", "export_epoch"} {
 		q := fmt.Sprintf("INSERT INTO %s (task,value) VALUES (?,0)", t.table("progress"))
 		if t.s.cfg.Driver == DriverMySQL {
 			q += " ON DUPLICATE KEY UPDATE task=task"
@@ -447,6 +461,9 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 	b.Points = append([]Point(nil), b.Points...)
 	oldest := now.UnixNano()
 	resolvedKeys := make(map[string]string)
+	type memberBounds struct{ first, last, points int64 }
+	members := make(map[string]memberBounds)
+	latest := make(map[string]int)
 	for i, p := range b.Points {
 		if err := p.Validate(); err != nil {
 			return result, err
@@ -520,7 +537,14 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 	if err != nil {
 		return result, err
 	}
-	if hotBytes > t.cfg.MaxHotBytes-batchBytes {
+	if _, err = t.pruneLive(ctx, tx, now, 512); err != nil {
+		return result, err
+	}
+	liveBytes, err := t.progress(ctx, tx, "live_bytes")
+	if err != nil {
+		return result, err
+	}
+	if hotBytes+liveBytes > t.cfg.MaxHotBytes-batchBytes {
 		return result, ErrTelemetryBackpressure
 	}
 	entity, day := telemetryBatchPartition(b.Points)
@@ -593,13 +617,33 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 		if _, err = tx.ExecContext(ctx, t.bind("INSERT INTO "+t.table("hot")+" (ingest_id,ordinal,series_id,observed,received,value,labels,segment_id) VALUES (?,?,?,?,?,?,?,?)"), result.IngestID, i, sid, p.Timestamp.UnixNano(), now.UnixNano(), p.Value, string(labels), seg.ID); err != nil {
 			return result, err
 		}
-		q := "INSERT INTO " + t.table("members") + " (segment_id,series_id,first_observed,last_observed,points) VALUES (?,?,?,?,1)"
-		if t.s.cfg.Driver == DriverMySQL {
-			q += " ON DUPLICATE KEY UPDATE first_observed=LEAST(first_observed,VALUES(first_observed)),last_observed=GREATEST(last_observed,VALUES(last_observed)),points=points+1"
-		} else {
-			q += " ON CONFLICT(segment_id,series_id) DO UPDATE SET first_observed=CASE WHEN excluded.first_observed<" + t.table("members") + ".first_observed THEN excluded.first_observed ELSE " + t.table("members") + ".first_observed END,last_observed=CASE WHEN excluded.last_observed>" + t.table("members") + ".last_observed THEN excluded.last_observed ELSE " + t.table("members") + ".last_observed END,points=" + t.table("members") + ".points+1"
+		m, exists := members[sid]
+		observed := p.Timestamp.UnixNano()
+		if !exists {
+			m.first, m.last = observed, observed
 		}
-		if _, err = tx.ExecContext(ctx, t.bind(q), seg.ID, sid, p.Timestamp.UnixNano(), p.Timestamp.UnixNano()); err != nil {
+		m.first, m.last, m.points = min(m.first, observed), max(m.last, observed), m.points+1
+		members[sid] = m
+		if telemetryLiveMetric(p.MetricName) {
+			prior, ok := latest[sid]
+			if !ok || !p.Timestamp.Before(b.Points[prior].Timestamp) {
+				latest[sid] = i
+			}
+		}
+	}
+	for sid, m := range members {
+		q := "INSERT INTO " + t.table("members") + " (segment_id,series_id,first_observed,last_observed,points) VALUES (?,?,?,?,?)"
+		if t.s.cfg.Driver == DriverMySQL {
+			q += " ON DUPLICATE KEY UPDATE first_observed=LEAST(first_observed,VALUES(first_observed)),last_observed=GREATEST(last_observed,VALUES(last_observed)),points=points+VALUES(points)"
+		} else {
+			q += " ON CONFLICT(segment_id,series_id) DO UPDATE SET first_observed=CASE WHEN excluded.first_observed<" + t.table("members") + ".first_observed THEN excluded.first_observed ELSE " + t.table("members") + ".first_observed END,last_observed=CASE WHEN excluded.last_observed>" + t.table("members") + ".last_observed THEN excluded.last_observed ELSE " + t.table("members") + ".last_observed END,points=" + t.table("members") + ".points+excluded.points"
+		}
+		if _, err = tx.ExecContext(ctx, t.bind(q), seg.ID, sid, m.first, m.last, m.points); err != nil {
+			return result, err
+		}
+	}
+	for sid, i := range latest {
+		if err = t.putLatest(ctx, tx, sid, result.IngestID, i, b.Points[i]); err != nil {
 			return result, err
 		}
 	}
@@ -678,9 +722,44 @@ func (t *Telemetry) SealDue(ctx context.Context, now time.Time) (int64, error) {
 		return 0, err
 	}
 	defer release()
-	r, err := t.s.db.ExecContext(ctx, t.bind("UPDATE "+t.table("segments")+" SET state='sealed' WHERE state='open' AND (created<=? OR points>=? OR bytes>=? OR (SELECT value FROM "+t.table("progress")+" WHERE task='hot_bytes')>=?)"), now.Add(-t.cfg.SegmentDuration).UnixNano(), t.cfg.SegmentPoints, t.cfg.SegmentBytes, t.cfg.MaxHotBytes/2)
+	tx, err := t.begin(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return r.RowsAffected()
+	defer tx.Rollback()
+	// Day rollover follows the handoff clock, not the age of imported points.
+	// Historical batches in one fixed import session must accumulate normally
+	// instead of creating a new tiny extent for every migration page.
+	r, err := tx.ExecContext(ctx, t.bind("UPDATE "+t.table("segments")+" SET state='sealed' WHERE state='open' AND (created<=? OR points>=? OR bytes>=? OR created<?)"), now.Add(-t.cfg.SegmentDuration).UnixNano(), t.cfg.SegmentPoints, t.cfg.SegmentBytes, now.UTC().Truncate(24*time.Hour).UnixNano())
+	if err != nil {
+		return 0, err
+	}
+	n, err := r.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	hot, err := t.progress(ctx, tx, "hot_bytes")
+	if err != nil {
+		return 0, err
+	}
+	live, err := t.progress(ctx, tx, "live_bytes")
+	if err != nil {
+		return 0, err
+	}
+	// Under global pressure flush the largest partition, not every machine's
+	// tiny tail. The shared budget bounds SQL even with a full-day idle limit.
+	if n == 0 && hot >= max(int64(1), (t.cfg.MaxHotBytes-live)*3/4) {
+		var id string
+		err = tx.QueryRowContext(ctx, "SELECT id FROM "+t.table("segments")+" WHERE state='open' ORDER BY bytes DESC,created,id LIMIT 1").Scan(&id)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
+		}
+		if err == nil {
+			if _, err = tx.ExecContext(ctx, t.bind("UPDATE "+t.table("segments")+" SET state='sealed' WHERE id=? AND state='open'"), id); err != nil {
+				return 0, err
+			}
+			n++
+		}
+	}
+	return n, tx.Commit()
 }

@@ -24,7 +24,9 @@ func telemetryFixture(t *testing.T, dir string) (*Store, *Telemetry) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, err := s.OpenTelemetry(context.Background(), TelemetryConfig{ArchiveDirectory: filepath.Join(dir, "archive")})
+	// Fault/lifecycle fixtures explicitly use a short handoff period. Runtime
+	// defaults and sustained volume are covered by the lifecycle regression.
+	e, err := s.OpenTelemetry(context.Background(), TelemetryConfig{ArchiveDirectory: filepath.Join(dir, "archive"), SegmentDuration: 15 * time.Minute})
 	if err != nil {
 		s.Close()
 		t.Fatal(err)

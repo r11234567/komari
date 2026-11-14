@@ -57,8 +57,10 @@ func telemetryConfig(cfg *MetricStoreConfig) (metric.TelemetryConfig, error) {
 	if hot == 0 {
 		hot = 15
 	}
-	if segment == 0 {
-		segment = 15
+	if segment == 0 || segment == 15 {
+		// Retire the old quarter-hour file cadence. Shared hot capacity, per-
+		// segment bytes and observation-day rollover still trigger handoff.
+		segment = 1440
 	}
 	if budget == 0 {
 		budget = 16

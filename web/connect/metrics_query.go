@@ -350,6 +350,12 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 			return nil, connectError(connect.CodeInvalidArgument, fmtRange("unknown metric %q", metricName))
 		}
 		interval := store.CompatibleSeriesIntervalForMetric(ctx, metricName, start, time.Now().UTC(), baseInterval)
+		if telemetry := store.Telemetry(); telemetry != nil && downsample {
+			interval, err = telemetry.ChartInterval(ctx, metric.Query{MetricName: metricName, Start: start, End: end, Tags: req.Msg.Tags}, time.Now().UTC(), baseInterval)
+			if err != nil {
+				return nil, connectMetricStoreError(err)
+			}
+		}
 		queryIndex := len(queries)
 		if !downsample {
 			queryIndex = len(rawQueries)
@@ -583,6 +589,12 @@ func (s *metricsService) getPingStats(ctx context.Context, req *connect.Request[
 		interval = metric.TelemetryChartInterval(end.Sub(start), maxPoints)
 	}
 	interval = store.CompatibleSeriesIntervalForMetric(ctx, metricstore.MetricPingLatency, start, time.Now().UTC(), interval)
+	if telemetry := store.Telemetry(); telemetry != nil {
+		interval, err = telemetry.ChartInterval(ctx, metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end}, time.Now().UTC(), interval)
+		if err != nil {
+			return nil, connectMetricStoreError(err)
+		}
+	}
 	if telemetry := store.Telemetry(); telemetry != nil {
 		start, end, err = telemetry.PingWindow(start, end, interval, time.Now().UTC())
 		if err != nil {

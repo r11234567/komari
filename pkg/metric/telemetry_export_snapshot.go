@@ -174,7 +174,7 @@ func (t *Telemetry) FreezeExport(ctx context.Context, queries []Query, dir strin
 			if e != nil {
 				return out, e
 			}
-			if !info.Mode().IsRegular() || info.Size() != seg.FileBytes {
+			if !telemetryArchiveExtentValid(info, seg) {
 				return out, errors.New("snapshot archive unavailable")
 			}
 			if out.Bytes+seg.FileBytes > maxBytes {
@@ -182,7 +182,13 @@ func (t *Telemetry) FreezeExport(ctx context.Context, queries []Query, dir strin
 			}
 			// The immutable file has a server-derived name in a private archive
 			// root. Hardlinks freeze ownership without decoding or copying it.
-			if e = os.Link(filepath.Join(t.cfg.ArchiveDirectory, t.segmentPath(seg)), target); e != nil {
+			if seg.ArchiveFile != "" {
+				e = t.copyExportArchive(ctx, seg, target)
+				seg.ArchiveFile, seg.ArchiveOffset = "", 0
+				if e != nil {
+					return out, e
+				}
+			} else if e = os.Link(filepath.Join(t.cfg.ArchiveDirectory, t.segmentPath(seg)), target); e != nil {
 				if e = t.copyExportArchive(ctx, seg, target); e != nil {
 					return out, e
 				}
@@ -354,6 +360,7 @@ func (t *Telemetry) copyExportArchive(ctx context.Context, seg telemetrySegment,
 		return err
 	}
 	defer f.Close()
+	input := telemetryArchiveReader(f, seg)
 	out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
@@ -364,7 +371,7 @@ func (t *Telemetry) copyExportArchive(ctx context.Context, seg telemetrySegment,
 		if err = ctx.Err(); err != nil {
 			return err
 		}
-		n, e := f.Read(buffer)
+		n, e := input.Read(buffer)
 		if n > 0 {
 			if _, err = out.Write(buffer[:n]); err != nil {
 				return err

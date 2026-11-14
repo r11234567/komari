@@ -57,8 +57,8 @@ func TestScalarHandoffRetiresRawAndReopensCharts(t *testing.T) {
 		t.Fatal("deleted before archive")
 	}
 	scalarDrain(t, e, now)
-	if telemetryCount(t, e, "hot") != 0 || telemetryCount(t, e, "summary") != 0 {
-		t.Fatal("retained duplicate SQL input")
+	if telemetryCount(t, e, "hot") != 3 || telemetryCount(t, e, "summary") != 0 {
+		t.Fatal("live display rows lost or legacy summary retained")
 	}
 	q := scalarQuery(at, time.Minute, time.Minute, "cpu")
 	r, err := e.Chart(ctx, q, now)
@@ -331,7 +331,7 @@ func TestScalarMigrationFencesAndResumesOldStatistics(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err := s.db.QueryRow("SELECT value FROM " + e.table("progress") + " WHERE task='schema_version'").Scan(&version); err != nil || version != -9 {
+	if err := s.db.QueryRow("SELECT value FROM " + e.table("progress") + " WHERE task='schema_version'").Scan(&version); err != nil || version != -10 {
 		t.Fatal(version, err)
 	}
 	cfg.Fault = nil

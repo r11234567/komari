@@ -166,12 +166,12 @@ func telemetryExternalFixture(t *testing.T, cfg Config) (context.Context, *Telem
 	}
 	// SQLite's entire database belongs to the parent TempDir, including legacy
 	// compatibility views that the external engines do not create.
-	e, err := s.OpenTelemetry(ctx, TelemetryConfig{ArchiveDirectory: t.TempDir()})
+	e, err := s.OpenTelemetry(ctx, TelemetryConfig{ArchiveDirectory: t.TempDir(), SegmentDuration: 15 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		for _, table := range []string{"schedule", "gaps", "traffic_ingress", "identity", "erasures", "members", "work", "leases", "outbox", "summary", "hot", "series", "receipts", "segments", "progress"} {
+		for _, table := range []string{"schedule", "gaps", "traffic_ingress", "identity", "erasures", "members", "work", "leases", "outbox", "summary", "hot", "latest", "series", "receipts", "segments", "progress"} {
 			if _, err := s.db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+e.table(table)); err != nil {
 				t.Errorf("drop %s: %v", table, err)
 			}

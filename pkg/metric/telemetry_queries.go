@@ -39,9 +39,9 @@ func reserveChartMemory(ctx context.Context, points, bytes int) error {
 }
 
 func telemetryInterval(start, now time.Time, interval time.Duration) time.Duration {
-	// Output-grid compatibility is independent of unrelated retained history.
-	// The query planner resolves actual source precision for each ownership span.
-	r := 10 * time.Second
+	// A historical window ages even when its duration is unchanged. The output
+	// grid must contain complete cells from the oldest requested retention tier.
+	r := telemetryResolution(now.Sub(start))
 	interval = max(interval, r)
 	if remainder := interval % r; remainder != 0 {
 		interval += r - remainder
@@ -51,6 +51,52 @@ func telemetryInterval(start, now time.Time, interval time.Duration) time.Durati
 
 func (t *Telemetry) compatibleInterval(start, now time.Time, interval time.Duration) time.Duration {
 	return telemetryInterval(start, now, interval)
+}
+
+// ChartInterval combines the age policy with actual ownership in this query.
+// Promotion may already have merged an edge into its parent, and imported
+// stores can contain nonstandard cells. Read only the small per-series tier
+// directory and indexed existence probes, never decode/archive/scan payloads.
+func (t *Telemetry) ChartInterval(ctx context.Context, q Query, now time.Time, requested time.Duration) (time.Duration, error) {
+	name := q.MetricName
+	if name == sqliteVirtualPingLossMetric {
+		name = sqliteMergedPingLatencyMetric
+	}
+	q.MetricName = name
+	filter, args, err := t.seriesFilter(ctx, q, "s")
+	if err != nil {
+		return 0, err
+	}
+	quantum := telemetryResolution(now.Sub(q.Start))
+	if t.scalar {
+		statement := "SELECT DISTINCT d.resolution FROM " + t.table("series") + " s JOIN " + t.table("rollup_keys") + " k ON k.source_id=s.id JOIN " + t.table("rollup_due") + " d ON d.series_id=k.id WHERE s.metric=?" + filter + " AND EXISTS (SELECT 1 FROM " + t.table("rollup") + " b WHERE b.series_id=d.series_id AND b.resolution=d.resolution AND b.bucket>=? AND b.bucket<=? AND b.bucket+b.resolution>?)"
+		values := append([]any{name}, args...)
+		values = append(values, q.Start.Add(-24*time.Hour).Unix(), q.End.Unix(), q.Start.Unix())
+		rows, e := t.s.reader().QueryContext(ctx, t.bind(statement), values...)
+		if e != nil {
+			return 0, e
+		}
+		for rows.Next() {
+			var seconds int64
+			if e = rows.Scan(&seconds); e != nil {
+				break
+			}
+			quantum = telemetryLCM(quantum, time.Duration(seconds)*time.Second)
+		}
+		re := rows.Err()
+		rows.Close()
+		if e != nil {
+			return 0, e
+		}
+		if re != nil {
+			return 0, re
+		}
+	}
+	requested = max(requested, quantum)
+	if rem := requested % quantum; rem != 0 {
+		requested += quantum - rem
+	}
+	return requested, nil
 }
 
 // PingWindow returns the interval which can be answered from retained cells.

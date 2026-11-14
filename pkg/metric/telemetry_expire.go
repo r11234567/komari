@@ -67,17 +67,25 @@ func (t *Telemetry) ExpireArchiveNext(ctx context.Context, now time.Time, retent
 		return false, err
 	}
 	path := t.segmentPath(seg)
-	if err = t.root.Remove(path); err != nil && !os.IsNotExist(err) {
-		return false, err
+	var owners int64
+	if seg.ArchiveFile != "" {
+		if err = t.s.reader().QueryRowContext(ctx, t.bind("SELECT COUNT(*) FROM "+t.table("segments")+" WHERE archive_file=? AND id<>? AND state<>'expired'"), seg.ArchiveFile, id).Scan(&owners); err != nil {
+			return false, err
+		}
 	}
-	d, err := t.root.Open(filepath.Dir(path))
-	if err != nil {
-		return false, err
-	}
-	err = d.Sync()
-	d.Close()
-	if err != nil {
-		return false, err
+	if owners == 0 {
+		if err = t.root.Remove(path); err != nil && !os.IsNotExist(err) {
+			return false, err
+		}
+		d, e := t.root.Open(filepath.Dir(path))
+		if e != nil {
+			return false, e
+		}
+		e = d.Sync()
+		d.Close()
+		if e != nil {
+			return false, e
+		}
 	}
 	if err = t.fault("expire-after-remove"); err != nil {
 		return false, err

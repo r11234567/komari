@@ -149,8 +149,15 @@ func TestScalarCompletedMigrationDrainsLastShortRawSegment(t *testing.T) {
 	}
 	target := s.Telemetry()
 	defer target.Close()
-	if telemetryCount(t, target, "hot") != 0 {
-		t.Fatal("completion stranded raw input")
+	var pending int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM " + target.table("hot") + " WHERE segment_id<>''").Scan(&pending); err != nil || pending != 0 {
+		t.Fatal("completion stranded archive input", pending, err)
+	}
+	if pendingBytes, err := target.progress(ctx, s.db, "hot_bytes"); err != nil || pendingBytes != 0 {
+		t.Fatal("completion stranded archive budget", pendingBytes, err)
+	}
+	if telemetryCount(t, target, "hot") != 3 {
+		t.Fatal("migration discarded the live display window")
 	}
 	raw, err := target.ExportRawBatch(WithTelemetryEntities(ctx, []string{"node"}), []Query{{MetricName: "cpu", EntityID: "node", Start: at, End: now}})
 	if err != nil || len(raw) != 1 || len(raw[0]) != 3 {

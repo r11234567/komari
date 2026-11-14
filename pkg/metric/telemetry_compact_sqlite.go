@@ -289,7 +289,7 @@ func (t *Telemetry) compactSeriesKeys(ctx context.Context, tx *sql.Tx) error {
 	// A full hash is retained once; never truncate hashes or change canonical
 	// identity. Existing @ keys must resolve before any rewrite is attempted.
 	var invalid int
-	for _, ref := range []struct{ table, column string }{{"series", "id"}, {"hot", "series_id"}, {"summary", "series_id"}, {"members", "series_id"}, {"erasures", "series_id"}, {"gaps", "series_id"}, {"rollup_keys", "source_id"}} {
+	for _, ref := range []struct{ table, column string }{{"series", "id"}, {"hot", "series_id"}, {"latest", "series_id"}, {"summary", "series_id"}, {"members", "series_id"}, {"erasures", "series_id"}, {"gaps", "series_id"}, {"rollup_keys", "source_id"}} {
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+t.table(ref.table)+" s WHERE substr(s."+ref.column+",1,1)='@' AND NOT EXISTS (SELECT 1 FROM "+keys+" k WHERE k.id=CAST(substr(s."+ref.column+",2) AS INTEGER) AND '@'||k.id=s."+ref.column+")").Scan(&invalid); err != nil {
 			return err
 		}
@@ -300,7 +300,7 @@ func (t *Telemetry) compactSeriesKeys(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO "+keys+" (canonical) SELECT id FROM "+t.table("series")+" WHERE substr(id,1,1)<>'@' UNION SELECT series_id FROM "+t.table("erasures")+" WHERE substr(series_id,1,1)<>'@' ORDER BY 1"); err != nil {
 		return err
 	}
-	for _, table := range []string{"hot", "summary", "members", "erasures", "gaps"} {
+	for _, table := range []string{"hot", "latest", "summary", "members", "erasures", "gaps"} {
 		if _, err := tx.ExecContext(ctx, "UPDATE "+t.table(table)+" SET series_id=(SELECT '@'||k.id FROM "+keys+" k WHERE k.canonical=series_id) WHERE substr(series_id,1,1)<>'@'"); err != nil {
 			return err
 		}
@@ -328,7 +328,7 @@ func (t *Telemetry) compactStateHash(ctx context.Context, db querier) (string, e
 		h.Write(b)
 		return nil
 	}
-	for _, suffix := range []string{"definitions", "receipts", "series", "hot", "segments", "summary", "rollup_keys", "rollup", "rollup_due", "raw_gaps", "outbox", "members", "erasures", "identity", "traffic_ingress", "gaps", "progress"} {
+	for _, suffix := range []string{"definitions", "receipts", "series", "hot", "latest", "segments", "summary", "rollup_keys", "rollup", "rollup_due", "raw_gaps", "outbox", "members", "erasures", "identity", "traffic_ingress", "gaps", "progress"} {
 		name := t.table(suffix)
 		if suffix == "definitions" {
 			name = t.s.tables.definitions

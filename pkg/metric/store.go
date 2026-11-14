@@ -1658,8 +1658,7 @@ func (s *Store) Latest(ctx context.Context, metricName, entityID string, limit i
 		limit = 1
 	}
 	if t := s.Telemetry(); t != nil {
-		now := time.Now().UTC()
-		return t.ReadHot(ctx, Query{MetricName: metricName, EntityID: entityID, Start: now.Add(-t.cfg.RawWindow), End: now, Order: OrderDesc, Limit: limit}, now)
+		return t.latestRetained(ctx, metricName, entityID, time.Now().UTC().Add(time.Nanosecond), limit)
 	}
 	virtualLoss := s.sqlitePingMerged && metricName == sqliteVirtualPingLossMetric
 	if virtualLoss {
@@ -1746,11 +1745,7 @@ func (s *Store) LatestBefore(ctx context.Context, metricName, entityID string, b
 		return Point{}, false, fmt.Errorf("%w: before time is required", ErrInvalidArgument)
 	}
 	if t := s.Telemetry(); t != nil {
-		now := time.Now().UTC()
-		if before.Before(now.Add(-t.cfg.RawWindow)) {
-			return Point{}, false, ErrTelemetryCold
-		}
-		p, err := t.ReadHot(ctx, Query{MetricName: metricName, EntityID: entityID, Start: now.Add(-t.cfg.RawWindow), End: before.Add(-time.Nanosecond), Order: OrderDesc, Limit: 1}, now)
+		p, err := t.latestRetained(ctx, metricName, entityID, before, 1)
 		if err != nil || len(p) == 0 {
 			return Point{}, false, err
 		}

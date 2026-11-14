@@ -62,7 +62,7 @@ func ValidateTelemetryBackup(ctx context.Context, databasePath, archiveDirectory
 	if err = db.QueryRowContext(ctx, "SELECT value FROM "+quote(prefix+"progress")+" WHERE task='schema_version'").Scan(&version); err != nil {
 		return err
 	}
-	if version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 {
+	if version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 && version != 10 {
 		return fmt.Errorf("unsupported restored telemetry schema %d", version)
 	}
 	root, err := os.OpenRoot(archiveDirectory)
@@ -112,19 +112,30 @@ func ValidateTelemetryBackup(ctx context.Context, databasePath, archiveDirectory
 	if version >= 8 {
 		dayColumn = "archive_day"
 	}
-	rows, err = db.QueryContext(ctx, "SELECT id,checksum,file_bytes,created,"+dayColumn+" FROM "+quote(prefix+"segments")+" WHERE state IN ('archived','deleting','complete')")
+	fileColumns := "'',0"
+	if version >= 10 {
+		fileColumns = "archive_file,archive_offset"
+	}
+	rows, err = db.QueryContext(ctx, "SELECT id,checksum,file_bytes,created,"+dayColumn+","+fileColumns+" FROM "+quote(prefix+"segments")+" WHERE state IN ('archived','deleting','complete')")
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
+	expected := map[string]int64{}
 	for rows.Next() {
-		var id, hash string
-		var size, created, archiveDay int64
-		if err = rows.Scan(&id, &hash, &size, &created, &archiveDay); err != nil {
+		var id, hash, archiveFile string
+		var size, created, archiveDay, offset int64
+		if err = rows.Scan(&id, &hash, &size, &created, &archiveDay, &archiveFile, &offset); err != nil {
 			return err
 		}
 		if len(id) != 32 {
 			return fmt.Errorf("invalid restored segment identity")
+		}
+		if archiveFile != "" {
+			if len(archiveFile) != 32 || hash != "" || offset < 0 || size < 0 || offset > telemetryArchiveFileLimit-size {
+				return fmt.Errorf("invalid restored archive extent")
+			}
+			id = archiveFile
 		}
 		day := time.Unix(0, created).UTC()
 		if archiveDay != 0 {
@@ -132,17 +143,28 @@ func ValidateTelemetryBackup(ctx context.Context, databasePath, archiveDirectory
 		}
 		rel := day.Format("2006/01/02") + "/" + id + ".jsonl.zst"
 		file, ok := files[rel]
-		if !ok || file.Bytes != size || file.SHA256 != hash {
+		if !ok || (archiveFile == "" && file.Bytes != size) || file.Bytes < offset+size || file.SHA256 != hash {
 			return fmt.Errorf("telemetry manifest/catalog mismatch: %s", id)
+		}
+		expected[rel] = max(expected[rel], offset+size)
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	for rel, size := range expected {
+		file := files[rel]
+		if file.Bytes != size {
+			return fmt.Errorf("telemetry manifest extent coverage mismatch")
 		}
 		info, err := root.Lstat(filepath.FromSlash(rel))
 		if err != nil {
 			return err
 		}
 		if !info.Mode().IsRegular() || info.Size() != size {
-			return fmt.Errorf("restored archive type/size mismatch: %s", id)
+			return fmt.Errorf("restored archive type/size mismatch: %s", rel)
 		}
-		if hash == "" {
+		if file.SHA256 == "" {
 			delete(files, rel)
 			continue
 		}
@@ -156,13 +178,10 @@ func ValidateTelemetryBackup(ctx context.Context, databasePath, archiveDirectory
 		if err != nil {
 			return err
 		}
-		if n != size || hex.EncodeToString(h.Sum(nil)) != hash {
-			return fmt.Errorf("restored archive checksum mismatch: %s", id)
+		if n != size || hex.EncodeToString(h.Sum(nil)) != file.SHA256 {
+			return fmt.Errorf("restored archive checksum mismatch: %s", rel)
 		}
 		delete(files, rel)
-	}
-	if err = rows.Err(); err != nil {
-		return err
 	}
 	if len(files) != 0 {
 		return fmt.Errorf("telemetry manifest contains files absent from SQL catalog")

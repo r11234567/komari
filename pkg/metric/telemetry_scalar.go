@@ -183,13 +183,13 @@ func (t *Telemetry) createScalarSchema(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if version == 9 {
+	if version == 10 {
 		t.scalar = true
 		return nil
 	}
 	// Fence older binaries before retiring any source. A partially migrated
 	// database must be resumed by this reader, never reopened by a v7 writer.
-	if _, err := t.s.db.ExecContext(ctx, "UPDATE "+t.table("progress")+" SET value=-9 WHERE task='schema_version' AND value<>9"); err != nil {
+	if _, err := t.s.db.ExecContext(ctx, "UPDATE "+t.table("progress")+" SET value=-10 WHERE task='schema_version' AND value<>10"); err != nil {
 		return err
 	}
 	// Move one old ownership group transactionally. Removing its source in the
@@ -213,7 +213,7 @@ func (t *Telemetry) createScalarSchema(ctx context.Context) error {
 	if remaining != 0 {
 		return errors.New("legacy summary has no archive owner; migration retained for repair")
 	}
-	if _, err := t.s.db.ExecContext(ctx, "UPDATE "+t.table("progress")+" SET value=9 WHERE task='schema_version'"); err != nil {
+	if _, err := t.s.db.ExecContext(ctx, "UPDATE "+t.table("progress")+" SET value=10 WHERE task='schema_version'"); err != nil {
 		return err
 	}
 	t.scalar = true

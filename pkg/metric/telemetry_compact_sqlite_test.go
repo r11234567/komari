@@ -40,7 +40,7 @@ func compactFixture(t *testing.T) (*Store, *Telemetry, time.Time) {
 	t.Cleanup(func() { e.Close() })
 	// Recreate the previous long-key representation, then let production
 	// compaction rewrite every table. Canonical identity is never fabricated.
-	for _, table := range []string{"summary", "hot", "members", "gaps", "erasures"} {
+	for _, table := range []string{"summary", "hot", "latest", "members", "gaps", "erasures"} {
 		if _, err := s.db.Exec("UPDATE " + e.table(table) + " SET series_id=(SELECT canonical FROM " + e.table("series_keys") + " k WHERE '@'||k.id=series_id)"); err != nil {
 			t.Fatal(err)
 		}

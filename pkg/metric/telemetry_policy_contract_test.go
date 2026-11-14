@@ -13,7 +13,7 @@ func TestTelemetryPolicyPresetGridOracle(t *testing.T) {
 		interval time.Duration
 		count    int
 	}{
-		{1, 10 * time.Second, 360}, {6, time.Minute, 360}, {12, 2 * time.Minute, 360}, {24, 4 * time.Minute, 360},
+		{1, 10 * time.Second, 360}, {6, time.Minute, 360}, {12, 2 * time.Minute, 360}, {24, 5 * time.Minute, 288},
 		{168, 30 * time.Minute, 336}, {360, time.Hour, 360}, {720, 2 * time.Hour, 360}, {1080, 2 * time.Hour, 540},
 		{1440, 4 * time.Hour, 360}, {1800, 6 * time.Hour, 300}, {2160, 6 * time.Hour, 360}, {2520, 6 * time.Hour, 420},
 		{2880, 6 * time.Hour, 480}, {4320, 12 * time.Hour, 360}, {8760, 24 * time.Hour, 365},

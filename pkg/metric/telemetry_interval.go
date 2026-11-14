@@ -16,9 +16,13 @@ func TelemetryChartInterval(span time.Duration, points int) time.Duration {
 		return 10 * time.Second
 	}
 	quantum := telemetryResolution(span)
-	// First-party charts use a 600-point budget but aim at 360. Prefer a
-	// compatible finer grid over dropping a populated preset below 300 cells.
-	// Explicit smaller budgets remain hard limits. Never split a physical cell.
+	// A rolling day crosses into five-minute ownership as its oldest edge
+	// advances. Keep that grid stable instead of producing incompatible 4m cells.
+	if span >= 24*time.Hour {
+		quantum = max(quantum, 5*time.Minute)
+	}
+	// First-party charts aim at 360 where source precision permits it. Point
+	// count is secondary to complete physical cells (a day may have 288 cells).
 	if points >= 600 {
 		step := max(int64(1), (int64(span)+360*int64(quantum)-1)/(360*int64(quantum)))
 		if step > 1 && int64(span)/(step*int64(quantum)) < 300 {

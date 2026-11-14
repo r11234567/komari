@@ -12,11 +12,18 @@ import (
 // with the same input cursor. This is independent of raw/archive retention.
 // The scheduler supplies one metric and a bounded chunk, never a full DB sweep.
 func (t *Telemetry) PruneSummaries(ctx context.Context, name string, retention time.Duration, now time.Time, limit int) (int, error) {
-	if t.scalar {
-		return t.pruneScalar(ctx, name, retention, now, limit)
-	}
 	if name == "" || retention <= 0 || limit <= 0 || limit > 512 {
 		return 0, ErrInvalidArgument
+	}
+	// Last observations have the metric's lifetime too. Prune them before the
+	// rollups so catalog GC cannot keep an expired series alive indefinitely.
+	n, err := t.pruneLatest(ctx, name, now.Add(-retention), limit)
+	if err != nil || n == limit {
+		return n, err
+	}
+	if t.scalar {
+		m, err := t.pruneScalar(ctx, name, retention, now, limit-n)
+		return n + m, err
 	}
 	release, err := t.acquire(ctx)
 	if err != nil {
@@ -47,7 +54,7 @@ func (t *Telemetry) PruneSummaries(ctx context.Context, name string, retention t
 	}
 	where += ") OR (s.metric=? AND a.state='legacy' AND b.bucket+b.resolution<=?)"
 	args = append(args, name, now.Add(-retention).UnixNano())
-	args = append(args, limit)
+	args = append(args, limit-n)
 	rows, err := tx.QueryContext(ctx, t.bind("SELECT b.segment_id,b.series_id,b.resolution,b.bucket FROM "+t.table("summary")+" b JOIN "+t.table("series")+" s ON s.id=b.series_id JOIN "+t.table("segments")+" a ON a.id=b.segment_id WHERE "+where+" ORDER BY b.resolution,b.bucket,b.series_id,b.segment_id LIMIT ?"), args...)
 	if err != nil {
 		return 0, err
@@ -73,13 +80,14 @@ func (t *Telemetry) PruneSummaries(ctx context.Context, name string, retention t
 			return 0, err
 		}
 	}
-	return len(keys), tx.Commit()
+	return n + len(keys), tx.Commit()
 }
 
 type TelemetryDiagnostics struct {
 	Accepted             int64                      `json:"accepted_through"`
 	Summarized           int64                      `json:"summarized_through"`
 	HotBudgetBytes       int64                      `json:"hot_budget_bytes"`
+	LiveBudgetBytes      int64                      `json:"live_budget_bytes"`
 	OldestUndelivered    int64                      `json:"oldest_undelivered_ingest,omitempty"`
 	OldestArchivePending time.Time                  `json:"oldest_archive_pending,omitempty"`
 	HotLimitBytes        int64                      `json:"hot_limit_bytes"`
@@ -118,6 +126,9 @@ func (t *Telemetry) Diagnostics(ctx context.Context) (TelemetryDiagnostics, erro
 		return d, err
 	}
 	if d.HotBudgetBytes, err = t.progress(ctx, t.s.reader(), "hot_bytes"); err != nil {
+		return d, err
+	}
+	if d.LiveBudgetBytes, err = t.progress(ctx, t.s.reader(), "live_bytes"); err != nil {
 		return d, err
 	}
 	err = t.s.reader().QueryRowContext(ctx, "SELECT ingest_id FROM "+t.table("outbox")+" WHERE delivered=0 ORDER BY ingest_id LIMIT 1").Scan(&d.OldestUndelivered)

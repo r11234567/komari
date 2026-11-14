@@ -54,14 +54,19 @@ func (t *Telemetry) segmentPath(seg telemetrySegment) string {
 	if seg.ArchiveDay != 0 {
 		day = time.Unix(seg.ArchiveDay, 0).UTC()
 	}
-	return filepath.Join(day.Format("2006/01/02"), seg.ID+".jsonl.zst")
+	id := seg.ID
+	if seg.ArchiveFile != "" {
+		id = seg.ArchiveFile
+	}
+	return filepath.Join(day.Format("2006/01/02"), id+".jsonl.zst")
 }
 
 func (t *Telemetry) segment(ctx context.Context, q querier, id string) (telemetrySegment, error) {
 	var s telemetrySegment
-	err := q.QueryRowContext(ctx, t.bind("SELECT id,state,first_id,last_id,points,bytes,created,deleted,checksum,file_bytes,staging_owner,archive_entity,archive_day FROM "+t.table("segments")+" WHERE id=?"), id).Scan(&s.ID, &s.State, &s.First, &s.Last, &s.Points, &s.Bytes, &s.Created, &s.Deleted, &s.Hash, &s.FileBytes, &s.StagingOwner, &s.ArchiveEntity, &s.ArchiveDay)
+	err := q.QueryRowContext(ctx, t.bind("SELECT id,state,first_id,last_id,points,bytes,created,deleted,checksum,file_bytes,staging_owner,archive_entity,archive_day,archive_file,archive_offset FROM "+t.table("segments")+" WHERE id=?"), id).Scan(&s.ID, &s.State, &s.First, &s.Last, &s.Points, &s.Bytes, &s.Created, &s.Deleted, &s.Hash, &s.FileBytes, &s.StagingOwner, &s.ArchiveEntity, &s.ArchiveDay, &s.ArchiveFile, &s.ArchiveOffset)
 	// PostgreSQL pads empty CHAR fields; identities themselves are fixed hex.
 	s.StagingOwner = strings.TrimSpace(s.StagingOwner)
+	s.ArchiveFile = strings.TrimSpace(s.ArchiveFile)
 	return s, err
 }
 
@@ -92,8 +97,8 @@ func (t *Telemetry) segmentPage(ctx context.Context, seg string, ingest int64, o
 }
 
 // ArchiveNext streams one fixed segment. The writing state survives restart.
-// A file becomes readable only after close+fsync+rename+directory fsync and
-// the catalog commit. Retry rewrites only this unregistered
+// An extent becomes readable only after its file sync and catalog commit.
+// Directory sync is required only when creating a file. Retry rewrites only this unregistered
 // attempt from still-owned SQL rows, never an already published archive.
 func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 	select {
@@ -126,23 +131,26 @@ func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 	}
 	path := t.segmentPath(seg)
 	dir := filepath.Dir(path)
+	_, dirErr := t.root.Lstat(dir)
 	if err = t.root.MkdirAll(dir, 0700); err != nil {
 		return false, err
 	}
 	// Persist newly created directory entries all the way up to the volume
 	// root. Syncing only the leaf would not make its parents crash durable.
 	parent := "."
-	for _, component := range strings.Split(filepath.ToSlash(dir), "/") {
-		d, e := t.root.Open(parent)
-		if e != nil {
-			return false, e
+	if errors.Is(dirErr, os.ErrNotExist) {
+		for _, component := range strings.Split(filepath.ToSlash(dir), "/") {
+			d, e := t.root.Open(parent)
+			if e != nil {
+				return false, e
+			}
+			e = d.Sync()
+			d.Close()
+			if e != nil {
+				return false, e
+			}
+			parent = filepath.Join(parent, component)
 		}
-		e = d.Sync()
-		d.Close()
-		if e != nil {
-			return false, e
-		}
-		parent = filepath.Join(parent, component)
 	}
 	part := path + ".part." + t.owner
 	if seg.StagingOwner != "" && seg.StagingOwner != t.owner {
@@ -234,9 +242,8 @@ func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 	if err = t.fault("archive-before-sync"); err != nil {
 		return false, err
 	}
-	if err = f.Sync(); err != nil {
-		return false, err
-	}
+	// The staging file is regenerable from still-owned SQL rows. Only the
+	// appended destination must reach durable storage before catalog handoff.
 	if err = f.Close(); err != nil {
 		return false, err
 	}
@@ -244,8 +251,15 @@ func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 	seg.Hash = ""
 	seg.FileBytes = compressed.n
 	// The writer already checked input counts, every write, compressor close
-	// and file sync. Do not reread/decompress the file merely to publish it.
+	// and compressor close. Do not reread/decompress merely to publish it.
 	if err = t.fault("archive-before-rename"); err != nil {
+		return false, err
+	}
+	if err = t.renewWork(ctx, t.s.db, "archive"); err != nil {
+		return false, err
+	}
+	seg, err = t.appendArchive(ctx, seg, part)
+	if err != nil {
 		return false, err
 	}
 	tx, err := t.begin(ctx)
@@ -256,25 +270,13 @@ func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 	if err = t.renewWork(ctx, tx, "archive"); err != nil {
 		return false, err
 	}
-	if err = t.root.Rename(part, path); err != nil {
-		return false, err
-	}
-	d, e := t.root.Open(dir)
-	if e != nil {
-		return false, e
-	}
-	err = d.Sync()
-	d.Close()
-	if err != nil {
-		return false, err
-	}
 	if err = t.fault("archive-after-rename"); err != nil {
 		return false, err
 	}
 	if err = t.fault("archive-before-catalog"); err != nil {
 		return false, err
 	}
-	r, err := tx.ExecContext(ctx, t.bind("UPDATE "+t.table("segments")+" SET state='archived',checksum=?,file_bytes=? WHERE id=? AND state='writing'"), seg.Hash, seg.FileBytes, id)
+	r, err := tx.ExecContext(ctx, t.bind("UPDATE "+t.table("segments")+" SET state='archived',checksum=?,file_bytes=?,archive_file=?,archive_offset=? WHERE id=? AND state='writing'"), seg.Hash, seg.FileBytes, seg.ArchiveFile, seg.ArchiveOffset, id)
 	if err != nil {
 		return false, err
 	}
@@ -288,6 +290,9 @@ func (t *Telemetry) ArchiveNext(ctx context.Context) (bool, error) {
 	if err = tx.Commit(); err != nil {
 		return false, err
 	}
+	if err = t.root.Remove(part); err != nil {
+		return false, err
+	}
 	return true, t.fault("archive-after-catalog")
 }
 
@@ -299,7 +304,7 @@ func (t *Telemetry) visitArchivePath(ctx context.Context, seg telemetrySegment, 
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() || info.Size() != seg.FileBytes {
+	if !telemetryArchiveExtentValid(info, seg) {
 		return errors.New("archive type/length mismatch")
 	}
 	f, err := t.root.Open(path)
@@ -307,7 +312,8 @@ func (t *Telemetry) visitArchivePath(ctx context.Context, seg telemetrySegment, 
 		return err
 	}
 	defer f.Close()
-	index, err := readTelemetryArchiveIndex(f, seg)
+	input := telemetryArchiveReader(f, seg)
+	index, err := readTelemetryArchiveIndex(input, seg)
 	if err != nil {
 		return err
 	}
@@ -332,13 +338,13 @@ func (t *Telemetry) visitArchivePath(ctx context.Context, seg telemetrySegment, 
 				}
 				return nil
 			}
-			if err = t.visitArchiveStream(ctx, part, io.NewSectionReader(f, frame.Offset, frame.Bytes), callback); err != nil {
+			if err = t.visitArchiveStream(ctx, part, io.NewSectionReader(input, frame.Offset, frame.Bytes), callback); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	return t.visitArchiveStream(ctx, seg, f, visit)
+	return t.visitArchiveStream(ctx, seg, input, visit)
 }
 func (t *Telemetry) visitArchiveStream(ctx context.Context, seg telemetrySegment, input io.Reader, visit func(telemetryRecord) error) error {
 	if seg.Hash == "" {
@@ -436,6 +442,18 @@ func (t *Telemetry) DeleteArchivedChunk(ctx context.Context, now time.Time, limi
 		return 0, err
 	}
 	defer func() { release() }()
+	prune, err := t.begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	pruned, err := t.pruneLive(ctx, prune, now, limit)
+	if err != nil {
+		prune.Rollback()
+		return 0, err
+	}
+	if err = prune.Commit(); err != nil {
+		return 0, err
+	}
 	// Archive publication committed only after the completed file and directory
 	// were synced. Cleanup checks presence/length; it does not decode it again.
 	coverage, err := t.progress(ctx, t.s.reader(), "summary")
@@ -446,7 +464,7 @@ func (t *Telemetry) DeleteArchivedChunk(ctx context.Context, now time.Time, limi
 	eligible := " FROM " + t.table("segments") + " a JOIN " + t.table("receipts") + " r ON r.ingest_id=a.last_id WHERE a.state IN ('archived','deleting') AND a.last_id<=? AND r.received<=? AND NOT EXISTS (SELECT 1 FROM " + t.table("outbox") + " o WHERE o.ingest_id>=a.first_id AND o.ingest_id<=a.last_id AND o.delivered=0) AND NOT EXISTS (SELECT 1 FROM " + t.table("leases") + " l WHERE l.segment_id=a.id AND l.expires>" + fmt.Sprintf("%d", time.Now().UnixNano()) + ")"
 	err = t.s.reader().QueryRowContext(ctx, t.bind("SELECT a.id,a.state"+eligible+" ORDER BY a.created,a.id LIMIT 1"), coverage, now.UnixNano()).Scan(&candidate, &stateBefore)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
+		return pruned, nil
 	}
 	if err != nil {
 		return 0, err
@@ -479,21 +497,24 @@ func (t *Telemetry) DeleteArchivedChunk(ctx context.Context, now time.Time, limi
 	if err != nil {
 		return 0, err
 	}
-	if !info.Mode().IsRegular() || info.Size() != seg.FileBytes {
+	if !telemetryArchiveExtentValid(info, seg) {
 		return 0, errors.New("archive unavailable; retaining hot data")
 	}
-	rows, err := tx.QueryContext(ctx, t.bind("SELECT ingest_id,ordinal FROM "+t.table("hot")+" WHERE segment_id=? ORDER BY ingest_id,ordinal LIMIT ?"), id, limit)
+	rows, err := tx.QueryContext(ctx, t.bind("SELECT h.ingest_id,h.ordinal,h.observed,h.series_id,h.labels,s.metric,COALESCE(e.through_id,0),h.value FROM "+t.table("hot")+" h JOIN "+t.table("series")+" s ON s.id=h.series_id LEFT JOIN "+t.table("erasures")+" e ON e.series_id=h.series_id WHERE h.segment_id=? ORDER BY h.ingest_id,h.ordinal LIMIT ?"), id, limit)
 	if err != nil {
 		return 0, err
 	}
 	type key struct {
-		i int64
-		o int
+		i                      int64
+		o                      int
+		observed, erased       int64
+		series, labels, metric string
+		value                  float64
 	}
 	var keys []key
 	for rows.Next() {
 		var k key
-		if err = rows.Scan(&k.i, &k.o); err != nil {
+		if err = rows.Scan(&k.i, &k.o, &k.observed, &k.series, &k.labels, &k.metric, &k.erased, &k.value); err != nil {
 			break
 		}
 		keys = append(keys, k)
@@ -506,9 +527,41 @@ func (t *Telemetry) DeleteArchivedChunk(ctx context.Context, now time.Time, limi
 	if readErr != nil {
 		return 0, readErr
 	}
+	var retained int64
+	lastBySeries := map[string]key{}
 	for _, k := range keys {
-		if _, err = tx.ExecContext(ctx, t.bind("DELETE FROM "+t.table("hot")+" WHERE ingest_id=? AND ordinal=? AND segment_id=?"), k.i, k.o, id); err != nil {
+		if telemetryLiveMetric(k.metric) && k.i > k.erased {
+			prior, ok := lastBySeries[k.series]
+			if !ok || k.observed > prior.observed || k.observed == prior.observed && (k.i > prior.i || k.i == prior.i && k.o > prior.o) {
+				lastBySeries[k.series] = k
+			}
+		}
+		statement := "DELETE FROM " + t.table("hot") + " WHERE ingest_id=? AND ordinal=? AND segment_id=?"
+		if telemetryLiveMetric(k.metric) && k.observed >= now.Add(-t.cfg.RawWindow).UnixNano() && k.i > k.erased {
+			statement = "UPDATE " + t.table("hot") + " SET segment_id='' WHERE ingest_id=? AND ordinal=? AND segment_id=?"
+			retained += telemetryLiveBytes(k.series, k.labels)
+		}
+		if _, err = tx.ExecContext(ctx, t.bind(statement), k.i, k.o, id); err != nil {
 			return 0, err
+		}
+	}
+	// Also seeds snapshots when handing off rows accepted by a pre-v10 writer.
+	for sid, k := range lastBySeries {
+		p := Point{MetricName: k.metric, Timestamp: time.Unix(0, k.observed), Value: k.value}
+		if err = json.Unmarshal([]byte(k.labels), &p.Labels); err != nil {
+			return 0, err
+		}
+		if err = t.putLatest(ctx, tx, sid, k.i, k.o, p); err != nil {
+			return 0, err
+		}
+	}
+	if retained > 0 {
+		live, e := t.progress(ctx, tx, "live_bytes")
+		if e != nil {
+			return 0, e
+		}
+		if e = t.advance(ctx, tx, "live_bytes", live, live+retained); e != nil {
+			return 0, e
 		}
 	}
 	state := "deleting"

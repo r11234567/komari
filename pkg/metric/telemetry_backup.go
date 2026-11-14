@@ -134,6 +134,7 @@ func (t *Telemetry) BackupBundleAfterSnapshot(ctx context.Context, databasePath,
 	first := true
 	// Page the catalog, too: archive history must not be an in-memory slice.
 	after := ""
+	copied := map[string]bool{}
 	for {
 		rows, e := snapshot.QueryContext(ctx, t.bind("SELECT id FROM "+t.table("segments")+" WHERE id>? AND state IN ('archived','deleting','complete') ORDER BY id LIMIT 128"), after)
 		if e != nil {
@@ -167,11 +168,23 @@ func (t *Telemetry) BackupBundleAfterSnapshot(ctx context.Context, databasePath,
 				return e
 			}
 			rel := t.segmentPath(seg)
+			if copied[rel] {
+				continue
+			}
+			if len(copied) >= 100000 {
+				return ErrTelemetryBackpressure
+			}
+			if seg.ArchiveFile != "" {
+				if e = snapshot.QueryRowContext(ctx, t.bind("SELECT COALESCE(MAX(archive_offset+file_bytes),0) FROM "+t.table("segments")+" WHERE archive_file=? AND state IN ('archived','deleting','complete')"), seg.ArchiveFile).Scan(&seg.FileBytes); e != nil {
+					return e
+				}
+				seg.ArchiveOffset = 0
+			}
 			info, e := t.root.Lstat(rel)
 			if e != nil {
 				return e
 			}
-			if !info.Mode().IsRegular() || info.Size() != seg.FileBytes {
+			if !telemetryArchiveExtentValid(info, seg) {
 				return fmt.Errorf("backup archive type/size mismatch: %s", id)
 			}
 			src, e := t.root.Open(rel)
@@ -194,7 +207,7 @@ func (t *Telemetry) BackupBundleAfterSnapshot(ctx context.Context, databasePath,
 			if seg.Hash != "" {
 				output = io.MultiWriter(out, h)
 			}
-			n, e := io.Copy(output, &telemetryContextReader{ctx: ctx, r: src})
+			n, e := io.Copy(output, &telemetryContextReader{ctx: ctx, r: telemetryArchiveReader(src, seg)})
 			src.Close()
 			if e == nil {
 				e = out.Sync()
@@ -221,6 +234,7 @@ func (t *Telemetry) BackupBundleAfterSnapshot(ctx context.Context, databasePath,
 			if err = encoder.Encode(telemetryBackupFile{Path: filepath.ToSlash(rel), SHA256: hash, Bytes: n}); err != nil {
 				return err
 			}
+			copied[rel] = true
 			if err = t.renewWork(ctx, t.s.db, "archive"); err != nil {
 				return err
 			}

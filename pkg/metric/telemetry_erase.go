@@ -83,6 +83,10 @@ func (t *Telemetry) EraseSeries(ctx context.Context, q Query) (int64, error) {
 			return total, e
 		}
 		for _, id := range ids {
+			if _, e = tx.ExecContext(ctx, t.bind("DELETE FROM "+t.table("latest")+" WHERE series_id=?"), id); e != nil {
+				tx.Rollback()
+				return total, e
+			}
 			if t.scalar {
 				for _, table := range []string{"rollup", "rollup_due", "raw_gaps"} {
 					if _, e = tx.ExecContext(ctx, t.bind("DELETE FROM "+t.table(table)+" WHERE series_id IN (SELECT id FROM "+t.table("rollup_keys")+" WHERE source_id=?)"), id); e != nil {

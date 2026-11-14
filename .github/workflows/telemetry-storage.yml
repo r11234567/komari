@@ -30,6 +30,10 @@ jobs:
         run: bash scripts/ci/run-audit-check.sh telemetry-curve-fixture go test -race -count=1 -timeout=10m ./scripts/ci/migration-fixture -run '^TestSyntheticMigrationCurveFixture$' -v
       - name: Build separate archive measurement process
         run: go test -c ./pkg/metric -o /var/tmp/komari-metric-resource.test
+      - name: Sustained online lifecycle with live-window and disk regression
+        env:
+          KOMARI_TELEMETRY_SUSTAINED: '1'
+        run: bash scripts/ci/run-audit-check.sh telemetry-sustained go test -count=1 -timeout=8m ./pkg/metric -run '^TestTelemetrySustainedLifecycle$' -v
       - name: Isolated decoder CPU and process RSS with enforced limits
         run: sudo -n python3 scripts/ci/telemetry-independent-resources.py --binary /var/tmp/komari-metric-resource.test --output ci-artifacts/independent/archive
       - name: Decoded chart budgets under high series cardinality in a fresh bounded process

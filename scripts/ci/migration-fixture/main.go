@@ -5,6 +5,7 @@ package main
 import (
 	"archive/zip"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -65,6 +66,22 @@ func run() error {
 		if ce != nil {
 			return ce
 		}
+	}
+	// The installation test deliberately uses a one-minute online window to
+	// exercise archive retirement quickly. This fixture tests the default live
+	// contract after migration instead, including a full 14.5-minute reload.
+	metadata, err := sql.Open("sqlite3", filepath.Join(dir, "komari.db"))
+	if err != nil {
+		return err
+	}
+	for key, value := range map[string]string{"metric_hot_window_minutes": "15", "metric_archive_segment_minutes": "1440"} {
+		if _, err = metadata.Exec("INSERT INTO configs (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, value); err != nil {
+			metadata.Close()
+			return err
+		}
+	}
+	if err = metadata.Close(); err != nil {
+		return err
 	}
 	var scope migrationScope
 	data, err := os.ReadFile(filepath.Join(root, "qualification-scope.json"))
