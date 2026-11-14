@@ -36,7 +36,7 @@ func TestTelemetryPolicyPresetGridOracle(t *testing.T) {
 	}
 }
 
-func TestTelemetryPolicyPromotionDueAndHotRetentionAreIndependent(t *testing.T) {
+func TestTelemetryPolicyPromotionSurvivesImmediateRawHandoff(t *testing.T) {
 	_, e := telemetryFixture(t, "")
 	ctx := context.Background()
 	at := time.Now().UTC().Truncate(10 * time.Second)
@@ -60,14 +60,18 @@ func TestTelemetryPolicyPromotionDueAndHotRetentionAreIndependent(t *testing.T) 
 			break
 		}
 	}
-	if n, err := e.DeleteArchivedChunk(ctx, at.Add(23*time.Hour), 512); err != nil || n != 0 {
-		t.Fatal("hot safety retention lost", n, err)
+	if n, err := e.DeleteArchivedChunk(ctx, at.Add(time.Hour), 512); err != nil || n != 2 {
+		t.Fatal("retired setting kept archived raw SQL", n, err)
 	}
 	q := Query{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(time.Minute)}
 	if _, err := e.ReadHot(ctx, q, at.Add(23*time.Hour)); err == nil {
 		t.Fatal("one-day safety rows enabled unbounded online raw reads")
 	}
-	if n, err := e.DeleteArchivedChunk(ctx, at.Add(24*time.Hour), 512); err != nil || n != 2 {
-		t.Fatal("hot rows did not retire at deadline", n, err)
+	if delay, err := e.NextSummaryPromotion(ctx, at.Add(30*time.Minute)); err != nil || delay != 30*time.Minute+10*time.Second {
+		t.Fatal("raw handoff changed chart promotion deadline", delay, err)
+	}
+	chart, err := e.Chart(ctx, AggregateQuery{Query: q, Interval: time.Minute, Aggregation: AggAvg}, at.Add(30*time.Minute))
+	if err != nil || len(chart.Points) != 1 || chart.Points[0].Count != 2 || chart.Points[0].Value != 5 {
+		t.Fatal("chart changed after raw handoff", chart.Points, err)
 	}
 }

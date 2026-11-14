@@ -37,6 +37,13 @@ func TestSyntheticMigrationCurveFixture(t *testing.T) {
 	if err = s.EnableTelemetry(ctx, metric.TelemetryConfig{ArchiveDirectory: filepath.Join(root, "archive"), RawRetention: 24 * time.Hour}); err != nil {
 		t.Fatal(err)
 	}
+	diagnostics, err := s.Telemetry().Diagnostics(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diagnostics.HotBudgetBytes != 0 || diagnostics.HotLimitBytes != 16<<20 {
+		t.Fatalf("migration retained archived raw SQL or changed the default budget: %+v", diagnostics)
+	}
 	var source struct {
 		CPU     []metric.Point `json:"cpu_observations"`
 		Ping    []metric.Point `json:"ping_observations"`
@@ -61,6 +68,11 @@ func TestSyntheticMigrationCurveFixture(t *testing.T) {
 			var selected []metric.Point
 			for _, p := range raw {
 				if !p.Timestamp.Before(start) && !p.Timestamp.After(now) {
+					// Negative Ping observations are failed attempts, not latency
+					// samples. Match the independent browser oracle's valid average.
+					if p.MetricName == metricstore.MetricPingLatency && p.Value < 0 {
+						continue
+					}
 					selected = append(selected, p)
 				}
 			}

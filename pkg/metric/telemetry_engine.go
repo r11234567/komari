@@ -32,10 +32,9 @@ type TelemetryConfig struct {
 	SegmentPoints    int64
 	SegmentBytes     int64
 	RawWindow        time.Duration
-	// RawRetention is a compatibility field for offline callers. Runtime does
-	// not retain archived raw rows: charts own their scalar rollups, and CSV
-	// reads the immutable archive. A zero value retires raw input immediately
-	// after archive, summary and accounting handoff have committed.
+	// RawRetention is ignored and retained only for source compatibility.
+	// Charts own their scalar rollups and CSV reads the immutable archive;
+	// archived raw SQL rows retire after summary/accounting handoff commits.
 	RawRetention time.Duration
 	MaxLateness  time.Duration
 	MaxHotBytes  int64
@@ -46,6 +45,7 @@ type TelemetryConfig struct {
 }
 
 func (c TelemetryConfig) defaults() TelemetryConfig {
+	c.RawRetention = 0
 	if c.SegmentDuration == 0 {
 		c.SegmentDuration = 15 * time.Minute
 	}

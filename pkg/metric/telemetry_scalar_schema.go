@@ -28,10 +28,10 @@ func (t *Telemetry) simplifyScalarSchema(ctx context.Context) error {
 	if t.s.cfg.Driver == DriverSQLite {
 		suffix = " WITHOUT ROWID"
 	}
-	if _, err = tx.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS "+name+" (series_id BIGINT NOT NULL,resolution INTEGER NOT NULL,bucket BIGINT NOT NULL,n BIGINT NOT NULL,loss BIGINT NOT NULL,total DOUBLE PRECISION NOT NULL,minimum DOUBLE PRECISION NOT NULL,maximum DOUBLE PRECISION NOT NULL,last_value DOUBLE PRECISION NOT NULL,first_offset BIGINT NOT NULL,last_offset BIGINT NOT NULL,PRIMARY KEY(series_id,resolution,bucket))"+suffix); err != nil {
+	if _, err = tx.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS "+name+" (series_id BIGINT NOT NULL,resolution INTEGER NOT NULL,bucket BIGINT NOT NULL,n BIGINT NOT NULL,loss BIGINT NOT NULL,total DOUBLE PRECISION NOT NULL,minimum DOUBLE PRECISION NOT NULL,maximum DOUBLE PRECISION NOT NULL,"+quoteMaintenanceIdentifier(t.s.cfg.Driver, "last_value")+" DOUBLE PRECISION NOT NULL,first_offset BIGINT NOT NULL,last_offset BIGINT NOT NULL,PRIMARY KEY(series_id,resolution,bucket))"+suffix); err != nil {
 		return err
 	}
-	statement := "INSERT INTO " + name + " (series_id,resolution,bucket," + scalarStatColumns + ") SELECT series_id,resolution,bucket,n,loss,total,minimum,maximum,last_value,first_ns-bucket*1000000000,last_ns-bucket*1000000000 FROM " + t.table("rollup")
+	statement := "INSERT INTO " + name + " (series_id,resolution,bucket," + t.scalarColumns() + ") SELECT series_id,resolution,bucket,n,loss,total,minimum,maximum," + quoteMaintenanceIdentifier(t.s.cfg.Driver, "last_value") + ",first_ns-bucket*1000000000,last_ns-bucket*1000000000 FROM " + t.table("rollup")
 	if t.s.cfg.Driver == DriverMySQL {
 		statement += " ON DUPLICATE KEY UPDATE n=VALUES(n)"
 	}

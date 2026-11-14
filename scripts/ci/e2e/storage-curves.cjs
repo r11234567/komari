@@ -29,7 +29,7 @@ async function verifyStorageCurves({ context, page, root, artifacts, base, agent
       expect(points, `${metric}/${window.hours}h`).toHaveLength(expected.length);
       for (let i=0; i<points.length; i++) {
         expect(new Date(points[i].observedAt).getTime()).toBe(new Date(expected[i].bucket).getTime());
-        expect(Number(points[i].sampleCount)).toBe(expected[i].count);
+        expect(Number(points[i].sampleCount), `${metric}/${window.hours}h/${expected[i].bucket}`).toBe(expected[i].count);
         expect(points[i]).toHaveProperty('value');
         expect(Number(points[i].value || 0)).toBeCloseTo(expected[i].value, 7);
         expect(points[i].coverage).toBe('complete');
@@ -47,7 +47,7 @@ async function verifyStorageCurves({ context, page, root, artifacts, base, agent
     const label = hours < 24 ? new RegExp(`^${hours}\\s*hours?$`,'i') : new RegExp(`^${hours/24}\\s*days?$`,'i');
     const radio = chart.getByRole('radio',{name:label});
     const custom = await radio.count() === 0;
-    if (!custom && await radio.isChecked()) await chart.getByRole('radio',{name:/^10\s*minutes?$/i}).click();
+    if (!custom && await radio.isChecked()) await chart.getByRole('radio',{name:/real.?time/i}).click();
     if (custom) {
       await chart.getByRole('radio',{name:/custom range/i}).click();
       const end = new Date(Math.floor(Date.now()/60_000)*60_000);
@@ -60,7 +60,7 @@ async function verifyStorageCurves({ context, page, root, artifacts, base, agent
       if (!new URL(r.url()).pathname.endsWith('/QueryMetrics') || r.status()!==200) return false;
       if (!r.request().headers()['content-type']?.includes('application/proto')) return false;
       const q = decodeMetricsRequest(r.request().postDataBuffer());
-      return q.agentIds.includes(agentId) && q.metrics.includes('cpu.usage') && q.maxPoints===700 && Math.abs(new Date(q.endTime)-new Date(q.startTime)-hours*3600_000)<5;
+      return q.agentIds.includes(agentId) && q.metrics.includes('cpu.usage') && q.maxPoints===600 && Math.abs(new Date(q.endTime)-new Date(q.startTime)-hours*3600_000)<5;
     });
     if (custom) await chart.getByRole('button',{name:/^query$/i}).click(); else await radio.click();
     const actual = await pending, body = decodeMetricsResponse(await actual.body());

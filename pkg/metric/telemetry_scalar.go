@@ -17,6 +17,12 @@ import (
 
 const scalarStatColumns = "n,loss,total,minimum,maximum,last_value,first_offset,last_offset"
 
+func (t *Telemetry) scalarColumns() string {
+	// LAST_VALUE is reserved by MySQL 8. Keep the existing column and quote it
+	// consistently in DDL, reads and upserts without changing stored schemas.
+	return strings.ReplaceAll(scalarStatColumns, "last_value", quoteMaintenanceIdentifier(t.s.cfg.Driver, "last_value"))
+}
+
 type scalarCell struct {
 	series, resolution, bucket int64 // seconds, except the observed bounds
 	stats                      telemetryStats
@@ -107,7 +113,7 @@ func (t *Telemetry) putScalar(ctx context.Context, tx *sql.Tx, c scalarCell) err
 		return nil
 	}
 	var prior telemetryStats
-	err := tx.QueryRowContext(ctx, t.bind("SELECT "+scalarStatColumns+" FROM "+t.table("rollup")+" WHERE series_id=? AND resolution=? AND bucket=?"), c.series, c.resolution, c.bucket).Scan(scalarScan(&prior)...)
+	err := tx.QueryRowContext(ctx, t.bind("SELECT "+t.scalarColumns()+" FROM "+t.table("rollup")+" WHERE series_id=? AND resolution=? AND bucket=?"), c.series, c.resolution, c.bucket).Scan(scalarScan(&prior)...)
 	if err == nil {
 		decodeScalarStats(&prior, c.bucket)
 		mergeScalarStats(&prior, c.stats)
@@ -116,9 +122,10 @@ func (t *Telemetry) putScalar(ctx context.Context, tx *sql.Tx, c scalarCell) err
 		return err
 	}
 	args := append([]any{c.series, c.resolution, c.bucket}, scalarArgs(c.stats, c.bucket)...)
-	statement := "INSERT INTO " + t.table("rollup") + " (series_id,resolution,bucket," + scalarStatColumns + ") VALUES (" + strings.TrimSuffix(strings.Repeat("?,", len(args)), ",") + ")"
+	statement := "INSERT INTO " + t.table("rollup") + " (series_id,resolution,bucket," + t.scalarColumns() + ") VALUES (" + strings.TrimSuffix(strings.Repeat("?,", len(args)), ",") + ")"
 	var assignments []string
 	for _, column := range strings.Split(scalarStatColumns, ",") {
+		column = quoteMaintenanceIdentifier(t.s.cfg.Driver, column)
 		value := "excluded." + column
 		if t.s.cfg.Driver == DriverMySQL {
 			value = "VALUES(" + column + ")"
@@ -158,7 +165,7 @@ func (t *Telemetry) createScalarSchema(ctx context.Context) error {
 	}
 	for _, statement := range []string{
 		"CREATE TABLE IF NOT EXISTS " + t.table("rollup_keys") + " (id BIGINT PRIMARY KEY,source_id VARCHAR(64) NOT NULL UNIQUE)" + suffix,
-		"CREATE TABLE IF NOT EXISTS " + t.table("rollup") + " (series_id BIGINT NOT NULL,resolution INTEGER NOT NULL,bucket BIGINT NOT NULL,n BIGINT NOT NULL,loss BIGINT NOT NULL,total DOUBLE PRECISION NOT NULL,minimum DOUBLE PRECISION NOT NULL,maximum DOUBLE PRECISION NOT NULL,last_value DOUBLE PRECISION NOT NULL,first_offset BIGINT NOT NULL,last_offset BIGINT NOT NULL,PRIMARY KEY(series_id,resolution,bucket))" + suffix,
+		"CREATE TABLE IF NOT EXISTS " + t.table("rollup") + " (series_id BIGINT NOT NULL,resolution INTEGER NOT NULL,bucket BIGINT NOT NULL,n BIGINT NOT NULL,loss BIGINT NOT NULL,total DOUBLE PRECISION NOT NULL,minimum DOUBLE PRECISION NOT NULL,maximum DOUBLE PRECISION NOT NULL," + quoteMaintenanceIdentifier(t.s.cfg.Driver, "last_value") + " DOUBLE PRECISION NOT NULL,first_offset BIGINT NOT NULL,last_offset BIGINT NOT NULL,PRIMARY KEY(series_id,resolution,bucket))" + suffix,
 		"CREATE TABLE IF NOT EXISTS " + t.table("rollup_due") + " (series_id BIGINT NOT NULL,resolution INTEGER NOT NULL,bucket BIGINT NOT NULL,PRIMARY KEY(series_id,resolution))" + suffix,
 		"CREATE TABLE IF NOT EXISTS " + t.table("raw_gaps") + " (series_id BIGINT NOT NULL,first_ns BIGINT NOT NULL,last_ns BIGINT NOT NULL,PRIMARY KEY(series_id,first_ns))" + suffix,
 	} {
@@ -446,7 +453,7 @@ func (t *Telemetry) promoteScalar(ctx context.Context, now time.Time, limit int)
 		if target <= r {
 			continue
 		}
-		rows, err = tx.QueryContext(ctx, t.bind("SELECT bucket,"+scalarStatColumns+" FROM "+t.table("rollup")+" WHERE series_id=? AND resolution=? ORDER BY bucket LIMIT ?"), d.series, d.resolution, limit-done)
+		rows, err = tx.QueryContext(ctx, t.bind("SELECT bucket,"+t.scalarColumns()+" FROM "+t.table("rollup")+" WHERE series_id=? AND resolution=? ORDER BY bucket LIMIT ?"), d.series, d.resolution, limit-done)
 		if err != nil {
 			return 0, err
 		}
@@ -606,7 +613,7 @@ func (t *Telemetry) aggregateScalar(ctx context.Context, q AggregateQuery, now t
 	if err != nil {
 		return out, err
 	}
-	statement := "SELECT b.resolution,b.bucket," + "b." + strings.ReplaceAll(scalarStatColumns, ",", ",b.") + ",s.metric,s.entity,s.tags FROM " + t.table("series") + " s JOIN " + t.table("rollup_keys") + " k ON k.source_id=s.id JOIN " + t.table("rollup_due") + " d ON d.series_id=k.id JOIN " + t.table("rollup") + " b ON b.series_id=d.series_id AND b.resolution=d.resolution WHERE s.metric=?" + filter + " AND b.bucket>=? AND b.bucket<=? AND b.bucket+b.resolution>? ORDER BY b.series_id,b.resolution,b.bucket"
+	statement := "SELECT b.resolution,b.bucket," + "b." + strings.ReplaceAll(t.scalarColumns(), ",", ",b.") + ",s.metric,s.entity,s.tags FROM " + t.table("series") + " s JOIN " + t.table("rollup_keys") + " k ON k.source_id=s.id JOIN " + t.table("rollup_due") + " d ON d.series_id=k.id JOIN " + t.table("rollup") + " b ON b.series_id=d.series_id AND b.resolution=d.resolution WHERE s.metric=?" + filter + " AND b.bucket>=? AND b.bucket<=? AND b.bucket+b.resolution>? ORDER BY b.series_id,b.resolution,b.bucket"
 	queryArgs := append([]any{q.MetricName}, args...)
 	queryArgs = append(queryArgs, q.Start.Add(-24*time.Hour).Unix(), q.End.Unix(), q.Start.Unix())
 	rows, err := tx.QueryContext(ctx, t.bind(statement), queryArgs...)

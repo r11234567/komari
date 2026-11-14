@@ -17,6 +17,9 @@ function startPanel(directory){execFileSync('sudo',['systemd-run','--unit=komari
 function startWorker(directory=path.join(root,'panel')){execFileSync('sudo',['systemd-run','--unit=komari-e2e-export','--collect','--slice=komari-e2e.slice',`--property=User=${process.env.KOMARI_E2E_USER || process.env.USER}`,`--property=WorkingDirectory=${directory}`,'--property=CPUQuota=4%','--property=CPUQuotaPeriodSec=100ms','--property=MemoryMax=128M','--property=MemorySwapMax=0','--setenv=GOMEMLIMIT=90MiB','--setenv=GOMAXPROCS=1',path.join(root,'bin/komari'),'export-worker','--queue',path.join(directory,'data/exports-v2'),`--instance-cgroup=/sys/fs/cgroup${execFileSync('systemctl',['show','komari-e2e-panel.service','--property=ControlGroup','--value'],{encoding:'utf8'}).trim()}`],{timeout:30000});}
 let browser,context,locker;
 async function run(){
+ // This oracle describes a closed synthetic population. The migration panel
+ // reuses the enrolled Agent's identity, so stop its live reports first.
+ system('stop','komari-e2e.service');
  if(skipCSV)system('stop','komari-e2e-panel.service');
  else system('stop','komari-e2e-export.service','komari-e2e-panel.service');
  const marker=path.join(root,'migration-lock-ready'),release=path.join(root,'migration-lock-release');
@@ -178,5 +181,5 @@ print(json.dumps({'source_rows':source.execute('SELECT COUNT(*) FROM metric_poin
 run().catch(async e=>{console.error(e);process.exitCode=1;fs.writeFileSync(path.join(artifacts,'storage-upgrade-error.txt'),e.stack||String(e));if(context)for(const page of context.pages())await page.screenshot({path:path.join(artifacts,'storage-upgrade-error.png'),fullPage:true}).catch(()=>{});}).finally(async()=>{
  if(locker&&locker.exitCode===null)locker.kill();if(context){await context.tracing.stop({path:path.join(artifacts,'storage-upgrade-trace.zip')});await context.close();}if(browser)await browser.close();
  execFileSync('sudo',['journalctl','-u','komari-e2e-panel.service','--no-pager','-o','short-iso'],{stdio:['ignore',fs.openSync(path.join(artifacts,'storage-upgrade-server.log'),'w'),'inherit']});
- system('stop','komari-e2e-panel.service');startPanel(path.join(root,'panel'));if(!skipCSV)startWorker();
+ system('stop','komari-e2e-panel.service');startPanel(path.join(root,'panel'));if(!skipCSV)startWorker();system('start','komari-e2e.service');
 });
