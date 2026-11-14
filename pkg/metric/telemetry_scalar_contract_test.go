@@ -187,4 +187,5 @@ func testScalarExternalBoundary(t *testing.T, e *Telemetry) {
 	if err != nil || len(r.Gaps) != 0 || len(r.Points) != 1 || r.Points[0].Count != 2 || r.Points[0].Value != 5 {
 		t.Fatal(r, err)
 	}
+	testScalarRecentExternalBoundary(t, e)
 }

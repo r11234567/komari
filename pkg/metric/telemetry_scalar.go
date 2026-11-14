@@ -613,7 +613,7 @@ func (t *Telemetry) aggregateScalar(ctx context.Context, q AggregateQuery, now t
 	if err != nil {
 		return out, err
 	}
-	statement := "SELECT b.resolution,b.bucket," + "b." + strings.ReplaceAll(t.scalarColumns(), ",", ",b.") + ",s.metric,s.entity,s.tags FROM " + t.table("series") + " s JOIN " + t.table("rollup_keys") + " k ON k.source_id=s.id JOIN " + t.table("rollup_due") + " d ON d.series_id=k.id JOIN " + t.table("rollup") + " b ON b.series_id=d.series_id AND b.resolution=d.resolution WHERE s.metric=?" + filter + " AND b.bucket>=? AND b.bucket<=? AND b.bucket+b.resolution>? ORDER BY b.series_id,b.resolution,b.bucket"
+	statement := "SELECT s.id,b.series_id,b.resolution,b.bucket," + "b." + strings.ReplaceAll(t.scalarColumns(), ",", ",b.") + ",s.metric,s.entity,s.tags FROM " + t.table("series") + " s JOIN " + t.table("rollup_keys") + " k ON k.source_id=s.id JOIN " + t.table("rollup_due") + " d ON d.series_id=k.id JOIN " + t.table("rollup") + " b ON b.series_id=d.series_id AND b.resolution=d.resolution WHERE s.metric=?" + filter + " AND b.bucket>=? AND b.bucket<=? AND b.bucket+b.resolution>? ORDER BY b.series_id,b.resolution,b.bucket"
 	queryArgs := append([]any{q.MetricName}, args...)
 	queryArgs = append(queryArgs, q.Start.Add(-24*time.Hour).Unix(), q.End.Unix(), q.Start.Unix())
 	rows, err := tx.QueryContext(ctx, t.bind(statement), queryArgs...)
@@ -648,6 +648,10 @@ func (t *Telemetry) aggregateScalar(ctx context.Context, q AggregateQuery, now t
 		return nil
 	}
 	card, _ := ctx.Value(telemetryStatisticsCardKey{}).(bool)
+	crossesBoundary := func(st telemetryStats) bool {
+		first, last := time.Unix(0, st.FirstNano), time.Unix(0, st.LastNano)
+		return first.Before(q.Start) || last.After(q.End) || (!card && !alignTime(first, q.Interval).Equal(alignTime(last, q.Interval)))
+	}
 	add := func(st telemetryStats, name, entity string, tags map[string]string, resolution time.Duration) error {
 		if st.Attempts == 0 {
 			return nil
@@ -659,7 +663,7 @@ func (t *Telemetry) aggregateScalar(ctx context.Context, q AggregateQuery, now t
 		// Sparse coarse buckets can be answered exactly when every retained
 		// observation fits one output bucket. Never split a population which
 		// actually crosses the requested grid or window.
-		if first.Before(q.Start) || last.After(q.End) || (!card && !alignTime(first, q.Interval).Equal(alignTime(last, q.Interval))) {
+		if crossesBoundary(st) {
 			out.BoundaryAdjusted = true
 			if e := reserveChartMemory(ctx, 0, 384); e != nil {
 				return e
@@ -683,16 +687,27 @@ func (t *Telemetry) aggregateScalar(ctx context.Context, q AggregateQuery, now t
 		reason := "scalar rollup"
 		if resolution == 0 {
 			reason = "unsummarized hot tail"
+			if st.LastIngest <= out.AccountedThrough {
+				reason = "retained hot boundary"
+			}
 		}
 		return span(sources, name, entity, tags, first, last.Add(time.Nanosecond), resolution, reason)
 	}
 	lastTags := ""
 	var tags map[string]string
+	type boundaryCell struct {
+		source, name, entity string
+		tags                 map[string]string
+		cell                 scalarCell
+	}
+	var boundaries []boundaryCell
+	boundaryBytes := 0
+	defer func() { releaseChartMemory(ctx, boundaryBytes) }()
 	for rows.Next() {
 		var st telemetryStats
-		var resolution, bucket int64
-		var name, entity, raw string
-		scan := append([]any{&resolution, &bucket}, scalarScan(&st)...)
+		var series, resolution, bucket int64
+		var source, name, entity, raw string
+		scan := append([]any{&source, &series, &resolution, &bucket}, scalarScan(&st)...)
 		scan = append(scan, &name, &entity, &raw)
 		if err = rows.Scan(scan...); err != nil {
 			break
@@ -706,6 +721,14 @@ func (t *Telemetry) aggregateScalar(ctx context.Context, q AggregateQuery, now t
 			tags = parsed
 			lastTags = raw
 		}
+		if chart && st.LastNano >= q.Start.UnixNano() && st.FirstNano <= q.End.UnixNano() && crossesBoundary(st) {
+			if err = reserveChartMemory(ctx, 0, 512); err != nil {
+				break
+			}
+			boundaryBytes += 512
+			boundaries = append(boundaries, boundaryCell{source, name, entity, tags, scalarCell{series, resolution, bucket, st}})
+			continue
+		}
 		if err = add(st, name, entity, tags, time.Duration(resolution)*time.Second); err != nil {
 			break
 		}
@@ -718,17 +741,41 @@ func (t *Telemetry) aggregateScalar(ctx context.Context, q AggregateQuery, now t
 	if readErr != nil {
 		return out, readErr
 	}
+	// Close the rollup cursor before querying its boundaries: real SQL drivers
+	// cannot run a second statement on the same transaction's open cursor.
+	hotRead := 0
+	for _, boundary := range boundaries {
+		points, e := t.scalarHotBoundary(ctx, tx, boundary.source, boundary.name, boundary.cell, out.AccountedThrough, now, &hotRead)
+		if e != nil {
+			return out, e
+		}
+		if points == nil {
+			if err = add(boundary.cell.stats, boundary.name, boundary.entity, boundary.tags, time.Duration(boundary.cell.resolution)*time.Second); err != nil {
+				return out, err
+			}
+			continue
+		}
+		for _, point := range points {
+			if err = add(point, boundary.name, boundary.entity, boundary.tags, 0); err != nil {
+				break
+			}
+		}
+		releaseChartMemory(ctx, 256*len(points))
+		if err != nil {
+			return out, err
+		}
+	}
 	if chart {
-		statement = "SELECT s.metric,s.entity,s.tags,h.observed,h.value,h.ingest_id,h.ordinal FROM " + t.table("hot") + " h JOIN " + t.table("series") + " s ON s.id=h.series_id LEFT JOIN " + t.table("erasures") + " e ON e.series_id=s.id WHERE s.metric=? AND h.ingest_id>? AND h.observed>=? AND h.observed<=? AND (e.through_id IS NULL OR h.ingest_id>e.through_id)" + filter + " ORDER BY h.ingest_id,h.ordinal LIMIT 10001"
+		statement = "SELECT s.metric,s.entity,s.tags,h.observed,h.value,h.ingest_id,h.ordinal FROM " + t.table("hot") + " h JOIN " + t.table("series") + " s ON s.id=h.series_id LEFT JOIN " + t.table("erasures") + " e ON e.series_id=s.id WHERE s.metric=? AND h.ingest_id>? AND h.observed>=? AND h.observed<=? AND (e.through_id IS NULL OR h.ingest_id>e.through_id)" + filter + " ORDER BY h.ingest_id,h.ordinal LIMIT ?"
 		hotArgs := append([]any{q.MetricName, out.AccountedThrough, q.Start.UnixNano(), q.End.UnixNano()}, args...)
+		hotArgs = append(hotArgs, 10001-hotRead)
 		rows, err = tx.QueryContext(ctx, t.bind(statement), hotArgs...)
 		if err != nil {
 			return out, err
 		}
-		n := 0
 		for rows.Next() {
-			n++
-			if n > 10000 {
+			hotRead++
+			if hotRead > 10000 {
 				err = ErrTelemetryBackpressure
 				break
 			}
