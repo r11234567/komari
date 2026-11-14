@@ -58,6 +58,12 @@ const (
 // 注意：metric store 现在始终启用（旧的 metric_store_enabled 开关已废弃）。
 // 未显式配置时默认使用 SQLite（./data/metrics.db）。
 type MetricStoreConfig struct {
+	ArchiveDirectory                 string `json:"metric_archive_directory" default:"./data/telemetry"`
+	ArchiveRetentionDays             int    `json:"metric_archive_retention_days" default:"30"`
+	HotWindowMinutes                 int    `json:"metric_hot_window_minutes" default:"15"`
+	HotRetentionMinutes              int    `json:"metric_hot_retention_minutes" default:"0"` // retired: raw is removed after durable handoff
+	ArchiveSegmentMinutes            int    `json:"metric_archive_segment_minutes" default:"1440"`
+	HotBudgetMiB                     int    `json:"metric_hot_budget_mib" default:"16"`
 	Driver                           string `json:"metric_db_driver" default:"sqlite"`                          // 数据库类型: sqlite, mysql, postgresql
 	DSN                              string `json:"metric_db_dsn" default:"./data/metrics.db"`                  // 数据库连接串
 	DownsamplingEnabled              bool   `json:"metric_downsampling_enabled" default:"false"`                // true=降采样并删除已汇总原始点；false=保留原始点并仅生成查询加速 rollup
@@ -105,6 +111,7 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 	opts := []metric.Option{
 		metric.WithTablePrefix(tablePrefix),
 		metric.WithAutoMigrate(autoMigrate),
+		metric.WithRetiredLegacyStorage(),
 	}
 	resources := detectSQLiteResourceProfile()
 	opts = append(opts, metric.WithHeavyReadConcurrency(resources.HeavyReadConcurrent))
@@ -133,6 +140,7 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 		// 这里刻意忽略 cfg.MaxOpenConns/MaxIdleConns —— 对 SQLite 而言多写连接
 		// 只会引入锁竞争而非提升吞吐。
 		opts = append(opts,
+			metric.WithSQLiteProfile(metric.SQLiteProfileDurable),
 			metric.WithMaxOpenConns(1),
 			metric.WithMaxIdleConns(1),
 			metric.WithConnMaxLifetime(0),
@@ -465,6 +473,9 @@ func OpenConfiguredStoreForMigration(ctx context.Context, progress metric.Migrat
 // TestConnection 使用给定配置尝试连接 metrics 数据库（不影响当前运行的 store）。
 // 仅打开连接并 Ping，不执行自动建表，连接成功后立即关闭。失败时返回可读错误。
 func TestConnection(ctx context.Context, cfg *MetricStoreConfig) error {
+	if err := ValidateTelemetrySettings(cfg); err != nil {
+		return err
+	}
 	metricCfg, err := buildMetricConfig(cfg, false)
 	if err != nil {
 		return err
@@ -481,6 +492,12 @@ func TestConnection(ctx context.Context, cfg *MetricStoreConfig) error {
 
 // InitializeStore 初始化 metric store（启动时调用，可在失败或关闭后重试）。
 func InitializeStore() error {
+	return InitializeStoreContext(context.Background())
+}
+
+// InitializeStoreContext lets the restricted startup controller cancel the
+// open/schema work as well as the subsequent history conversion.
+func InitializeStoreContext(parent context.Context) error {
 	storeInitMu.Lock()
 	defer storeInitMu.Unlock()
 
@@ -500,6 +517,11 @@ func InitializeStore() error {
 	// timeout. Remote stores retain a bounded startup deadline.
 	ctx, cancel := startupStoreContext(cfg)
 	defer cancel()
+	stop := context.AfterFunc(parent, cancel)
+	defer stop()
+	if err := parent.Err(); err != nil {
+		return err
+	}
 
 	s, err := openStore(ctx, cfg)
 	if err != nil {
@@ -547,9 +569,24 @@ func Reload(ctx context.Context) error {
 	}
 
 	// 用新配置打开并建表（内部已 Ping 校验连接）。
+	if err := ValidateTelemetrySettings(cfg); err != nil {
+		return err
+	}
 	s, err := openStore(ctx, cfg)
 	if err != nil {
 		return err
+	}
+	if telemetryRuntime.Load() {
+		if err := s.RequireTelemetryMigration(ctx); err != nil {
+			s.Close()
+			return err
+		}
+		if err := enableTelemetryStore(ctx, s, cfg); err != nil {
+			s.Close()
+			return err
+		}
+		copy := *cfg
+		activeTelemetrySettings.Store(&copy)
 	}
 
 	storeMu.Lock()

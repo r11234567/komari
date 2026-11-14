@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
+const { decodeMetricsRequest, decodeMetricsResponse } = require('./storage-metrics-wire.cjs');
 const { createRequire } = require('node:module');
 // Use the pinned Web's already-installed protobuf runtime for its wire format.
 const webRequire = createRequire(path.resolve(__dirname, '../../../third_party/komari-web/package.json'));
@@ -13,10 +14,18 @@ const { BinaryReader } = webRequire('@bufbuild/protobuf/wire');
 const root = process.env.E2E_ROOT;
 const artifacts = process.env.E2E_ARTIFACTS;
 const base = 'https://127.0.0.1:29443';
-if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' ||
-    root !== path.join(process.env.RUNNER_TEMP || '', 'komari-e2e')) {
-  throw new Error('This integration test is restricted to the disposable GitHub-hosted fixture.');
-}
+const skipCSV = process.env.KOMARI_E2E_SKIP_CSV === '1';
+const databaseStages = new Set([
+  'first-run setup, Secure admin cookie and actual Agent enrollment',
+  'installed Agent performs a real TCP latency probe',
+  'real Agent history remains available across live metric-store reloads',
+  'real raw and summary input ownership agrees and built charts expose source precision',
+  'enabled rate limits allow 32 concurrent charts and Ping reads',
+  'minute traffic trends and daily billing remain independently available',
+  'real reports archive, charts survive raw deletion, CSV and complete backup use cold history',
+]);
+const serviceUser = process.env.KOMARI_E2E_USER || process.env.USER;
+require('./guard.cjs');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const shellQuote = text => `'${text.replaceAll("'", "'\\''")}'`;
 const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -27,6 +36,8 @@ const services = {
   browser: 'komari.browser.v1.BrowserService',
   file: 'komari.file.v1.FileService',
   metrics: 'komari.metrics.v1.MetricsService',
+  pingTasks: 'komari.admin.v1.PingTaskService',
+  dashboard: 'komari.admin.v1.DashboardService',
   workspace: 'komari.workspace.v1.WorkspaceService',
 };
 
@@ -75,8 +86,10 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
   await context.addInitScript(() => localStorage.setItem('i18nextLng', 'en'));
   const http = context.request;
   let secret;
+  let fixturePassword;
   let lastCounter = -1;
   let agentId;
+  let pingTaskId;
   let workspaceToken;
   page.on('request', request => {
     // Observe the grant obtained by the actual UI; never inject signed state.
@@ -85,6 +98,39 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
   });
   let exportCount = 0;
   const fixture = name => path.join(root, 'files', name);
+
+  // Local debugging may resume at a completed stage boundary. Saved session
+  // data stays in the private fixture, never in uploaded test artifacts. CI
+  // always executes the complete scenario without this mechanism.
+  const localCheckpoint = path.join(root, 'local-browser-checkpoint.json');
+  const completedSteps = [];
+  let resume;
+  if (process.env.KOMARI_E2E_LOCAL === '1' && process.env.KOMARI_E2E_RESUME === '1') {
+    resume = JSON.parse(fs.readFileSync(localCheckpoint, 'utf8'));
+    ({secret, fixturePassword, lastCounter, agentId, pingTaskId, workspaceToken} = resume.values);
+    await context.addCookies(resume.storage.cookies);
+    await context.addInitScript(origins => {
+      for (const origin of origins) if (location.origin === origin.origin) {
+        for (const item of origin.localStorage) localStorage.setItem(item.name, item.value);
+      }
+    }, resume.storage.origins);
+    await page.goto(resume.url);
+  }
+  async function stage(name, action) {
+    if (skipCSV && !databaseStages.has(name)) return;
+    if (resume?.completed.includes(name)) {
+      completedSteps.push(name);
+      console.log(`LOCAL DEBUG: restored previously completed stage: ${name}`);
+      return;
+    }
+    await test.step(name, action);
+    completedSteps.push(name);
+    if (process.env.KOMARI_E2E_LOCAL === '1') {
+      fs.writeFileSync(localCheckpoint, JSON.stringify({completed:completedSteps,
+        values:{secret,fixturePassword,lastCounter,agentId,pingTaskId,workspaceToken},
+        storage:await context.storageState(),url:page.url()}), {mode:0o600});
+    }
+  }
 
   async function request(url, data, options = {}) {
     const { allowFailure = false, method = 'POST', headers = {} } = options;
@@ -148,24 +194,46 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
   }
   async function confirmTerminal() {
     const dialog = page.getByRole('dialog');
-    await dialog.getByRole('textbox', { name: 'System account on this machine', exact: true }).fill(process.env.USER);
+    await dialog.getByRole('textbox', { name: 'System account on this machine', exact: true }).fill(serviceUser);
     await dialog.getByRole('button', { name: 'Verify and unlock', exact: true }).click();
     await beginVerification(dialog);
     await verifyCredential(dialog, await freshCode());
     await expect(dialog).toBeHidden();
     await expect.poll(() => page.evaluate(() => getComputedStyle(document.body).pointerEvents)).not.toBe('none');
     await expect(page.locator('.km-terminal-session:visible textarea.xterm-helper-textarea')).toBeAttached();
+    // Mounting xterm precedes Agent attachment. Input is intentionally disabled
+    // until then; wait for the real shell, not a fixed delay or a test handle.
+    await expect(page.locator('.km-terminal-session:visible .xterm-rows'))
+      .toContainText(`${serviceUser}@`, { timeout: 45_000 });
   }
   async function downloadFile(name) {
     const response = await request(`/api/admin/client/${agentId}/file/download?${new URLSearchParams({ path: fixture(name), chunk_size: '1048576' })}`, undefined, { method: 'GET' });
     return response.body();
   }
 
+  if (resume && new URL(resume.url).pathname === '/terminal') {
+    // Browser storage cannot restore React's in-memory workspace identity or
+    // file pane. Obtain a new grant through the same real UI ceremony.
+    await confirmTerminal();
+    if (resume.completed.includes('real file browsing and multi-chunk browser upload/download with SHA256 equality')) {
+      await tabMenu('File Manager');
+      const location = page.getByRole('textbox', { name: 'Path', exact: true });
+      await location.fill(path.join(root, 'files'));
+      await location.press('Enter');
+      await expect(page.locator('[data-file-path]').filter({ hasText: 'editor.txt' })).toBeVisible();
+    }
+  }
+
   try {
-    await test.step('first-run setup, Secure admin cookie and actual Agent enrollment', async () => {
-      const password = `Ci9-${crypto.randomBytes(24).toString('hex')}`;
+    await stage('first-run setup, Secure admin cookie and actual Agent enrollment', async () => {
+      const bootstrap = path.join(root, 'local-bootstrap.json');
+      const localExisting = process.env.KOMARI_E2E_LOCAL === '1' && fs.existsSync(bootstrap);
+      const password = localExisting ? JSON.parse(fs.readFileSync(bootstrap)).password : `Ci9-${crypto.randomBytes(24).toString('hex')}`;
+      fixturePassword = password;
+      if (process.env.KOMARI_E2E_LOCAL === '1' && !localExisting) fs.writeFileSync(bootstrap, JSON.stringify({password}), {mode:0o600});
       console.log(`::add-mask::${password}`);
-      await request('/api/install/complete', {
+      const needsInstall = !localExisting || (await (await http.get('/api/install/status')).json()).data.required;
+      if (needsInstall) await request('/api/install/complete', {
         username: 'e2e-user', password, sitename: 'Komari real E2E', description: '', metric_dsn: './data/metrics.db',
       });
       await expect.poll(async () => (await http.get('/api/version')).status(), { timeout: 60_000 }).toBe(200);
@@ -176,7 +244,9 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       const ticket = (await (await request('/api/bind/ticket', {})).json()).data.ticket;
       expect(ticket).toBeTruthy();
       const log = fs.openSync(path.join(artifacts, 'enrollment.log'), 'w', 0o600);
-      const login = spawn('/usr/lib/komari/komari-e2e/komari-agent', ['login', '--endpoint', base], { stdio: ['ignore', log, log] });
+      const loginCommand = process.env.KOMARI_E2E_LOCAL === '1' ? 'sudo' : '/usr/lib/komari/komari-e2e/komari-agent';
+      const loginPrefix = process.env.KOMARI_E2E_LOCAL === '1' ? ['-u', serviceUser, '/usr/lib/komari/komari-e2e/komari-agent'] : [];
+      const login = spawn(loginCommand, [...loginPrefix, 'login', '--endpoint', base], { stdio: ['ignore', log, log] });
       fs.closeSync(log);
       fs.writeFileSync(path.join(root, 'login.pid'), String(login.pid));
       let pending;
@@ -198,12 +268,31 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       const trustLog = execFileSync('sudo', ['/usr/lib/komari/komari-e2e/komari-host', 'trust',
         '--manifest', '/etc/komari/services/komari-e2e.json', '--endpoint', base,
         '--agent-id', agentId, '--panel-public-key', key.value, '--panel-key-id', key.keyId,
-        '--service-user', process.env.USER], { encoding: 'utf8', timeout: 30_000 });
+        '--service-user', serviceUser], { encoding: 'utf8', timeout: 30_000 });
       fs.writeFileSync(path.join(artifacts, 'trust-install.log'), trustLog);
       execFileSync('sudo', ['systemctl', 'start', 'komari-e2e.service'], { timeout: 30_000 });
     });
 
-    await test.step('real Agent history remains available across live metric-store reloads', async () => {
+    await stage('installed Agent performs a real TCP latency probe', async () => {
+      const created = await rpc('pingTasks', 'CreatePingTask', {
+        name: 'Real E2E panel TCP', target: '127.0.0.1:29444', type: 'tcp',
+        intervalSeconds: 5, clients: [agentId], defaultOn: false,
+      });
+      pingTaskId = created.taskId;
+      expect(pingTaskId).toBeGreaterThan(0);
+      let result;
+      await expect.poll(async () => {
+        const end = new Date();
+        result = await rpc('metrics', 'GetPingStats', {
+          agentIds: [agentId], taskIds: [String(pingTaskId)],
+          startTime: new Date(end.getTime()-300_000).toISOString(), endTime: end.toISOString(), maxPoints: 100,
+        });
+        return result.stats?.some(s => String(s.taskId) === String(pingTaskId) && s.valid > 0);
+      }, { timeout: 120_000, intervals: [2000, 5000] }).toBe(true);
+      fs.writeFileSync(path.join(artifacts, 'real-agent-ping.json'), JSON.stringify(result, null, 2));
+    });
+
+    await stage('real Agent history remains available across live metric-store reloads', async () => {
       function window() {
         const end = new Date();
         return { agentIds: [agentId], startTime: new Date(end.getTime() - 300_000).toISOString(), endTime: end.toISOString(), maxPoints: 100 };
@@ -230,6 +319,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         expect(history.series?.some(series => series.queryPoints?.length > 0)).toBe(true);
         expect(definitions.definitions?.some(item => item.name === 'cpu.usage')).toBe(true);
         expect(ping.endTime).toBeTruthy();
+        expect(ping.stats?.some(s => String(s.taskId) === String(pingTaskId) && s.valid > 0)).toBe(true);
         expect(!!reloaded.policy.enabled).toBe(policy.enabled);
         results.push({ iteration, historySeries: history.series.length, definitions: definitions.definitions.length });
         // Bypass the short response cache before verifying the next instance.
@@ -240,7 +330,98 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       fs.writeFileSync(path.join(artifacts, 'metric-store-reloads.json'), JSON.stringify(results, null, 2));
     });
 
-    await test.step('enable real 2FA and apply a signed same-identity WebSSH grant', async () => {
+    await stage('real raw and summary input ownership agrees and built charts expose source precision', async () => {
+      const end = new Date(Date.now() - 15_000);
+      const start = new Date(end.getTime() - 5*60_000);
+      const window = { agentIds:[agentId], metrics:['cpu.usage'], startTime:start.toISOString(), endTime:end.toISOString(), maxPoints:30 };
+      const raw = await rpc('metrics','QueryMetrics',{...window, downsample:false});
+      const summarized = await rpc('metrics','QueryMetrics',{...window, downsample:true, aggregation:'count'});
+      const rawCount = (raw.series || []).reduce((n,s)=>n+(s.queryPoints || []).length,0);
+      expect(rawCount).toBeGreaterThan(0);
+      expect(summarized.series.length).toBeGreaterThan(0);
+      let total = 0;
+      for (const series of summarized.series) {
+        expect(series.requestedInterval).toBe(series.interval);
+        expect(series.coverage).toBe('complete');
+        expect(series.sources?.length).toBeGreaterThan(0);
+        expect(BigInt(series.acceptedThrough || '0')).toBeGreaterThanOrEqual(BigInt(series.summarizedThrough || '0'));
+        for (const point of series.queryPoints || []) {
+          expect(Number(point.value)).toBe(Number(point.sampleCount));
+          expect(point.coverage).toBe('complete');
+          total += Number(point.sampleCount);
+        }
+      }
+      expect(total).toBe(rawCount);
+      await page.goto(`/instance/${agentId}`);
+      const chart = page.locator('.km-load-chart');
+      const chartResponse = page.waitForResponse(response => {
+        if (!new URL(response.url()).pathname.endsWith('/QueryMetrics') || response.status() !== 200 || !response.request().headers()['content-type']?.includes('application/proto')) return false;
+        const request = decodeMetricsRequest(response.request().postDataBuffer());
+        return request.agentIds.includes(agentId) && request.metrics.includes('cpu.usage') && request.maxPoints === 600 && new Date(request.endTime)-new Date(request.startTime) === 3600_000;
+      });
+      await chart.getByRole('radio', { name:/^1\s*hour$/i }).click();
+      const rendered = decodeMetricsResponse(await (await chartResponse).body());
+      const renderedCPU = rendered.series.find(series => series.metric === 'cpu.usage');
+      expect(renderedCPU?.queryPoints.length).toBeGreaterThan(0);
+      expect(renderedCPU.coverage).toBe('complete');
+      await expect(page.getByTestId('chart-source-precision').first()).toBeVisible();
+      // A fresh Agent may occupy only one retained minute. Verify that actual
+      // observation as a dot; multiple observations must produce a line.
+      await expect(chart.locator(renderedCPU.queryPoints.length === 1 ? '.recharts-line-dots .recharts-dot' : '.recharts-line-curve').first()).toBeVisible();
+      fs.writeFileSync(path.join(artifacts,'metric-rendered-1h.json'),JSON.stringify(rendered,null,2));
+      await page.screenshot({path:path.join(artifacts,'chart-source-precision.png'),fullPage:true});
+      const windows = [];
+      // The right edge deliberately lags wall time by 15s, so the oldest
+      // edge of 1h/7d/15d is already in the next retention tier. Assert that
+      // age-aware grid exactly; the 24h preset uses compatible 5m cells.
+      for (const [hours, interval] of [[1,60],[6,60],[12,120],[24,300],[168,3600],[360,7200],[720,7200]]) {
+        const last = new Date(Date.now()-15_000);
+        const result = await rpc('metrics','QueryMetrics',{agentIds:[agentId],metrics:['cpu.usage'],startTime:new Date(last.getTime()-hours*3600_000).toISOString(),endTime:last.toISOString(),maxPoints:360,downsample:true});
+        expect(result.series.length).toBeGreaterThan(0);
+        for (const series of result.series) expect(series.interval).toBe(`${interval}s`);
+        windows.push({hours,result});
+      }
+      for (const hours of [6,12]) {
+        await page.locator('.km-load-chart').getByRole('radio',{name:new RegExp(`^${hours}\\s*hours?$`,'i')}).click();
+        await expect(page.getByTestId('chart-source-precision').first()).toBeVisible();
+        // A freshly installed Agent can occupy only one 2-minute bucket in
+        // the 12h view. Recharts correctly renders that observation as a dot,
+        // not a fabricated line joining it to missing historical data.
+        await expect(page.locator('.recharts-line-curve, .recharts-line-dots .recharts-dot').first()).toBeVisible();
+      }
+      await page.screenshot({path:path.join(artifacts,'chart-window-12h.png'),fullPage:true});
+      fs.writeFileSync(path.join(artifacts,'metric-chart-windows.json'),JSON.stringify(windows,null,2));
+      fs.writeFileSync(path.join(artifacts,'metric-query-ownership.json'),JSON.stringify({rawCount,summarized},null,2));
+    });
+
+    await stage('enabled rate limits allow 32 concurrent charts and Ping reads', async () => {
+      await request('/api/admin/settings/', { rate_limit_enabled: true });
+      const end = new Date();
+      // Distinct maxPoints bypass shared cache keys: this exercises actual
+      // bounded SQL work as well as HTTP admission through the real proxy.
+      const began = Date.now();
+      const results = await Promise.all(Array.from({ length: 32 }, async (_, i) => {
+        const ping = i >= 24;
+        const duration = i < 8 ? 30 * 86400_000 : 300_000;
+        const window = {
+          agentIds: [agentId], startTime: new Date(end.getTime() - duration).toISOString(),
+          endTime: end.toISOString(), maxPoints: 100 + i,
+        };
+        const response = await rpc('metrics', ping ? 'GetPingStats' : 'QueryMetrics',
+          ping ? window : { ...window, metrics: ['cpu.usage'], downsample: true });
+        if (ping) {
+          expect(response.endTime).toBeTruthy();
+          expect(response.stats?.some(s => String(s.taskId) === String(pingTaskId) && s.valid > 0)).toBe(true);
+        }
+        else expect(response.series?.some(series => series.queryPoints?.length > 0)).toBe(true);
+        return { kind: ping ? 'ping' : 'chart', duration, elapsedMs: Date.now() - began };
+      }));
+      fs.writeFileSync(path.join(artifacts, 'concurrent-charts-ping.json'), JSON.stringify(results, null, 2));
+      // Leave rate limiting enabled for the remaining real Agent, terminal,
+      // file, history and backup assertions as an integration regression.
+    });
+
+    await stage('enable real 2FA and apply a signed same-identity WebSSH grant', async () => {
       await request('/api/admin/2fa/generate', undefined, { method: 'GET' });
       secret = (await context.cookies()).find(c => c.name === '2fa_secret')?.value;
       expect(secret).toBeTruthy();
@@ -268,7 +449,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         { timeout: 60_000 }).toBe(true);
     });
 
-    await test.step('built account page rejects wrong OTP and password change requires its own challenge', async () => {
+    await stage('built account page rejects wrong OTP and password change requires its own challenge', async () => {
       await page.goto('/admin/account');
       const gate = page.locator('.km-account-2fa-gate');
       await expect(gate).toBeVisible();
@@ -309,7 +490,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       page.off('request', onWrite);
     });
 
-    await test.step('real xterm input, remote output, export, search and system clipboard', async () => {
+    await stage('real xterm input, remote output, export, search and system clipboard', async () => {
       await context.addInitScript(({ base, agentId }) => {
         localStorage.setItem('komari:file-transfer:chunk-size:v1', JSON.stringify({
           [`${base}|upload|${agentId}`]: 1048576, [`${base}|download|${agentId}`]: 1048576,
@@ -346,7 +527,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await page.locator('.km-terminal-search-floating button').last().click();
     });
 
-    await test.step('rename, color, duplicate, drag and bulk close real terminal tabs', async () => {
+    await stage('rename, color, duplicate, drag and bulk close real terminal tabs', async () => {
       const active = () => page.getByRole('tab', { selected: true });
       await active().dblclick();
       await page.getByRole('textbox', { name: 'Rename tab', exact: true }).fill('Original E2E');
@@ -384,7 +565,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await expect(page.getByRole('menu', { includeHidden: true })).toHaveCount(0);
     });
 
-    await test.step('real file browsing and multi-chunk browser upload/download with SHA256 equality', async () => {
+    await stage('real file browsing and multi-chunk browser upload/download with SHA256 equality', async () => {
       await tabMenu('File Manager');
       const location = page.getByRole('textbox', { name: 'Path', exact: true });
       await expect(location).toBeVisible();
@@ -404,7 +585,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       }, null, 2));
     });
 
-    await test.step('actual Monaco editor saves UTF-8 and zero-byte content through the Agent', async () => {
+    await stage('actual Monaco editor saves UTF-8 and zero-byte content through the Agent', async () => {
       await page.locator('[data-file-path]').filter({ hasText: 'editor.txt' }).dblclick();
       // Current Monaco uses a native EditContext surface in Chromium; address
       // its accessible input instead of assuming the old hidden textarea.
@@ -414,20 +595,40 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await expect(editor).toBeAttached();
       await editor.focus();
       await page.keyboard.press('Control+a');
-      await page.keyboard.type('Monaco UTF-8: ');
+      // Chromium EditContext synchronizes selection asynchronously. Send real
+      // keystrokes at typing speed rather than a zero-delay CDP burst, and
+      // verify the rendered buffer before testing the separate save transport.
+      await page.keyboard.type('Monaco UTF-8: ', { delay: 50 });
       await page.keyboard.insertText('联调 ✓\n');
+      await expect(page.locator('.km-file-editor .view-lines')).toContainText('Monaco UTF-8: 联调 ✓');
+      const savedMark = page.locator('.km-file-editor').getByRole('button', { name: 'Close File', exact: true }).locator('svg');
+      await expect(savedMark).toHaveCount(0); // React has observed the edited model.
+      const savedUtf8 = page.waitForResponse(r => new URL(r.url()).pathname.endsWith('/file/upload') && new URL(r.url()).searchParams.get('operation') === 'merge');
       await page.keyboard.press('Control+s');
+      const utf8Response = await savedUtf8;
+      expect(utf8Response.ok(), await utf8Response.text()).toBe(true);
       await expect.poll(() => fs.readFileSync(fixture('editor.txt'), 'utf8')).toBe('Monaco UTF-8: 联调 ✓\n');
+      // The remote filesystem changes before the upload response and editor's
+      // save guard settle. Wait for the actual saved tab state, not a delay.
+      await expect(savedMark).toHaveCount(1);
       expect((await downloadFile('editor.txt')).toString()).toBe('Monaco UTF-8: 联调 ✓\n');
       await editor.focus();
       await page.keyboard.press('Control+a');
       await page.keyboard.press('Backspace');
+      await expect(page.locator('.km-file-editor .view-lines')).toHaveText(/^\s*$/);
+      await expect(savedMark).toHaveCount(0);
+      // Zero-byte files complete in init; there is no chunk/merge phase.
+      const savedEmpty = page.waitForResponse(r => new URL(r.url()).pathname.endsWith('/file/upload') && new URL(r.url()).searchParams.get('operation') === 'init');
       await page.keyboard.press('Control+s');
+      const emptyResponse = await savedEmpty;
+      expect(emptyResponse.ok(), await emptyResponse.text()).toBe(true);
+      expect((await emptyResponse.json()).data.complete).toBe(true);
       await expect.poll(() => fs.statSync(fixture('editor.txt')).size).toBe(0);
+      await expect(savedMark).toHaveCount(1);
       expect((await downloadFile('editor.txt')).length).toBe(0);
     });
 
-    await test.step('file authorization requires the real workspace grant and rejects unsafe overwrite/recursive flags', async () => {
+    await stage('file authorization requires the real workspace grant and rejects unsafe overwrite/recursive flags', async () => {
       expect(workspaceToken).toBeTruthy();
       const created = fixture('created.txt');
       const missing = await fileDenied('CreateEntry', { path: created, kind: 'ENTRY_KIND_FILE' }, { 'X-Komari-Workspace-Grant': '' });
@@ -447,7 +648,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       expect(fs.readFileSync(fixture('nonempty/keep.txt'), 'utf8')).toBe('keep\n');
     });
 
-    await test.step('Agent executes copy, move, chmod, search and delete under the authorized OS identity', async () => {
+    await stage('Agent executes copy, move, chmod, search and delete under the authorized OS identity', async () => {
       await mutate('CopyEntry', { source: fixture('roundtrip.bin'), destination: fixture('copy.bin'), overwrite: false });
       expect(sha256(fs.readFileSync(fixture('copy.bin')))).toBe(sha256(fs.readFileSync(fixture('roundtrip.bin'))));
       await mutate('MoveEntry', { source: fixture('copy.bin'), destination: fixture('moved.bin'), overwrite: false });
@@ -461,7 +662,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       expect(fs.existsSync(fixture('moved.bin'))).toBe(false);
     });
 
-    await test.step('restart the disposable Agent and verify identity, authorization and file channel recovery', async () => {
+    await stage('restart the disposable Agent and verify identity, authorization and file channel recovery', async () => {
       const before = await rpc('config', 'GetNodeConfigState', { agentId });
       execFileSync('sudo', ['systemctl', 'restart', 'komari-e2e.service'], { timeout: 30_000 });
       await expect.poll(async () => (await rpc('browser', 'GetAgent', { agentId })).agent?.capabilities?.webssh?.available,
@@ -475,7 +676,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       expect(after.observation?.serviceId).toBe(before.observation?.serviceId);
     });
 
-    await test.step('workspace revocation rejects old file grants and re-unlock requires fresh UI verification', async () => {
+    await stage('workspace revocation rejects old file grants and re-unlock requires fresh UI verification', async () => {
       const old = workspaceToken;
       expect((await rpc('workspace', 'LockWorkspace', { grantToken: old })).locked).toBe(true);
       const blockedPath = fixture('revoked-must-not-exist.txt');
@@ -489,6 +690,221 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await confirmTerminal();
       await expect.poll(() => workspaceToken).not.toBe(old);
       expect(sha256(await downloadFile('roundtrip.bin'))).toBe(sha256(fs.readFileSync(fixture('roundtrip.bin'))));
+    });
+
+    await stage('minute traffic trends and daily billing remain independently available', async () => {
+      // Real network traffic after the installed Agent's baseline. Fetch public
+      // pinned source bytes; no forged timestamps, metric writes or DB seeding.
+      execFileSync('curl', ['--fail', '--location', '--max-time', '30', '--output',
+        path.join(root, 'traffic-observation.txt'),
+        'https://raw.githubusercontent.com/r11234567/komari/cfed6d1f67abcd3316983095391728b88ae1652a/scripts/ci/e2e/real.spec.cjs']);
+      await expect.poll(async () => {
+        const trend = await rpc('browser', 'GetTrafficTrend', { window: '86400s', interval: '1200s' });
+        return (trend.buckets || []).reduce((sum, b) => sum + BigInt(b.uploadBytes || 0) + BigInt(b.downloadBytes || 0), 0n) > 0n;
+      }, { timeout: 120_000, intervals: [3000, 5000] }).toBe(true);
+      const results = [];
+      for (const seconds of [600, 1200, 1800]) {
+        const trend = await rpc('browser', 'GetTrafficTrend', { window: '86400s', interval: `${seconds}s` });
+        expect(trend.requestedInterval).toBe(`${seconds}s`);
+        expect(trend.interval).toBe(`${seconds}s`);
+        expect(['complete', 'partial']).toContain(trend.coverage);
+        expect(trend.buckets).toHaveLength(86400 / seconds);
+        expect(trend.dataEnd).toBeTruthy();
+        expect(trend.accountingThrough).toBeTruthy();
+        for (let i = 1; i < trend.buckets.length; i++) {
+          expect(Date.parse(trend.buckets[i].startTime) - Date.parse(trend.buckets[i - 1].startTime)).toBe(seconds * 1000);
+        }
+        results.push(trend);
+      }
+      const billing = await rpc('dashboard', 'GetDashboardCharts', { charts: ['DASHBOARD_CHART_TRAFFIC'], rankingLimit: 5 });
+      expect(billing.charts.traffic.error || '').toBe('');
+      expect(billing.charts.traffic.todayError || '').toBe('');
+      expect(billing.charts.traffic.trendError || '').toBe('');
+      expect(billing.charts.traffic.daily).toHaveLength(30);
+      expect(billing.charts.traffic.daily.at(-1).available).not.toBe(false);
+      await page.goto('/admin');
+      const live = page.locator('section').filter({ has: page.getByText('Live traffic over the last 24 hours', { exact: true }) });
+      const daily = page.locator('section').filter({ has: page.getByText('Daily billable traffic', { exact: true }) });
+      await expect(live).toBeVisible();
+      await expect(daily).toBeVisible();
+      await expect(live.getByText('Data unavailable', { exact: true })).toHaveCount(0);
+      await expect(daily.getByText('Data unavailable', { exact: true })).toHaveCount(0);
+      await page.screenshot({ path: path.join(artifacts, 'traffic-and-billing.png'), fullPage: true });
+      fs.writeFileSync(path.join(artifacts, 'traffic-and-billing.json'), JSON.stringify({ trends: results, billing }, null, 2));
+    });
+
+    await stage('real reports archive, charts survive raw deletion, CSV and complete backup use cold history', async () => {
+      // Public settings, not forged timestamps or seeded history, shorten the
+      // fixture rotation. All samples still come from the installed Agent.
+      await request('/api/admin/settings/', { metric_hot_window_minutes: 1, metric_hot_retention_minutes: 1, metric_archive_segment_minutes: 1 });
+      let storage;
+      await expect.poll(() => {
+        storage = JSON.parse(execFileSync('python3', ['scripts/ci/e2e/check-telemetry-retirement.py'], { encoding: 'utf8' }));
+        return storage.complete_archives;
+      }, { timeout: 210_000, intervals: [5000] }).toBeGreaterThan(0);
+      const end = new Date();
+      const start = new Date(end.getTime() - 20 * 60_000);
+      const history = await rpc('metrics', 'QueryMetrics', {
+        agentIds: [agentId], metrics: ['cpu.usage'], startTime: start.toISOString(), endTime: end.toISOString(), maxPoints: 100, downsample: true,
+      });
+      expect(history.series?.some(series => series.queryPoints?.some(point => Number(point.sampleCount) > 0))).toBe(true);
+      let csvBytes = 0;
+      if (!skipCSV) {
+        const created = await (await request('/api/admin/history/export', {
+          uuid: agentId, category: 'resource', mode: 'raw', start: start.toISOString(), end: end.toISOString(),
+        })).json();
+        expect(created.data?.id).toBeTruthy();
+        let job;
+        await expect.poll(async () => {
+          job = (await (await request(`/api/admin/history/export/${created.data.id}`, undefined, { method: 'GET' })).json()).data;
+          if (job.status === 'failed') throw new Error(job.error);
+          return job.status;
+        }, { timeout: 90_000 }).toBe('done');
+        const csv = await (await request(`/api/admin/history/export/${job.id}/download`, undefined, { method: 'GET' })).body();
+        expect(csv.toString('utf8').split('\n').length).toBeGreaterThan(2);
+        fs.writeFileSync(path.join(artifacts, 'real-history.csv'), csv);
+        csvBytes = csv.length;
+      }
+      const backup = await request('/api/admin/download/backup?scope=full', undefined, { method: 'GET' });
+      // Credentials stay inside the disposable fixture, outside uploaded artifacts.
+      fs.writeFileSync(path.join(root, 'real-full-backup.zip'), await backup.body());
+      fs.writeFileSync(path.join(artifacts, 'real-storage-roundtrip.json'), JSON.stringify({ ...storage, csvBytes, csv_scenarios: !skipCSV }, null, 2));
+      if (skipCSV) {
+        await context.storageState({ path: path.join(root, 'qualification-browser-state.json') });
+        fs.writeFileSync(path.join(root, 'qualification-scope.json'), JSON.stringify({ agentId, pingTaskId }));
+        fs.writeFileSync(path.join(root, 'migration-credentials.json'), JSON.stringify({ username: 'e2e-user', password: fixturePassword }), { mode: 0o600 });
+        fs.writeFileSync(path.join(artifacts, 'database-scenario-scope.json'), JSON.stringify({
+          database_only: true, csv_scenarios: false,
+          completed: [...completedSteps, 'real reports archive, charts survive raw deletion, CSV and complete backup use cold history'],
+        }, null, 2));
+      }
+    });
+
+    await stage('background export UI: durable pause, refresh, network recovery and ready-only download', async () => {
+      await page.goto('/admin/pprof');
+      const card = page.getByTestId('history-export-card');
+      await expect(card).toBeVisible();
+      await expect.poll(async () => (await (await request('/api/admin/history/export/retention', undefined, { method: 'GET' })).json()).data.worker_available,
+        { timeout: 60_000 }).toBe(true);
+      await expect(card.getByTestId('create-background-export')).toBeEnabled();
+      // Freeze the real process, keeping its transient unit/configuration. No
+      // forged worker heartbeat or task state is written by the test.
+      execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGSTOP', 'komari-e2e-export.service']);
+      let id;
+      try {
+        const response = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/admin/history/export');
+        await card.getByTestId('create-background-export').click();
+        const created = await (await response).json();
+        expect(created.data?.mode).toBe('raw'); expect(created.data?.format_version).toBe(2); id = created.data.id;
+        const row = page.getByTestId(`export-job-${id}`);
+        await expect(row).toBeVisible();
+        await row.getByRole('button', { name: 'Pause', exact: true }).click();
+        await expect(row).toContainText('Paused');
+        await page.reload(); await expect(page.getByTestId(`export-job-${id}`)).toContainText('Paused');
+        await context.setOffline(true);
+        await card.getByRole('button', { name: 'Refresh tasks', exact: true }).click();
+        await expect(card.getByRole('alert')).toContainText('retrying automatically');
+        await context.setOffline(false);
+        await card.getByRole('button', { name: 'Refresh tasks', exact: true }).click();
+        await expect(page.getByTestId(`export-job-${id}`)).toContainText('Paused');
+      } finally {
+        await context.setOffline(false);
+        execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGCONT', 'komari-e2e-export.service']);
+      }
+      await page.getByTestId(`export-job-${id}`).getByRole('button', { name: 'Resume', exact: true }).click();
+      let job;
+      await expect.poll(async () => {
+        job = (await (await request(`/api/admin/history/export/${id}`, undefined, { method: 'GET' })).json()).data;
+        if (job.status === 'failed' || job.status === 'cancelled') throw new Error(JSON.stringify(job));
+        return job.status;
+      }, { timeout: 180_000, intervals: [2000, 5000] }).toBe('done');
+      await expect(page.getByTestId(`export-job-${id}`)).toContainText('Complete: 100%');
+      const first = await request(`/api/admin/history/export/${id}/download`, undefined, { method: 'GET' });
+      const bytes = await first.body();
+      expect(sha256(bytes)).toBe(job.sha256); expect(first.headers()['x-export-format-version']).toBe('2');
+      expect(sha256(await (await request(`/api/admin/history/export/${id}/download`, undefined, { method: 'GET' })).body())).toBe(job.sha256);
+      expect(bytes.toString('utf8')).toContain('observation_id,observed_at,received_at,entity_id,metric,tags,labels,value,unit');
+      fs.writeFileSync(path.join(artifacts, 'background-export-ui.json'), JSON.stringify(job, null, 2));
+      await page.screenshot({ path: path.join(artifacts, 'background-export-ui.png'), fullPage: true });
+    });
+
+    await stage('all CSV modes and v1 units, real worker restart, queued cancellation and filesystem-failure retry', async () => {
+      const end = new Date(); const start = new Date(end.getTime() - 30 * 60_000);
+      const create = async extra => (await (await request('/api/admin/history/export', {
+        uuid: agentId, category: 'network', start: start.toISOString(), end: end.toISOString(), ...extra,
+      })).json()).data;
+      const wait = async id => {
+        let result;
+        await expect.poll(async () => {
+          result = (await (await request(`/api/admin/history/export/${id}`, undefined, { method: 'GET' })).json()).data;
+          if (result.status === 'failed' || result.status === 'cancelled') throw new Error(JSON.stringify(result));
+          return result.status;
+        }, { timeout: 180_000, intervals: [2000, 5000] }).toBe('done'); return result;
+      };
+      const proofs = [];
+      for (const extra of [{ mode: 'summary', interval_seconds: 60, aggregation: 'avg' }, { mode: 'raw' }, {}, { mode: 'sample30s', format_version: 2 }]) {
+        const created = await create(extra); expect(created.id).toBeTruthy();
+        const job = await wait(created.id);
+        const bytes = await (await request(`/api/admin/history/export/${job.id}/download`, undefined, { method: 'GET' })).body();
+        expect(sha256(bytes)).toBe(job.sha256);
+        const text = bytes.toString('utf8');
+        if (extra.mode === 'summary') expect(text).toContain('sample_count,output_interval_seconds,source_precision,coverage');
+        else if (extra.mode === 'raw') expect(text).toContain('observation_id,observed_at,received_at,entity_id,metric,tags,labels,value,unit');
+        else if (!extra.mode) { expect(job.format_version).toBe(1); expect(text).toContain('Total downloaded (GiB)'); expect(text).toContain('Network inbound (KiB/s)'); }
+        else { expect(job.format_version).toBe(2); expect(text).toContain('net.in.rate'); }
+        proofs.push({ job, bytes: bytes.length });
+      }
+      await expect.poll(async () => (await (await request('/api/admin/history/export/retention', undefined, { method: 'GET' })).json()).data.worker_available).toBe(true);
+      execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGSTOP', 'komari-e2e-export.service']);
+      let cancelled;
+      try {
+        // A completed identical request is intentionally deduplicated. Give
+        // this new queued task its own immutable time range before checking
+        // that it cannot download and can be cancelled while the worker stops.
+        cancelled = await create({ mode: 'raw', end: new Date(end.getTime()-2).toISOString() });
+        const denied = await request(`/api/admin/history/export/${cancelled.id}/download`, undefined, { method: 'GET', allowFailure: true });
+        expect(denied.status()).toBe(409);
+        await request(`/api/admin/history/export/${cancelled.id}/cancel`, {});
+        expect((await (await request(`/api/admin/history/export/${cancelled.id}`, undefined, { method: 'GET' })).json()).data.status).toBe('cancel_requested');
+      } finally { execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGCONT', 'komari-e2e-export.service']); }
+      await expect.poll(async () => (await (await request(`/api/admin/history/export/${cancelled.id}`, undefined, { method: 'GET' })).json()).data.status).toBe('cancelled');
+      await expect.poll(async () => (await (await request('/api/admin/history/export/retention', undefined, { method: 'GET' })).json()).data.worker_available).toBe(true);
+      execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGSTOP', 'komari-e2e-export.service']);
+      let failed, blocked;
+      try {
+        failed = await create({ mode: 'raw', category: 'latency' });
+        blocked = path.join(root, 'panel/data/exports-v2', `${failed.id}.csv.part`);
+        fs.mkdirSync(blocked);
+      } finally { execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGCONT', 'komari-e2e-export.service']); }
+      await expect.poll(async () => (await (await request(`/api/admin/history/export/${failed.id}`, undefined, { method: 'GET' })).json()).data.status,
+        { timeout: 90_000 }).toBe('failed');
+      fs.rmdirSync(blocked); // Exactly the empty directory created by this test.
+      await page.getByTestId('history-export-card').getByRole('button', { name: 'Refresh tasks', exact: true }).click();
+      await page.getByTestId(`export-job-${failed.id}`).getByRole('button', { name: 'Retry from checkpoint', exact: true }).click();
+      execFileSync('sudo', ['systemctl', 'restart', 'komari-e2e-export.service'], { timeout: 30_000 });
+      const recovered = await wait(failed.id); expect(recovered.retries).toBe(1);
+      const outsider = await context.browser().newContext({ baseURL: base });
+      try { expect([401, 403]).toContain((await outsider.request.get(`/api/admin/history/export/${recovered.id}/download`)).status()); }
+      finally { await outsider.close(); }
+      fs.writeFileSync(path.join(artifacts, 'background-export-modes.json'), JSON.stringify({ proofs, cancelled, recovered }, null, 2));
+      // The portable full backup must include ready tasks of every output type
+      // and a genuinely paused queue entry. Stop only after the worker is idle,
+      // so the backup never waits on a process frozen while holding its lock.
+      await expect.poll(() => JSON.parse(fs.readFileSync(path.join(root, 'panel/data/exports-v2/worker.json'))).active_job || '').toBe('');
+      execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGSTOP', 'komari-e2e-export.service']);
+      let pausedBackup;
+      try {
+        pausedBackup = await create({ mode: 'raw', category: 'resource', end: new Date(end.getTime()-1000).toISOString() });
+        expect(pausedBackup.id).toBeTruthy();
+        await request(`/api/admin/history/export/${pausedBackup.id}/pause`, {});
+        expect((await (await request(`/api/admin/history/export/${pausedBackup.id}`, undefined, { method: 'GET' })).json()).data.status).toBe('paused');
+        const backup = await request('/api/admin/download/backup?scope=full', undefined, { method: 'GET' });
+        fs.writeFileSync(path.join(root, 'real-full-backup.zip'), await backup.body());
+        fs.writeFileSync(path.join(root, 'export-restore-proof.json'), JSON.stringify({ ready: proofs.map(p=>p.job), paused: pausedBackup }));
+      } finally { execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGCONT', 'komari-e2e-export.service']); }
+      await context.storageState({ path: path.join(root, 'qualification-browser-state.json') });
+      fs.writeFileSync(path.join(root, 'qualification-scope.json'), JSON.stringify({ agentId, pingTaskId }));
+      fs.writeFileSync(path.join(root, 'migration-credentials.json'), JSON.stringify({ username: 'e2e-user', password: fixturePassword, secret }), { mode: 0o600 });
     });
   } finally {
     fs.writeFileSync(path.join(artifacts, 'browser-events.json'), JSON.stringify(events, null, 2));

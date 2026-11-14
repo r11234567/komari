@@ -2,12 +2,25 @@ name: Feature audit - real end-to-end
 
 on:
   workflow_dispatch:
+    inputs:
+      export_qualification:
+        description: 'Run at least two hours of real cold CSV work and mixed foreground load'
+        type: boolean
+        default: false
+      database_only:
+        description: 'Only database qualification; login/enrollment supply real telemetry, without unrelated feature scenarios'
+        type: boolean
+        default: false
+      skip_csv:
+        description: 'Run database charts, ledgers, archives, startup migration and restore without CSV scenarios'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: feature-e2e-${{ github.ref }}
+  group: feature-e2e-${{ github.ref }}-${{ inputs.export_qualification }}-${{ inputs.database_only }}-${{ inputs.skip_csv }}
   cancel-in-progress: true
 
 jobs:
@@ -15,12 +28,13 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     name: Built Web + server + installed nonroot Agent / HTTPS
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: ${{ inputs.export_qualification && 335 || 45 }}
     env:
       GOMAXPROCS: '2'
       GOMEMLIMIT: 3GiB
       NODE_OPTIONS: --max-old-space-size=4096
       CGO_ENABLED: '1'
+      KOMARI_E2E_SKIP_CSV: ${{ inputs.skip_csv && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,7 +44,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: r11234567/komari-agent
-          ref: f6d3504cbb4306b2dba40193ba1a7572791edd71
+          ref: b0e875ccaa9c610d4f41f77187b781ba96d9949b
           path: e2e-agent
           submodules: recursive
           persist-credentials: false
@@ -53,16 +67,88 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y nginx libnss3-tools
           npm install --prefix "$E2E_TOOLS" --no-audit --no-fund --no-package-lock @playwright/test@1.56.1
-          "$E2E_TOOLS/node_modules/.bin/playwright" install --with-deps chromium
+          if [[ '${{ inputs.database_only }}' != true || '${{ inputs.skip_csv }}' == true ]]; then
+            "$E2E_TOOLS/node_modules/.bin/playwright" install --with-deps chromium
+          fi
       - name: Start an isolated HTTPS panel and install a nonroot Agent
         run: bash scripts/ci/run-audit-check.sh e2e-setup bash scripts/ci/e2e/setup.sh
       - name: Real enrollment, fresh 2FA, terminal, clipboard and file round trips
+        if: ${{ !inputs.database_only && !inputs.skip_csv }}
         env:
+          KOMARI_E2E_SKIP_CSV: ${{ inputs.skip_csv && '1' || '0' }}
           NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
           NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
         run: |
           bash scripts/ci/run-audit-check.sh e2e-browser \
             "$E2E_TOOLS/node_modules/.bin/playwright" test --config scripts/ci/e2e/playwright.config.cjs
+      - name: Database charts, concurrent reads, ledgers, archives and backup with password login
+        if: inputs.skip_csv
+        env:
+          NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
+        run: |
+          bash scripts/ci/run-audit-check.sh e2e-database-browser \
+            "$E2E_TOOLS/node_modules/.bin/playwright" test --config scripts/ci/e2e/playwright.config.cjs
+      - name: Prepare only database qualification with an actual reporting Agent and TCP probe
+        if: ${{ inputs.database_only && !inputs.skip_csv }}
+        env:
+          NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
+        run: bash scripts/ci/run-audit-check.sh e2e-database-bootstrap node scripts/ci/e2e/database-bootstrap.cjs
+      - name: Verify real telemetry ingestion does not create legacy blocks
+        run: bash scripts/ci/run-audit-check.sh e2e-storage python3 scripts/ci/e2e/check-telemetry-retirement.py
+      - name: Verify new engine across real SQL and archive process restarts
+        run: bash scripts/ci/run-audit-check.sh e2e-storage-process go test -race ./pkg/metric -run TestTelemetryProcessRoundTrip -count=1 -v
+      - name: Verify the exact binary in isolated Docker cgroup-v2 deployment
+        if: ${{ !inputs.skip_csv }}
+        run: bash scripts/ci/run-audit-check.sh e2e-export-docker bash scripts/ci/e2e/export-docker.sh
+      - name: Build explicitly synthetic legacy upgrade fixture from the real installation backup
+        if: ${{ !inputs.database_only || inputs.skip_csv }}
+        run: bash scripts/ci/run-audit-check.sh e2e-migration-fixture go run ./scripts/ci/migration-fixture
+      - name: Verify automatic restricted upgrade, native password and TOTP, failure and retry
+        if: ${{ !inputs.database_only && !inputs.skip_csv }}
+        env:
+          KOMARI_E2E_SKIP_CSV: ${{ inputs.skip_csv && '1' || '0' }}
+          NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
+        run: bash scripts/ci/run-audit-check.sh e2e-storage-upgrade node scripts/ci/e2e/storage-upgrade.cjs
+      - name: Database startup migration, failure recovery and ZIP restore with password login
+        if: inputs.skip_csv
+        env:
+          NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
+        run: bash scripts/ci/run-audit-check.sh e2e-database-upgrade node scripts/ci/e2e/storage-upgrade.cjs
+      - name: Prepare explicitly synthetic large cold CSV input in the isolated fixture
+        if: ${{ inputs.export_qualification && !inputs.skip_csv }}
+        run: |
+          sudo systemctl stop komari-e2e-export.service komari-e2e-panel.service
+          go run ./scripts/ci/export-fixture
+          cp "$E2E_ROOT/qualification-manifest.json" "$E2E_ARTIFACTS/qualification-manifest.json"
+          sudo systemd-run --unit=komari-e2e-panel --collect --slice=komari-e2e.slice \
+            --property="User=$(id -un)" --property="WorkingDirectory=$E2E_ROOT/panel" \
+            --property=CPUQuota=100% --property=MemoryMax=1G \
+            "$E2E_ROOT/bin/komari" server --listen 127.0.0.1:29444
+          sudo systemd-run --unit=komari-e2e-export --collect --slice=komari-e2e.slice \
+            --property="User=$(id -un)" --property="WorkingDirectory=$E2E_ROOT/panel" \
+            --property=CPUQuota=4% --property=CPUQuotaPeriodSec=100ms \
+            --property=MemoryMax=128M --property=MemorySwapMax=0 \
+            --setenv=GOMEMLIMIT=90MiB --setenv=GOMAXPROCS=1 \
+            "$E2E_ROOT/bin/komari" export-worker --queue "$E2E_ROOT/panel/data/exports-v2" \
+            --io-bytes-per-second=131072 \
+            --instance-cgroup="/sys/fs/cgroup$(systemctl show komari-e2e-panel.service --property=ControlGroup --value)"
+      - name: Qualify actual cold CSV work for at least two hours with HTTPS, Agent and chart load
+        if: ${{ inputs.export_qualification && !inputs.skip_csv }}
+        env:
+          KOMARI_AUDIT_TIMEOUT: 300m
+          NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
+        run: |
+          bash scripts/ci/run-audit-check.sh e2e-qualification-contracts node --test scripts/ci/e2e/qualification-observations.test.cjs
+          bash scripts/ci/run-audit-check.sh e2e-qualification-performance node --test scripts/ci/e2e/qualification-performance.test.cjs
+          bash scripts/ci/run-audit-check.sh e2e-export-qualification node scripts/ci/e2e/export-qualification.cjs
+      - name: Restore the real downloaded SQL, ledger and cold archive bundle
+        if: ${{ !inputs.database_only || inputs.skip_csv }}
+        run: bash scripts/ci/run-audit-check.sh e2e-storage-restore go test -race ./pkg/metric -run TestTelemetryE2ERestoreBundle -count=1 -v
       - name: Collect service logs and destroy temporary services and secrets
         if: always()
         run: bash scripts/ci/e2e/cleanup.sh

@@ -187,7 +187,7 @@ func (s *browserService) GetTrafficTrend(ctx context.Context, req *connect.Reque
 	// and each abandoned request keeps scanning after the browser has retried.
 	loadCtx, cancel := context.WithTimeout(ctx, trafficTrendLoadBudget)
 	defer cancel()
-	buckets, err := dashboardapp.LoadTrafficTrend(loadCtx, clientIDs, now, window, interval)
+	trend, err := dashboardapp.LoadTrafficTrendSnapshot(loadCtx, clientIDs, now, window, interval)
 	if err != nil {
 		// Only a bad window/interval is the caller's fault. Reporting a store
 		// timeout as InvalidArgument tells the dashboard its request was malformed,
@@ -196,11 +196,20 @@ func (s *browserService) GetTrafficTrend(ctx context.Context, req *connect.Reque
 		return nil, connectError(trafficTrendErrorCode(ctx, err), err)
 	}
 	response := &browserv1.GetTrafficTrendResponse{
-		Buckets:     make([]*browserv1.TrafficTrendBucket, 0, len(buckets)),
-		Interval:    durationpb.New(interval),
-		GeneratedAt: timestamppb.New(now),
+		Buckets:           make([]*browserv1.TrafficTrendBucket, 0, len(trend.Buckets)),
+		Interval:          durationpb.New(trend.Interval),
+		GeneratedAt:       timestamppb.New(now),
+		RequestedInterval: durationpb.New(interval),
+		Coverage:          trend.Coverage,
+		CatchingUp:        trend.CatchingUp,
+		MissingClients:    uint32(trend.MissingClients),
+		Warning:           trend.Warning,
+		DataEnd:           timestamppb.New(trend.DataEnd),
 	}
-	for _, bucket := range buckets {
+	if !trend.AccountingThrough.IsZero() {
+		response.AccountingThrough = timestamppb.New(trend.AccountingThrough)
+	}
+	for _, bucket := range trend.Buckets {
 		response.Buckets = append(response.Buckets, &browserv1.TrafficTrendBucket{
 			StartTime:     timestamppb.New(bucket.Start),
 			UploadBytes:   uint64(max(bucket.Up, 0)),

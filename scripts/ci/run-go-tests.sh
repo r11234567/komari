@@ -12,7 +12,9 @@ export GOMAXPROCS="${GOMAXPROCS:-2}"
 # failure. Otherwise a full disk can produce a green check with missing logs.
 exec 3> >(tee "$log_dir/build-stderr.log" >&2)
 stderr_logger=$!
-go test -json -count=1 -timeout=12m -p=2 "$@" 2>&3 | tee "$log_dir/tests.jsonl"
+# Reference-format regression tests explicitly build the retired writers.
+# Release builds and the separate production telemetry job never use this tag.
+go test -tags metric_legacy_fixture -json -count=1 -timeout=12m -p=2 "$@" 2>&3 | tee "$log_dir/tests.jsonl"
 statuses=("${PIPESTATUS[@]}")
 status="${statuses[0]}"
 if [ "$status" -eq 0 ] && [ "${statuses[1]}" -ne 0 ]; then status="${statuses[1]}"; fi

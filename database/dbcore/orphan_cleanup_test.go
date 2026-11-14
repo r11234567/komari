@@ -92,7 +92,24 @@ func TestCleanupOrphanedClientDataRepairsAllAssociations(t *testing.T) {
 		{TaskId: "missing-task", Client: "client-a"},
 	}).Error)
 
+	telemetryModels := []any{&models.TelemetryTrafficState{}, &models.TelemetryTrafficSlice{}, &models.TelemetryTrafficCycle{}, &models.TelemetryTrafficMinute{}, &models.TelemetryTrafficTail{}}
+	require.NoError(t, db.AutoMigrate(append(telemetryModels, &models.TelemetryTrafficStream{})...))
+	for _, id := range []string{"client-a", "deleted-client"} {
+		for _, row := range []any{&models.TelemetryTrafficState{Client: id}, &models.TelemetryTrafficSlice{Client: id}, &models.TelemetryTrafficCycle{Client: id}, &models.TelemetryTrafficMinute{Client: id}, &models.TelemetryTrafficTail{Client: id}} {
+			require.NoError(t, db.Create(row).Error)
+		}
+	}
+	require.NoError(t, db.Create(&models.TelemetryTrafficStream{StoreID: "shared-stream", Through: 42}).Error)
 	require.NoError(t, cleanupOrphanedClientData(db))
+	for _, model := range telemetryModels {
+		var rows []struct{ Client string }
+		require.NoError(t, db.Model(model).Select("client").Scan(&rows).Error)
+		require.Len(t, rows, 1)
+		require.Equal(t, "client-a", rows[0].Client)
+	}
+	var stream models.TelemetryTrafficStream
+	require.NoError(t, db.First(&stream).Error)
+	require.Equal(t, int64(42), stream.Through)
 
 	var gotPingTask models.PingTask
 	require.NoError(t, db.First(&gotPingTask, pingTask.Id).Error)

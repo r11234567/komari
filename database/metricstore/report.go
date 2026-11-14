@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	logger "github.com/komari-monitor/komari/utils/log"
-	"math"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/metric"
+	"github.com/komari-monitor/komari/pkg/trafficcounter"
 	v1 "github.com/komari-monitor/komari/protocol/v1"
 )
 
@@ -189,6 +189,17 @@ func WriteReport(ctx context.Context, report v1.Report) (v1.Report, error) {
 		return v1.Report{}, ErrMetricWriteBlocked
 	}
 	report.UpdatedAt = report.UpdatedAt.UTC()
+	if TelemetryEnabled() {
+		s, release, err := AcquireStore(ctx)
+		if err != nil {
+			return v1.Report{}, err
+		}
+		defer release()
+		if s.Telemetry() == nil {
+			return v1.Report{}, ErrStoreBusy
+		}
+		return writeTelemetryReport(ctx, s, report)
+	}
 	if GetStore() == nil {
 		return v1.Report{}, fmt.Errorf("metric store not enabled")
 	}
@@ -521,45 +532,18 @@ func getLatestTrafficBeforeWithStore(ctx context.Context, s *metric.Store, entit
 // starts a new continuity epoch; the first value in that epoch is a baseline,
 // not traffic that can safely be attributed to the current report interval.
 func TrafficCounterDelta(current, previous int64) int64 {
-	if current < 0 || previous < 0 {
-		return 0
-	}
-	if current >= previous {
-		return current - previous
-	}
-	return 0
+	return trafficcounter.Delta(current, previous)
 }
 
 // ReportTrafficCounterDelta rejects positive jumps that cannot be explained by
 // the Agent's measured transfer rate. This protects interface additions and
 // Agent restarts without imposing a fixed link-speed limit.
 func ReportTrafficCounterDelta(current, previous, bytesPerSecond int64, elapsed time.Duration) int64 {
-	delta := TrafficCounterDelta(current, previous)
-	if delta == 0 || elapsed <= 0 {
-		return delta
-	}
-	if delta > reportTrafficDeltaUpperBound(bytesPerSecond, elapsed) {
-		return 0
-	}
-	return delta
+	return trafficcounter.ReportDelta(current, previous, bytesPerSecond, elapsed)
 }
 
 func reportTrafficDeltaUpperBound(bytesPerSecond int64, elapsed time.Duration) int64 {
-	if bytesPerSecond < 0 {
-		return reportTrafficRateAllowance
-	}
-	seconds := int64((elapsed + time.Second - 1) / time.Second)
-	if seconds <= 0 || bytesPerSecond == 0 {
-		return reportTrafficRateAllowance
-	}
-	if bytesPerSecond > math.MaxInt64/seconds {
-		return math.MaxInt64
-	}
-	expected := bytesPerSecond * seconds
-	if expected > (math.MaxInt64-reportTrafficRateAllowance)/reportTrafficRateMultiplier {
-		return math.MaxInt64
-	}
-	return expected*reportTrafficRateMultiplier + reportTrafficRateAllowance
+	return trafficcounter.UpperBound(bytesPerSecond, elapsed)
 }
 
 func deleteReportTrafficState(entityID string) {

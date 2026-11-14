@@ -1,0 +1,374 @@
+//go:build metric_legacy_fixture
+
+package metric
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"fmt"
+	"math"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestSQLiteStorageV4MigratesUpstreamLegacyDataAndPreservesQueries(t *testing.T) {
+	ctx := context.Background()
+	dsn := sqliteFileDSN(filepath.Join(t.TempDir(), "metrics.db"))
+	base := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+	tags := map[string]string{"task_id": "7"}
+	tagsHash, tagsJSON, err := tagsFingerprint(tags)
+	if err != nil {
+		t.Fatalf("fingerprint tags: %v", err)
+	}
+	digest := NewTDigest(defaultTDigestCompression)
+	for i := 0; i < 60; i++ {
+		digest.Add(float64(i%10), 1)
+	}
+	legacyDigest := digest.encodeRaw()
+
+	legacy, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("open legacy SQLite database: %v", err)
+	}
+	createLegacySQLiteMetricSchema(t, ctx, legacy)
+	createdAt := base.Add(-time.Hour).UnixNano()
+	if _, err := legacy.ExecContext(ctx, `INSERT INTO metric_definitions
+		(name, type, unit, description, retention_days, metadata, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"latency", TypeGauge, "ms", "legacy metric", 30, `{"source":"legacy"}`, createdAt, createdAt,
+	); err != nil {
+		t.Fatalf("insert legacy definition: %v", err)
+	}
+	rawTime := base.Add(30 * time.Second)
+	if _, err := legacy.ExecContext(ctx, `INSERT INTO metric_points
+		(metric_name, entity_id, tags_hash, ts_nano, value, tags, labels, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"latency", "node-a", tagsHash, rawTime.UnixNano(), 12.5, tagsJSON, `{"origin":"old-db"}`, createdAt,
+	); err != nil {
+		t.Fatalf("insert legacy point: %v", err)
+	}
+	if _, err := legacy.ExecContext(ctx, `INSERT INTO metric_rollups
+		(metric_name, entity_id, tags_hash, tags, resolution_nano, bucket_nano,
+		 count, sum, sum_sq, min_val, max_val, first_val, first_ts, last_val, last_ts, digest, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"latency", "node-a", tagsHash, tagsJSON, time.Minute.Nanoseconds(), base.UnixNano(),
+		60, 270.0, 1710.0, 0.0, 9.0, 0.0, base.UnixNano(),
+		9.0, base.Add(59*time.Second).UnixNano(), legacyDigest, createdAt,
+	); err != nil {
+		t.Fatalf("insert legacy rollup: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy SQLite database: %v", err)
+	}
+
+	policy := RollupPolicy{
+		RawRetention: 15 * time.Minute,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 24 * time.Hour}},
+	}
+	store, err := Open(ctx, SQLite(dsn, WithRollupPolicy(policy), WithSQLiteReadPool(4)))
+	if err != nil {
+		t.Fatalf("open and migrate legacy SQLite database: %v", err)
+	}
+	if store.readDB == nil || !store.sqliteStorageV3 || !store.sqliteStorageV4 {
+		t.Fatal("SQLite V3 compatibility, V4 storage, or read pool was not enabled after upstream migration")
+	}
+	assertSQLiteV3Schema(t, ctx, store.db)
+	assertSQLiteQueryPlanUses(t, sqliteQueryPlan(t, ctx, store.db,
+		`SELECT ts_nano, value FROM metric_points WHERE metric_name = ? AND entity_id = ? AND ts_nano BETWEEN ? AND ? ORDER BY ts_nano`,
+		"latency", "node-a", base.UnixNano(), base.Add(time.Minute).UnixNano()),
+		"SEARCH p USING PRIMARY KEY")
+	assertSQLiteQueryPlanUses(t, sqliteQueryPlan(t, ctx, store.db,
+		`SELECT bucket_nano, count FROM metric_rollups WHERE metric_name = ? AND entity_id = ? AND resolution_nano = ? AND bucket_nano BETWEEN ? AND ? ORDER BY bucket_nano`,
+		"latency", "node-a", time.Minute.Nanoseconds(), base.UnixNano(), base.Add(time.Minute).UnixNano()),
+		"SEARCH r USING PRIMARY KEY")
+
+	points, err := store.Query(ctx, Query{
+		MetricName: "latency", EntityID: "node-a", Start: base, End: base.Add(time.Minute), Tags: tags,
+	})
+	if err != nil {
+		t.Fatalf("query migrated raw point: %v", err)
+	}
+	if len(points) != 1 || points[0].Timestamp != rawTime || points[0].Value != 12.5 ||
+		points[0].Tags["task_id"] != "7" || points[0].Labels["origin"] != "old-db" {
+		t.Fatalf("migrated raw point changed: %#v", points)
+	}
+
+	series, err := store.Series(ctx, AggregateQuery{
+		Query: Query{
+			MetricName: "latency", EntityID: "node-a", Start: base,
+			End: base.Add(time.Minute - time.Nanosecond), Tags: tags,
+		},
+		Aggregation: AggP99,
+		Interval:    time.Minute,
+	}, base.Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("query migrated percentile rollup: %v", err)
+	}
+	if len(series) != 1 || series[0].Count != 60 || math.Float64bits(series[0].Value) != math.Float64bits(digest.Quantile(0.99)) {
+		t.Fatalf("migrated percentile rollup changed: %#v", series)
+	}
+
+	matchedSeries, err := store.sqliteV4MatchingSeries(ctx, store.db, "latency", "node-a", tags)
+	if err != nil || len(matchedSeries) != 1 {
+		t.Fatalf("find migrated rollup series: count=%d err=%v", len(matchedSeries), err)
+	}
+	rollupRecords, err := store.loadAllSQLiteV4RollupBlockRecords(ctx, store.db, matchedSeries[0].id, time.Minute.Nanoseconds())
+	if err != nil || len(rollupRecords) != 1 {
+		t.Fatalf("read migrated rollup block: count=%d err=%v", len(rollupRecords), err)
+	}
+	migratedDigest := rollupRecords[0].digest
+	if !bytes.Equal(migratedDigest, legacyDigest) {
+		t.Fatal("legacy digest centroid bits changed during migration")
+	}
+	var storedDigestBytes int
+	if err := store.db.QueryRowContext(ctx, `SELECT length(digest_payload) FROM metric_rollup_blocks`).Scan(&storedDigestBytes); err != nil {
+		t.Fatalf("read split digest payload size: %v", err)
+	}
+	if storedDigestBytes >= len(legacyDigest) {
+		t.Fatalf("split digest section was not compressed: raw=%d stored=%d", len(legacyDigest), storedDigestBytes)
+	}
+
+	rootPage := sqliteRootPage(t, ctx, store.db, "metric_series")
+	if err := store.Close(); err != nil {
+		t.Fatalf("close migrated store: %v", err)
+	}
+	store, err = Open(ctx, SQLite(dsn, WithRollupPolicy(policy), WithSQLiteReadPool(4)))
+	if err != nil {
+		t.Fatalf("reopen migrated SQLite database: %v", err)
+	}
+	defer store.Close()
+	if got := sqliteRootPage(t, ctx, store.db, "metric_series"); got != rootPage {
+		t.Fatalf("SQLite V3 storage was rebuilt on reopen: root page %d -> %d", rootPage, got)
+	}
+
+	updated := Point{
+		MetricName: "latency", EntityID: "node-a", Timestamp: rawTime,
+		Value: 99, Tags: tags, Labels: map[string]string{"origin": "new-write"},
+	}
+	if err := store.Write(ctx, updated); err != nil {
+		t.Fatalf("upsert point through V3 view: %v", err)
+	}
+	points, err = store.Query(ctx, Query{MetricName: "latency", EntityID: "node-a", Start: base, End: base.Add(time.Minute)})
+	if err != nil || len(points) != 1 || points[0].Value != 99 || points[0].Labels["origin"] != "new-write" {
+		t.Fatalf("V3 point upsert result: points=%#v err=%v", points, err)
+	}
+	deleted, err := store.DeleteEntity(ctx, "node-a")
+	if err != nil {
+		t.Fatalf("delete migrated entity: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("deleted rows = %d, want raw+rollup = 2", deleted)
+	}
+	var remainingSeries int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM metric_series`).Scan(&remainingSeries); err != nil || remainingSeries != 0 {
+		t.Fatalf("unused series after entity delete = %d, err=%v", remainingSeries, err)
+	}
+}
+
+func TestSQLiteStorageV3ContinuesWritingAndCompactingAfterLegacyMigration(t *testing.T) {
+	ctx := context.Background()
+	dsn := sqliteFileDSN(filepath.Join(t.TempDir(), "metrics.db"))
+	base := time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC)
+
+	legacy, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createLegacySQLiteMetricSchema(t, ctx, legacy)
+	if _, err := legacy.ExecContext(ctx, `INSERT INTO metric_definitions
+		(name, type, unit, description, retention_days, metadata, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"traffic", TypeGauge, "bytes", "traffic report source", 35, `{}`, base.UnixNano(), base.UnixNano(),
+	); err != nil {
+		t.Fatalf("insert legacy definition: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	policy := RollupPolicy{
+		RawRetention: 15 * time.Minute,
+		Tiers:        []RollupTier{{Interval: time.Minute, Retention: 35 * 24 * time.Hour}},
+	}
+	store, err := Open(ctx, SQLite(dsn, WithRollupPolicy(policy), WithSQLiteReadPool(4)))
+	if err != nil {
+		t.Fatalf("migrate legacy database: %v", err)
+	}
+
+	points := make([]Point, 0, 120)
+	for i := 0; i < 120; i++ {
+		points = append(points, Point{
+			MetricName: "traffic",
+			EntityID:   "node-a",
+			Timestamp:  base.Add(time.Duration(i) * time.Second),
+			Value:      float64(i % 60),
+			Tags:       map[string]string{"source": "report"},
+			Labels:     map[string]string{"phase": "after-migration"},
+		})
+	}
+	if err := store.WriteBatch(ctx, points); err != nil {
+		_ = store.Close()
+		t.Fatalf("write after migration: %v", err)
+	}
+	if compacted, err := store.CompactMetric(ctx, "traffic", base.Add(3*time.Hour)); err != nil || compacted == 0 {
+		_ = store.Close()
+		t.Fatalf("compact after migration: rows=%d err=%v", compacted, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(ctx, SQLite(dsn, WithRollupPolicy(policy), WithSQLiteReadPool(4)))
+	if err != nil {
+		t.Fatalf("reopen migrated database: %v", err)
+	}
+	defer store.Close()
+	recent := Point{
+		MetricName: "traffic", EntityID: "node-a", Timestamp: base.Add(3 * time.Hour), Value: 777,
+		Tags: map[string]string{"source": "report"}, Labels: map[string]string{"phase": "after-restart"},
+	}
+	if err := store.Write(ctx, recent); err != nil {
+		t.Fatalf("write after restart: %v", err)
+	}
+	raw, err := store.Query(ctx, Query{
+		MetricName: "traffic", EntityID: "node-a", Start: recent.Timestamp, End: recent.Timestamp,
+		Tags: map[string]string{"source": "report"},
+	})
+	if err != nil || len(raw) != 1 || raw[0].Value != 777 || raw[0].Labels["phase"] != "after-restart" {
+		t.Fatalf("raw query after restart: points=%#v err=%v", raw, err)
+	}
+
+	series, err := store.Series(ctx, AggregateQuery{
+		Query: Query{
+			MetricName: "traffic", EntityID: "node-a", Start: base,
+			End: base.Add(2*time.Minute - time.Nanosecond), Tags: map[string]string{"source": "report"},
+		},
+		Aggregation: AggP99,
+		Interval:    time.Minute,
+	}, base.Add(3*time.Hour))
+	if err != nil {
+		t.Fatalf("percentile query after restart: %v", err)
+	}
+	if len(series) != 2 {
+		t.Fatalf("reconstructed percentile buckets = %d, want 2: %#v", len(series), series)
+	}
+	for _, bucket := range series {
+		if bucket.Count != 60 || bucket.Value < 55 || bucket.Value > 59 {
+			t.Fatalf("unexpected reconstructed P99 bucket: %#v", bucket)
+		}
+	}
+}
+
+func TestSQLiteStorageV3MigrationFailureKeepsLegacyTables(t *testing.T) {
+	ctx := context.Background()
+	dsn := sqliteFileDSN(filepath.Join(t.TempDir(), "metrics.db"))
+	legacy, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("open legacy SQLite database: %v", err)
+	}
+	createLegacySQLiteMetricSchema(t, ctx, legacy)
+	if _, err := legacy.ExecContext(ctx, `ALTER TABLE metric_rollups DROP COLUMN digest`); err != nil {
+		t.Fatalf("make legacy rollup schema incompatible: %v", err)
+	}
+	if _, err := legacy.ExecContext(ctx, `INSERT INTO metric_points
+		(metric_name, entity_id, tags_hash, ts_nano, value, tags, labels, created_at)
+		VALUES ('latency', 'node-a', 'hash', 1, 12.5, '{}', '{}', 1)`); err != nil {
+		t.Fatalf("insert legacy point: %v", err)
+	}
+	_ = legacy.Close()
+
+	if store, err := Open(ctx, SQLite(dsn)); err == nil {
+		_ = store.Close()
+		t.Fatal("migration unexpectedly succeeded for incompatible legacy schema")
+	}
+	legacy, err = sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("reopen legacy database: %v", err)
+	}
+	defer legacy.Close()
+	for _, table := range []string{"metric_points", "metric_rollups"} {
+		kind, err := sqliteObjectType(ctx, legacy, table)
+		if err != nil || kind != "table" {
+			t.Fatalf("legacy object %s after rollback: kind=%q err=%v", table, kind, err)
+		}
+	}
+	var rows int
+	if err := legacy.QueryRowContext(ctx, `SELECT COUNT(*) FROM metric_points`).Scan(&rows); err != nil || rows != 1 {
+		t.Fatalf("legacy rows after rollback = %d, err=%v", rows, err)
+	}
+}
+
+func TestSQLiteStorageV3ReducesRepresentativeFileSize(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "metrics.db")
+	dsn := sqliteFileDSN(path)
+	legacy, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createLegacySQLiteMetricSchema(t, ctx, legacy)
+	tagsHash, tagsJSON, err := tagsFingerprint(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := NewTDigest(defaultTDigestCompression)
+	for i := 0; i < 60; i++ {
+		digest.Add(float64(i%10), 1)
+	}
+	legacyDigest := digest.encodeRaw()
+	tx, err := legacy.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pointStmt, err := tx.PrepareContext(ctx, `INSERT INTO metric_points
+		(metric_name, entity_id, tags_hash, ts_nano, value, tags, labels, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, '{}', ?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10000; i++ {
+		if _, err := pointStmt.ExecContext(ctx, fmt.Sprintf("metric.%02d", i%12), fmt.Sprintf("node-%03d", i%100),
+			tagsHash, int64(i)*time.Second.Nanoseconds(), float64(i%100), tagsJSON, int64(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = pointStmt.Close()
+	rollupStmt, err := tx.PrepareContext(ctx, `INSERT INTO metric_rollups
+		(metric_name, entity_id, tags_hash, tags, resolution_nano, bucket_nano,
+		 count, sum, sum_sq, min_val, max_val, first_val, first_ts, last_val, last_ts, digest, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, 60, 270, 1710, 0, 9, 0, ?, 9, ?, ?, ?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2000; i++ {
+		bucket := int64(i) * time.Minute.Nanoseconds()
+		if _, err := rollupStmt.ExecContext(ctx, fmt.Sprintf("metric.%02d", i%12), fmt.Sprintf("node-%03d", i%100),
+			tagsHash, tagsJSON, time.Minute.Nanoseconds(), bucket, bucket, bucket+59*time.Second.Nanoseconds(), legacyDigest, int64(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = rollupStmt.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.ExecContext(ctx, `VACUUM`); err != nil {
+		t.Fatal(err)
+	}
+	_ = legacy.Close()
+	before := fileSize(t, path)
+	store, err := Open(ctx, SQLite(dsn))
+	if err != nil {
+		t.Fatalf("migrate representative database: %v", err)
+	}
+	if err := store.ReclaimSpace(ctx); err != nil {
+		t.Fatalf("manually reclaim migrated database: %v", err)
+	}
+	_ = store.Close()
+	after := fileSize(t, path)
+	t.Logf("SQLite storage V3 size: before=%d after=%d ratio=%.3f", before, after, float64(after)/float64(before))
+	if after*100 >= before*85 {
+		t.Fatalf("SQLite V3 size = %d, want at least 15%% below legacy %d", after, before)
+	}
+}

@@ -16,6 +16,7 @@ import (
 	installweb "github.com/komari-monitor/komari/web/install"
 	"github.com/komari-monitor/komari/web/public"
 	jsonRpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
+	"github.com/komari-monitor/komari/web/storageupdate"
 )
 
 // legacyRemoteCompatEnabled reports whether the pre-Connect terminal and remote
@@ -34,24 +35,26 @@ func legacyRemoteCompatEnabled() bool {
 //
 // 设计：JSON 类接口统一经声明式路由桥 jsonRpc.Bind 绑定到对应 RPC2 方法，
 // 不再有 per-resource gin handler 层。仅二进制/流/重定向/特殊鉴权类接口保留为 REST handler。
-func Register(r *gin.Engine) {
+func Register(r *gin.Engine) func() error {
 	r.Any("/ping", func(c *gin.Context) {
 		c.String(200, "pong")
 	})
 
 	registerPublicRoutes(r)
 	registerAgentRoutes(r)
-	registerAdminRoutes(r)
+	closeExports := registerAdminRoutes(r)
 	connectapi.Register(r)
 
 	public.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
 		r.NoRoute(handlers...)
 	})
+	return closeExports
 }
 
 // registerPublicRoutes 公开路由。JSON 读接口经 Bind 绑定到 public: 命名空间方法。
 func registerPublicRoutes(r *gin.Engine) {
 	installweb.RegisterCompleted(r)
+	storageupdate.RegisterCompleted(r)
 
 	// 非 JSON / 特殊流程，保留 REST handler。
 	r.POST("/api/login", public_api.Login)
@@ -115,13 +118,13 @@ func registerAgentRoutes(r *gin.Engine) {
 }
 
 // registerAdminRoutes 管理员路由。除二进制/流类外全部经 Bind 绑定到 admin: 命名空间方法。
-func registerAdminRoutes(r *gin.Engine) {
+func registerAdminRoutes(r *gin.Engine) func() error {
 	g := r.Group("/api/admin", api.RequireRole(api.RoleAdmin))
 	// dashboard 读取已迁移到 komari.admin.v1.DashboardService。admin:getDashboard*
 	// 方法仍在 /api/rpc2 上注册，供未改造的第三方主题使用，但不再有 REST 桥接路由。
 	admin.RegisterCredentialLifecycleRoutes(g)
 	admin.RegisterPprofRoutes(g)
-	admin.RegisterHistoryExportRoutes(g)
+	closeExports := admin.RegisterHistoryExportRoutes(g)
 
 	// --- 二进制/流/重定向类，保留 REST handler ---
 	g.GET("/download/backup", admin.DownloadBackup)
@@ -328,4 +331,5 @@ func registerAdminRoutes(r *gin.Engine) {
 		returnRoute.POST("/rules/update", jsonRpc.Bind("admin:updateReturnRouteRules"))
 		returnRoute.POST("/rules/refresh", jsonRpc.Bind("admin:refreshReturnRouteBGPRules"))
 	}
+	return closeExports
 }

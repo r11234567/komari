@@ -1,3 +1,5 @@
+//go:build metric_legacy_fixture
+
 package metric
 
 import (
@@ -5,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 )
@@ -358,27 +359,5 @@ func assertSQLSeriesBatchMatches(t *testing.T, ctx context.Context, store *Store
 	}
 	if gotScans := scanCounts[scanKind]; gotScans != wantScans {
 		t.Fatalf("%s scans = %d, want %d for %d logical queries", scanKind, gotScans, wantScans, len(queries))
-	}
-}
-
-// dropIntegrationTables drops integration-test tables.
-//
-// dropIntegrationTables 删除集成测试创建的表。
-func dropIntegrationTables(t *testing.T, store *Store, prefix string) {
-	t.Helper()
-	if strings.TrimSpace(prefix) == "" {
-		t.Fatal("refusing to drop tables with empty prefix")
-	}
-	for _, name := range []string{
-		prefix + "point_blocks",
-		prefix + "series",
-		prefix + "rollups",
-		prefix + "points",
-		prefix + "compaction_watermarks",
-		prefix + "definitions",
-	} {
-		if _, err := store.db.Exec("DROP TABLE IF EXISTS " + name); err != nil {
-			t.Fatalf("drop integration table %s: %v", name, err)
-		}
 	}
 }

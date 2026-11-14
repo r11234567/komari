@@ -17,24 +17,10 @@ var maintenancePressureState struct {
 }
 
 // MaintenanceTimeout returns a bounded wall-clock budget for one maintenance
-// pass. Linux CPU steal time is used as a pressure signal; when the host gives
-// the process less CPU, the pass gets more wall time but never an unbounded
-// lease. On systems without /proc/stat the normal budget is retained.
+// compatibility pass. A busy host never extends continuous maintenance work.
+// The production telemetry scheduler uses shorter independent task budgets.
 func MaintenanceTimeout(now time.Time) time.Duration {
-	steal := maintenanceStealRatio(now)
-	base := maintenanceRunBudget
-	effective := 1 - steal
-	if effective < 0.2 {
-		effective = 0.2
-	}
-	budget := time.Duration(float64(base) / effective)
-	if budget < base {
-		budget = base
-	}
-	if budget > 90*time.Second {
-		budget = 90 * time.Second
-	}
-	return budget + 3*time.Second
+	return maintenanceRunBudget + 3*time.Second
 }
 
 func maintenanceStealRatio(now time.Time) float64 {

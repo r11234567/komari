@@ -12,6 +12,10 @@ import (
 // reconstruction path for SQLite V4 raw data, including the raw tail of a
 // mixed rollup query. Other storage layouts retain the exact Series behavior.
 func (s *Store) DashboardSeries(ctx context.Context, query AggregateQuery, now time.Time) ([]AggregatePoint, error) {
+	if t := s.telemetry.Load(); t != nil {
+		r, err := t.Chart(ctx, query, now)
+		return r.Points, err
+	}
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}

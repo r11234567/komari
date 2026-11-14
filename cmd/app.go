@@ -28,11 +28,13 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/database/trafficledger"
 	"github.com/komari-monitor/komari/internal/diagnostics"
 	"github.com/komari-monitor/komari/internal/notifications"
 	"github.com/komari-monitor/komari/internal/plugin"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/corn"
+	"github.com/komari-monitor/komari/pkg/historyexport"
 	"github.com/komari-monitor/komari/pkg/metric"
 	"github.com/komari-monitor/komari/pkg/migrations"
 	"github.com/komari-monitor/komari/utils"
@@ -200,6 +202,15 @@ func (a *App) InitStores() error {
 
 		return fmt.Errorf("metrics startup migration failed: %w", err)
 	}
+	// Route all store operations through telemetry before cleanup. Offline
+	// compaction may already have retired the legacy tables; orphan cleanup
+	// must enumerate and erase the active engine, never the retired schema.
+	trafficledger.ConfigureTelemetry(dbcore.GetDBInstance())
+	metricstore.ConfigureTelemetryConsumer(trafficledger.ConsumeTelemetry)
+	metricstore.ConfigureTelemetryLedgerGC(trafficledger.PruneTelemetrySlices)
+	if err := metricstore.ActivateTelemetry(context.Background()); err != nil {
+		return fmt.Errorf("activate telemetry: %w", err)
+	}
 	var registeredClients []models.Client
 	if err := dbcore.GetDBInstance().Select("uuid").Find(&registeredClients).Error; err != nil {
 		return fmt.Errorf("failed to list clients for metrics orphan cleanup: %w", err)
@@ -227,6 +238,9 @@ func (a *App) InitStores() error {
 	a.addCleanup("metric-report-batcher", func(ctx context.Context) error {
 		return metricstore.StopReportBatcher(ctx)
 	})
+	metricstore.StartTelemetryScheduler()
+	a.addCleanup("telemetry-scheduler", metricstore.StopTelemetryScheduler)
+	a.startExportPolicy()
 	return nil
 }
 
@@ -459,6 +473,9 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 	defer controller.Deactivate()
 
 	r := gin.New()
+	if err := security.ConfigureTrustedProxies(r, security.TrustedProxiesFromEnv()); err != nil {
+		return false, fmt.Errorf("invalid %s: %w", security.TrustedProxyEnv, err)
+	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
@@ -475,8 +492,10 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 	frontendpublic.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
 		r.NoRoute(func(c *gin.Context) {
 			requestPath := c.Request.URL.Path
-			if strings.HasPrefix(requestPath, "/api") {
-				api.RespondError(c, http.StatusNotFound, "Not found in metric storage upgrade mode")
+			if strings.HasPrefix(requestPath, "/api") || strings.HasPrefix(requestPath, "/komari.") {
+				c.Header("Retry-After", "5")
+				c.Header("Cache-Control", "no-store")
+				api.RespondError(c, http.StatusServiceUnavailable, "Telemetry storage migration in progress; retry after completion")
 				return
 			}
 			if c.Request.Method == http.MethodGet && requestPath != storageupdateweb.PagePath && filepath.Ext(requestPath) == "" {
@@ -510,6 +529,7 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 	case err := <-serverErr:
 		return false, fmt.Errorf("listen in metric storage upgrade mode: %w", err)
 	case <-quit:
+		controller.Deactivate()
 		return false, a.Shutdown()
 	case <-controller.Done():
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -651,6 +671,17 @@ func (a *App) BuildRouter() error {
 	r.Use(api.IdentityMiddleware())
 	rateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)
 	r.Use(rateLimiter.Middleware())
+	r.Use(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		observe := strings.HasSuffix(path, "/QueryMetrics") || strings.HasSuffix(path, "/GetTrafficTrend") || strings.HasSuffix(path, "/GetDashboardCharts") || strings.HasPrefix(path, "/api/records/")
+		if !observe {
+			c.Next()
+			return
+		}
+		started := time.Now()
+		c.Next()
+		historyexport.ObserveForeground(time.Since(started))
+	})
 	r.Use(api.PrivateSiteMiddleware())
 
 	r.Use(func(c *gin.Context) {
@@ -660,7 +691,8 @@ func (a *App) BuildRouter() error {
 		c.Next()
 	})
 
-	router.Register(r)
+	closeExports := router.Register(r)
+	a.addCleanup("history-export-queue", func(context.Context) error { return closeExports() })
 	plugin.Init(r)
 	if err := plugin.LoadAll(); err != nil {
 		logger.ErrorArgs("server", "Failed to load some plugins:", err)
@@ -778,9 +810,6 @@ func registerScheduledWork() {
 
 	if err := corn.AddFunc("records:cleanup", "@every 30m", cleanupScheduledData); err != nil {
 		logger.ErrorArgs("server", "Failed to add cleanup scheduled task:", err)
-	}
-	if err := corn.AddContextFunc("metrics:compact", "@every 30s", false, compactMetricStore); err != nil {
-		logger.ErrorArgs("server", "Failed to add metric compact scheduled task:", err)
 	}
 	if err := corn.AddFunc("notifier:traffic", "@every 1m", notifier.CheckTraffic); err != nil {
 		logger.ErrorArgs("server", "Failed to add traffic notification task:", err)

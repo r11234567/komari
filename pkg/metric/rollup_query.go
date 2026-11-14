@@ -491,6 +491,9 @@ func rawTagsToJSON(v any) (string, error) {
 // retained tiers, it uses the longest-retained tier so the available portion of
 // the window can still be returned.
 func (s *Store) CompatibleSeriesInterval(start, now time.Time, interval time.Duration) time.Duration {
+	if t := s.telemetry.Load(); t != nil {
+		return t.compatibleInterval(start, now, interval)
+	}
 	return compatibleSeriesInterval(s.cfg.RollupPolicy, start, now, interval)
 }
 
@@ -498,6 +501,9 @@ func (s *Store) CompatibleSeriesInterval(start, now time.Time, interval time.Dur
 // tiers retained for that metric. Callers that know the metric name should use
 // this method; the legacy method remains for third-party compatibility.
 func (s *Store) CompatibleSeriesIntervalForMetric(ctx context.Context, metricName string, start, now time.Time, interval time.Duration) time.Duration {
+	if t := s.telemetry.Load(); t != nil {
+		return t.compatibleInterval(start, now, interval)
+	}
 	return compatibleSeriesInterval(s.rollupPolicyForMetric(ctx, metricName), start, now, interval)
 }
 
@@ -596,6 +602,10 @@ func bestRollupTier(policy RollupPolicy, interval time.Duration, start, now time
 // 这是“降采样 TSDB”的读取路径：近期范围以完整分辨率从原始点回答，旧范围从
 // 逐级更粗的 rollup 回答。
 func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time) ([]AggregatePoint, error) {
+	if t := s.telemetry.Load(); t != nil {
+		r, err := t.Chart(ctx, query, now)
+		return r.Points, err
+	}
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
@@ -626,6 +636,9 @@ func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time)
 // Compatible raw filters share QueryBatch, while multiple aggregations of the
 // same physical series share one bucket state.
 func (s *Store) SeriesBatch(ctx context.Context, queries []AggregateQuery, now time.Time) ([][]AggregatePoint, error) {
+	if t := s.telemetry.Load(); t != nil {
+		return t.SeriesBatch(ctx, queries, now)
+	}
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}

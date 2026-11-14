@@ -79,7 +79,7 @@ func TestAPISourceIgnoresSpoofedForwardingWithoutExplicitProxyTrust(t *testing.T
 func TestAPITokenUsageHasIndependentBoundedHistoryBudget(t *testing.T) {
 	limiter := NewAPITokenUsageLimiter()
 	now := time.Now()
-	for i := 0; i < 4; i++ {
+	for i := 0; i < historyReadBurst; i++ {
 		if ok, _ := limiter.Allow("one", "/komari.metrics.v1.MetricsService/QueryMetrics", now); !ok {
 			t.Fatal("history burst rejected early")
 		}

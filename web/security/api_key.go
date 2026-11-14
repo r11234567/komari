@@ -92,9 +92,9 @@ func NewAPITokenUsageLimiter() *APITokenUsageLimiter {
 // Costly history reads share a stricter lane; changing IP does not reset it.
 func (l *APITokenUsageLimiter) Allow(id, path string, now time.Time) (bool, time.Duration) {
 	if isHistoricalReadPath(path) {
-		if ok, retry := l.budget.allow("api-history:"+id, 1, 4, now); !ok {
+		if ok, retry := l.budget.allow("api-history:"+id, historyReadRate, historyReadBurst, now); !ok {
 			return false, retry
 		}
 	}
-	return l.budget.allow("api-use:"+id, 10, 30, now)
+	return l.budget.allow("api-use:"+id, 40, 160, now)
 }

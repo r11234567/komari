@@ -63,3 +63,26 @@ func TestStoreOperationGateWaitsRespectContext(t *testing.T) {
 		t.Fatalf("shared acquire error = %v, want %v", err, context.Canceled)
 	}
 }
+
+func TestStoreOperationGateDowngradePreservesLifecycleLease(t *testing.T) {
+	gate := newStoreOperationGate()
+	if err := gate.Acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	gate.Downgrade()
+	if gate.TryAcquire() {
+		gate.Release()
+		t.Fatal("downgrade opened a Store replacement window")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := gate.AcquireShared(ctx); err != nil {
+		t.Fatal("downgraded backup blocked ingress", err)
+	}
+	gate.ReleaseShared()
+	gate.ReleaseShared()
+	if !gate.TryAcquire() {
+		t.Fatal("downgraded lease leaked")
+	}
+	gate.Release()
+}

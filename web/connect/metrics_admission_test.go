@@ -19,16 +19,12 @@ func TestMetricAdmissionFailsFastAndKeepsRecentLaneAvailable(t *testing.T) {
 			release()
 		}
 	}()
-	for range connectMetricHeavyCapacity {
+	for range connectMetricHeavyCapacity / 2 {
 		release, err := acquireMetricReadSlot(context.Background(), 2)
 		if err != nil {
 			t.Fatal(err)
 		}
 		held = append(held, release)
-		// Each historical request may consume the whole weighted capacity.
-		if connectMetricHeavyCapacity >= 2 {
-			break
-		}
 	}
 	started := time.Now()
 	_, err := acquireMetricReadSlot(context.Background(), 2)
@@ -51,20 +47,20 @@ func TestMetricAdmissionFailsFastAndKeepsRecentLaneAvailable(t *testing.T) {
 	}
 }
 
-func TestMetricCooldownReturnsRetryAfter(t *testing.T) {
-	connectMetricReadCooldown.Lock()
-	previous := connectMetricReadCooldown.heavyUntil
-	connectMetricReadCooldown.heavyUntil = time.Now().Add(4 * time.Second)
-	connectMetricReadCooldown.Unlock()
-	defer func() {
-		connectMetricReadCooldown.Lock()
-		connectMetricReadCooldown.heavyUntil = previous
-		connectMetricReadCooldown.Unlock()
-	}()
-	_, err := acquireMetricReadSlot(context.Background(), 2)
-	var failure *connect.Error
-	if !errors.As(err, &failure) || failure.Meta().Get("Retry-After") != "4" {
-		t.Fatalf("slow read cooldown was bypassed: %v", err)
+func TestSlowMetricReadDoesNotSuspendOtherCharts(t *testing.T) {
+	release, err := acquireMetricReadSlot(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce the old two-second threshold with an actual held request.
+	time.Sleep(2100 * time.Millisecond)
+	release()
+	for range 8 {
+		release, err := acquireMetricReadSlot(context.Background(), 3)
+		if err != nil {
+			t.Fatalf("completed slow read suspended another chart: %v", err)
+		}
+		defer release()
 	}
 }
 

@@ -337,16 +337,34 @@ func DecodeTDigest(b []byte) (*TDigest, error) {
 			return nil, errors.New("metric: unsupported compressed t-digest version")
 		}
 		reader := flate.NewReader(bytes.NewReader(b[3:]))
-		decompressed, err := io.ReadAll(io.LimitReader(reader, (64<<20)+1))
+		var header [39]byte
+		_, err := io.ReadFull(reader, header[:])
+		if err != nil || header[0] != tdigestMagic0 || header[1] != tdigestMagic1 || header[2] != tdigestVersion {
+			reader.Close()
+			return nil, errors.New("metric: invalid compressed t-digest header")
+		}
+		n := uint64(binary.LittleEndian.Uint32(header[35:]))
+		if n > ((64<<20)-39)/16 {
+			reader.Close()
+			return nil, errors.New("metric: compressed t-digest blob is too large")
+		}
+		// The declared centroid count is also the allocation bound. A forged
+		// tiny header must not expand a 64MiB tail before being rejected.
+		decompressed := make([]byte, 39+int(n)*16)
+		copy(decompressed, header[:])
+		_, err = io.ReadFull(reader, decompressed[39:])
+		var tail [1]byte
+		if err == nil {
+			if count, end := io.ReadFull(reader, tail[:]); count != 0 || end != io.EOF {
+				err = errors.New("metric: invalid compressed t-digest length")
+			}
+		}
 		closeErr := reader.Close()
 		if err != nil {
 			return nil, errors.New("metric: invalid compressed t-digest blob")
 		}
 		if closeErr != nil {
 			return nil, errors.New("metric: invalid compressed t-digest blob")
-		}
-		if len(decompressed) > 64<<20 {
-			return nil, errors.New("metric: compressed t-digest blob is too large")
 		}
 		b = decompressed
 	}

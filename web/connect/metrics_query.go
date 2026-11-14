@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	connectDefaultMetricPoints = 500
+	connectDefaultMetricPoints = 600
 	connectMaxMetricPoints     = 10_000
 	connectMaxRawMetricRange   = time.Hour
 	connectMetricMemoryTotal   = "memory.total"
@@ -40,19 +40,14 @@ const (
 	connectMetricCacheTTL      = 5 * time.Second
 )
 
-var connectMetricLightCapacity = int64(max(1, min(4, runtime.GOMAXPROCS(0))))
-var connectMetricHeavyCapacity = int64(max(1, min(2, runtime.GOMAXPROCS(0))))
+var connectMetricLightCapacity = int64(max(32, min(128, runtime.GOMAXPROCS(0)*16)))
+var connectMetricHeavyCapacity = int64(max(24, min(64, runtime.GOMAXPROCS(0)*12)))
 
 // Recent reads have their own lane so multi-day scans cannot starve normal
 // dashboard/live views.
 var connectMetricLightReadGate = semaphore.NewWeighted(connectMetricLightCapacity)
 var connectMetricHeavyReadGate = semaphore.NewWeighted(connectMetricHeavyCapacity)
 var connectMetricQueryFlight singleflight.Group
-var connectMetricReadCooldown struct {
-	sync.Mutex
-	lightUntil time.Time
-	heavyUntil time.Time
-}
 var connectMetricQueryCache struct {
 	sync.Mutex
 	items map[string]metricQueryCacheEntry
@@ -91,50 +86,19 @@ func acquireMetricReadSlot(ctx context.Context, weight int64) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, connectMetricStoreError(err)
 	}
-	connectMetricReadCooldown.Lock()
-	until := connectMetricReadCooldown.lightUntil
-	if gate == connectMetricHeavyReadGate {
-		until = connectMetricReadCooldown.heavyUntil
-	}
-	if wait := time.Until(until); wait > 0 {
-		connectMetricReadCooldown.Unlock()
-		return nil, metricReadBusy(wait)
-	}
 	acquired := gate.TryAcquire(weight)
-	connectMetricReadCooldown.Unlock()
 	if !acquired {
 		return nil, metricReadBusy(2 * time.Second)
 	}
-	started := time.Now()
-	return func() {
-		// Slow reads back off their own lane, allowing ingestion and maintenance
-		// to make progress. Fast future storage engines incur no cooldown.
-		elapsed := time.Since(started)
-		if elapsed >= 2*time.Second {
-			connectMetricReadCooldown.Lock()
-			deadline := time.Now().Add(min(elapsed, 15*time.Second))
-			if gate == connectMetricHeavyReadGate {
-				connectMetricReadCooldown.heavyUntil = maxTime(connectMetricReadCooldown.heavyUntil, deadline)
-			} else {
-				connectMetricReadCooldown.lightUntil = maxTime(connectMetricReadCooldown.lightUntil, deadline)
-			}
-			connectMetricReadCooldown.Unlock()
-		}
-		gate.Release(weight)
-	}, nil
+	// Releasing a slow read immediately makes capacity available again. Its
+	// latency alone is not evidence that every other chart should be refused.
+	return func() { gate.Release(weight) }, nil
 }
 
 func metricReadBusy(wait time.Duration) error {
 	err := connect.NewError(connect.CodeResourceExhausted, errors.New("metric query capacity is busy; retry shortly"))
 	err.Meta().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(wait.Seconds())))))
 	return err
-}
-
-func maxTime(first, second time.Time) time.Time {
-	if first.After(second) {
-		return first
-	}
-	return second
 }
 
 func connectMetricReadWeight(start, end time.Time) int64 {
@@ -324,6 +288,7 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 	if err != nil {
 		return nil, err
 	}
+	ctx = metric.WithTelemetryEntities(ctx, entityIDs)
 	store, releaseStore, err := metricstore.AcquireStore(ctx)
 	if err != nil {
 		return nil, connectMetricStoreError(err)
@@ -352,6 +317,9 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 		aggregation = metric.AggAvg
 	}
 	baseInterval := metric.CeilStandardInterval(time.Duration((end.Sub(start).Nanoseconds() + int64(maxPoints) - 1) / int64(maxPoints)))
+	if store.Telemetry() != nil {
+		baseInterval = metric.TelemetryChartInterval(end.Sub(start), maxPoints)
+	}
 	if baseInterval < time.Second {
 		baseInterval = time.Second
 	}
@@ -382,6 +350,12 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 			return nil, connectError(connect.CodeInvalidArgument, fmtRange("unknown metric %q", metricName))
 		}
 		interval := store.CompatibleSeriesIntervalForMetric(ctx, metricName, start, time.Now().UTC(), baseInterval)
+		if telemetry := store.Telemetry(); telemetry != nil && downsample {
+			interval, err = telemetry.ChartInterval(ctx, metric.Query{MetricName: metricName, Start: start, End: end, Tags: req.Msg.Tags}, time.Now().UTC(), baseInterval)
+			if err != nil {
+				return nil, connectMetricStoreError(err)
+			}
+		}
 		queryIndex := len(queries)
 		if !downsample {
 			queryIndex = len(rawQueries)
@@ -406,6 +380,15 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 			continue
 		}
 		query := metric.Query{MetricName: metricName, Start: start, End: end, Tags: req.Msg.Tags, Order: metric.OrderAsc}
+		if store.Telemetry() != nil && downsample && definition.RetentionDays > 0 {
+			cutoff := time.Now().UTC().Add(-time.Duration(definition.RetentionDays) * 24 * time.Hour)
+			if cutoff.After(query.Start) {
+				query.Start = cutoff
+			}
+			if query.Start.After(end) {
+				query.Start = end
+			}
+		}
 		if downsample {
 			queries = append(queries, metric.AggregateQuery{Query: query, Aggregation: aggregation, Interval: interval, PreserveSeries: true})
 		} else {
@@ -414,11 +397,18 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 	}
 	if downsample && len(queries) > 0 {
 		var batch [][]metric.AggregatePoint
+		var telemetryBatch []metric.TelemetryQueryResult
 		var queryErr error
 		// SQLite V4 can route all ordinary dashboard aggregations through one
 		// snapshot. This avoids one block/axis scan per metric in a six-metric
 		// page while retaining SeriesBatch for percentile/rate compatibility.
-		if aggregation == metric.AggAvg || aggregation == metric.AggSum || aggregation == metric.AggLast {
+		if telemetry := store.Telemetry(); telemetry != nil {
+			telemetryBatch, queryErr = telemetry.ChartBatch(ctx, queries, time.Now().UTC())
+			batch = make([][]metric.AggregatePoint, len(telemetryBatch))
+			for i, result := range telemetryBatch {
+				batch[i] = result.Points
+			}
+		} else if aggregation == metric.AggAvg || aggregation == metric.AggSum || aggregation == metric.AggLast {
 			batch, queryErr = store.DashboardSeriesBatch(ctx, queries, time.Now().UTC())
 		} else {
 			batch, queryErr = store.SeriesBatch(ctx, queries, time.Now().UTC())
@@ -438,7 +428,9 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 				grouped[item.queryIndex] = connectAggregatePointIndices(batch[item.queryIndex], entityIDs...)
 			}
 			points := grouped[item.queryIndex][item.agentID]
-			if len(points) > 0 {
+			if telemetryBatch != nil {
+				resultParts[item.index] = connectTelemetryAggregateSeries(item.metricName, item.agentID, item.definition, aggregation, item.interval, req.Msg.FillEmpty, start, end, telemetryBatch[item.queryIndex], points)
+			} else if len(points) > 0 {
 				resultParts[item.index] = connectAggregateSeries(item.metricName, item.agentID, item.definition, aggregation, item.interval, req.Msg.FillEmpty, start, end, batch[item.queryIndex], points)
 			}
 		}
@@ -593,7 +585,22 @@ func (s *metricsService) getPingStats(ctx context.Context, req *connect.Request[
 		taskFilter[strconv.FormatUint(id, 10)] = true
 	}
 	interval := metric.CeilStandardInterval(time.Duration((end.Sub(start).Nanoseconds() + int64(maxPoints) - 1) / int64(maxPoints)))
+	if store.Telemetry() != nil {
+		interval = metric.TelemetryChartInterval(end.Sub(start), maxPoints)
+	}
 	interval = store.CompatibleSeriesIntervalForMetric(ctx, metricstore.MetricPingLatency, start, time.Now().UTC(), interval)
+	if telemetry := store.Telemetry(); telemetry != nil {
+		interval, err = telemetry.ChartInterval(ctx, metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end}, time.Now().UTC(), interval)
+		if err != nil {
+			return nil, connectMetricStoreError(err)
+		}
+	}
+	if telemetry := store.Telemetry(); telemetry != nil {
+		start, end, err = telemetry.PingWindow(start, end, interval, time.Now().UTC())
+		if err != nil {
+			return nil, connectMetricStoreError(err)
+		}
+	}
 	result := make([]*metricsv1.PingStat, 0)
 	for _, agentID := range entityIDs {
 		if err := ctx.Err(); err != nil {
@@ -775,9 +782,9 @@ func connectPingStats(agentID string, summary metric.SeriesSummary, tasksByID ma
 		if len(filter) > 0 && !filter[id] {
 			continue
 		}
-		total := aggregateCount(avg[id])
+		total := aggregateCount(loss[id])
 		if total == 0 {
-			total = aggregateCount(loss[id])
+			total = aggregateCount(avg[id])
 		}
 		if total == 0 {
 			continue
@@ -800,6 +807,15 @@ func connectPingStats(agentID string, summary metric.SeriesSummary, tasksByID ma
 }
 
 func connectMetricStoreError(err error) error {
+	if errors.Is(err, metric.ErrTelemetryBackpressure) {
+		return metricReadBusy(2 * time.Second)
+	}
+	if errors.Is(err, metric.ErrTelemetryCold) || errors.Is(err, metric.ErrTelemetryCoverage) {
+		return connectError(connect.CodeFailedPrecondition, err)
+	}
+	if errors.Is(err, metric.ErrInvalidArgument) {
+		return connectError(connect.CodeInvalidArgument, err)
+	}
 	if errors.Is(err, metricstore.ErrStoreNotInitialized) {
 		return connectError(connect.CodeFailedPrecondition, err)
 	}

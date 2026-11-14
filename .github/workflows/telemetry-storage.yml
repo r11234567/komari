@@ -1,0 +1,115 @@
+name: Telemetry storage contracts
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: telemetry-storage-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  independent:
+    name: Telemetry / historical matrix and isolated decoder resources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOMAXPROCS: '2'
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Raw-oracle historical windows after migration, retention and restart
+        env:
+          KOMARI_TELEMETRY_INDEPENDENT_OUTPUT: ${{ github.workspace }}/ci-artifacts/independent
+        run: bash scripts/ci/run-audit-check.sh telemetry-history-matrix go test -race -count=1 -timeout=12m ./pkg/metric -run '^TestTelemetryIndependentHistoricalMatrix$'
+      - name: Production schema and exact synthetic browser fixture migration
+        env:
+          KOMARI_TELEMETRY_MIGRATION_CURVE_FIXTURE: '1'
+        run: bash scripts/ci/run-audit-check.sh telemetry-curve-fixture go test -race -count=1 -timeout=10m ./scripts/ci/migration-fixture -run '^TestSyntheticMigrationCurveFixture$' -v
+      - name: Build separate archive measurement process
+        run: go test -c ./pkg/metric -o /var/tmp/komari-metric-resource.test
+      - name: Sustained online lifecycle with live-window and disk regression
+        env:
+          KOMARI_TELEMETRY_SUSTAINED: '1'
+        run: bash scripts/ci/run-audit-check.sh telemetry-sustained go test -count=1 -timeout=8m ./pkg/metric -run '^TestTelemetrySustainedLifecycle$' -v
+      - name: Isolated decoder CPU and process RSS with enforced limits
+        run: sudo -n python3 scripts/ci/telemetry-independent-resources.py --binary /var/tmp/komari-metric-resource.test --output ci-artifacts/independent/archive
+      - name: Decoded chart budgets under high series cardinality in a fresh bounded process
+        run: |
+          mkdir -p ci-artifacts/independent/chart
+          sudo -n systemd-run --unit=komari-chart-budget-${{ github.run_id }} --wait --pipe --collect \
+            --property=User="$(id -u)" --property=Group="$(id -g)" \
+            --property=CPUQuota=10% --property=CPUQuotaPeriodSec=100ms --property=MemoryMax=128M --property=MemorySwapMax=0 \
+            /usr/bin/env GOMAXPROCS=1 GOMEMLIMIT=96MiB \
+            KOMARI_TELEMETRY_REQUIRE_CHART_CGROUP=1 \
+            KOMARI_TELEMETRY_CHART_MEMORY_OUTPUT="$GITHUB_WORKSPACE/ci-artifacts/independent/chart/result.json" \
+            /usr/bin/time -v /var/tmp/komari-metric-resource.test -test.run '^TestTelemetryChartHighCardinalityResourceBudget$' -test.v -test.timeout 5m \
+            > ci-artifacts/independent/chart/process.log 2>&1
+          test -r ci-artifacts/independent/chart/result.json
+      - name: Retain independent measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: telemetry-independent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+  storage:
+    name: Telemetry / SQLite, PostgreSQL, MySQL and MariaDB
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: telemetry
+          POSTGRES_PASSWORD: fixture
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U postgres -d telemetry" --health-interval 5s --health-timeout 5s --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: telemetry
+          MYSQL_ROOT_PASSWORD: fixture
+        ports: ['3306:3306']
+        options: --health-cmd "mysqladmin ping -h 127.0.0.1 -pfixture" --health-interval 5s --health-timeout 5s --health-retries 30
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_DATABASE: telemetry
+          MARIADB_ROOT_PASSWORD: fixture
+        ports: ['3307:3306']
+        options: --health-cmd "healthcheck.sh --connect --innodb_initialized" --health-interval 5s --health-timeout 5s --health-retries 30
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 1GiB
+      CGO_ENABLED: '1'
+      METRIC_POSTGRES_DSN: postgres://postgres:fixture@127.0.0.1:5432/telemetry?sslmode=disable
+      METRIC_MYSQL_DSN: root:fixture@tcp(127.0.0.1:3306)/telemetry?parseTime=true
+      METRIC_MARIADB_DSN: root:fixture@tcp(127.0.0.1:3307)/telemetry?parseTime=true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Full storage race, real SQL drivers, restart and fault contracts
+        run: bash scripts/ci/run-audit-check.sh telemetry-storage bash scripts/ci/run-go-tests.sh -race ./pkg/metric ./database/metricstore ./database/trafficledger ./pkg/historyexport
+      - name: Production build without retired compression writers
+        run: |
+          go list -json ./pkg/metric > ci-artifacts/production-metric-package.json
+          python3 scripts/ci/check-production-telemetry.py ci-artifacts/production-metric-package.json
+          go test -race -count=1 -timeout=12m ./pkg/metric ./database/metricstore ./database/trafficledger
+      - name: Offline metadata rollback snapshot and active key preservation
+        run: go test -race -count=1 -timeout=5m ./cmd -run '^TestCompactMetadata'
+      - name: Full store startup after legacy table retirement
+        run: bash scripts/ci/run-audit-check.sh telemetry-retired-startup go test -race -count=1 -timeout=5m ./cmd -run '^TestAppInitStoresTelemetryLifecycle$'
+      - name: Retain test events and context
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: telemetry-storage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30

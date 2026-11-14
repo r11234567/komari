@@ -28,6 +28,12 @@ const (
 	// rateLimitSweepInterval throttles opportunistic sweeps so a table that
 	// sits near capacity does not pay a scan on every single request.
 	rateLimitSweepInterval = 30 * time.Second
+
+	// A dashboard opens many charts and Ping summaries together. Admission must
+	// accommodate that fan-out before cached or coalesced reads reach storage.
+	historyReadRate        = 32
+	historyReadBurst       = 96
+	historyReadPerIdentity = 32
 )
 
 type rateLimitBucket struct {
@@ -204,7 +210,7 @@ func AcquireCompatibilityHistoryRead(c *gin.Context) (func(), time.Duration) {
 	key, _, _ := ctrl.keyAndBudget(c)
 	_, identity, _ := strings.Cut(key, ":")
 	key = "history:" + identity
-	if allowed, wait := ctrl.allow(key, 2, 5, time.Now()); !allowed {
+	if allowed, wait := ctrl.allow(key, historyReadRate, historyReadBurst, time.Now()); !allowed {
 		return nil, wait
 	}
 	if !ctrl.acquireHistory(key) {
@@ -235,7 +241,7 @@ func (ctrl *RateLimitController) keyAndBudget(c *gin.Context) (string, float64, 
 	// Classify history before Agent ingestion so expensive reads cannot spend
 	// or inherit the higher-priority reporting budget.
 	if isHistoricalReadPath(path) {
-		return "history:" + identity, 2, 5
+		return "history:" + identity, historyReadRate, historyReadBurst
 	}
 	if isLongLivedRequest(path) {
 		// Charge the HTTP opening once, never individual stream frames. A
@@ -264,8 +270,8 @@ func (ctrl *RateLimitController) acquireHistory(key string) bool {
 	ctrl.mu.Lock()
 	defer ctrl.mu.Unlock()
 	// Bound HTTP work independently of any particular metrics storage engine.
-	capacity := max(2, min(8, runtime.GOMAXPROCS(0)*2))
-	if ctrl.historyTotal >= capacity || ctrl.historyActive[key] >= 2 {
+	capacity := max(64, min(256, runtime.GOMAXPROCS(0)*32))
+	if ctrl.historyTotal >= capacity || ctrl.historyActive[key] >= historyReadPerIdentity {
 		return false
 	}
 	if ctrl.historyActive == nil {
