@@ -120,22 +120,17 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 
 		path := c.Request.URL.Path
 		if strings.HasPrefix(path, "/komari.") {
-			// Public site metadata must remain reachable so the browser can render
-			// the login/private-site state before it has a session.
-			if path == "/komari.browser.v1.BrowserService/GetPublicInfo" ||
-				path == "/komari.browser.v1.BrowserService/GetThemeContract" {
+			if privateSiteBootstrapProcedure(path) {
 				c.Next()
 				return
 			}
 			privateSite, err := config.GetAs[bool](config.PrivateSiteKey, false)
 			if err != nil {
-				RespondError(c, http.StatusInternalServerError, "Failed to get configuration.")
-				c.Abort()
+				security.AbortRequest(c, http.StatusInternalServerError, "Failed to get configuration.")
 				return
 			}
 			if privateSite && !HasTempAccess(c) {
-				RespondError(c, http.StatusUnauthorized, "Private site is enabled, please login first.")
-				c.Abort()
+				security.AbortRequest(c, http.StatusUnauthorized, "Private site is enabled, please login first.")
 				return
 			}
 			c.Next()
