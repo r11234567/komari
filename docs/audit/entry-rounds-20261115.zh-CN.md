@@ -29,6 +29,7 @@
 - CORS/WS allowlist 使用完整 Origin，拒绝裸 hostname、通配符与 opaque Origin；补齐 Connect、workspace、credential action、bind 和当前 Agent 签名头。校验预检方法/请求头，追加 Vary 而不覆盖既有值，错误保留 no-store 和浏览器可读 Retry-After，不暴露 Set-Cookie。
 - Agent `7e85a9eded915fee4db8f28257be9542a0f8cf24` 以 SDK `IsWireError` 区分原生凭据拒绝与代理 HTML 状态映射；代理失败保留 pending/凭据、受控重试，真实原生 Unauthenticated/PermissionDenied 仍停止主动续期。入网/刷新客户端不添加 Bearer 或 Cookie。Server 专项 pin 同轮更新，Web/Proto 无 wire/消费变化。
 - 本地生产路由 race 场景和 security/api/connect 完整 race 回归已通过；Agent Windows enrollment/clientcore 单测、代理错误恢复和双类原生拒绝回归及 go vet 通过。组合专项继续只跑本项目 entry E2E，并增加真实浏览器跨源请求、401/429 可读性与策略撤销。
+- 最终复查补齐通用请求限流器的原生协议拒绝：RPC 与认证拒绝共用 ErrorWriter，REST 保留已有三字段 JSON。新增真实 TLS/HTTP2 客户端的 Connect、gRPC、gRPC-Web unary/服务器流六种组合，验证有预算成功、耗尽时原生 ResourceExhausted、Retry-After/no-store；旧实现六种中五种错误映射为 Unavailable。此补充只追加第三轮修复提交，不改写前序历史。
 
 ## 提交与远程证据
 
