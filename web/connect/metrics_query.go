@@ -226,17 +226,10 @@ func storeMetricQueryMessage(key string, message proto.Message, at time.Time) {
 }
 
 func connectMetricQueryKey(ctx context.Context, request *metricsv1.QueryMetricsRequest) string {
-	// Browsers compute "now" independently, so equivalent dashboard windows
-	// otherwise miss singleflight by a few milliseconds. Canonicalize only the
-	// cache key; the first request still owns the exact response boundaries.
+	// Explicit timestamps define the observed population and coverage bounds.
+	// Even nearby windows can cut different hot cells, so they cannot share a
+	// response. Preserve nanoseconds for both caching and in-flight reads.
 	canonical := proto.Clone(request).(*metricsv1.QueryMetricsRequest)
-	const quantum = 5 * time.Second
-	if canonical.StartTime != nil && canonical.StartTime.IsValid() {
-		canonical.StartTime = timestamppb.New(canonical.StartTime.AsTime().UTC().Truncate(quantum))
-	}
-	if canonical.EndTime != nil && canonical.EndTime.IsValid() {
-		canonical.EndTime = timestamppb.New(canonical.EndTime.AsTime().UTC().Truncate(quantum))
-	}
 	// These request spellings have identical server semantics, but protobuf
 	// encoding would otherwise give them different singleflight keys.
 	if canonical.Downsample == nil {
