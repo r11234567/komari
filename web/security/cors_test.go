@@ -196,7 +196,7 @@ func setupCORSConfigDB(t *testing.T, apiKey string) {
 }
 
 func performCORSRequest(handler http.Handler, method, path, host, origin string) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(method, path, nil)
+	request := httptest.NewRequest(method, "https://"+host+path, nil)
 	request.Host = host
 	if origin != "" {
 		request.Header.Set("Origin", origin)

@@ -15,6 +15,14 @@
 
 迁移：无数据库结构变更、无凭据重签发；已存在登录/因素仍由原 handler 验证。删除原仅两条 metadata 的硬编码私有入口判断及手写 RPC 鉴权 JSON。候选提交必须通过 CI/E2E 才能记验收通过。
 
+## 轮次二：统一来源解析与固定批准链接
+
+- 新建标准库 `pkg/requestmeta` 作为 HTTP 元数据边界：默认不信任代理，拒绝全网段和错误配置；Gin、API 预算、原始插件 hook、HTTPS 判断共用同一显式代理列表与右至左 IP 链规则。
+- 删除私有/回环地址自动可信、任意第一 XFF 和桥接层直接 XFP 判安全的旧路径。外部 Origin 完整比较 scheme、host、port，多值/冲突转发头拒绝。正常、安装、两类升级监听器均校验配置。
+- 批准链接仅来自 `KOMARI_PUBLIC_ORIGIN`；未配置时在创建申请前返回 FailedPrecondition，绝不从 Host、转发头或 Peer 拼接。无 wire、数据库、凭据格式变化，Agent/Web/Proto 固定第一轮组合。
+- HTTPS fixture 的启动及所有既有重启路径显式传入 Origin/代理配置；Nginx HTTP/H2 覆盖转发头。部署模板见 `deploy/nginx/entry-origin.zh-CN.md`，保留单 hostname。
+- 本地相关八包 `go vet -race` 与完整 `go test -race -count=1` 已通过。新增伪造头、冲突头、默认拒绝代理、固定链接与配置缺失测试；CI 增加这些包，专项 E2E 加入真实 Nginx 伪造头覆盖检查。远程门禁结果另行登记，未通过前不记验收完成。
+
 ## 验收边界
 
 真实 Cloudflare 账户、生产配置/包摘要、1C512M 和生产等量负载尚无本次实测。本地/CI 的 Nginx HTTPS 不等于 CF 橙云验收；协议和登录回归通过也不代表其他已知 S0/S1 关闭。中间开发提交不作为生产安全重构完成版本发布。

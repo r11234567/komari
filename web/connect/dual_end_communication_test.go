@@ -295,6 +295,7 @@ func TestDualEnd_AuthenticatedMetricsSubmit(t *testing.T) {
 
 // TestDualEnd_EnrollmentHandshake tests unauthenticated device enrollment handshake over HTTP.
 func TestDualEnd_EnrollmentHandshake(t *testing.T) {
+	t.Setenv("KOMARI_PUBLIC_ORIGIN", testServer.URL)
 	enrollClient := enrollmentv1connect.NewEnrollmentServiceClient(testServer.Client(), testServer.URL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -515,6 +516,7 @@ func TestDualEnd_DPoP_DriftedTimestampRejected(t *testing.T) {
 
 // TestDualEnd_SingleUseDeviceCode tests that an approved device code is atomically consumed on first retrieval
 func TestDualEnd_SingleUseDeviceCode(t *testing.T) {
+	t.Setenv("KOMARI_PUBLIC_ORIGIN", testServer.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

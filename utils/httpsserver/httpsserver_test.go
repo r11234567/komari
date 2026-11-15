@@ -224,6 +224,7 @@ func TestNormalizeUsesDefaultHTTPSPortAndRequiresCertificatePaths(t *testing.T) 
 }
 
 func TestHTTPRedirectUsesPublic443AndHonorsForwardedHTTPS(t *testing.T) {
+	t.Setenv("KOMARI_TRUSTED_PROXIES", "127.0.0.1")
 	manager := NewManager()
 	manager.settings = Settings{
 		Enabled:      true,
@@ -408,6 +409,7 @@ func TestDeferredDisableDoesNotStopReenabledHTTPS(t *testing.T) {
 }
 
 func TestHTTPOriginOnlyForDirectTLS(t *testing.T) {
+	t.Setenv("KOMARI_TRUSTED_PROXIES", "127.0.0.1,172.18.0.3")
 	manager := NewManager()
 	manager.httpListen = "0.0.0.0:25774"
 
@@ -434,6 +436,7 @@ func TestHTTPOriginOnlyForDirectTLS(t *testing.T) {
 }
 
 func TestHTTPSOriginOnlyForDirectHTTP(t *testing.T) {
+	t.Setenv("KOMARI_TRUSTED_PROXIES", "127.0.0.1,172.18.0.3")
 	manager := NewManager()
 	manager.settings = Settings{Listen: ":35938"}
 

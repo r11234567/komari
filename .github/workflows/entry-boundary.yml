@@ -26,11 +26,11 @@ jobs:
       - name: Unified static acceptance of the changed entry stack
         run: |
           git diff --check
-          test -z "$(git ls-files -z -- 'web/security/*.go' 'web/api/*.go' 'web/connect/*.go' | xargs -0 gofmt -l)"
-          go vet ./web/security ./web/api ./web/connect
+          test -z "$(git ls-files -z -- 'pkg/requestmeta/*.go' 'utils/requestscheme/*.go' 'utils/httpsserver/*.go' 'internal/plugin/*.go' 'cmd/*.go' 'web/security/*.go' 'web/api/*.go' 'web/connect/*.go' | xargs -0 gofmt -l)"
+          go vet ./pkg/requestmeta ./utils/requestscheme ./utils/httpsserver ./internal/plugin ./cmd ./web/security ./web/api ./web/connect
           node scripts/ci/check-protocol.cjs --resolve-go
       - name: Complete entry and authentication regressions with the race detector
-        run: bash scripts/ci/run-audit-check.sh entry-regressions bash scripts/ci/run-go-tests.sh -race ./web/security ./web/api ./web/connect
+        run: bash scripts/ci/run-audit-check.sh entry-regressions bash scripts/ci/run-go-tests.sh -race ./pkg/requestmeta ./utils/requestscheme ./utils/httpsserver ./internal/plugin ./cmd ./web/security ./web/api ./web/connect
       - uses: actions/upload-artifact@v4
         if: always()
         with:

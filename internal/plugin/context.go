@@ -1,14 +1,13 @@
 package plugin
 
 import (
-	"net"
 	"net/http"
-	"strings"
 
 	"github.com/Calcium-Ion/moejs"
 	"github.com/Calcium-Ion/moejs/engine"
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/pkg/jsruntime/native"
+	"github.com/komari-monitor/komari/pkg/requestmeta"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
@@ -52,7 +51,7 @@ func routeRequestContext(vm *moejs.Runtime, c *gin.Context) *engine.Object {
 // available there.
 func hookRequestContext(vm *moejs.Runtime, r *http.Request) *engine.Object {
 	ctx := vm.Realm().NewObject()
-	_ = native.Set(vm, ctx, "remote_ip", remoteIP(r))
+	_ = native.Set(vm, ctx, "remote_ip", requestmeta.ClientIP(r))
 	_ = native.Set(vm, ctx, "user_agent", r.Header.Get("User-Agent"))
 	return ctx
 }
@@ -77,23 +76,4 @@ func principalTypeString(t rpc.PrincipalType) string {
 	default:
 		return "anonymous"
 	}
-}
-
-// remoteIP mirrors gin's ClientIP for the raw request layer: first
-// X-Forwarded-For entry, then X-Real-IP, then the RemoteAddr host.
-func remoteIP(r *http.Request) string {
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		if first, _, ok := strings.Cut(forwarded, ","); ok {
-			return strings.TrimSpace(first)
-		}
-		return strings.TrimSpace(forwarded)
-	}
-	if real := r.Header.Get("X-Real-IP"); real != "" {
-		return strings.TrimSpace(real)
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }

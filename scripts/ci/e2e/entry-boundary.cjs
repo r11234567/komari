@@ -101,6 +101,17 @@ async function run() {
   fs.unlinkSync(path.join(root, 'login.pid'));
   checks.push('installed-agent-begins-polls-and-enrolls-without-access-token');
 
+  const { publicKey } = crypto.generateKeyPairSync('ed25519');
+  const rawKey = publicKey.export({ type: 'spki', format: 'der' }).subarray(-32).toString('base64');
+  const forwarded = await rpc(guest, 'enrollment.v1.EnrollmentService', 'BeginEnrollment', {
+    agentPublicKey: { algorithm: 'SIGNATURE_ALGORITHM_ED25519', value: rawKey },
+    device: { hostname: 'entry-forwarding-probe' },
+  }, { Forwarded: 'host=evil.invalid;proto=http', 'X-Forwarded-Host': 'evil.invalid', 'X-Forwarded-Proto': 'http', 'X-Forwarded-For': '192.0.2.99' });
+  assert.equal(forwarded.status, 200);
+  assert.equal(forwarded.body.verificationUri, `${base}/bind`);
+  assert.equal(forwarded.body.verificationUriComplete, `${base}/bind?code=${forwarded.body.userCode}`);
+  checks.push('nginx-overwrites-untrusted-forwarding-and-approval-link-uses-pinned-origin');
+
   browser = await chromium.launch();
   context = await browser.newContext({ locale: 'en-US' });
   const page = await context.newPage();
