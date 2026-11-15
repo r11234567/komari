@@ -406,8 +406,8 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
-	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 	r.Use(cors.Middleware())
+	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 	r.Use(api.IdentityMiddleware())
 	r.Use(func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, "/api") {
@@ -659,9 +659,9 @@ func (a *App) BuildRouter() error {
 		return fmt.Errorf("invalid request metadata configuration: %w", err)
 	}
 
-	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
 	r.Use(cors.Middleware())
+	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 
 	r.Use(api.IdentityMiddleware())
 	rateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)

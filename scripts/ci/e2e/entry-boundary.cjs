@@ -133,6 +133,55 @@ async function run() {
   assert.equal(failed.length, 0, failed.join('\n'));
   await page.screenshot({ path: path.join(artifacts, 'private-site-native-login.png'), fullPage: true });
   checks.push('built-web-native-private-site-login-and-session');
+
+  // This loopback alias is only a browser test origin on the same disposable
+  // Nginx listener/certificate. It adds no production hostname or listener.
+  const callerOrigin = 'https://localhost:29443';
+  await post(admin, '/api/admin/settings', { cors_origin_check_enabled: true, cors_allowed_origins: callerOrigin });
+  await until('CORS policy reload', async () => {
+    const response = await guest.fetch('/komari.browser.v1.BrowserService/GetPublicInfo', {
+      method: 'OPTIONS', headers: { Origin: callerOrigin, 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'authorization,content-type,connect-protocol-version,x-komari-workspace-grant,x-komari-credential-authorization' },
+    });
+    const status = response.status(); await response.dispose(); return status;
+  }, status => status === 204);
+  const crossPage = await context.newPage();
+  const aliasResponse = await crossPage.goto(`${callerOrigin}/api/version`);
+  assert.equal(aliasResponse.status(), 403, 'test alias escaped the pinned destination policy');
+  const results = await crossPage.evaluate(async base => {
+    const call = async () => {
+      const response = await fetch(`${base}/komari.browser.v1.BrowserService/GetPublicInfo`, {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json', 'Connect-Protocol-Version': '1', Authorization: 'Bearer invalid-cross-origin-entry', 'X-Komari-Workspace-Grant': 'invalid-fixture-grant', 'X-Komari-Credential-Authorization': 'invalid-fixture-proof' }, body: '{}',
+      });
+      return { status: response.status, body: await response.json(), retry: response.headers.get('Retry-After'), cookie: response.headers.get('Set-Cookie') };
+    };
+    const initial = await call();
+    const burst = await Promise.all(Array.from({ length: 12 }, call));
+    return { initial, burst };
+  }, base);
+  assert.equal(results.initial.status, 401);
+  assert.equal(results.initial.body.code, 'unauthenticated');
+  const limited = results.burst.find(item => item.status === 429);
+  assert(limited, 'actual browser burst did not reach the authentication failure budget');
+  assert.equal(limited.body.code, 'resource_exhausted');
+  assert(Number(limited.retry) > 0, 'browser cannot read Retry-After');
+  assert.equal(limited.cookie, null, 'browser exposed a cookie header');
+  await post(admin, '/api/admin/settings', { cors_allowed_origins: '' });
+  await until('CORS removal reload', async () => {
+    const response = await guest.fetch('/komari.browser.v1.BrowserService/GetThemeContract', {
+      method: 'OPTIONS', headers: { Origin: callerOrigin, 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'authorization,content-type,connect-protocol-version' },
+    });
+    const status = response.status(); await response.dispose(); return status;
+  }, status => status === 403);
+  const blocked = await crossPage.evaluate(async base => {
+    try {
+      await fetch(`${base}/komari.browser.v1.BrowserService/GetThemeContract`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Connect-Protocol-Version': '1', Authorization: 'Bearer invalid-cross-origin-entry' }, body: '{}' });
+      return false;
+    } catch (error) { return error instanceof TypeError; }
+  }, base);
+  assert(blocked, 'removed origin remained browser-authorized');
+  await crossPage.close();
+  checks.push('real-browser-preflight-rpc-headers-readable-401-and-429-retry-after', 'removed-origin-cannot-bypass-cors-with-authorization');
 }
 run().then(() => {
   fs.writeFileSync(path.join(artifacts, 'entry-acceptance.json'), JSON.stringify({ passed: true, checks, cloudflare_live_tested: false }, null, 2));

@@ -40,22 +40,13 @@ func OriginMatchesRequest(origin string, r *http.Request) bool {
 }
 
 func OriginInAllowlist(origin, rawAllowlist string) bool {
-	normalizedOrigin, originHost, ok := normalizeOrigin(origin)
+	normalizedOrigin, _, ok := normalizeOrigin(origin)
 	if !ok {
 		return false
 	}
 	for _, entry := range SplitAllowlist(rawAllowlist) {
-		if entry == "*" {
-			return true
-		}
-		if strings.Contains(entry, "://") {
-			normalizedEntry, _, ok := normalizeOrigin(entry)
-			if ok && strings.EqualFold(normalizedEntry, normalizedOrigin) {
-				return true
-			}
-			continue
-		}
-		if strings.EqualFold(entry, originHost) {
+		normalizedEntry, _, ok := normalizeOrigin(entry)
+		if ok && normalizedEntry == normalizedOrigin {
 			return true
 		}
 	}
@@ -71,18 +62,6 @@ func IsAPIKeyRequest(r *http.Request) bool {
 		return false
 	}
 	return APIKeyMatches(r.Header.Get("Authorization"), apiKeyConfig)
-}
-
-func IsAuthorizationPreflight(r *http.Request) bool {
-	if r.Method != http.MethodOptions {
-		return false
-	}
-	for _, header := range strings.Split(r.Header.Get("Access-Control-Request-Headers"), ",") {
-		if strings.EqualFold(strings.TrimSpace(header), "authorization") {
-			return true
-		}
-	}
-	return false
 }
 
 func normalizeOrigin(raw string) (string, string, bool) {

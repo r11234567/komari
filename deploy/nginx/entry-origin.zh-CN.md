@@ -45,3 +45,10 @@ Authorization/Cookie/Set-Cookie 的响应绕过缓存，关闭会改写认证协
 
 CI 仅在隔离 fixture 验证真实 Nginx HTTPS、构建后的 Web 与已安装 Agent。
 实际 CF 账户的规则、TLS 模式、来源网段和缓存命中仍需部署环境证据，不能以 CI 代替。
+
+跨源调用仅允许与请求完整 Origin 相同或显式配置的完整 Origin。
+`cors_allowed_origins` 与 `ws_allowed_origins` 中原有裸 hostname 或 `*` 必须改为
+准确的 `https://host[:port]`；这些宽泛值不再授权跨源。单域同源访问无需新增 allowlist。
+API Key 和预检的 Authorization 请求头均不能授予来源权限。允许列表应只包含可信控制台，
+不能把主题 opaque Origin `null` 加入。预检先于认证，不会兑换凭据或消耗失败预算；
+实际请求仍经过完整身份与权限校验。错误响应允许浏览器读取 Retry-After，禁止暴露 Set-Cookie。

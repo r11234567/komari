@@ -19,6 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           submodules: recursive
       - uses: actions/setup-go@v5
         with:
@@ -53,6 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           submodules: recursive
           persist-credentials: false
       - name: Read the exact Agent revision
@@ -77,6 +79,9 @@ jobs:
           printf 'E2E_TOOLS=%s/komari-e2e-tools\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           printf 'E2E_ARTIFACTS=%s/ci-artifacts/e2e\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
       - name: Verify all four source and protocol revisions
+        env:
+          E2E_EXPECTED_SERVER_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          E2E_EXPECTED_AGENT_SHA: ${{ steps.agent.outputs.revision }}
         run: bash scripts/ci/e2e/provenance.sh
       - uses: ./.github/actions/build-frontend
       - name: Build the actual server and installed Agent
