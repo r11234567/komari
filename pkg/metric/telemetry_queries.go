@@ -72,7 +72,11 @@ func (t *Telemetry) ChartInterval(ctx context.Context, q Query, now time.Time, r
 		statement := "SELECT DISTINCT d.resolution FROM " + t.table("series") + " s JOIN " + t.table("rollup_keys") + " k ON k.source_id=s.id JOIN " + t.table("rollup_due") + " d ON d.series_id=k.id WHERE s.metric=?" + filter + " AND EXISTS (SELECT 1 FROM " + t.table("rollup") + " b WHERE b.series_id=d.series_id AND b.resolution=d.resolution AND b.bucket>=? AND b.bucket<=? AND b.bucket+b.resolution>? AND b.bucket*1000000000+b.last_offset>=? AND b.bucket*1000000000+b.first_offset<=?)"
 		values := append([]any{name}, args...)
 		values = append(values, q.Start.Add(-24*time.Hour).Unix(), q.End.Unix(), q.Start.Unix(), q.Start.UnixNano(), q.End.UnixNano())
-		rows, e := t.s.reader().QueryContext(ctx, t.bind(statement), values...)
+		var reader querier = t.s.reader()
+		if tx, ok := ctx.Value(telemetrySnapshotKey{}).(*sql.Tx); ok {
+			reader = tx
+		}
+		rows, e := reader.QueryContext(ctx, t.bind(statement), values...)
 		if e != nil {
 			return 0, e
 		}
@@ -269,7 +273,7 @@ func (t *Telemetry) PingSummary(ctx context.Context, q AggregateQuery, now time.
 		}
 		tags[aggregateSeriesKey{p.MetricName, p.EntityID, h}] = p.Tags
 	}
-	var out SeriesSummary
+	out := SeriesSummary{CoverageStart: q.Start, CoverageEnd: q.End, Interval: q.Interval}
 	for key, s := range stats {
 		for _, view := range []struct {
 			a    Aggregation

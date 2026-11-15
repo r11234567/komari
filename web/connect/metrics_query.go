@@ -281,6 +281,9 @@ func (s *metricsService) queryMetrics(ctx context.Context, req *connect.Request[
 	if err != nil {
 		return nil, err
 	}
+	if len(entityIDs) == 0 {
+		return connect.NewResponse(&metricsv1.QueryMetricsResponse{Series: []*metricsv1.MetricsSeries{}}), nil
+	}
 	ctx = metric.WithTelemetryEntities(ctx, entityIDs)
 	store, releaseStore, err := metricstore.AcquireStore(ctx)
 	if err != nil {
@@ -547,15 +550,18 @@ func (s *metricsService) getPingStats(ctx context.Context, req *connect.Request[
 	if maxPoints < 1 || maxPoints > connectMaxMetricPoints {
 		return nil, connectError(connect.CodeInvalidArgument, fmtRange("max_points must be between 1 and %d", connectMaxMetricPoints))
 	}
+	entityIDs, err := connectVisibleAgentIDs(ctx, req.Msg.AgentIds)
+	if err != nil {
+		return nil, err
+	}
+	if len(entityIDs) == 0 {
+		return connect.NewResponse(&metricsv1.GetPingStatsResponse{StartTime: timestamppb.New(start), EndTime: timestamppb.New(end), Stats: []*metricsv1.PingStat{}}), nil
+	}
 	release, err := acquireMetricReadSlot(ctx, connectMetricReadWeight(start, end))
 	if err != nil {
 		return nil, err
 	}
 	defer release()
-	entityIDs, err := connectVisibleAgentIDs(ctx, req.Msg.AgentIds)
-	if err != nil {
-		return nil, err
-	}
 	ctx = metric.WithTelemetryEntities(ctx, entityIDs)
 	store, releaseStore, err := metricstore.AcquireStore(ctx)
 	if err != nil {
@@ -574,6 +580,12 @@ func (s *metricsService) getPingStats(ctx context.Context, req *connect.Request[
 	for _, id := range req.Msg.TaskIds {
 		taskFilter[strconv.FormatUint(id, 10)] = true
 	}
+	var tags map[string]string
+	if len(taskFilter) == 1 {
+		for id := range taskFilter {
+			tags = map[string]string{"task_id": id}
+		}
+	}
 	interval := metric.CeilStandardInterval(time.Duration((end.Sub(start).Nanoseconds() + int64(maxPoints) - 1) / int64(maxPoints)))
 	now := time.Now().UTC()
 	if telemetry := store.Telemetry(); telemetry != nil {
@@ -581,7 +593,7 @@ func (s *metricsService) getPingStats(ctx context.Context, req *connect.Request[
 		if e != nil {
 			return nil, connectMetricStoreError(e)
 		}
-		q := metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end}
+		q := metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end, Tags: tags}
 		q, interval, err = telemetry.PlanChart(ctx, q, now, maxPoints, definition.RetentionDays)
 		if err != nil {
 			return nil, connectMetricStoreError(err)
@@ -591,16 +603,16 @@ func (s *metricsService) getPingStats(ctx context.Context, req *connect.Request[
 		interval = store.CompatibleSeriesIntervalForMetric(ctx, metricstore.MetricPingLatency, start, now, interval)
 	}
 	result := make([]*metricsv1.PingStat, 0)
-	summaries, queryErr := store.PingSummariesForEntities(ctx, metric.AggregateQuery{Query: metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end, Order: metric.OrderAsc}, Interval: interval, PreserveSeries: true}, entityIDs, now)
+	summaries, queryErr := store.PingSummariesForEntities(ctx, metric.AggregateQuery{Query: metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end, Tags: tags, Order: metric.OrderAsc}, Interval: interval, PreserveSeries: true}, entityIDs, now)
 	if queryErr != nil {
 		return nil, connectMetricStoreError(queryErr)
 	}
+	start, end, interval = summaries.CoverageStart, summaries.CoverageEnd, summaries.Interval
 	for _, agentID := range entityIDs {
 		if err := ctx.Err(); err != nil {
 			return nil, connectMetricStoreError(err)
 		}
-		summary := summaries[agentID]
-		start, end = summary.CoverageStart, summary.CoverageEnd
+		summary := summaries.ByEntity[agentID]
 		result = append(result, connectPingStats(agentID, summary, taskByID, taskFilter)...)
 	}
 	return connect.NewResponse(&metricsv1.GetPingStatsResponse{StartTime: timestamppb.New(start), EndTime: timestamppb.New(end), Interval: durationpb.New(interval), Stats: result}), nil

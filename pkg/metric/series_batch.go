@@ -210,6 +210,7 @@ func (s *Store) PingSeriesSummaryBatch(ctx context.Context, queries []AggregateQ
 	for index := range result {
 		base := index * 8
 		result[index] = SeriesSummary{
+			CoverageStart: queries[index].Start, CoverageEnd: queries[index].End, Interval: queries[index].Interval,
 			Avg: series[base], Min: series[base+1], Max: series[base+2], Last: series[base+3],
 			P50: series[base+4], P99: series[base+5], StdDev: series[base+6], Loss: series[base+7],
 		}

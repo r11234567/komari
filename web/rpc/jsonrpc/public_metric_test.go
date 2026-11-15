@@ -398,7 +398,6 @@ func TestPublicPingStatsFromAggregateGroupsUsesTaskNamesAndLossMetric(t *testing
 		Loss: map[string][]metric.AggregatePoint{
 			"1": {{Bucket: base, Count: 4, Value: 0.25}},
 		},
-		LossAvailable: true,
 	}
 
 	stats := publicPingStatsFromAggregateGroups("node-a", groups, taskMap, nil)
@@ -441,6 +440,42 @@ func TestPublicPingMetricStatsIncludesZeroVolatility(t *testing.T) {
 	}
 	if value, ok := decoded["p99_p50_ratio"]; !ok || value != float64(0) {
 		t.Fatalf("zero volatility must be present, got %s", payload)
+	}
+}
+
+func TestPublicPingStatisticsUseAttemptPopulationPerTask(t *testing.T) {
+	// Scalar latency counts only successes; loss counts every attempt. Other
+	// tasks having a loss series cannot establish coverage for this task.
+	summary := metric.SeriesSummary{
+		Avg: []metric.AggregatePoint{
+			{Tags: map[string]string{"task_id": "1"}, Count: 2, Value: 20},
+			{Tags: map[string]string{"task_id": "3"}, Count: 1, Value: 10},
+			{Tags: map[string]string{"task_id": "3"}, Count: 1, Value: -1},
+		},
+		Loss: []metric.AggregatePoint{
+			{Tags: map[string]string{"task_id": "1"}, Count: 3, Value: 1.0 / 3},
+			{Tags: map[string]string{"task_id": "2"}, Count: 3, Value: 1},
+		},
+	}
+	stats := publicPingStatsFromAggregateGroups("node", publicPingMetricGroupsFromSummary(summary), nil, nil)
+	if len(stats) != 3 {
+		t.Fatal(stats)
+	}
+	for _, stat := range stats {
+		switch stat.TaskID {
+		case "1":
+			if stat.Total != 3 || stat.Valid != 2 || math.Abs(stat.Loss-100.0/3) > 1e-9 || stat.LossApproximate || stat.Avg == nil || *stat.Avg != 20 {
+				t.Fatal(stat)
+			}
+		case "2":
+			if stat.Total != 3 || stat.Valid != 0 || stat.Loss != 100 || stat.LossApproximate || stat.Avg != nil {
+				t.Fatal(stat)
+			}
+		case "3":
+			if stat.Total != 2 || stat.Valid != 1 || stat.Loss != 50 || !stat.LossApproximate || stat.Avg == nil || *stat.Avg != 10 {
+				t.Fatal(stat)
+			}
+		}
 	}
 }
 

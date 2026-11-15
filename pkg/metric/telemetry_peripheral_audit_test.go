@@ -136,7 +136,7 @@ func TestTelemetryScalarWindowUsesActualRawPopulation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			summary := values["visible"]
+			summary := values.ByEntity["visible"]
 			if len(summary.Loss) != 1 || summary.Loss[0].EntityID != "visible" {
 				t.Fatal("scope or missing card", summary)
 			}

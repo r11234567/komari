@@ -79,6 +79,62 @@ async function verifyStorageCurves({ context, page, root, artifacts, base, agent
     results.push({ hours:window.hours, age:window.age, boundary_offset_seconds:window.boundary_offset_seconds, request, comparisons, response:body });
     fs.writeFileSync(path.join(artifacts,'storage-curve-http.json'),JSON.stringify(results,null,2));
   }
+  // Exercise both real adapters against the same synthetic raw oracle. These
+  // are single-task requests: task scope must reach both planning and SQL.
+  const pingResults=[];
+  for(const hours of [1,24,168]) {
+    const end=new Date(),start=new Date(end-hours*3600_000+1234);
+    const request={agentIds:[agentId],taskIds:[String(oracle.ping_task_id)],startTime:start.toISOString(),endTime:end.toISOString(),maxPoints:600};
+    const response=await context.request.post('/komari.metrics.v1.MetricsService/GetPingStats',{headers,data:request});
+    expect(response.status(),`single-task Ping/${hours}h`).toBe(200);
+    const body=await response.json();
+    const effectiveStart=timestampNs(body.startTime),effectiveEnd=timestampNs(body.endTime);
+    expect(effectiveStart).toBeGreaterThanOrEqual(timestampNs(request.startTime));
+    expect(effectiveEnd).toBeLessThanOrEqual(timestampNs(request.endTime));
+    expect(effectiveStart).toBeLessThan(effectiveEnd);
+    const selected=oracle.ping_observations.filter(p=>timestampNs(p.timestamp)>=effectiveStart&&timestampNs(p.timestamp)<=effectiveEnd);
+    const valid=selected.filter(p=>p.value>=0);
+    expect(valid.length).toBeGreaterThan(0);
+    expect(body.stats).toHaveLength(1);
+    const stat=body.stats[0];
+    expect(String(stat.taskId)).toBe(String(oracle.ping_task_id));
+    expect(stat.agentId).toBe(agentId);
+    expect(Number(stat.total)).toBe(selected.length);
+    expect(Number(stat.valid)).toBe(valid.length);
+    expect(Number(stat.average)).toBeCloseTo(valid.reduce((sum,p)=>sum+p.value,0)/valid.length,7);
+    expect(Number(stat.lossPercent||0)).toBeCloseTo(100*(selected.length-valid.length)/selected.length,7);
+    const rpcResponse=await context.request.post('/api/rpc2',{headers:{Origin:base},data:{jsonrpc:'2.0',id:`ping-${hours}`,method:'public:getPingMetricStats',params:{entity_id:agentId,task_id:oracle.ping_task_id,start_time:request.startTime,end_time:request.endTime,max_points:600}}});
+    expect(rpcResponse.status()).toBe(200);
+    const rpcBody=await rpcResponse.json();expect(rpcBody.error).toBeUndefined();
+    const rpc=rpcBody.result;
+    expect(timestampNs(rpc.start)).toBe(effectiveStart);
+    expect(timestampNs(rpc.end)).toBe(effectiveEnd);
+    expect(rpc.interval_seconds).toBe(Number.parseFloat(body.interval));
+    expect(rpc.stats).toHaveLength(1);
+    expect(rpc.stats[0].task_id).toBe(String(oracle.ping_task_id));
+    expect(rpc.stats[0].total).toBe(selected.length);
+    expect(rpc.stats[0].valid).toBe(valid.length);
+    expect(rpc.stats[0].avg).toBeCloseTo(Number(stat.average),7);
+    expect(rpc.stats[0].loss).toBeCloseTo(Number(stat.lossPercent||0),7);
+    pingResults.push({request,connect:body,jsonrpc:rpc,expected:{total:selected.length,valid:valid.length}});
+  }
+  // A nonexistent task must remain an empty population even when other tasks
+  // on this node have retained, indivisible historical cells.
+  const missingTask=String(Number(oracle.ping_task_id)+1_000_000);
+  const emptyEnd=new Date(),emptyStart=new Date(emptyEnd-180_000);
+  const emptyRequest={agentIds:[agentId],taskIds:[missingTask],startTime:emptyStart.toISOString(),endTime:emptyEnd.toISOString()};
+  const empty=await context.request.post('/komari.metrics.v1.MetricsService/GetPingStats',{headers,data:emptyRequest});
+  expect(empty.status()).toBe(200);
+  const emptyBody=await empty.json();expect(emptyBody.stats||[]).toHaveLength(0);
+  expect(timestampNs(emptyBody.startTime)).toBe(timestampNs(emptyRequest.startTime));
+  expect(timestampNs(emptyBody.endTime)).toBe(timestampNs(emptyRequest.endTime));
+  const emptyRPC=await context.request.post('/api/rpc2',{headers:{Origin:base},data:{jsonrpc:'2.0',id:'empty-task',method:'public:getPingMetricStats',params:{entity_id:agentId,task_id:missingTask,start:emptyRequest.startTime,end:emptyRequest.endTime}}});
+  expect(emptyRPC.status()).toBe(200);
+  const emptyRPCBody=await emptyRPC.json();expect(emptyRPCBody.error).toBeUndefined();
+  expect(emptyRPCBody.result.stats).toHaveLength(0);
+  expect(timestampNs(emptyRPCBody.result.start)).toBe(timestampNs(emptyRequest.startTime));
+  expect(timestampNs(emptyRPCBody.result.end)).toBe(timestampNs(emptyRequest.endTime));
+  fs.writeFileSync(path.join(artifacts,'storage-ping-projection-http.json'),JSON.stringify({pingResults,empty:{request:emptyRequest,connect:emptyBody,jsonrpc:emptyRPCBody.result}},null,2));
   // An unrelated background QueryMetrics response cannot satisfy this wait.
   await page.goto(`/instance/${agentId}`);
   const chart = page.locator('.km-load-chart');

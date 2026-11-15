@@ -956,7 +956,6 @@ func (t *Telemetry) commitScalarLegacyCells(ctx context.Context, key, name, enti
 func (t *Telemetry) scalarPingSummary(ctx context.Context, q AggregateQuery, now time.Time) (SeriesSummary, error) {
 	ctx = context.WithValue(defaultChartBudget(ctx), telemetryStatisticsCardKey{}, true)
 	q.MetricName, q.Aggregation, q.PreserveSeries = sqliteMergedPingLatencyMetric, AggCount, true
-	q.Interval = t.compatibleInterval(q.Start, now, max(q.Interval, 10*time.Second))
 	tx, shared := ctx.Value(telemetrySnapshotKey{}).(*sql.Tx)
 	if !shared {
 		var err error
@@ -968,7 +967,9 @@ func (t *Telemetry) scalarPingSummary(ctx context.Context, q AggregateQuery, now
 		ctx = context.WithValue(ctx, telemetrySnapshotKey{}, tx)
 	}
 	var err error
-	q.Query, err = t.scalarAnswerableWindow(ctx, q.Query, q.Interval, now)
+	// Plan from actual retained cells in the same snapshot as the statistics.
+	// Direct store callers need the same precision and boundary rules as HTTP.
+	q.Query, q.Interval, err = t.PlanChartInterval(ctx, q.Query, now, max(q.Interval, 10*time.Second), 0)
 	if err != nil {
 		return SeriesSummary{}, err
 	}
@@ -979,7 +980,7 @@ func (t *Telemetry) scalarPingSummary(ctx context.Context, q AggregateQuery, now
 	if len(r.Gaps) != 0 {
 		return SeriesSummary{}, ErrTelemetryCoverage
 	}
-	out := SeriesSummary{CoverageStart: q.Start, CoverageEnd: q.End}
+	out := SeriesSummary{CoverageStart: q.Start, CoverageEnd: q.End, Interval: q.Interval}
 	for _, point := range r.Points {
 		h, _, e := tagsFingerprint(point.Tags)
 		if e != nil {

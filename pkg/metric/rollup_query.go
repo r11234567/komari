@@ -664,6 +664,7 @@ func (s *Store) SeriesBatch(ctx context.Context, queries []AggregateQuery, now t
 // the SQLite V8 series, so percentile decoding and block IO are not repeated.
 type SeriesSummary struct {
 	CoverageStart, CoverageEnd time.Time
+	Interval                   time.Duration
 	Avg                        []AggregatePoint
 	Min                        []AggregatePoint
 	Max                        []AggregatePoint
@@ -674,13 +675,30 @@ type SeriesSummary struct {
 	Loss                       []AggregatePoint
 }
 
+// EntityPingSummaries has one authoritative window for all returned nodes.
+// An empty node cannot replace response metadata while results are projected.
+type EntityPingSummaries struct {
+	CoverageStart, CoverageEnd time.Time
+	Interval                   time.Duration
+	ByEntity                   map[string]SeriesSummary
+}
+
 // PingSummariesForEntities keeps authorization in the planner and reads the
 // telemetry population once, then distributes all views in one linear pass.
-func (s *Store) PingSummariesForEntities(ctx context.Context, q AggregateQuery, entities []string, now time.Time) (map[string]SeriesSummary, error) {
-	out := make(map[string]SeriesSummary, len(entities))
+func (s *Store) PingSummariesForEntities(ctx context.Context, q AggregateQuery, entities []string, now time.Time) (EntityPingSummaries, error) {
+	out := EntityPingSummaries{CoverageStart: q.Start, CoverageEnd: q.End, Interval: q.Interval, ByEntity: make(map[string]SeriesSummary, len(entities))}
+	ids := make([]string, 0, len(entities))
 	for _, id := range entities {
-		out[id] = SeriesSummary{CoverageStart: q.Start, CoverageEnd: q.End}
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		if _, exists := out.ByEntity[id]; exists {
+			continue
+		}
+		ids = append(ids, id)
+		out.ByEntity[id] = SeriesSummary{CoverageStart: q.Start, CoverageEnd: q.End, Interval: q.Interval}
 	}
+	entities = ids
 	if len(entities) == 0 {
 		return out, nil
 	}
@@ -692,12 +710,12 @@ func (s *Store) PingSummariesForEntities(ctx context.Context, q AggregateQuery, 
 		}
 		values, err := s.PingSeriesSummaryBatch(ctx, queries, now)
 		if err != nil {
-			return nil, err
+			return out, err
 		}
 		for i, id := range entities {
 			v := values[i]
 			v.CoverageStart, v.CoverageEnd = q.Start, q.End
-			out[id] = v
+			out.ByEntity[id] = v
 		}
 		return out, nil
 	}
@@ -705,14 +723,15 @@ func (s *Store) PingSummariesForEntities(ctx context.Context, q AggregateQuery, 
 	q.PreserveSeries = true
 	value, err := s.PingSeriesSummary(WithTelemetryEntities(ctx, entities), q, now)
 	if err != nil {
-		return nil, err
+		return out, err
 	}
+	out.CoverageStart, out.CoverageEnd, out.Interval = value.CoverageStart, value.CoverageEnd, value.Interval
 	for _, id := range entities {
-		out[id] = SeriesSummary{CoverageStart: value.CoverageStart, CoverageEnd: value.CoverageEnd}
+		out.ByEntity[id] = SeriesSummary{CoverageStart: value.CoverageStart, CoverageEnd: value.CoverageEnd, Interval: value.Interval}
 	}
 	for view, points := range [][]AggregatePoint{value.Avg, value.Min, value.Max, value.Last, value.P50, value.P99, value.StdDev, value.Loss} {
 		for _, p := range points {
-			v, ok := out[p.EntityID]
+			v, ok := out.ByEntity[p.EntityID]
 			if !ok {
 				continue
 			}
@@ -734,7 +753,7 @@ func (s *Store) PingSummariesForEntities(ctx context.Context, q AggregateQuery, 
 			case 7:
 				v.Loss = append(v.Loss, p)
 			}
-			out[p.EntityID] = v
+			out.ByEntity[p.EntityID] = v
 		}
 	}
 	return out, nil
@@ -769,7 +788,7 @@ func (s *Store) pingSeriesSummaryFromRaw(ctx context.Context, query AggregateQue
 		}
 		return pageBuckets(result, view.BucketLimit, view.BucketOffset), nil
 	}
-	var summary SeriesSummary
+	summary := SeriesSummary{CoverageStart: query.Start, CoverageEnd: query.End, Interval: query.Interval}
 	views := []struct {
 		aggregation Aggregation
 		target      *[]AggregatePoint
@@ -834,7 +853,7 @@ func (s *Store) pingSeriesSummaryCompatibility(ctx context.Context, query Aggreg
 		view.Aggregation = aggregation
 		return s.Series(ctx, view, now)
 	}
-	var summary SeriesSummary
+	summary := SeriesSummary{CoverageStart: query.Start, CoverageEnd: query.End, Interval: query.Interval}
 	var err error
 	if summary.Avg, err = load(query.MetricName, AggAvg); err != nil {
 		return SeriesSummary{}, err

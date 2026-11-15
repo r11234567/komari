@@ -480,6 +480,12 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 		taskMap[strconv.FormatUint(uint64(task.Id), 10)] = task
 	}
 	taskFilter := normalizePingMetricTaskIDs(params.TaskID, params.TaskIDs)
+	var tags map[string]string
+	if len(taskFilter) == 1 {
+		for id := range taskFilter {
+			tags = map[string]string{"task_id": id}
+		}
+	}
 
 	maxPoints := params.MaxPoints
 	if maxPoints == 0 {
@@ -496,7 +502,7 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 		if e != nil {
 			return nil, metricQueryError(e, "Failed to resolve ping retention")
 		}
-		q := metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end}
+		q := metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end, Tags: tags}
 		q, interval, err = telemetry.PlanChart(ctx, q, now, maxPoints, definition.RetentionDays)
 		if err != nil {
 			return nil, metricQueryError(err, "Failed to resolve ping statistics window")
@@ -506,14 +512,14 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 		interval = store.CompatibleSeriesIntervalForMetric(ctx, metricstore.MetricPingLatency, start, now, interval)
 	}
 
-	summaries, err := store.PingSummariesForEntities(ctx, metric.AggregateQuery{Query: metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end, Order: metric.OrderAsc}, Interval: interval, PreserveSeries: true}, entityIDs, now)
+	summaries, err := store.PingSummariesForEntities(ctx, metric.AggregateQuery{Query: metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end, Tags: tags, Order: metric.OrderAsc}, Interval: interval, PreserveSeries: true}, entityIDs, now)
 	if err != nil {
 		return nil, metricQueryError(err, "Failed to query ping stats")
 	}
+	start, end, interval = summaries.CoverageStart, summaries.CoverageEnd, summaries.Interval
 	stats := make([]publicPingMetricTaskStats, 0)
 	for _, entityID := range entityIDs {
-		summary := summaries[entityID]
-		start, end = summary.CoverageStart, summary.CoverageEnd
+		summary := summaries.ByEntity[entityID]
 		groups := publicPingMetricGroupsFromSummary(summary)
 		entityStats := publicPingStatsFromAggregateGroups(entityID, groups, taskMap, taskFilter)
 		stats = append(stats, entityStats...)
@@ -845,29 +851,27 @@ func isNullPingMetricValue(metricName string, value float64, fillEmpty bool) boo
 }
 
 type publicPingMetricAggregateGroups struct {
-	Avg           map[string][]metric.AggregatePoint
-	Min           map[string][]metric.AggregatePoint
-	Max           map[string][]metric.AggregatePoint
-	Last          map[string][]metric.AggregatePoint
-	P50           map[string][]metric.AggregatePoint
-	P99           map[string][]metric.AggregatePoint
-	StdDev        map[string][]metric.AggregatePoint
-	Loss          map[string][]metric.AggregatePoint
-	LossAvailable bool
+	Avg    map[string][]metric.AggregatePoint
+	Min    map[string][]metric.AggregatePoint
+	Max    map[string][]metric.AggregatePoint
+	Last   map[string][]metric.AggregatePoint
+	P50    map[string][]metric.AggregatePoint
+	P99    map[string][]metric.AggregatePoint
+	StdDev map[string][]metric.AggregatePoint
+	Loss   map[string][]metric.AggregatePoint
 }
 
 func publicPingMetricGroupsFromSummary(summary metric.SeriesSummary) publicPingMetricAggregateGroups {
 	loss := groupPingMetricAggregatePointsByTask(summary.Loss)
 	return publicPingMetricAggregateGroups{
-		Avg:           groupPingMetricAggregatePointsByTask(summary.Avg),
-		Min:           groupPingMetricAggregatePointsByTask(summary.Min),
-		Max:           groupPingMetricAggregatePointsByTask(summary.Max),
-		Last:          groupPingMetricAggregatePointsByTask(summary.Last),
-		P50:           groupPingMetricAggregatePointsByTask(summary.P50),
-		P99:           groupPingMetricAggregatePointsByTask(summary.P99),
-		StdDev:        groupPingMetricAggregatePointsByTask(summary.StdDev),
-		Loss:          loss,
-		LossAvailable: pingMetricGroupsHaveData(loss),
+		Avg:    groupPingMetricAggregatePointsByTask(summary.Avg),
+		Min:    groupPingMetricAggregatePointsByTask(summary.Min),
+		Max:    groupPingMetricAggregatePointsByTask(summary.Max),
+		Last:   groupPingMetricAggregatePointsByTask(summary.Last),
+		P50:    groupPingMetricAggregatePointsByTask(summary.P50),
+		P99:    groupPingMetricAggregatePointsByTask(summary.P99),
+		StdDev: groupPingMetricAggregatePointsByTask(summary.StdDev),
+		Loss:   loss,
 	}
 }
 
@@ -881,17 +885,6 @@ func groupPingMetricAggregatePointsByTask(points []metric.AggregatePoint) map[st
 		out[taskID] = append(out[taskID], point)
 	}
 	return out
-}
-
-func pingMetricGroupsHaveData(groups map[string][]metric.AggregatePoint) bool {
-	for _, points := range groups {
-		for _, point := range points {
-			if point.Count > 0 {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func publicPingStatsFromAggregateGroups(entityID string, groups publicPingMetricAggregateGroups, taskMap map[string]models.PingTask, taskFilter map[string]bool) []publicPingMetricTaskStats {
@@ -910,15 +903,18 @@ func publicPingStatsFromAggregateGroups(entityID string, groups publicPingMetric
 			continue
 		}
 
-		total := aggregatePointCount(groups.Avg[taskID])
+		// Latency counts contain successful probes; loss counts contain all
+		// attempts. The denominator must describe the same probe population.
+		total := aggregatePointCount(groups.Loss[taskID])
+		lossAvailable := total > 0
 		if total == 0 {
-			total = aggregatePointCount(groups.Loss[taskID])
+			total = aggregatePointCount(groups.Avg[taskID])
 		}
 		if total == 0 {
 			continue
 		}
 
-		lossRate, valid, approximate := publicPingLossRate(groups.Avg[taskID], groups.Loss[taskID], total, groups.LossAvailable)
+		lossRate, valid, approximate := publicPingLossRate(groups.Avg[taskID], groups.Loss[taskID], total, lossAvailable)
 		avg, _ := weightedAggregateValue(groups.Avg[taskID], true)
 		p50, _ := weightedAggregateValue(groups.P50[taskID], true)
 		p99, _ := weightedAggregateValue(groups.P99[taskID], true)
