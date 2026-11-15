@@ -196,7 +196,16 @@ func TestTelemetryExportSnapshotRejectsMissingMembershipAndCorruptFrame(t *testi
 	if e != nil {
 		t.Fatal(e)
 	}
-	b[20] ^= 1
+	frame := snap.Units[0].Frame
+	if frame == nil {
+		t.Fatal("fixture lacks an indexed frame")
+	}
+	if frame.Bytes < 8 || frame.Offset < 0 || frame.Offset+frame.Bytes > int64(len(b)) || b[frame.Offset+4]&4 == 0 {
+		t.Fatal("fixture lacks a checksummed zstd frame", frame)
+	}
+	// A fixed compressed offset can hit unused coding bits without changing
+	// decoded data. Corrupt the frame checksum itself to guarantee damage.
+	b[frame.Offset+frame.Bytes-1] ^= 1
 	if e = os.WriteFile(file, b, 0600); e != nil {
 		t.Fatal(e)
 	}
