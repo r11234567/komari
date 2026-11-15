@@ -69,7 +69,7 @@ func TestRescueWatchFreshSignedHeartbeatAndCredentialRevocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stream.Close()
-	var previous securityv1.SignedInstruction
+	var previous *securityv1.SignedInstruction
 	for i := 0; i < 2; i++ {
 		if !stream.Receive() {
 			t.Fatalf("signed heartbeat %d missing: %v", i, stream.Err())
@@ -88,7 +88,7 @@ func TestRescueWatchFreshSignedHeartbeatAndCredentialRevocation(t *testing.T) {
 		if i > 0 && (signed.Nonce == previous.Nonce || !signed.IssuedAt.AsTime().After(previous.IssuedAt.AsTime())) {
 			t.Fatal("heartbeat reused signed response")
 		}
-		previous = signed
+		previous = &signed
 	}
 	// The same revision's confirmation is a committed event, not a 20s poll.
 	approved, err := privilegeddelivery.Confirm(id, saved.Revision, "admin")

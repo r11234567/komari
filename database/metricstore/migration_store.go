@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	logger "github.com/komari-monitor/komari/utils/log"
+	"os"
 	"strings"
 	"time"
 
@@ -60,30 +61,22 @@ func defaultSQLiteFingerprint() string {
 	return targetFingerprint(&MetricStoreConfig{Driver: "sqlite", DSN: "./data/metrics.db"})
 }
 
-// migrateFromPreviousStore 打开由 prevFingerprint 指定的上一个 metrics 目标库作为源，
-// 把其中的全部指标搬运到当前目标 dst（例如 SQLite metrics.db → MySQL/PostgreSQL）。
-//
-// 该过程幂等：dst 以 (metric, entity, tags, ts) upsert 写入，中断后重启可安全重跑。
+// migrateFromPreviousStore refuses the retired raw-only copier: a telemetry
+// database and its archives must be transferred as one offline storage set.
 func migrateFromPreviousStore(prevFingerprint string, cfg *MetricStoreConfig, dst *metric.Store) error {
-	prevCfg, err := configFromFingerprint(prevFingerprint, cfg)
-	if err != nil {
+	if _, err := configFromFingerprint(prevFingerprint, cfg); err != nil {
 		return fmt.Errorf("parse previous metrics target %q: %w", prevFingerprint, err)
 	}
-
-	ctx := context.Background()
-	src, err := openSourceStore(ctx, prevCfg)
-	if err != nil {
-		return fmt.Errorf("open previous metrics store (%s): %w", prevFingerprint, err)
+	// A fresh custom target has no inferred default source to move. Do not
+	// create one just to run the retired raw-only copy routine.
+	if prevFingerprint == defaultSQLiteFingerprint() {
+		if _, err := os.Stat("./data/metrics.db"); os.IsNotExist(err) {
+			return nil
+		} else if err != nil {
+			return fmt.Errorf("inspect previous metrics store: %w", err)
+		}
 	}
-	defer src.Close()
-
-	logger.Infof("metricstore", "Migrating metrics from previous store %s to current target...", prevFingerprint)
-	total, err := MigrateBetweenStores(ctx, src, dst)
-	if err != nil {
-		return fmt.Errorf("store-to-store metrics migration failed: %w", err)
-	}
-	logger.Infof("metricstore", "Store-to-store metrics migration completed (%d points)", total)
-	return nil
+	return fmt.Errorf("automatic metrics backend copying is unavailable for telemetry; keep the previous database and archives together and restore the previous target before startup")
 }
 
 // storeMigrationObserver 在 store-to-store 迁移过程中接收进度回调。
@@ -111,6 +104,15 @@ func MigrateBetweenStores(ctx context.Context, src, dst *metric.Store) (int64, e
 func migrateBetweenStores(ctx context.Context, src, dst *metric.Store, observe storeMigrationObserver) (int64, error) {
 	if src == nil || dst == nil {
 		return 0, fmt.Errorf("source or destination metric store is nil")
+	}
+	for _, store := range []*metric.Store{src, dst} {
+		present, err := store.HasTelemetrySchema(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if present {
+			return 0, fmt.Errorf("raw-only store copying cannot migrate telemetry summaries and archives; use a complete stopped-service transfer")
+		}
 	}
 
 	defs, err := src.ListMetrics(ctx)

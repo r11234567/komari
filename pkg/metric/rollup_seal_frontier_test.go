@@ -1,3 +1,5 @@
+//go:build metric_legacy_fixture
+
 package metric
 
 import (

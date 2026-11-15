@@ -32,7 +32,7 @@ func TestRateLimitControllerAllowsPacedDashboardReads(t *testing.T) {
 	controller := NewRateLimitController(true)
 	now := time.Now()
 	for i := 0; i < 30; i++ {
-		if allowed, _ := controller.allow("history:user", 2, 5, now.Add(time.Duration(i)*500*time.Millisecond)); !allowed {
+		if allowed, _ := controller.allow("history:user", historyReadRate, historyReadBurst, now.Add(time.Duration(i)*time.Second/historyReadRate)); !allowed {
 			t.Fatalf("normal dashboard burst was limited at request %d", i+1)
 		}
 	}
@@ -41,12 +41,12 @@ func TestRateLimitControllerAllowsPacedDashboardReads(t *testing.T) {
 func TestRateLimitControllerRejectsSustainedHistoryStorm(t *testing.T) {
 	controller := NewRateLimitController(true)
 	now := time.Now()
-	for i := 0; i < 5; i++ {
-		if allowed, _ := controller.allow("history:user", 2, 5, now); !allowed {
+	for i := 0; i < historyReadBurst; i++ {
+		if allowed, _ := controller.allow("history:user", historyReadRate, historyReadBurst, now); !allowed {
 			t.Fatalf("history burst was limited too early at request %d", i+1)
 		}
 	}
-	if allowed, _ := controller.allow("history:user", 2, 5, now); allowed {
+	if allowed, _ := controller.allow("history:user", historyReadRate, historyReadBurst, now); allowed {
 		t.Fatal("sustained history storm was not limited")
 	}
 }

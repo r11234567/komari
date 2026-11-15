@@ -106,6 +106,11 @@ func UpdateTrafficCalibration(c *gin.Context) {
 		snapshot, err = trafficledger.CalibrateCurrentCycle(c.Request.Context(), dbcore.GetDBInstance(), client, trafficledger.Usage{Up: *request.TargetUp, Down: *request.TargetDown}, fmt.Sprint(actor), now)
 	}
 	if err != nil {
+		if errors.Is(err, trafficledger.ErrCalibrationCatchingUp) {
+			c.Header("Retry-After", "1")
+			api.RespondError(c, http.StatusServiceUnavailable, "流量账本正在追赶已接收的报告，请稍后重试校准")
+			return
+		}
 		api.RespondError(c, http.StatusBadRequest, "保存流量校准失败："+err.Error())
 		return
 	}

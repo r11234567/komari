@@ -22,7 +22,9 @@ func TestCompatibilityBatchChargesEveryHistoricalMessage(t *testing.T) {
 		c.Next()
 	}, controller.Middleware())
 	router.POST("/api/rpc2", OnRpcRequest)
-	batch := make([]map[string]any, 6)
+	// Larger than the supported dashboard burst, with each message still
+	// charged individually even though there is only one HTTP request.
+	batch := make([]map[string]any, 200)
 	for i := range batch {
 		batch[i] = map[string]any{"jsonrpc": "2.0", "id": i, "method": "public:queryMetrics", "params": map[string]any{}}
 	}
@@ -33,16 +35,21 @@ func TestCompatibilityBatchChargesEveryHistoricalMessage(t *testing.T) {
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/rpc2", bytes.NewReader(body)))
 	var replies []rpc.JsonRpcResponse
-	if err := json.Unmarshal(response.Body.Bytes(), &replies); err != nil || len(replies) != 6 {
+	if err := json.Unmarshal(response.Body.Bytes(), &replies); err != nil || len(replies) != len(batch) {
 		t.Fatalf("invalid batch response: %s", response.Body.String())
 	}
+	var admitted, refused int
 	for i, reply := range replies {
-		want := rpc.InvalidParams
-		if i == 5 {
-			want = rpc.Unavailable
-		}
-		if reply.Error == nil || reply.Error.Code != want {
+		if reply.Error == nil || (reply.Error.Code != rpc.InvalidParams && reply.Error.Code != rpc.Unavailable) {
 			t.Fatalf("reply %d did not spend its own history budget: %+v", i, reply.Error)
 		}
+		if reply.Error.Code == rpc.Unavailable {
+			refused++
+		} else {
+			admitted++
+		}
+	}
+	if admitted < 32 || refused == 0 {
+		t.Fatalf("batch did not allow dashboard fan-out and bound excess work: admitted=%d refused=%d", admitted, refused)
 	}
 }

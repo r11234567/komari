@@ -2,6 +2,7 @@ package trafficledger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -134,6 +135,9 @@ func enabledReportTargets(ctx context.Context, db *gorm.DB) ([]reportTarget, err
 // BackfillEnabledHistory converts the history retained by the old report
 // implementation before callers lower any metric retention.
 func BackfillEnabledHistory(ctx context.Context, db *gorm.DB, now time.Time) error {
+	if metricstore.TelemetryEnabled() {
+		return ensureTelemetryFresh(ctx)
+	}
 	targets, err := enabledReportTargets(ctx, db)
 	if err != nil {
 		return err
@@ -219,6 +223,11 @@ func ledgerRangeComplete(ctx context.Context, db *gorm.DB, clientID string, star
 // Maintain settles recent missing days and removes old ledger rows. Existing
 // rows are never recalculated, so running this hourly has negligible cost.
 func Maintain(ctx context.Context, db *gorm.DB, now time.Time) error {
+	if metricstore.TelemetryEnabled() {
+		// New ingestion owns complete daily and cycle state. Never call the old
+		// gap/backfill calculator on this runtime (even for an empty day).
+		return ensureTelemetryFresh(ctx)
+	}
 	return maintainWithDailyCalculator(ctx, db, now, MetricUsagesByDay)
 }
 
@@ -319,6 +328,9 @@ func NormalizedCountingType(kind string) string {
 // EnsureRange creates any missing per-day rows in [startDay, endDay). The
 // process is idempotent and serialised with report-time settlement.
 func EnsureRange(ctx context.Context, db *gorm.DB, clientIDs []string, startDay, endDay time.Time) error {
+	if metricstore.TelemetryEnabled() {
+		return ensureTelemetryFresh(ctx)
+	}
 	return ensureRangeWithDailyCalculator(ctx, db, clientIDs, startDay, endDay, MetricUsagesByDay)
 }
 
@@ -461,6 +473,10 @@ func SumRange(ctx context.Context, db *gorm.DB, clientID string, startDay, endDa
 // MetricUsage computes exact report traffic from retained metric points. The
 // end boundary is inclusive to match metric-store range queries.
 func MetricUsage(ctx context.Context, clientID string, start, end time.Time) (Usage, error) {
+	if metricstore.TelemetryEnabled() {
+		u, _, err := telemetryUsage(ctx, []string{clientID}, start, end, time.Hour)
+		return u[clientID], err
+	}
 	if end.Before(start) {
 		return Usage{}, fmt.Errorf("traffic metric range end precedes start")
 	}
@@ -475,6 +491,10 @@ func MetricUsage(ctx context.Context, clientID string, start, end time.Time) (Us
 // MetricUsageByHour calculates the exact total and hourly increments in one
 // metric-store scan. Hour boundaries use Beijing time to match traffic reports.
 func MetricUsageByHour(ctx context.Context, clientID string, start, end time.Time) (Usage, []HourlyUsage, error) {
+	if metricstore.TelemetryEnabled() {
+		u, h, err := telemetryUsage(ctx, []string{clientID}, start, end, time.Hour)
+		return u[clientID], h[clientID], err
+	}
 	if end.Before(start) {
 		return Usage{}, nil, fmt.Errorf("traffic metric range end precedes start")
 	}
@@ -495,6 +515,9 @@ func MetricUsageByHourBatch(ctx context.Context, clientIDs []string, start, end 
 // increments in one shared metric-store scan. Buckets are aligned in Beijing
 // time so dashboard labels stay consistent with traffic billing days.
 func MetricUsageByIntervalBatch(ctx context.Context, clientIDs []string, start, end time.Time, interval time.Duration) (map[string]Usage, map[string][]HourlyUsage, error) {
+	if metricstore.TelemetryEnabled() {
+		return telemetryUsage(ctx, clientIDs, start, end, interval)
+	}
 	if end.Before(start) {
 		return nil, nil, fmt.Errorf("traffic metric range end precedes start")
 	}
@@ -593,6 +616,24 @@ func usageByIntervalFromRecords(records []DeltaRecord, previous *DeltaRecord, in
 // one continuous state machine, then assigns each accepted delta to a Beijing
 // calendar day. This makes daily rows additive across weekly/monthly reports.
 func MetricUsagesByDay(ctx context.Context, clientID string, startDay, endDay time.Time) (map[string]Usage, error) {
+	if metricstore.TelemetryEnabled() {
+		if err := ensureTelemetryFresh(ctx); err != nil {
+			return nil, err
+		}
+		db := telemetryMetadata.Load()
+		if db == nil {
+			return nil, errors.New("telemetry metadata unavailable")
+		}
+		var rows []models.TrafficDailyLedger
+		if err := db.WithContext(ctx).Where("client = ? AND day >= ? AND day < ?", clientID, dayKey(startDay), dayKey(endDay)).Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		result := make(map[string]Usage, len(rows))
+		for _, r := range rows {
+			result[r.Day] = Usage{Up: r.UpBytes, Down: r.DownBytes}
+		}
+		return result, nil
+	}
 	start, end, err := normalizeRange(startDay, endDay)
 	if err != nil {
 		return nil, err

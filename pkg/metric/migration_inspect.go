@@ -58,6 +58,9 @@ func InspectSQLiteMigration(ctx context.Context, cfg Config) (SQLiteMigrationSum
 	if err := db.PingContext(ctx); err != nil {
 		return SQLiteMigrationSummary{}, err
 	}
+	if cfg.RetireLegacyStorage {
+		return inspectRetiredTelemetryMigration(ctx, db, cfg.TablePrefix)
+	}
 
 	t := tables{
 		definitions:  tableName(cfg.TablePrefix, "definitions"),

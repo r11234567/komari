@@ -32,8 +32,9 @@ func targetFingerprint(cfg *MetricStoreConfig) string {
 //     把默认 SQLite 中可能存在的历史数据搬运过来，否则仅登记指纹。
 //   - saved != current：后端已切换，把上一个目标（saved）的数据搬运到当前目标。
 //
-// 搬运以 upsert 写入，幂等，中断后重启可安全重跑。任一失败都返回错误，
-// 调用方应让启动失败并打印明确错误。
+// Telemetry owns SQL summaries and external archives together. The old raw-only
+// copier is not a backend migration; reject target changes before touching a
+// source, except an absent inferred default on a fresh installation.
 func RunStartupMigration() error {
 	s := GetStore()
 	if s == nil {

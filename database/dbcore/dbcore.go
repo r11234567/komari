@@ -18,6 +18,8 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/diagnostics"
 	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/pkg/historyexport"
+	"github.com/komari-monitor/komari/pkg/metric"
 	"github.com/komari-monitor/komari/pkg/migrations"
 	"github.com/komari-monitor/komari/utils/fsmove"
 	logger "github.com/komari-monitor/komari/utils/log"
@@ -26,7 +28,7 @@ import (
 )
 
 // zipDirectoryExcluding 将 srcDir 打包为 dstZip，exclude 是绝对路径集合需要排除
-func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}) error {
+func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}, overlays ...map[string]string) error {
 	// 规范化排除路径为绝对路径
 	normExclude := make(map[string]struct{}, len(exclude))
 	for p := range exclude {
@@ -43,40 +45,24 @@ func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}) e
 	zw := zip.NewWriter(out)
 	defer zw.Close()
 
-	absSrc, _ := filepath.Abs(srcDir)
-	walkErr := filepath.Walk(absSrc, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		// 排除 backup.zip 本身
-		if _, ok := normExclude[path]; ok {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		// 计算 zip 内相对路径
-		rel, err := filepath.Rel(absSrc, path)
-		if err != nil {
-			return err
-		}
-		// 根目录跳过
-		if rel == "." {
-			return nil
-		}
-		// 替换为正斜杠
-		zipName := filepath.ToSlash(rel)
-
+	addFile := func(path string, info os.FileInfo, zipName string) error {
 		if info.IsDir() {
 			_, err := zw.Create(zipName + "/")
 			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unsupported backup file: %s", path)
 		}
 		// 普通文件
 		fh, err := os.Open(path)
 		if err != nil {
 			return err
 		}
-		w, err := zw.Create(zipName)
+		method := uint16(zip.Deflate)
+		if strings.HasSuffix(zipName, ".jsonl.zst") {
+			method = zip.Store
+		}
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: zipName, Method: method, Modified: info.ModTime()})
 		if err != nil {
 			fh.Close()
 			return err
@@ -87,11 +73,97 @@ func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}) e
 		}
 		fh.Close()
 		return nil
+	}
+	overlay := map[string]string{}
+	for _, entries := range overlays {
+		for name, source := range entries {
+			overlay[name] = source
+		}
+	}
+	absSrc, err := filepath.Abs(srcDir)
+	if err != nil {
+		return err
+	}
+	walkErr := filepath.Walk(absSrc, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(absSrc, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		_, excluded := normExclude[path]
+		_, replaced := overlay[rel]
+		if excluded || replaced {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		return addFile(path, info, filepath.ToSlash(rel))
 	})
 	if walkErr != nil {
 		return walkErr
 	}
+	for name, source := range overlay {
+		if !filepath.IsLocal(name) {
+			return fmt.Errorf("invalid backup overlay: %s", name)
+		}
+		if err = filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			rel, err := filepath.Rel(source, path)
+			if err != nil {
+				return err
+			}
+			return addFile(path, info, filepath.ToSlash(filepath.Join(name, rel)))
+		}); err != nil {
+			return err
+		}
+	}
 	return zw.Close()
+}
+
+// Automatic upgrade/pre-restore packages use the same portable queue snapshot
+// as explicit full backups. The panel is stopped here; an old standalone
+// worker may still be alive, so its mutations must be excluded as well.
+func backupDataDirectory(dataDir, destination string, exclude map[string]struct{}, exportLocked bool) error {
+	queueDir := filepath.Join(dataDir, "exports-v2")
+	if _, err := os.Stat(filepath.Join(queueDir, "queue.db")); os.IsNotExist(err) {
+		return zipDirectoryExcluding(dataDir, destination, exclude)
+	} else if err != nil {
+		return err
+	}
+	q, err := historyexport.Open(queueDir)
+	if err != nil {
+		return err
+	}
+	defer q.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	if !exportLocked {
+		lockCtx, lockCancel := context.WithTimeout(ctx, 30*time.Second)
+		release, err := historyexport.LockMaintenance(lockCtx, queueDir)
+		lockCancel()
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
+	temp, err := os.MkdirTemp(filepath.Dir(dataDir), ".komari-export-backup-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(temp)
+	snapshot := filepath.Join(temp, "exports-v2")
+	if err = q.BackupLocked(ctx, snapshot); err != nil {
+		return err
+	}
+	return zipDirectoryExcluding(dataDir, destination, exclude, map[string]string{"exports-v2": snapshot})
 }
 
 // removeAllInDirExcept 删除 dir 下除 exclude 指定绝对路径外的所有文件和文件夹
@@ -223,21 +295,49 @@ func restoreStagedBackup(dataDir string) error {
 		if err := validateRestoredSQLite(metricsPath, "metrics.db"); err != nil {
 			return err
 		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		err := metric.ValidateTelemetryBackup(ctx, metricsPath, filepath.Join(stageDir, "telemetry"))
+		cancel()
+		if err != nil {
+			return fmt.Errorf("validate restored telemetry bundle: %w", err)
+		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect restored metrics.db: %w", err)
 	}
 	_ = os.Remove(filepath.Join(stageDir, "komari-backup-markup"))
+	queueDir := filepath.Join(stageDir, "exports-v2")
+	if _, err := os.Stat(queueDir); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		err = historyexport.ValidateAndRebindBackup(ctx, queueDir, dataDir)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("validate restored export queue: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Join(stageDir, "theme"), 0o755); err != nil {
 		return fmt.Errorf("prepare restored theme directory: %w", err)
 	}
 
 	backupDir := filepath.Join(filepath.Dir(dataDir), "backup")
+	if _, err := os.Stat(filepath.Join(dataDir, "exports-v2")); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		release, err := historyexport.LockMaintenance(ctx, filepath.Join(dataDir, "exports-v2"))
+		cancel()
+		if err != nil {
+			return fmt.Errorf("quiesce export worker before restore: %w", err)
+		}
+		defer release()
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	if err := os.MkdirAll(backupDir, 0o755); err != nil {
 		return fmt.Errorf("create pre-restore backup directory: %w", err)
 	}
 	timestamp := time.Now().UTC().Format("20060102-150405")
 	preRestorePath := filepath.Join(backupDir, fmt.Sprintf("pre-restore-%s.zip", timestamp))
-	if err := zipDirectoryExcluding(dataDir, preRestorePath, map[string]struct{}{backupZipPath: {}}); err != nil {
+	if err := backupDataDirectory(dataDir, preRestorePath, map[string]struct{}{backupZipPath: {}}, true); err != nil {
 		return fmt.Errorf("preserve current data before restore: %w", err)
 	}
 
@@ -351,7 +451,7 @@ func backupOnVersionUpgrade() {
 	tsName := time.Now().UTC().Format("20060102-150405")
 	bakPath := filepath.Join("./backup", fmt.Sprintf("upgrade-%s.zip", tsName))
 	backupZipPath := filepath.Join(".", "data", "backup.zip")
-	if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}}); zipErr != nil {
+	if zipErr := backupDataDirectory("./data", bakPath, map[string]struct{}{backupZipPath: {}}, false); zipErr != nil {
 		logger.Errorf("dbcore", "[upgrade-backup] failed to backup ./data before upgrade (from %q to %q): %v", prevVersion, versionID, zipErr)
 		return
 	}
@@ -547,6 +647,12 @@ func doInitialize() error {
 		&models.TrafficDailyLedger{},
 		&models.TrafficCalibrationAdjustment{},
 		&models.TrafficCycleFirstDay{},
+		&models.TelemetryTrafficStream{},
+		&models.TelemetryTrafficState{},
+		&models.TelemetryTrafficSlice{},
+		&models.TelemetryTrafficCycle{},
+		&models.TelemetryTrafficMinute{},
+		&models.TelemetryTrafficTail{},
 		&models.PingTask{},
 		&models.PingLossNotification{},
 		&models.ReturnRouteTask{},
@@ -657,6 +763,11 @@ func cleanupOrphanedClientData(db *gorm.DB) error {
 			"traffic daily ledger":            &models.TrafficDailyLedger{},
 			"traffic calibration adjustments": &models.TrafficCalibrationAdjustment{},
 			"traffic cycle first day":         &models.TrafficCycleFirstDay{},
+			"telemetry traffic state":         &models.TelemetryTrafficState{},
+			"telemetry traffic hours":         &models.TelemetryTrafficSlice{},
+			"telemetry traffic cycles":        &models.TelemetryTrafficCycle{},
+			"telemetry traffic minutes":       &models.TelemetryTrafficMinute{},
+			"telemetry traffic tails":         &models.TelemetryTrafficTail{},
 		} {
 			if !tx.Migrator().HasTable(model) {
 				continue

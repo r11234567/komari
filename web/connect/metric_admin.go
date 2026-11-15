@@ -50,6 +50,20 @@ func (s *metricsService) GetDownsamplingPolicy(context.Context, *connect.Request
 }
 
 func (s *metricsService) SetDownsamplingPolicy(ctx context.Context, req *connect.Request[metricsv1.SetDownsamplingPolicyRequest]) (*connect.Response[metricsv1.SetDownsamplingPolicyResponse], error) {
+	if metricstore.TelemetryEnabled() {
+		// Retain the old RPC as a reload-compatible adapter for cached clients.
+		// It cannot disable the archive handoff or restore legacy SQL writers.
+		if err := metricstore.Reload(ctx); err != nil {
+			return nil, connectMetricStoreError(err)
+		}
+		policy, err := connectDownsamplingPolicy()
+		if err != nil {
+			return nil, connectError(connect.CodeInternal, err)
+		}
+		response := connect.NewResponse(&metricsv1.SetDownsamplingPolicyResponse{Policy: policy})
+		response.Header().Set("X-Komari-Storage-Policy", "telemetry; legacy policy fields ignored")
+		return response, nil
+	}
 	cfg, err := config.GetManyAs[metricstore.MetricStoreConfig]()
 	if err != nil {
 		return nil, connectError(connect.CodeInternal, err)
@@ -104,6 +118,9 @@ func connectDownsamplingPolicy() (*metricsv1.DownsamplingPolicy, error) {
 	cfg, err := config.GetManyAs[metricstore.MetricStoreConfig]()
 	if err != nil {
 		return nil, err
+	}
+	if metricstore.TelemetryEnabled() {
+		return &metricsv1.DownsamplingPolicy{Enabled: true, PreserveRaw: false, RawRetention: (time.Duration(max(cfg.HotWindowMinutes, 1)) * time.Minute).String(), MinuteRetentionMinutes: 120, FiveMinuteRetentionMinutes: 1440, HourRetentionHours: 168, Tiers: []*metricsv1.DownsamplingTier{{Interval: "10s", Retention: "2h"}, {Interval: "5m", Retention: "24h"}, {Interval: "15m", Retention: "168h"}, {Interval: "1h", Retention: "metric retention"}}}, nil
 	}
 	effective, err := metricstore.RollupPolicyForConfig(cfg)
 	if err != nil {

@@ -18,6 +18,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	dashboardapp "github.com/komari-monitor/komari/web/dashboard"
+	"gorm.io/gorm"
 )
 
 type dashboardOfflineNode struct {
@@ -35,10 +36,11 @@ type dashboardServerSummary struct {
 }
 
 type dashboardTrafficDay struct {
-	Day      string `json:"day"`
-	Up       int64  `json:"up"`
-	Down     int64  `json:"down"`
-	Billable int64  `json:"billable"`
+	Day       string `json:"day"`
+	Up        int64  `json:"up"`
+	Down      int64  `json:"down"`
+	Billable  int64  `json:"billable"`
+	Available *bool  `json:"available,omitempty"`
 }
 
 type dashboardTrafficBucket struct {
@@ -57,14 +59,20 @@ type dashboardTrafficRankItem struct {
 }
 
 type dashboardTrafficSummary struct {
-	TodayUp       int64                      `json:"today_up"`
-	TodayDown     int64                      `json:"today_down"`
-	TodayBillable int64                      `json:"today_billable"`
-	Hourly        []dashboardTrafficBucket   `json:"hourly"`
-	Daily         []dashboardTrafficDay      `json:"daily"`
-	Ranking       []dashboardTrafficRankItem `json:"ranking"`
-	HistoryReady  bool                       `json:"history_ready"`
-	Error         string                     `json:"error,omitempty"`
+	TodayUp           int64                      `json:"today_up"`
+	TodayDown         int64                      `json:"today_down"`
+	TodayBillable     int64                      `json:"today_billable"`
+	Hourly            []dashboardTrafficBucket   `json:"hourly"`
+	Daily             []dashboardTrafficDay      `json:"daily"`
+	Ranking           []dashboardTrafficRankItem `json:"ranking"`
+	HistoryReady      bool                       `json:"history_ready"`
+	Error             string                     `json:"error,omitempty"`
+	TodayError        string                     `json:"today_error,omitempty"`
+	TrendError        string                     `json:"trend_error,omitempty"`
+	RankingError      string                     `json:"ranking_error,omitempty"`
+	AccountingThrough *time.Time                 `json:"accounting_through,omitempty"`
+	CatchingUp        bool                       `json:"catching_up"`
+	TrendCoverage     string                     `json:"trend_coverage,omitempty"`
 }
 
 type dashboardStorageSummary struct {
@@ -465,35 +473,109 @@ func buildDashboardServers(clientList []models.Client) dashboardServerSummary {
 }
 
 func loadDashboardTraffic(ctx context.Context, clientList []models.Client, now time.Time, rankingLimit int) (dashboardTrafficSummary, error) {
+	return loadDashboardTrafficFrom(ctx, dbcore.GetDBInstance(), clientList, now, rankingLimit, metricstore.TelemetryEnabled(), dashboardapp.LoadTrafficTrendSnapshot)
+}
+
+type dashboardTrendLoader func(context.Context, []string, time.Time, time.Duration, time.Duration) (*dashboardapp.TrafficTrendResult, error)
+
+func loadDashboardTrafficFrom(ctx context.Context, db *gorm.DB, clientList []models.Client, now time.Time, rankingLimit int, telemetry bool, loadTrend dashboardTrendLoader) (dashboardTrafficSummary, error) {
 	today := trafficledger.BeijingDay(now)
 	start := today.AddDate(0, 0, -(trafficledger.DashboardHistoryDays - 1))
-	db := dbcore.GetDBInstance()
 	var rows []models.TrafficDailyLedger
-	if err := db.WithContext(ctx).
-		Select("client", "day", "up_bytes", "down_bytes").
-		Where("day >= ? AND day < ?", start.Format(time.DateOnly), today.Format(time.DateOnly)).
-		Find(&rows).Error; err != nil {
-		return dashboardTrafficSummary{}, fmt.Errorf("read dashboard traffic ledger: %w", err)
-	}
-	adjustments, err := trafficledger.DailyAdjustments(ctx, db, start, today.AddDate(0, 0, 1))
-	if err != nil {
-		return dashboardTrafficSummary{}, fmt.Errorf("read dashboard traffic calibration: %w", err)
-	}
-
 	todayUsage := make(map[string]trafficledger.Usage, len(clientList))
+	adjustments := map[string]trafficledger.SignedUsage{}
+	var todayErr error
+	var through *time.Time
 	clientIDs := make([]string, 0, len(clientList))
 	for _, client := range clientList {
 		clientIDs = append(clientIDs, client.UUID)
 	}
-	todayUsage, _, err = trafficledger.MetricUsageByHourBatch(ctx, clientIDs, today.UTC(), now.UTC())
+	// Historical days, today's ledger and calibration share one business snapshot.
+	// Trend precision and availability never participate in billing success.
+	err := trafficledger.WithTelemetryReadSnapshot(ctx, db, func(tx *gorm.DB) error {
+		if err := tx.Select("client", "day", "up_bytes", "down_bytes").Where("day >= ? AND day < ?", start.Format(time.DateOnly), today.Format(time.DateOnly)).Find(&rows).Error; err != nil {
+			return fmt.Errorf("read dashboard traffic ledger: %w", err)
+		}
+		var err error
+		adjustments, err = trafficledger.DailyAdjustments(ctx, tx, start, today.AddDate(0, 0, 1))
+		if err != nil {
+			return fmt.Errorf("read dashboard traffic calibration: %w", err)
+		}
+		if !telemetry {
+			return nil
+		}
+		// A savepoint contains driver statement failures, retaining settled days.
+		todayErr = tx.Transaction(func(dayTx *gorm.DB) error {
+			var current []models.TrafficDailyLedger
+			if err := dayTx.Select("client, up_bytes, down_bytes").Where("day = ?", today.Format(time.DateOnly)).Find(&current).Error; err != nil {
+				return err
+			}
+			for _, row := range current {
+				todayUsage[row.Client] = trafficledger.Usage{Up: row.UpBytes, Down: row.DownBytes}
+			}
+			for offset := 0; offset < len(clientIDs); offset += 128 {
+				ids := clientIDs[offset:min(offset+128, len(clientIDs))]
+				var states []models.TelemetryTrafficState
+				if err := dayTx.Select("client, last_observed").Where("client IN ?", ids).Find(&states).Error; err != nil {
+					return err
+				}
+				if len(states) != len(ids) {
+					return fmt.Errorf("traffic accounting history is incomplete")
+				}
+				for _, state := range states {
+					at := time.Unix(0, state.LastObserved).UTC()
+					if through == nil || at.Before(*through) {
+						through = &at
+					}
+				}
+			}
+			return nil
+		})
+		return nil
+	})
 	if err != nil {
-		return dashboardTrafficSummary{}, fmt.Errorf("read today's dashboard traffic: %w", err)
+		return dashboardTrafficSummary{}, err
 	}
-	trendBuckets, err := dashboardapp.LoadTrafficTrend(ctx, clientIDs, now, dashboardapp.DefaultTrafficTrendWindow, dashboardapp.DefaultTrafficTrendInterval)
-	if err != nil {
-		return dashboardTrafficSummary{}, fmt.Errorf("read 24-hour dashboard traffic trend: %w", err)
+	if !telemetry {
+		todayUsage, _, todayErr = trafficledger.MetricUsageByHourBatch(ctx, clientIDs, today.UTC(), now.UTC())
 	}
-	return summarizeDashboardTraffic(clientList, rows, todayUsage, trendBuckets, adjustments, now, rankingLimit), nil
+	trend, trendErr := loadTrend(ctx, clientIDs, now, dashboardapp.DefaultTrafficTrendWindow, dashboardapp.DefaultTrafficTrendInterval)
+	var buckets []dashboardapp.TrafficTrendBucket
+	if trendErr == nil {
+		buckets = trend.Buckets
+	}
+	if todayErr != nil {
+		todayUsage = nil
+	}
+	summary := summarizeDashboardTraffic(clientList, rows, todayUsage, buckets, adjustments, now, rankingLimit)
+	summary.AccountingThrough = through
+	if todayErr != nil {
+		summary.TodayError = todayErr.Error()
+		summary.RankingError = todayErr.Error()
+		summary.TodayUp = 0
+		summary.TodayDown = 0
+		summary.TodayBillable = 0
+		summary.Ranking = nil
+		for i := range summary.Daily {
+			if summary.Daily[i].Day == today.Format(time.DateOnly) {
+				available := false
+				summary.Daily[i].Available = &available
+				summary.Daily[i].Up = 0
+				summary.Daily[i].Down = 0
+				summary.Daily[i].Billable = 0
+			}
+		}
+	}
+	if trendErr != nil {
+		summary.TrendError = trendErr.Error()
+	} else {
+		summary.TrendCoverage = trend.Coverage
+		summary.CatchingUp = trend.CatchingUp
+		if trend.Coverage == "unavailable" {
+			summary.TrendError = trend.Warning
+		}
+	}
+	return summary, nil
 }
 
 func summarizeDashboardTraffic(clientList []models.Client, rows []models.TrafficDailyLedger, todayUsage map[string]trafficledger.Usage, trendBuckets []dashboardapp.TrafficTrendBucket, adjustments map[string]trafficledger.SignedUsage, now time.Time, rankingLimit int) dashboardTrafficSummary {

@@ -8,7 +8,8 @@ this workflow on that PR revision alongside the focused race checkpoints.
 When explicitly requested again, run **Feature audit - real end-to-end**
 (`feature-e2e.yml`) on the audit branch.
 Never execute these scripts on the panel VPS. Both shell and browser entry
-points require a GitHub-hosted Linux runner. There is no production deployment,
+points validate either a GitHub-hosted Linux runner or the explicit local
+fixture below. There is no production deployment,
 repository write permission, production secret or external test target.
 
 The workflow records the server, Web, Agent and protocol revisions, verifies
@@ -69,3 +70,35 @@ A green run proves this pinned Linux/Chromium/loopback proxy scenario. It does
 not prove every production proxy configuration, Windows/macOS behavior, real
 GPU driver telemetry, plugin compatibility or absence of all defects. Keep
 the existing component/race/platform CI jobs alongside this workflow.
+
+## Local staged debugging (Linux / WSL)
+
+Run `bash scripts/ci/e2e/local.sh prepare` from a local root shell. It creates
+an independent checkout at `/var/tmp/komari-local-e2e-0/repo`, fresh databases,
+loopback HTTPS on 29443/29444, a dedicated `komari-e2e-debug` OS account and the
+same systemd/cgroup-v2 services used by CI. The installed Agent's state parent
+is bind-mounted from the private fixture in a local mount namespace and the
+test service, leaving an existing `/var/lib/komari` untouched. It refuses occupied fixture ports
+and pre-existing test services. It does not pretend to be GitHub Actions.
+Required host tools are Go, git, rsync, curl, xz, sudo, Nginx and certutil;
+prepare installs the pinned Node/Playwright/browser into its private fixture.
+
+Run stages individually: `build`, `setup`, `browser`, `upgrade`. Run `sync`
+after editing source; it updates only the checkout's CI scripts and export
+package. Rebuild the relevant binary before checking application changes.
+The browser saves successful stage boundaries and real session state only
+inside the private fixture. `resume` reuses that state and reruns the failed
+and subsequent stages. It is a debugging aid, not a complete acceptance run;
+CI always starts from first-run installation. The independent `upgrade` stage
+uses the browser's actual downloaded backup and credentials.
+
+After a backend-only change, `sync` then `backend` rebuilds the binary for the
+next service restart. `qualify-prepare` stops the fixture panel/worker, builds
+the labelled synthetic cold input and restarts both with the qualification
+I/O budget. Then run `qualify`; it still requires at least two hours of actual
+work, fresh Agent/Ping data, CPU and latency gates. A resumed browser session
+reopens its workspace through real verification; grants are not injected.
+
+Failures retain databases, services, logs and browser traces for inspection.
+`cleanup` is explicit and stops/removes only the fixed test services and state.
+Do not upload fixture databases/session checkpoints/credentials as evidence.

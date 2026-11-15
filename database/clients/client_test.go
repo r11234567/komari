@@ -114,6 +114,14 @@ func TestDeleteClientCleansAllRelatedRowsAndSharedAssignments(t *testing.T) {
 				{Client: "client-a", Day: "2026-07-24", UpBytes: 100, DownBytes: 200},
 				{Client: "client-b", Day: "2026-07-24", UpBytes: 300, DownBytes: 400},
 			}).Error)
+			telemetryModels := []any{&models.TelemetryTrafficState{}, &models.TelemetryTrafficSlice{}, &models.TelemetryTrafficCycle{}, &models.TelemetryTrafficMinute{}, &models.TelemetryTrafficTail{}}
+			require.NoError(t, db.AutoMigrate(append(telemetryModels, &models.TelemetryTrafficStream{})...))
+			for _, id := range []string{"client-a", "client-b"} {
+				for _, row := range []any{&models.TelemetryTrafficState{Client: id}, &models.TelemetryTrafficSlice{Client: id}, &models.TelemetryTrafficCycle{Client: id}, &models.TelemetryTrafficMinute{Client: id}, &models.TelemetryTrafficTail{Client: id}} {
+					require.NoError(t, db.Create(row).Error)
+				}
+			}
+			require.NoError(t, db.Create(&models.TelemetryTrafficStream{StoreID: "shared-stream", Through: 42}).Error)
 			loadRules := []models.LoadNotification{
 				{Name: "shared", Clients: models.StringArray{"client-a", "client-b"}, Metric: "cpu", Interval: 15},
 				{Name: "only-a", Clients: models.StringArray{"client-a"}, Metric: "cpu", Interval: 15},
@@ -163,6 +171,13 @@ func TestDeleteClientCleansAllRelatedRowsAndSharedAssignments(t *testing.T) {
 			assert.Equal(t, "shared", remainingTasks[0].TaskId)
 			assert.Equal(t, models.StringArray{"client-b"}, remainingTasks[0].Clients)
 			assertRowCount(t, db, &models.TaskResult{}, "client = ?", 1, "client-b")
+			for _, model := range telemetryModels {
+				assertRowCount(t, db, model, "client = ?", 0, "client-a")
+				assertRowCount(t, db, model, "client = ?", 1, "client-b")
+			}
+			var stream models.TelemetryTrafficStream
+			require.NoError(t, db.First(&stream).Error)
+			assert.Equal(t, int64(42), stream.Through, "shared outbox watermark must survive node deletion")
 		})
 	}
 }

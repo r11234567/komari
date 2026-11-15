@@ -2,11 +2,16 @@ package dbcore
 
 import (
 	"archive/zip"
+	"context"
 	"database/sql"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/komari-monitor/komari/pkg/historyexport"
+	"github.com/komari-monitor/komari/pkg/metric"
 )
 
 func createRestoreSQLite(t *testing.T, path, value string) {
@@ -110,5 +115,62 @@ func TestRestoreStagedBackupKeepsCurrentDataWhenArchiveIsInvalid(t *testing.T) {
 	content, err := os.ReadFile(current)
 	if err != nil || string(content) != "keep" {
 		t.Fatalf("current data changed: %q, err=%v", content, err)
+	}
+}
+
+func TestAutomaticBackupRestoresPortableExportQueueAndFencesOldConnection(t *testing.T) {
+	root := t.TempDir()
+	data := filepath.Join(root, "data")
+	if err := os.MkdirAll(data, 0700); err != nil {
+		t.Fatal(err)
+	}
+	createRestoreSQLite(t, filepath.Join(data, "komari.db"), "original")
+	q, err := historyexport.Open(filepath.Join(data, "exports-v2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	j, err := q.Create(context.Background(), historyexport.Request{Owner: "owner", UUID: "node", Mode: "raw", Metrics: []string{"cpu"}, Start: time.Now().Add(-time.Hour), End: time.Now(), Source: historyexport.Source{DSN: filepath.Join(root, "old", "metrics.db"), Telemetry: metric.TelemetryConfig{ArchiveDirectory: filepath.Join(root, "old", "telemetry")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = backupDataDirectory(data, filepath.Join(data, "backup.zip"), map[string]struct{}{filepath.Join(data, "backup.zip"): {}}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = restoreStagedBackup(data); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = q.List(context.Background(), "owner"); err != historyexport.ErrQueueReplaced {
+		t.Fatal("old writer was not fenced", err)
+	}
+	fresh, err := historyexport.Open(filepath.Join(data, "exports-v2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	restored, err := fresh.Get(context.Background(), "owner", j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Source.DSN != filepath.Join(data, "metrics.db") || restored.Status != "queued" {
+		t.Fatal(restored)
+	}
+	archives, err := filepath.Glob(filepath.Join(root, "backup", "pre-restore-*.zip"))
+	if err != nil || len(archives) != 1 {
+		t.Fatal(archives, err)
+	}
+	z, err := zip.OpenReader(archives[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer z.Close()
+	found := false
+	for _, f := range z.File {
+		if f.Name == "exports-v2/backup-manifest.json" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("pre-restore safety backup omitted portable export manifest")
 	}
 }

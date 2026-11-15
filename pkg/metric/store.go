@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -22,6 +23,7 @@ import (
 //
 // Store 是 metric 包的主入口，封装数据库连接、SQL 方言和表名。
 type Store struct {
+	telemetry atomic.Pointer[Telemetry]
 	// cfg is the validated store configuration.
 	//
 	// cfg 是已校验的 Store 配置。
@@ -103,6 +105,7 @@ func (s *Store) IsVirtualMetric(metricName string) bool {
 //
 // Open 根据配置打开 Store，初始化连接池，并在需要时执行自动迁移。
 func Open(ctx context.Context, cfg Config) (*Store, error) {
+	retireLegacyConfig(&cfg)
 	if cfg.TablePrefix == "" {
 		cfg.TablePrefix = "metric_"
 	}
@@ -228,11 +231,11 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 					s.closeDBs()
 					return nil, fmt.Errorf("metric: inspect SQLite storage version: %w", err)
 				}
-				if userVersion < sqliteStorageVersionCurrent {
+				if userVersion < sqliteStorageVersionCurrent && !cfg.RetireLegacyStorage {
 					s.closeDBs()
 					return nil, fmt.Errorf("metric: SQLite storage V%d requires automatic migration", userVersion)
 				}
-				s.sqlitePingMerged = true
+				s.sqlitePingMerged = userVersion >= sqliteStorageVersionPingMerge
 			}
 		}
 	}
@@ -351,6 +354,10 @@ func prepareSQLiteConfig(cfg Config) (Config, error) {
 		// explicitly runs the blocking space-reclamation action.
 		cfg.DSN = setSQLiteDSNParam(cfg.DSN, "_auto_vacuum", "incremental")
 		cfg.DSN = appendSQLiteDSNParam(cfg.DSN, "_busy_timeout", fmt.Sprintf("%d", durationMillis(cfg.SQLite.BusyTimeout)))
+		if cfg.SQLite.PerformanceProfile == SQLiteProfileDurable {
+			// Apply on every replacement connection, not only the initial PRAGMA.
+			cfg.DSN = setSQLiteDSNParam(cfg.DSN, "_synchronous", "FULL")
+		}
 	}
 	return cfg, nil
 }
@@ -516,6 +523,9 @@ func (s *Store) Close() error {
 	}
 	s.closed = true
 	var firstErr error
+	if engine := s.telemetry.Load(); engine != nil {
+		firstErr = engine.Close()
+	}
 	if s.ownedReadDB && s.readDB != nil {
 		if err := s.readDB.Close(); err != nil {
 			firstErr = err
@@ -716,6 +726,13 @@ func (s *Store) DeleteMetric(ctx context.Context, name string) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("%w: metric name is required", ErrInvalidArgument)
 	}
+	if t := s.Telemetry(); t != nil {
+		if _, err := t.EraseSeries(ctx, Query{MetricName: name}); err != nil {
+			return err
+		}
+		_, err := s.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE name = %s`, s.tables.definitions, s.dialect.placeholder(1)), name)
+		return err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -874,6 +891,13 @@ func (s *Store) SetMetricRetention(ctx context.Context, name string, retentionDa
 
 // DeleteMetricData removes all raw, rollup, and watermark data for one metric.
 func (s *Store) DeleteMetricData(ctx context.Context, name string) error {
+	if t := s.telemetry.Load(); t != nil {
+		if strings.TrimSpace(name) == "" {
+			return ErrInvalidArgument
+		}
+		_, err := t.EraseSeries(ctx, Query{MetricName: name})
+		return err
+	}
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
@@ -932,6 +956,17 @@ func (s *Store) DeleteMetricDataIfDisabled(ctx context.Context, name string) (bo
 
 	s.retentionMu.Lock()
 	defer s.retentionMu.Unlock()
+	if t := s.telemetry.Load(); t != nil {
+		def, err := s.GetMetric(ctx, name)
+		if err != nil {
+			return false, err
+		}
+		if def.RetentionDays != 0 {
+			return false, nil
+		}
+		_, err = t.EraseSeries(ctx, Query{MetricName: name})
+		return err == nil, err
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -987,6 +1022,12 @@ func (s *Store) DeleteMetricDataIfDisabled(ctx context.Context, name string) (bo
 //
 // DeleteEntity 删除某个实体在所有指标下的原始点和 rollup 数据。
 func (s *Store) DeleteEntity(ctx context.Context, entityID string) (int64, error) {
+	if t := s.telemetry.Load(); t != nil {
+		if strings.TrimSpace(entityID) == "" {
+			return 0, ErrInvalidArgument
+		}
+		return t.EraseSeries(ctx, Query{EntityID: entityID})
+	}
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
 	}
@@ -1048,6 +1089,12 @@ func (s *Store) DeleteEntity(ctx context.Context, entityID string) (int64, error
 // EntityID 和 Tags 可选，因此调用方可以删除所有 agent 的某个 task 标签，或删除
 // 单个 agent 的某条带标签序列。
 func (s *Store) DeleteSeries(ctx context.Context, filter Query) (int64, error) {
+	if t := s.telemetry.Load(); t != nil {
+		if strings.TrimSpace(filter.MetricName) == "" {
+			return 0, ErrInvalidArgument
+		}
+		return t.EraseSeries(ctx, filter)
+	}
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
 	}
@@ -1137,6 +1184,9 @@ func (s *Store) WriteBatch(ctx context.Context, points []Point) error {
 	}
 	if len(points) == 0 {
 		return nil
+	}
+	if t := s.telemetry.Load(); t != nil {
+		return t.WritePoints(ctx, points)
 	}
 	if s.sqlitePingMerged {
 		physical := make([]Point, 0, len(points))
@@ -1327,6 +1377,9 @@ func (s *Store) rollupUpsertSQL() string {
 //
 // Query 按条件查询原始采样点。
 func (s *Store) Query(ctx context.Context, query Query) ([]Point, error) {
+	if t := s.telemetry.Load(); t != nil {
+		return t.ReadHot(ctx, query, time.Now().UTC())
+	}
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
@@ -1404,6 +1457,9 @@ func (s *Store) Query(ctx context.Context, query Query) ([]Point, error) {
 //
 // EntityIDs 返回在原始点或 rollup 中匹配查询条件的实体 ID。
 func (s *Store) EntityIDs(ctx context.Context, query Query) ([]string, error) {
+	if t := s.telemetry.Load(); t != nil {
+		return t.EntityIDs(ctx, query)
+	}
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
@@ -1465,6 +1521,9 @@ SELECT entity_id FROM %s WHERE %s
 
 // AllEntityIDs returns every entity that still owns raw or rollup data.
 func (s *Store) AllEntityIDs(ctx context.Context) ([]string, error) {
+	if t := s.telemetry.Load(); t != nil {
+		return t.EntityIDs(ctx, Query{})
+	}
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
@@ -1506,6 +1565,9 @@ func (s *Store) AllEntityIDs(ctx context.Context) ([]string, error) {
 
 // MetricTagValues returns the distinct non-empty values of one tag on a metric.
 func (s *Store) MetricTagValues(ctx context.Context, metricName, tagName string) ([]string, error) {
+	if t := s.telemetry.Load(); t != nil {
+		return t.MetricTagValues(ctx, metricName, tagName)
+	}
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
@@ -1595,6 +1657,9 @@ func (s *Store) Latest(ctx context.Context, metricName, entityID string, limit i
 	if limit <= 0 {
 		limit = 1
 	}
+	if t := s.Telemetry(); t != nil {
+		return t.latestRetained(ctx, metricName, entityID, time.Now().UTC().Add(time.Nanosecond), limit)
+	}
 	virtualLoss := s.sqlitePingMerged && metricName == sqliteVirtualPingLossMetric
 	if virtualLoss {
 		metricName = sqliteMergedPingLatencyMetric
@@ -1678,6 +1743,13 @@ func (s *Store) LatestBefore(ctx context.Context, metricName, entityID string, b
 	}
 	if before.IsZero() {
 		return Point{}, false, fmt.Errorf("%w: before time is required", ErrInvalidArgument)
+	}
+	if t := s.Telemetry(); t != nil {
+		p, err := t.latestRetained(ctx, metricName, entityID, before, 1)
+		if err != nil || len(p) == 0 {
+			return Point{}, false, err
+		}
+		return p[0], true, nil
 	}
 	virtualLoss := s.sqlitePingMerged && metricName == sqliteVirtualPingLossMetric
 	if virtualLoss {
@@ -1816,6 +1888,10 @@ func (s *Store) LatestBefore(ctx context.Context, metricName, entityID string, b
 //
 // Aggregate 对原始点执行分桶聚合，能下推到 SQL 的聚合会优先下推。
 func (s *Store) Aggregate(ctx context.Context, query AggregateQuery) ([]AggregatePoint, error) {
+	if t := s.telemetry.Load(); t != nil {
+		r, err := t.Chart(ctx, query, time.Now().UTC())
+		return r.Points, err
+	}
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
@@ -1977,6 +2053,9 @@ func (s *Store) DeleteBefore(ctx context.Context, metricName string, before time
 	if before.IsZero() {
 		return 0, fmt.Errorf("%w: before time is required", ErrInvalidArgument)
 	}
+	if s.Telemetry() != nil {
+		return 0, fmt.Errorf("%w: telemetry raw deletion requires archive handoff; use retention or explicit series erasure", ErrInvalidArgument)
+	}
 	if s.sqlitePingMerged && metricName == sqliteVirtualPingLossMetric {
 		metricName = sqliteMergedPingLatencyMetric
 	}
@@ -2101,6 +2180,12 @@ func (s *Store) CleanupExpiredMetric(ctx context.Context, metricName string, now
 func (s *Store) CleanupExpiredMetricStep(ctx context.Context, metricName string, now time.Time) (int64, bool, error) {
 	if err := s.ensureOpen(); err != nil {
 		return 0, false, err
+	}
+	// Until the new archive handoff owns deletion, retain the source data. In
+	// particular, a successful no-op Compact must not allow cleanup to discard
+	// points that have never been archived or summarized by the new engine.
+	if s.cfg.RetireLegacyStorage {
+		return 0, true, ctx.Err()
 	}
 	def, err := s.GetMetric(ctx, metricName)
 	if err != nil {
@@ -2315,6 +2400,12 @@ func (s *Store) cleanupMetricComplete(ctx context.Context, def Definition, now t
 // tier retention. It is intentionally separate from raw cleanup so callers can
 // reclaim rollup-only storage without changing raw-data ownership semantics.
 func (s *Store) CleanupExpiredRollups(ctx context.Context, now time.Time) (int64, error) {
+	if err := s.ensureOpen(); err != nil {
+		return 0, err
+	}
+	if s.cfg.RetireLegacyStorage {
+		return 0, ctx.Err()
+	}
 	defs, err := s.ListMetrics(ctx)
 	if err != nil {
 		return 0, err

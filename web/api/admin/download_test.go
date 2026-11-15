@@ -31,6 +31,10 @@ func createConfigSnapshotFixture(t *testing.T) string {
 		`CREATE TABLE logs (id INTEGER PRIMARY KEY, message TEXT)`,
 		`CREATE TABLE return_route_events (id INTEGER PRIMARY KEY, target TEXT)`,
 		`CREATE TABLE traffic_calibration_adjustments (id INTEGER PRIMARY KEY, client TEXT, day TEXT)`,
+		`CREATE TABLE telemetry_traffic_minutes (client TEXT, start INTEGER, up_bytes INTEGER)`,
+		`CREATE TABLE telemetry_traffic_tails (client TEXT, observed INTEGER, up_bytes INTEGER)`,
+		`INSERT INTO telemetry_traffic_minutes VALUES ('node-a', 1, 123)`,
+		`INSERT INTO telemetry_traffic_tails VALUES ('node-a', 1, 123)`,
 		`INSERT INTO clients VALUES ('node-a', 'Node A')`,
 		`INSERT INTO users VALUES ('user-a', 'admin')`,
 		`INSERT INTO sessions VALUES ('session-a', 'user-a')`,
@@ -70,6 +74,7 @@ func TestSanitizeConfigSnapshotKeepsServersAndTasksWithoutHistory(t *testing.T) 
 		"users": 1, "clients": 1, "ping_tasks": 1, "return_route_tasks": 1,
 		"sessions": 0, "clipboards": 0, "logs": 0, "return_route_events": 0,
 		"traffic_calibration_adjustments": 0,
+		"telemetry_traffic_minutes":       0, "telemetry_traffic_tails": 0,
 	} {
 		var got int
 		if err := db.QueryRow("SELECT COUNT(*) FROM " + quoteSQLiteIdentifier(table)).Scan(&got); err != nil {
@@ -119,6 +124,9 @@ func TestBuildBackupArchiveUsesUpstreamCompatibleRootLayout(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(content, "metrics.db"), []byte("history"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(content, "sample.jsonl.zst"), []byte("immutable-compressed-history"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	archive := filepath.Join(t.TempDir(), "backup.zip")
 	if err := buildBackupArchive(archive, content, backupScopeFull, timeForBackupTest); err != nil {
 		t.Fatalf("build archive: %v", err)
@@ -131,6 +139,9 @@ func TestBuildBackupArchiveUsesUpstreamCompatibleRootLayout(t *testing.T) {
 	found := map[string]bool{}
 	for _, entry := range reader.File {
 		found[entry.Name] = true
+		if entry.Name == "sample.jsonl.zst" && entry.Method != zip.Store {
+			t.Fatal("immutable archive was recompressed")
+		}
 	}
 	for _, name := range []string{"komari.db", "metrics.db", "komari-backup-markup"} {
 		if !found[name] {

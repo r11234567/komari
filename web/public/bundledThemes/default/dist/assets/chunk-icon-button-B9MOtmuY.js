@@ -1,0 +1,1 @@
+import{S as e,c as t,y as n}from"./chunk-radius.prop-CCllbZlz.js";import{t as r}from"./chunk-base-button-C478C_rY.js";var i=e(n()),a=e(t()),o=i.forwardRef(({className:e,...t},n)=>i.createElement(r,{...t,ref:n,className:(0,a.default)(`rt-IconButton`,e)}));o.displayName=`IconButton`;export{o as t};

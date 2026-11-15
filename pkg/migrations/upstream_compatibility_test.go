@@ -10,6 +10,7 @@ import (
 
 	"github.com/komari-monitor/komari/database/metricstore"
 	appconfig "github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/pkg/metric"
 	"github.com/komari-monitor/komari/pkg/migrations"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -47,7 +48,7 @@ func TestUpstreamMainDatabaseUpgradeCompatibility(t *testing.T) {
 			seedLegacyMainMonitoring(t, mainDB, base, version.withTraffic)
 
 			metricPath := filepath.Join(t.TempDir(), "metrics.db")
-			cfg := &metricstore.MetricStoreConfig{Driver: "sqlite", DSN: metricPath, TablePrefix: "metric_"}
+			cfg := &metricstore.MetricStoreConfig{Driver: "sqlite", DSN: metricPath, TablePrefix: "metric_", ArchiveDirectory: filepath.Join(filepath.Dir(metricPath), "telemetry")}
 			store, err := metricstore.OpenStoreForMigration(ctx, cfg, 1)
 			if err != nil {
 				t.Fatalf("open V4 migration target: %v", err)
@@ -60,14 +61,52 @@ func TestUpstreamMainDatabaseUpgradeCompatibility(t *testing.T) {
 				t.Fatalf("close V4 migration target: %v", err)
 			}
 			activateCompatibilityStore(t, metricPath)
+			if err := metricstore.ActivateTelemetry(ctx); err != nil {
+				t.Fatal(err)
+			}
 
 			expected := compatibilityExpected{}
 			if version.withTraffic {
 				expected.trafficUp = 123456789
 				expected.trafficDown = 987654321
 			}
-			assertCompatibilityReadAPIs(t, base.Truncate(time.Hour), expected)
+			assertTelemetryCompatibilityReadAPIs(t, base, expected)
 		})
+	}
+}
+
+func assertTelemetryCompatibilityReadAPIs(t *testing.T, at time.Time, expected compatibilityExpected) {
+	t.Helper()
+	ctx := metric.WithTelemetryEntities(context.Background(), []string{compatibilityNodeID})
+	engine := metricstore.GetStore().Telemetry()
+	for _, check := range []struct {
+		name  string
+		value float64
+		tags  map[string]string
+		chart bool
+	}{
+		{metricstore.MetricCPU, 42.5, nil, true},
+		{metricstore.MetricNetTotalUp, 8000000000123, nil, false},
+		{metricstore.MetricNetTotalDown, 7000000000456, nil, false},
+		{metricstore.MetricTrafficUp, float64(expected.trafficUp), nil, false},
+		{metricstore.MetricTrafficDown, float64(expected.trafficDown), nil, false},
+		{metricstore.MetricGPUMem, 4096, map[string]string{"device_index": "0", "device_name": "GPU 0"}, true},
+		{metricstore.MetricGPUDeviceUsage, 67.5, map[string]string{"device_index": "0", "device_name": "GPU 0"}, true},
+		{metricstore.MetricPingLatency, 36, map[string]string{"task_id": "7"}, true},
+	} {
+		query := metric.Query{MetricName: check.name, EntityID: compatibilityNodeID, Start: at.Add(-time.Second), End: at.Add(time.Second), Tags: check.tags}
+		rows, err := engine.ExportRawBatch(ctx, []metric.Query{query})
+		if err != nil || len(rows) != 1 || len(rows[0]) != 1 || rows[0][0].Value != check.value || !rows[0][0].Timestamp.Equal(at) {
+			t.Fatalf("exact archived %s: %+v, %v", check.name, rows, err)
+		}
+		if check.chart {
+			query.Start = at.Truncate(time.Minute)
+			query.End = query.Start.Add(time.Minute - time.Nanosecond)
+			r, err := engine.Chart(ctx, metric.AggregateQuery{Query: query, Interval: time.Minute, Aggregation: metric.AggAvg}, time.Now().UTC())
+			if err != nil || len(r.Points) != 1 || r.Points[0].Count != 1 || r.Points[0].Value != check.value {
+				t.Fatalf("chart %s: %+v, %v", check.name, r, err)
+			}
+		}
 	}
 }
 
@@ -95,7 +134,7 @@ func TestUpstreamMetricDatabaseUpgradeCompatibility(t *testing.T) {
 			if err != nil {
 				t.Fatalf("inspect %s metric database: %v", version.name, err)
 			}
-			if !summary.Required || summary.Layout != "legacy" || summary.SourceRows != 11 {
+			if !summary.Required || summary.Layout != "telemetry-legacy" {
 				t.Fatalf("unexpected %s preflight summary: %#v", version.name, summary)
 			}
 
@@ -104,12 +143,33 @@ func TestUpstreamMetricDatabaseUpgradeCompatibility(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = metricstore.CloseStoreContext(context.Background()) })
 			assertCompatibilityReadAPIs(t, base, compatibilityExpected{trafficUp: 123456789, trafficDown: 987654321})
+			// The ordinary open preserves the old raw reader. The replacement is
+			// an explicit offline handoff, rather than an automatic SQL block rewrite.
+			cfg, err := appconfig.GetManyAs[metricstore.MetricStoreConfig]()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = metricstore.MigrateTelemetryOffline(context.Background(), metricstore.GetStore(), cfg, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err = metricstore.CompleteTelemetryLedgerMigration(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			engine, err := metricstore.GetStore().OpenTelemetry(context.Background(), metric.TelemetryConfig{ArchiveDirectory: cfg.ArchiveDirectory})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := engine.Chart(context.Background(), metric.AggregateQuery{Query: metric.Query{MetricName: metricstore.MetricCPU, EntityID: compatibilityNodeID, Start: base.Truncate(5 * time.Minute), End: base.Truncate(5 * time.Minute).Add(5*time.Minute - time.Nanosecond)}, Interval: 5 * time.Minute, Aggregation: metric.AggAvg}, time.Now().UTC())
+			engine.Close()
+			if err != nil || len(result.Points) != 1 || result.Points[0].Value != 42.5 {
+				t.Fatal(result, err)
+			}
 
 			summary, err = metricstore.InspectSQLiteStorageMigration(context.Background())
 			if err != nil {
 				t.Fatalf("inspect upgraded %s metric database: %v", version.name, err)
 			}
-			if summary.Required || summary.Layout != "current" {
+			if summary.Required || summary.Layout != "legacy-retired" {
 				t.Fatalf("unexpected %s post-upgrade summary: %#v", version.name, summary)
 			}
 		})
@@ -269,6 +329,7 @@ func setCompatibilityMetricConfig(t *testing.T, metricPath string) {
 		metricstore.MetricDBDriverKey:    "sqlite",
 		metricstore.MetricDBDSNKey:       filepath.ToSlash(metricPath),
 		metricstore.MetricTablePrefixKey: "metric_",
+		"metric_archive_directory":       filepath.ToSlash(filepath.Join(filepath.Dir(metricPath), "telemetry")),
 	}); err != nil {
 		t.Fatalf("set compatibility metric configuration: %v", err)
 	}

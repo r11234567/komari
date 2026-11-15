@@ -41,6 +41,21 @@ func (s *Store) QueryBatch(ctx context.Context, queries []Query) ([][]Point, err
 // points, with one physical scan (or a bounded number of parameter chunks).
 // Results preserve input order and each query's independent paging semantics.
 func (s *Store) QueryRawBatch(ctx context.Context, queries []Query) ([][]Point, error) {
+	if t := s.telemetry.Load(); t != nil {
+		if len(queries) > 64 {
+			return nil, ErrTelemetryBackpressure
+		}
+		out := make([][]Point, len(queries))
+		now := time.Now().UTC()
+		for i, q := range queries {
+			p, err := t.ReadHot(ctx, q, now)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = p
+		}
+		return out, nil
+	}
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}

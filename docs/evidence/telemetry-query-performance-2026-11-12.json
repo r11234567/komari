@@ -1,0 +1,180 @@
+{
+  "date": "2026-11-12",
+  "scope": "Targeted SQL query optimization and short real HTTP/CSV validation; not sustained qualification",
+  "source_parent": "75cc3bc78f961c3e7a5905e03489cf9fc4bf9f1a",
+  "fixture": {
+    "production": false,
+    "copied_from_stopped_fixture": true,
+    "old_fixture_untouched": true,
+    "hot_rows": 540,
+    "summary_rows": 38514,
+    "series": 16,
+    "segments": 323
+  },
+  "sql": {
+    "summary": {
+      "plan": [
+        {
+          "id": 11,
+          "parent": 0,
+          "notused": 0,
+          "detail": "SEARCH s USING INDEX metric_telemetry_series_metric (metric=? AND entity=?)"
+        },
+        {
+          "id": 20,
+          "parent": 0,
+          "notused": 0,
+          "detail": "SEARCH b USING INDEX metric_telemetry_summary_series (series_id=?)"
+        },
+        {
+          "id": 26,
+          "parent": 0,
+          "notused": 0,
+          "detail": "SEARCH a USING INDEX sqlite_autoindex_metric_telemetry_segments_1 (id=?)"
+        },
+        {
+          "id": 47,
+          "parent": 0,
+          "notused": 0,
+          "detail": "SEARCH e USING INDEX sqlite_autoindex_metric_telemetry_erasures_1 (series_id=?) LEFT-JOIN"
+        },
+        {
+          "id": 84,
+          "parent": 0,
+          "notused": 0,
+          "detail": "USE TEMP B-TREE FOR ORDER BY"
+        }
+      ],
+      "p50_ms": 4.344578999734949,
+      "rows": 823,
+      "stats_bytes": 453346,
+      "sha256": "df185fbd73dbedcde5ed6e8fff53413e93c5a44e30a90038cebcdc8b1e7af250"
+    },
+    "summary_members": {
+      "plan": [
+        {
+          "id": 12,
+          "parent": 0,
+          "notused": 0,
+          "detail": "SEARCH s USING INDEX metric_telemetry_series_metric (metric=? AND entity=?)"
+        },
+        {
+          "id": 21,
+          "parent": 0,
+          "notused": 0,
+          "detail": "SEARCH m USING COVERING INDEX metric_telemetry_members_series (series_id=? AND first_observed<?)"
+        },
+        {
+          "id": 31,
+          "parent": 0,
+          "notused": 0,
+          "detail": "SEARCH a USING INDEX sqlite_autoindex_metric_telemetry_segments_1 (id=?)"
+        },
+        {
+          "id": 39,
+          "parent": 0,
+          "notused": 0,
+          "detail": "SEARCH b USING INDEX sqlite_autoindex_metric_telemetry_summary_1 (segment_id=? AND series_id=?)"
+        },
+        {
+          "id": 71,
+          "parent": 0,
+          "notused": 0,
+          "detail": "SEARCH e USING INDEX sqlite_autoindex_metric_telemetry_erasures_1 (series_id=?) LEFT-JOIN"
+        },
+        {
+          "id": 109,
+          "parent": 0,
+          "notused": 0,
+          "detail": "USE TEMP B-TREE FOR ORDER BY"
+        }
+      ],
+      "p50_ms": 2.6618349984346423,
+      "rows": 823,
+      "stats_bytes": 453346,
+      "sha256": "df185fbd73dbedcde5ed6e8fff53413e93c5a44e30a90038cebcdc8b1e7af250"
+    }
+  },
+  "short_http": {
+    "synthetic_cold_input": true,
+    "historical_private_fixture": true,
+    "scope": "short HTTP one-hour/60-point paired reads using retained one-minute history during actual resource-limited cold export; no Agent freshness or sustained acceptance; GitHub uses 360-point fresh history",
+    "output_before": 82,
+    "output_after": 1379355,
+    "comparison": {
+      "ping": {
+        "baseline_p95_ms": 36.61753499909537,
+        "during_p95_ms": 38.72278899871162,
+        "ratio": 1.0574930562548315,
+        "p99_ms": 38.815846000943566,
+        "requests": 40,
+        "pairs": 1
+      },
+      "ping_stats": {
+        "baseline_p95_ms": 35.80330499971751,
+        "during_p95_ms": 37.53265900013503,
+        "ratio": 1.0483015185450382,
+        "p99_ms": 39.28427999926498,
+        "requests": 40,
+        "pairs": 1
+      },
+      "chart": {
+        "baseline_p95_ms": 40.481867999915266,
+        "during_p95_ms": 37.448787999892375,
+        "ratio": 0.925075591866728,
+        "p99_ms": 39.73638699972071,
+        "requests": 40,
+        "pairs": 1
+      },
+      "traffic": {
+        "baseline_p95_ms": 22.882572000526125,
+        "during_p95_ms": 14.23422500010929,
+        "ratio": 0.62205529167709,
+        "p99_ms": 16.78172399988398,
+        "requests": 40,
+        "pairs": 1
+      },
+      "billing": {
+        "baseline_p95_ms": 10.540330000367248,
+        "during_p95_ms": 3.6925029999110848,
+        "ratio": 0.35032138460393836,
+        "p99_ms": 3.875635997246718,
+        "requests": 40,
+        "pairs": 1
+      }
+    },
+    "population_matched": true
+  },
+  "regression_checks": {
+    "race_pass": [
+      "pkg/metric",
+      "pkg/historyexport",
+      "database/metricstore",
+      "database/trafficledger",
+      "web/connect",
+      "web/storageupdate",
+      "web/backup"
+    ],
+    "vet_pass": [
+      "pkg/metric",
+      "pkg/historyexport",
+      "database/metricstore",
+      "database/trafficledger",
+      "web/storageupdate",
+      "web/backup"
+    ],
+    "broader_vet_finding": {
+      "path": "web/connect/rescue_watch_test.go:91",
+      "message": "existing assignment copies protobuf MessageState mutex; file unchanged by performance work"
+    },
+    "node_contract_tests": 8,
+    "late_archived_observation": "accepted six hours late, summarized, archived, hot deleted; sum=18/count=3 at 10s/1m/1h without cold reads"
+  },
+  "limits": [
+    "The initial short run was rejected: stopped historical fixture crossed its fine-tier retention and changed response population.",
+    "The accepted short run uses one-hour/60-point historical one-minute data. GitHub qualification uses one-hour/360-point freshly reporting Agent data.",
+    "Short HTTP was loopback HTTP with an existing private fixture session; GitHub independently covers HTTPS and actual installed-Agent freshness.",
+    "SQL timing is from one nonproduction database copy, not a universal latency guarantee.",
+    "Two-hour CPU/memory/foreground acceptance and 24-hour deployment soak remain open."
+  ]
+}

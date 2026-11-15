@@ -93,6 +93,9 @@ func ResolveStoreMigrationSourceFingerprint(driver, dsn string) string {
 // 返回错误表示“未能启动”（例如已有迁移在跑、源与目标相同、目标未初始化等）；
 // 迁移过程中的错误通过 GetStoreMigrationProgress().Status == "failed" 与 Error 暴露。
 func StartStoreMigration(sourceDriver, sourceDSN string) error {
+	if TelemetryEnabled() {
+		return fmt.Errorf("live legacy copying is retired; use the stopped-service telemetry migration with SQL and archives together")
+	}
 	cfg, err := config.GetManyAs[MetricStoreConfig]()
 	if err != nil {
 		return fmt.Errorf("failed to load metric store config: %w", err)

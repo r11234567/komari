@@ -26,6 +26,8 @@ jobs:
             packages: ./internal/plugin ./internal/notifications ./internal/managedconfig ./pkg/jsruntime/... ./utils/messageSender/... ./web/rpc/jsonrpc ./pkg/rpc
           - area: metric-store-lifecycle
             packages: ./database/metricstore ./database/notification ./database/trafficledger ./utils/notifier ./web/connect ./web/rpc/jsonrpc ./web/api/admin ./cmd
+          - area: telemetry-storage-engine
+            packages: ./pkg/metric
     env:
       GOMAXPROCS: '2'
       GOMEMLIMIT: 3GiB

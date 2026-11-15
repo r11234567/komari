@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -27,6 +28,11 @@ func (s *Store) compactionWatermarkFrom(ctx context.Context, q querier, metricNa
 		return time.Time{}, false, nil
 	}
 	if err != nil {
+		// Pre-watermark upstream SQLite files remain readable during the
+		// explicit archive migration; no legacy compaction boundary exists.
+		if s.cfg.RetireLegacyStorage && s.cfg.Driver == DriverSQLite && strings.Contains(err.Error(), "no such table: "+s.tables.watermarks) {
+			return time.Time{}, false, nil
+		}
 		return time.Time{}, false, err
 	}
 	if nano <= 0 {
