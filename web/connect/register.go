@@ -120,10 +120,7 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 		}
 		if err := verifyDPoP(c, principal); err != nil {
 			security.SetPrincipalHeader(c, rpc.NewAnonymousPrincipal())
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"code":    "UNAUTHENTICATED",
-				"message": err.Error(),
-			})
+			security.AbortRequest(c, http.StatusUnauthorized, err.Error())
 			return
 		}
 		meta := &rpc.ContextMeta{
