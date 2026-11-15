@@ -202,6 +202,21 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		return nil, rpc.MakeError(rpc.InternalError, "acquire metric store: "+err.Error(), nil)
 	}
 	defer releaseStore()
+	series, rpcErr := queryPublicMetricSeries(ctx, store, params, metricKeys, entityIDs, start, end, time.Now().UTC())
+	if rpcErr != nil {
+		return nil, rpcErr
+	}
+	return map[string]any{
+		"start": start.UTC(), "end": end.UTC(),
+		"server_downsample_default": downsample,
+		"default_points":            defaultMetricQueryPoints,
+		"series":                    series, "count": len(series),
+	}, nil
+}
+
+// Telemetry reads each metric once, independently of the number of authorized
+// entities. Keep that authorization in SQL as well as the response.
+func queryPublicMetricSeries(ctx context.Context, store *metric.Store, params publicMetricQueryParams, metricKeys, entityIDs []string, start, end, now time.Time) ([]publicMetricSeries, *rpc.JsonRpcError) {
 	defs, err := store.ListMetrics(ctx)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to list metric definitions: "+err.Error(), nil)
@@ -218,7 +233,10 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		aggregateSlot int
 		rawSlot       int
 	}
-	now := time.Now().UTC()
+	shared := store.Telemetry() != nil
+	if shared {
+		ctx = metric.WithTelemetryEntities(ctx, entityIDs)
+	}
 	plans := make([]publicMetricBatchPlan, 0)
 	aggregateQueries := make([]metric.AggregateQuery, 0, len(plans))
 	rawQueries := make([]metric.Query, 0, len(plans))
@@ -248,20 +266,23 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				interval = store.CompatibleSeriesIntervalForMetric(ctx, metricKey, start, now, interval)
 			}
 		}
-		for _, entityID := range entityIDs {
-			query := metric.Query{
-				MetricName: metricKey,
-				EntityID:   entityID,
-				Start:      start,
-				End:        end,
-				Tags:       params.Tags,
-				Order:      metric.OrderAsc,
+		query := metric.Query{
+			MetricName: metricKey,
+			Start:      start,
+			End:        end,
+			Tags:       params.Tags,
+			Order:      metric.OrderAsc,
+		}
+		if telemetry := store.Telemetry(); telemetry != nil && metricDownsample && len(entityIDs) > 0 {
+			query, interval, err = telemetry.PlanChart(ctx, query, now, maxPoints, def.RetentionDays)
+			if err != nil {
+				return nil, metricQueryError(err, "Failed to resolve chart window")
 			}
-			if telemetry := store.Telemetry(); telemetry != nil && metricDownsample {
-				query, interval, err = telemetry.PlanChart(ctx, query, now, maxPoints, def.RetentionDays)
-				if err != nil {
-					return nil, metricQueryError(err, "Failed to resolve chart window")
-				}
+		}
+		aggregateSlot, rawSlot := -1, -1
+		for _, entityID := range entityIDs {
+			if !shared {
+				query.EntityID = entityID
 			}
 			plan := publicMetricBatchPlan{
 				metricKey:   metricKey,
@@ -288,16 +309,22 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				}
 				plan.item.DownsampleAlgorithm = string(algorithm)
 				plan.item.IntervalSeconds = interval.Seconds()
-				plan.aggregateSlot = len(aggregateQueries)
-				aggregateQueries = append(aggregateQueries, metric.AggregateQuery{
-					Query:          query,
-					Aggregation:    algorithm,
-					Interval:       interval,
-					PreserveSeries: true,
-				})
+				if !shared || aggregateSlot < 0 {
+					aggregateSlot = len(aggregateQueries)
+					aggregateQueries = append(aggregateQueries, metric.AggregateQuery{
+						Query:          query,
+						Aggregation:    algorithm,
+						Interval:       interval,
+						PreserveSeries: true,
+					})
+				}
+				plan.aggregateSlot = aggregateSlot
 			} else {
-				plan.rawSlot = len(rawQueries)
-				rawQueries = append(rawQueries, query)
+				if !shared || rawSlot < 0 {
+					rawSlot = len(rawQueries)
+					rawQueries = append(rawQueries, query)
+				}
+				plan.rawSlot = rawSlot
 			}
 			plans = append(plans, plan)
 		}
@@ -312,26 +339,41 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		return nil, metricQueryError(err, "Failed to query metrics")
 	}
 	series := make([]publicMetricSeries, 0, len(plans))
+	// Distribute each physical result once; rescanning it for every entity
+	// would reintroduce the same multiplicative work after the SQL read.
+	aggregateEntities := make(map[int]map[string][]publicMetricPoint)
+	rawEntities := make(map[int]map[string][]publicMetricPoint)
 	for _, plan := range plans {
 		item := plan.item
 		if plan.downsampled {
-			points := aggregateResults[plan.aggregateSlot]
-			item.Points = make([]publicMetricPoint, 0, len(points))
-			for _, point := range points {
-				item.Points = append(item.Points, publicMetricPoint{
-					Time: point.Bucket.UTC(), Value: publicRawMetricValue(point.MetricName, point.Value, item.FillEmpty),
-					Count: point.Count, Tags: point.Tags,
-				})
+			byEntity, ok := aggregateEntities[plan.aggregateSlot]
+			if !ok {
+				byEntity = make(map[string][]publicMetricPoint)
+				for _, point := range aggregateResults[plan.aggregateSlot] {
+					byEntity[point.EntityID] = append(byEntity[point.EntityID], publicMetricPoint{
+						Time: point.Bucket.UTC(), Value: publicRawMetricValue(point.MetricName, point.Value, item.FillEmpty),
+						Count: point.Count, Tags: point.Tags,
+					})
+				}
+				aggregateEntities[plan.aggregateSlot] = byEntity
 			}
+			item.Points = byEntity[item.EntityID]
 		} else {
-			points := rawResults[plan.rawSlot]
-			item.Points = make([]publicMetricPoint, 0, len(points))
-			for _, point := range points {
-				item.Points = append(item.Points, publicMetricPoint{
-					Time: point.Timestamp.UTC(), Value: publicRawMetricValue(plan.metricKey, point.Value, item.FillEmpty),
-					Tags: point.Tags, Labels: point.Labels,
-				})
+			byEntity, ok := rawEntities[plan.rawSlot]
+			if !ok {
+				byEntity = make(map[string][]publicMetricPoint)
+				for _, point := range rawResults[plan.rawSlot] {
+					byEntity[point.EntityID] = append(byEntity[point.EntityID], publicMetricPoint{
+						Time: point.Timestamp.UTC(), Value: publicRawMetricValue(plan.metricKey, point.Value, item.FillEmpty),
+						Tags: point.Tags, Labels: point.Labels,
+					})
+				}
+				rawEntities[plan.rawSlot] = byEntity
 			}
+			item.Points = byEntity[item.EntityID]
+		}
+		if item.Points == nil {
+			item.Points = []publicMetricPoint{}
 		}
 		for _, split := range splitPublicMetricSeries(item) {
 			if item.FillEmpty {
@@ -348,14 +390,7 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		}
 	}
 
-	return map[string]any{
-		"start":                     start.UTC(),
-		"end":                       end.UTC(),
-		"server_downsample_default": downsample,
-		"default_points":            defaultMetricQueryPoints,
-		"series":                    series,
-		"count":                     len(series),
-	}, nil
+	return series, nil
 }
 
 func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {

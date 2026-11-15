@@ -63,6 +63,11 @@ func telemetryExternal(t *testing.T, cfg Config) {
 		if err != nil || len(got) != 1 || len(got[0]) != 4 {
 			t.Fatal("composite driver export", err)
 		}
+		// Migration and catalog merging may create an owner today whose
+		// observations are already older than the raw retention deadline.
+		if _, err = e.s.db.ExecContext(ctx, e.bind("UPDATE "+e.table("segments")+" SET created=?"), time.Now().UnixNano()); err != nil {
+			t.Fatal(err)
+		}
 		if ok, err := e.ExpireArchiveNext(ctx, time.Now(), 24*time.Hour); err != nil || !ok {
 			t.Fatal(ok, err)
 		}

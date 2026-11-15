@@ -121,6 +121,7 @@ func seedHistory(ctx context.Context, s *metric.Store, scope migrationScope, roo
 	var batch []metric.Point
 	var cpu []metric.Point
 	var ping []metric.Point
+	liveBoundaryPoints := 0
 	pingTags := map[string]string{"task_id": strconv.FormatUint(uint64(scope.PingTaskID), 10)}
 	pingPoint := func(at time.Time, i int) metric.Point {
 		value := float64(10 + i%71)
@@ -141,6 +142,17 @@ func seedHistory(ctx context.Context, s *metric.Store, scope migrationScope, roo
 		p := pingPoint(at, i)
 		batch = append(batch, p)
 		ping = append(ping, p)
+		// Multiple observations in each recent source bucket let the HTTP
+		// regression exercise a cell straddling the live retirement boundary.
+		// A single point exactly on the 10s grid cannot expose that defect.
+		if !at.Before(cutoff.Add(-30 * time.Minute)) {
+			boundaryAt := at.Add(5 * time.Second)
+			cp := metric.Point{MetricName: metricstore.MetricCPU, EntityID: scope.AgentID, Timestamp: boundaryAt, Value: float64((i*7 + 3) % 100)}
+			pp := pingPoint(boundaryAt, i+3)
+			batch = append(batch, cp, pp)
+			cpu, ping = append(cpu, cp), append(ping, pp)
+			liveBoundaryPoints++
+		}
 		if len(batch) >= 1000 {
 			if err = s.WriteBatch(ctx, batch); err != nil {
 				return err
@@ -225,5 +237,5 @@ func seedHistory(ctx context.Context, s *metric.Store, scope migrationScope, roo
 	if err = os.WriteFile(filepath.Join(root, "migration-curve-oracle.json"), oracle, 0600); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(root, "migration-manifest.json"), []byte(fmt.Sprintf("{\"synthetic_points\":%d,\"agentId\":%q}", 6*8640+2*historicalPoints, scope.AgentID)), 0600)
+	return os.WriteFile(filepath.Join(root, "migration-manifest.json"), []byte(fmt.Sprintf("{\"synthetic_points\":%d,\"agentId\":%q}", 6*8640+2*historicalPoints+2*liveBoundaryPoints, scope.AgentID)), 0600)
 }

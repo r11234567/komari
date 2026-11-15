@@ -728,6 +728,12 @@ func (t *Telemetry) activeSegment(ctx context.Context, tx *sql.Tx, now time.Time
 }
 
 func (t *Telemetry) SealDue(ctx context.Context, now time.Time) (int64, error) {
+	return t.sealDue(ctx, now, true)
+}
+
+// The offline importer shares pressure selection with online maintenance,
+// but its fixed handoff clock must not flush sparse historical partitions.
+func (t *Telemetry) sealDue(ctx context.Context, now time.Time, wallClock bool) (int64, error) {
 	release, err := t.acquire(ctx)
 	if err != nil {
 		return 0, err
@@ -741,7 +747,13 @@ func (t *Telemetry) SealDue(ctx context.Context, now time.Time) (int64, error) {
 	// Day rollover follows the handoff clock, not the age of imported points.
 	// Historical batches in one fixed import session must accumulate normally
 	// instead of creating a new tiny extent for every migration page.
-	r, err := tx.ExecContext(ctx, t.bind("UPDATE "+t.table("segments")+" SET state='sealed' WHERE state='open' AND (created<=? OR points>=? OR bytes>=? OR created<?)"), now.Add(-t.cfg.SegmentDuration).UnixNano(), t.cfg.SegmentPoints, t.cfg.SegmentBytes, now.UTC().Truncate(24*time.Hour).UnixNano())
+	due := "points>=? OR bytes>=?"
+	args := []any{t.cfg.SegmentPoints, t.cfg.SegmentBytes}
+	if wallClock {
+		due += " OR created<=? OR created<?"
+		args = append(args, now.Add(-t.cfg.SegmentDuration).UnixNano(), now.UTC().Truncate(24*time.Hour).UnixNano())
+	}
+	r, err := tx.ExecContext(ctx, t.bind("UPDATE "+t.table("segments")+" SET state='sealed' WHERE state='open' AND ("+due+")"), args...)
 	if err != nil {
 		return 0, err
 	}
@@ -759,7 +771,11 @@ func (t *Telemetry) SealDue(ctx context.Context, now time.Time) (int64, error) {
 	}
 	// Under global pressure flush the largest partition, not every machine's
 	// tiny tail. The shared budget bounds SQL even with a full-day idle limit.
-	if n == 0 && hot >= max(int64(1), (t.cfg.MaxHotBytes-live)*3/4) {
+	pressure := max(int64(1), (t.cfg.MaxHotBytes-live)*3/4)
+	if !wallClock {
+		pressure = min(pressure, max(int64(1), t.cfg.MaxHotBytes/2))
+	}
+	if n == 0 && hot >= pressure {
 		var id string
 		err = tx.QueryRowContext(ctx, "SELECT id FROM "+t.table("segments")+" WHERE state='open' ORDER BY bytes DESC,created,id LIMIT 1").Scan(&id)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {

@@ -21,11 +21,14 @@ async function verifyStorageCurves({ context, page, root, artifacts, base, agent
   expect(oracle.origin).toBe('formula-generated synthetic observations only');
   const headers = { Origin: base, 'Connect-Protocol-Version': '1' }, results = [], ui = [];
   const sliding = [{age:30,hours:6},{age:4*24,hours:24},{age:20*24,hours:7*24},{age:90*24,hours:7*24}];
-  for (const window of [...oracle.windows,...sliding.map(w=>({...w,interval_seconds:600}))]) {
+  // Include the near-15m frontier, not only the comfortable 14.5m live view.
+  // Every request must resolve its own complete bounds after actual pruning.
+  const frontier = [0,1,3,5,9,30].map(seconds=>({hours:0.25,interval_seconds:10,boundary_offset_seconds:seconds}));
+  for (const window of [...frontier,...oracle.windows,...sliding.map(w=>({...w,interval_seconds:600}))]) {
     // One unaligned rolling request must advertise its complete effective
     // bounds itself. Do not repair an API response with a second request.
     const end = window.age ? new Date(Math.floor((Date.now()-(window.age-window.hours)*3600_000)/86400_000)*86400_000-1) : new Date();
-    const start = new Date(end.getTime()+1-window.hours*3600_000);
+    const start = new Date(end.getTime()+1-window.hours*3600_000+(window.boundary_offset_seconds||0)*1000);
     const request = { agentIds:[agentId], metrics:['cpu.usage','ping.latency_ms'], startTime:start.toISOString(), endTime:end.toISOString(), maxPoints:Math.ceil(window.hours*3600/window.interval_seconds), downsample:true, aggregation:'avg' };
     const response = await context.request.post('/komari.metrics.v1.MetricsService/QueryMetrics', { data:request, headers });
     expect(response.status(), `${window.hours}h`).toBe(200);
@@ -73,7 +76,7 @@ async function verifyStorageCurves({ context, page, root, artifacts, base, agent
       }
       comparisons.push({protocol:'jsonrpc',response:rpcBody});
     }
-    results.push({ hours:window.hours, age:window.age, request, comparisons, response:body });
+    results.push({ hours:window.hours, age:window.age, boundary_offset_seconds:window.boundary_offset_seconds, request, comparisons, response:body });
     fs.writeFileSync(path.join(artifacts,'storage-curve-http.json'),JSON.stringify(results,null,2));
   }
   // An unrelated background QueryMetrics response cannot satisfy this wait.

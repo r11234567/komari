@@ -52,7 +52,10 @@ func (t *Telemetry) ExpireArchiveNext(ctx context.Context, now time.Time, retent
 		return false, err
 	}
 	var id string
-	err = tx.QueryRowContext(ctx, t.bind("SELECT a.id FROM "+t.table("segments")+" a WHERE (a.state='expiring' OR (a.state='complete' AND a.created<?)) AND NOT EXISTS (SELECT 1 FROM "+t.table("leases")+" l WHERE l.segment_id=a.id AND l.expires>?) ORDER BY a.created,a.id LIMIT 1"), now.Add(-retention).UnixNano(), now.UnixNano()).Scan(&id)
+	// The raw floor and query bounds describe observation time. A segment's
+	// creation clock only schedules ingestion; it is unrelated to the newest
+	// observation after a long-lived segment or a historical import.
+	err = tx.QueryRowContext(ctx, t.bind("SELECT a.id FROM "+t.table("segments")+" a WHERE (a.state='expiring' OR (a.state='complete' AND COALESCE((SELECT MAX(m.last_observed) FROM "+t.table("members")+" m WHERE m.segment_id=a.id),a.created)<?)) AND NOT EXISTS (SELECT 1 FROM "+t.table("leases")+" l WHERE l.segment_id=a.id AND l.expires>?) ORDER BY a.created,a.id LIMIT 1"), now.Add(-retention).UnixNano(), now.UnixNano()).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, tx.Commit()
 	}

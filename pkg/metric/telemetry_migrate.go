@@ -197,7 +197,7 @@ func (s *Store) MigrateLegacy(ctx context.Context, cfg TelemetryConfig, observe 
 					// Historical observation time is not a wall-clock flush timer.
 					// Keep each machine/day open until its byte budget is filled;
 					// sealing every sparse 3h metric window creates tiny files.
-					if _, e = t.s.db.ExecContext(ctx, t.bind("UPDATE "+t.table("segments")+" SET state='sealed' WHERE state='open' AND (points>=? OR bytes>=? OR (SELECT value FROM "+t.table("progress")+" WHERE task='hot_bytes')>=?)"), t.cfg.SegmentPoints, t.cfg.SegmentBytes, t.cfg.MaxHotBytes/2); e != nil {
+					if _, e = t.sealDue(ctx, now, false); e != nil {
 						return e
 					}
 					for {
@@ -231,6 +231,9 @@ func (s *Store) MigrateLegacy(ctx context.Context, cfg TelemetryConfig, observe 
 	if err = t.finishLegacyRawHandoff(ctx); err != nil {
 		return err
 	}
+	if err = t.finishLegacyReceipts(ctx); err != nil {
+		return err
+	}
 	tx, err := t.begin(ctx)
 	if err != nil {
 		return err
@@ -249,12 +252,25 @@ func (s *Store) MigrateLegacy(ctx context.Context, cfg TelemetryConfig, observe 
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	return t.finishLegacyReceipts(ctx)
+	return nil
 }
 
 func (t *Telemetry) finishLegacyReceipts(ctx context.Context) error {
 	for {
-		n, err := t.PruneReceipts(ctx, time.Now().UTC(), 512)
+		n, err := t.pruneReceipts(ctx, time.Now().UTC(), 512, true)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			break
+		}
+	}
+	// Handoff units are transient import work, not the finished catalog.
+	// Converge before publishing completion; retries of an already-complete
+	// pre-upgrade import enter this same idempotent cleanup path.
+	now := time.Now().UTC()
+	for {
+		n, err := t.PruneCatalogChunk(ctx, now, 512)
 		if err != nil {
 			return err
 		}

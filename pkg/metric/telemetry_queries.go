@@ -124,7 +124,15 @@ func (t *Telemetry) ChartWindow(start, end time.Time, interval time.Duration, no
 	}
 	interval = t.compatibleInterval(start, now, interval)
 	cutoff := now.Add(-t.cfg.RawWindow)
-	if start.Before(cutoff) {
+	// Refinement requires the complete source cell, not merely the requested
+	// timestamp. The first live cell can straddle the raw-retirement boundary.
+	canRefine := func(at time.Time) bool {
+		if t.scalar {
+			at = alignTime(at.UTC(), telemetryResolution(now.Sub(at)))
+		}
+		return !at.Before(cutoff)
+	}
+	if !canRefine(start) {
 		grid := interval
 		if t.scalar {
 			grid = telemetryLCM(grid, telemetryResolution(now.Sub(start)))
@@ -135,7 +143,7 @@ func (t *Telemetry) ChartWindow(start, end time.Time, interval time.Duration, no
 		}
 		start = aligned
 	}
-	if end.Before(cutoff) {
+	if !canRefine(end) {
 		grid := interval
 		if t.scalar {
 			grid = telemetryLCM(grid, telemetryResolution(now.Sub(end)))

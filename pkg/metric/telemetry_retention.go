@@ -177,6 +177,13 @@ func (t *Telemetry) Diagnostics(ctx context.Context) (TelemetryDiagnostics, erro
 // justified for best-effort monitoring. Migration alone retains its in-flight
 // receipts until its durable window/global checkpoints prevent re-import.
 func (t *Telemetry) PruneReceipts(ctx context.Context, now time.Time, limit int) (int, error) {
+	return t.pruneReceipts(ctx, now, limit, false)
+}
+
+// finishImport is private to offline finalization, after every source window
+// has a durable checkpoint. Those checkpoints still protect retries until
+// catalog cleanup succeeds and the global completion transaction replaces them.
+func (t *Telemetry) pruneReceipts(ctx context.Context, now time.Time, limit int, finishImport bool) (int, error) {
 	if limit <= 0 || limit > 512 {
 		return 0, ErrInvalidArgument
 	}
@@ -190,7 +197,11 @@ func (t *Telemetry) PruneReceipts(ctx context.Context, now time.Time, limit int)
 		return 0, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, t.bind("SELECT r.ingest_id FROM "+t.table("receipts")+" r JOIN "+t.table("segments")+" s ON s.id=r.segment_id WHERE s.state IN ('complete','expired') AND (r.importing=0 OR EXISTS (SELECT 1 FROM "+t.table("progress")+" p WHERE p.task='legacy_migration_complete' AND p.value=1)) AND NOT EXISTS (SELECT 1 FROM "+t.table("outbox")+" o WHERE o.ingest_id=r.ingest_id AND o.delivered=0) ORDER BY r.received,r.ingest_id LIMIT ?"), limit)
+	importFilter := " AND (r.importing=0 OR EXISTS (SELECT 1 FROM " + t.table("progress") + " p WHERE p.task='legacy_migration_complete' AND p.value=1))"
+	if finishImport {
+		importFilter = ""
+	}
+	rows, err := tx.QueryContext(ctx, t.bind("SELECT r.ingest_id FROM "+t.table("receipts")+" r JOIN "+t.table("segments")+" s ON s.id=r.segment_id WHERE s.state IN ('complete','expired')"+importFilter+" AND NOT EXISTS (SELECT 1 FROM "+t.table("outbox")+" o WHERE o.ingest_id=r.ingest_id AND o.delivered=0) ORDER BY r.received,r.ingest_id LIMIT ?"), limit)
 	if err != nil {
 		return 0, err
 	}

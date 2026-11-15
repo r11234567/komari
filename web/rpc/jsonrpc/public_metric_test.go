@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,131 @@ import (
 	"github.com/komari-monitor/komari/pkg/metric"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
+
+func TestPublicMetricsBatchesByMetricAndPreservesEntityScope(t *testing.T) {
+	for _, telemetry := range []bool{true, false} {
+		t.Run(fmt.Sprint("telemetry=", telemetry), func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			s, err := metric.Open(ctx, metric.SQLite(filepath.Join(dir, "metrics.db"), metric.WithRetiredLegacyStorage(), metric.WithSQLiteProfile(metric.SQLiteProfileDurable)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			if telemetry {
+				if err = s.EnableTelemetry(ctx, metric.TelemetryConfig{ArchiveDirectory: filepath.Join(dir, "archive")}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			now := time.Now().UTC().Truncate(10 * time.Second)
+			at := now.Add(-2*time.Minute + time.Second)
+			var keys, visible []string
+			for n := 0; n < 6; n++ {
+				visible = append(visible, fmt.Sprintf("node-%d", n))
+			}
+			for m := 0; m < 12; m++ {
+				key := fmt.Sprintf("audit.metric.%02d", m)
+				keys = append(keys, key)
+				if err = s.CreateMetric(ctx, metric.Definition{Name: key, RetentionDays: 30}); err != nil {
+					t.Fatal(err)
+				}
+				for n, entity := range append(append([]string{}, visible...), "hidden", "unrelated") {
+					var points []metric.Point
+					for tag := 0; tag < 2; tag++ {
+						for sample := 0; sample < 2; sample++ {
+							points = append(points, metric.Point{MetricName: key, EntityID: entity, Timestamp: at.Add(time.Duration(sample) * time.Second), Value: float64(m*1000 + n*100 + tag*10 + sample*2), Tags: map[string]string{"device": fmt.Sprint(tag)}, Labels: map[string]string{"source": "synthetic"}})
+						}
+					}
+					if err = s.WriteBatch(ctx, points); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if telemetry {
+				for {
+					n, err := s.Telemetry().SummarizeNext(ctx)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if n == 0 {
+						break
+					}
+				}
+			}
+			for _, downsample := range []bool{true, false} {
+				for _, tc := range []struct {
+					name string
+					ids  []string
+					tags map[string]string
+					fill bool
+				}{
+					{"all_visible", visible, nil, false},
+					{"explicit_node_and_tag", visible[2:3], map[string]string{"device": "1"}, false},
+					{"empty_authorized_set", []string{}, nil, true},
+					{"no_data", []string{"unknown"}, nil, false},
+				} {
+					t.Run(fmt.Sprintf("%s/downsample=%t", tc.name, downsample), func(t *testing.T) {
+						params := publicMetricQueryParams{Downsample: &downsample, FillEmpty: &tc.fill, MaxPoints: 600, Tags: tc.tags}
+						series, rpcErr := queryPublicMetricSeries(ctx, s, params, keys, tc.ids, now.Add(-5*time.Minute), now, now)
+						if rpcErr != nil {
+							t.Fatal(rpcErr)
+						}
+						if tc.name == "no_data" {
+							if len(series) != len(keys) {
+								t.Fatal("missing empty series", len(series))
+							}
+							for _, item := range series {
+								if item.EntityID != "unknown" || item.Points == nil || len(item.Points) != 0 {
+									t.Fatal("empty series contract", item)
+								}
+							}
+							return
+						}
+						perEntity := 2
+						if len(tc.tags) > 0 {
+							perEntity = 1
+						}
+						if len(series) != len(keys)*len(tc.ids)*perEntity {
+							t.Fatal("entity/tag series lost", len(series))
+						}
+						for i, item := range series {
+							m := i / (len(tc.ids) * perEntity)
+							entity := tc.ids[(i/perEntity)%len(tc.ids)]
+							var n, tag int
+							fmt.Sscanf(entity, "node-%d", &n)
+							fmt.Sscanf(item.Tags["device"], "%d", &tag)
+							if item.EntityID != entity || item.MetricKey != keys[m] || item.Downsampled != downsample {
+								t.Fatal("response order or identity", item)
+							}
+							wantLen := 2
+							if downsample && telemetry {
+								wantLen = 1
+							}
+							if len(item.Points) != wantLen {
+								t.Fatal("population", item)
+							}
+							for sample, p := range item.Points {
+								want := float64(m*1000 + n*100 + tag*10 + sample*2)
+								if downsample && telemetry {
+									want++
+								}
+								if p.Value == nil || *p.Value != want || p.Tags["device"] != item.Tags["device"] {
+									t.Fatal("cross-entity data or wrong mean", item)
+								}
+								if downsample && p.Count != map[bool]int{true: 2, false: 1}[telemetry] {
+									t.Fatal("aggregate population", p)
+								}
+								if !downsample && (p.Labels["source"] != "synthetic" || !p.Time.Equal(at.Add(time.Duration(sample)*time.Second))) {
+									t.Fatal("raw timestamp/labels changed", p)
+								}
+							}
+						}
+					})
+				}
+			}
+		})
+	}
+}
 
 func TestMetricQueryParamsRequireRFC3339Time(t *testing.T) {
 	tests := []struct {
