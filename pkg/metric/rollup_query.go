@@ -663,14 +663,81 @@ func (s *Store) SeriesBatch(ctx context.Context, queries []AggregateQuery, now t
 // All views are derived from one physical scan when ping latency and loss share
 // the SQLite V8 series, so percentile decoding and block IO are not repeated.
 type SeriesSummary struct {
-	Avg    []AggregatePoint
-	Min    []AggregatePoint
-	Max    []AggregatePoint
-	Last   []AggregatePoint
-	P50    []AggregatePoint
-	P99    []AggregatePoint
-	StdDev []AggregatePoint
-	Loss   []AggregatePoint
+	CoverageStart, CoverageEnd time.Time
+	Avg                        []AggregatePoint
+	Min                        []AggregatePoint
+	Max                        []AggregatePoint
+	Last                       []AggregatePoint
+	P50                        []AggregatePoint
+	P99                        []AggregatePoint
+	StdDev                     []AggregatePoint
+	Loss                       []AggregatePoint
+}
+
+// PingSummariesForEntities keeps authorization in the planner and reads the
+// telemetry population once, then distributes all views in one linear pass.
+func (s *Store) PingSummariesForEntities(ctx context.Context, q AggregateQuery, entities []string, now time.Time) (map[string]SeriesSummary, error) {
+	out := make(map[string]SeriesSummary, len(entities))
+	for _, id := range entities {
+		out[id] = SeriesSummary{CoverageStart: q.Start, CoverageEnd: q.End}
+	}
+	if len(entities) == 0 {
+		return out, nil
+	}
+	if s.Telemetry() == nil {
+		queries := make([]AggregateQuery, len(entities))
+		for i, id := range entities {
+			queries[i] = q
+			queries[i].EntityID = id
+		}
+		values, err := s.PingSeriesSummaryBatch(ctx, queries, now)
+		if err != nil {
+			return nil, err
+		}
+		for i, id := range entities {
+			v := values[i]
+			v.CoverageStart, v.CoverageEnd = q.Start, q.End
+			out[id] = v
+		}
+		return out, nil
+	}
+	q.EntityID = ""
+	q.PreserveSeries = true
+	value, err := s.PingSeriesSummary(WithTelemetryEntities(ctx, entities), q, now)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range entities {
+		out[id] = SeriesSummary{CoverageStart: value.CoverageStart, CoverageEnd: value.CoverageEnd}
+	}
+	for view, points := range [][]AggregatePoint{value.Avg, value.Min, value.Max, value.Last, value.P50, value.P99, value.StdDev, value.Loss} {
+		for _, p := range points {
+			v, ok := out[p.EntityID]
+			if !ok {
+				continue
+			}
+			switch view {
+			case 0:
+				v.Avg = append(v.Avg, p)
+			case 1:
+				v.Min = append(v.Min, p)
+			case 2:
+				v.Max = append(v.Max, p)
+			case 3:
+				v.Last = append(v.Last, p)
+			case 4:
+				v.P50 = append(v.P50, p)
+			case 5:
+				v.P99 = append(v.P99, p)
+			case 6:
+				v.StdDev = append(v.StdDev, p)
+			case 7:
+				v.Loss = append(v.Loss, p)
+			}
+			out[p.EntityID] = v
+		}
+	}
+	return out, nil
 }
 
 // PingSeriesSummary returns latency and loss aggregates without changing the

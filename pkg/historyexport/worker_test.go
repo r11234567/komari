@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -127,6 +128,87 @@ func TestWorkerThreeModesHaveDifferentSemantics(t *testing.T) {
 				if len(rows) != 3 || rows[1][2] != "10" || rows[2][2] != "30" {
 					t.Fatalf("sampling was averaged or nondeterministic: %v", rows)
 				}
+			}
+		})
+	}
+}
+
+func TestWorkerSummaryPlansRetainedPrecisionAndClosedEnd(t *testing.T) {
+	w, j := workerFixture(t, "summary")
+	ctx := context.Background()
+	s, err := metric.Open(ctx, metric.SQLite(j.Source.DSN, metric.WithRetiredLegacyStorage(), metric.WithSQLiteProfile(metric.SQLiteProfileDurable)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.OpenTelemetry(ctx, j.Source.Telemetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Add(-23 * time.Hour).Truncate(5 * time.Minute)
+	points := []metric.Point{{MetricName: "cpu", EntityID: "node", Timestamp: at.Add(time.Minute), Value: 40}, {MetricName: "cpu", EntityID: "node", Timestamp: at.Add(4 * time.Minute), Value: 60}}
+	if _, err = e.Accept(ctx, metric.TelemetryBatch{Source: "node", Identity: "24h", Points: points}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		n, err := e.SummarizeNext(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+	}
+	e.Close()
+	s.Close()
+	j.Start = time.Now().UTC().Add(-24 * time.Hour)
+	j.Interval = 3 * time.Minute
+	if err = w.Queue.Save(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+	j = finishWorker(t, w, j)
+	rows := readCSV(t, w, j)
+	found := false
+	for _, r := range rows[1:] {
+		seconds, err := strconv.Atoi(r[9])
+		if err != nil || seconds != 300 {
+			t.Fatal("CSV reported an unanswerable output interval", r, err)
+		}
+		left, err := time.Parse(time.RFC3339Nano, r[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		right, err := time.Parse(time.RFC3339Nano, r[1])
+		if err != nil || right.Sub(left) != 5*time.Minute {
+			t.Fatal("CSV interval disagrees with bucket", r, err)
+		}
+		if r[5] == "50" && r[8] == "2" {
+			found = true
+		}
+	}
+	if !found || j.AutomaticRetries != 0 {
+		t.Fatal("historical summary missing or retried", rows, j.AutomaticRetries)
+	}
+}
+
+func TestWorkerRawAndSampleIncludeObservationAtEnd(t *testing.T) {
+	for _, mode := range []string{"raw", "sample30s"} {
+		t.Run(mode, func(t *testing.T) {
+			w, j := workerFixture(t, mode)
+			j.End = j.Start.Add(2 * time.Second)
+			if mode == "sample30s" {
+				j.Start = j.Start.Add(1500 * time.Millisecond)
+			}
+			if err := w.Queue.Save(context.Background(), j); err != nil {
+				t.Fatal(err)
+			}
+			j = finishWorker(t, w, j)
+			rows := readCSV(t, w, j)
+			if mode == "raw" {
+				if len(rows) != 3 || rows[1][7] != "20" || rows[2][7] != "10" {
+					t.Fatal("raw dropped exact End", rows)
+				}
+			} else if len(rows) != 2 || rows[1][2] != "20" {
+				t.Fatal("sample dropped exact End", rows)
 			}
 		})
 	}

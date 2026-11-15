@@ -28,7 +28,9 @@ type ExportSnapshot struct {
 	Erased        map[string]int64
 	UnitsByMetric map[string]string
 	Summary       []TelemetryQueryResult
-	Bytes         int64
+	// Optional for manifests written before per-metric chart planning.
+	SummaryIntervals []time.Duration `json:",omitempty"`
+	Bytes            int64
 }
 type ExportInput struct {
 	Segment telemetrySegment
@@ -182,14 +184,10 @@ func (t *Telemetry) FreezeExport(ctx context.Context, queries []Query, dir strin
 			}
 			// The immutable file has a server-derived name in a private archive
 			// root. Hardlinks freeze ownership without decoding or copying it.
-			if seg.ArchiveFile != "" {
+			if e = os.Link(filepath.Join(t.cfg.ArchiveDirectory, t.segmentPath(seg)), target); e != nil {
 				e = t.copyExportArchive(ctx, seg, target)
 				seg.ArchiveFile, seg.ArchiveOffset = "", 0
 				if e != nil {
-					return out, e
-				}
-			} else if e = os.Link(filepath.Join(t.cfg.ArchiveDirectory, t.segmentPath(seg)), target); e != nil {
-				if e = t.copyExportArchive(ctx, seg, target); e != nil {
 					return out, e
 				}
 			}
@@ -209,7 +207,7 @@ func (t *Telemetry) FreezeExport(ctx context.Context, queries []Query, dir strin
 		if e != nil {
 			return out, e
 		}
-		index, e := readTelemetryArchiveIndex(f, seg)
+		index, e := readTelemetryArchiveIndex(telemetryArchiveReader(f, seg), seg)
 		if e == nil && index != nil && index.Version == 2 {
 			e = verifyTelemetryArchiveFile(ctx, f, seg)
 		}
@@ -231,6 +229,7 @@ func (t *Telemetry) FreezeExport(ctx context.Context, queries []Query, dir strin
 					return out, ErrTelemetryBackpressure
 				}
 				part := seg
+				frame.Offset += seg.ArchiveOffset
 				part.Points, part.First, part.Last, part.FileBytes, part.Hash = frame.Points, frame.First, frame.Last, frame.Bytes, frame.Hash
 				copy := frame
 				out.Units = append(out.Units, ExportInput{Segment: part, File: name, Frame: &copy})
@@ -510,7 +509,7 @@ func VisitExportInputProgress(ctx context.Context, dir string, snapshot ExportSn
 			if q.MetricName == sqliteVirtualPingLossMetric && p.MetricName == sqliteMergedPingLatencyMetric {
 				candidate = virtualPingLossPoint(p)
 			}
-			if !telemetryPointMatches(ctx, candidate, q) || !candidate.Timestamp.Before(q.End) {
+			if !telemetryPointMatches(ctx, candidate, q) {
 				continue
 			}
 			received := time.Time{}
@@ -537,9 +536,10 @@ func VisitExportInputProgress(ctx context.Context, dir string, snapshot ExportSn
 	}
 	var input io.Reader = f
 	if unit.Frame == nil {
-		if info.Size() != unit.Segment.FileBytes {
+		if !telemetryArchiveExtentValid(info, unit.Segment) {
 			return errors.New("invalid export input size")
 		}
+		input = telemetryArchiveReader(f, unit.Segment)
 	} else {
 		if unit.Frame.Offset < 0 || unit.Frame.Bytes != unit.Segment.FileBytes || unit.Frame.Offset > info.Size()-unit.Frame.Bytes {
 			return errors.New("invalid export frame extent")

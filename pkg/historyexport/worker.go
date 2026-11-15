@@ -541,11 +541,26 @@ func (w *Worker) snapshot(ctx context.Context, j *Job) (metric.ExportSnapshot, e
 		queries = append(queries, metric.Query{MetricName: name, EntityID: j.UUID, Start: j.Start, End: j.End})
 	}
 	if j.Mode == "summary" {
-		qs := make([]metric.AggregateQuery, len(queries))
-		for i, q := range queries {
-			qs[i] = metric.AggregateQuery{Query: q, Aggregation: j.Aggregation, Interval: j.Interval, PreserveSeries: true}
+		now := time.Now().UTC()
+		defs, e := s.ListMetrics(ctx)
+		if e != nil {
+			return snapshot, e
 		}
-		r, e := telemetry.ChartBatchBounded(ctx, qs, time.Now(), 20000, 8<<20)
+		retention := map[string]int{}
+		for _, d := range defs {
+			retention[d.Name] = d.RetentionDays
+		}
+		qs := make([]metric.AggregateQuery, len(queries))
+		intervals := make([]time.Duration, len(queries))
+		for i, q := range queries {
+			planned, interval, err := telemetry.PlanChartInterval(ctx, q, now, j.Interval, retention[q.MetricName])
+			if err != nil {
+				return snapshot, err
+			}
+			queries[i], intervals[i] = planned, interval
+			qs[i] = metric.AggregateQuery{Query: planned, Aggregation: j.Aggregation, Interval: interval, PreserveSeries: true}
+		}
+		r, e := telemetry.ChartBatchBounded(ctx, qs, now, 20000, 8<<20)
 		if e != nil {
 			return snapshot, e
 		}
@@ -556,11 +571,7 @@ func (w *Worker) snapshot(ctx context.Context, j *Job) (metric.ExportSnapshot, e
 		if pointCount > 20000 {
 			return snapshot, errors.New("summary manifest exceeds 20000 points; use a larger interval")
 		}
-		snapshot = metric.ExportSnapshot{Version: 1, Queries: queries, Summary: r, UnitsByMetric: map[string]string{}, Instance: state.Instance, Epoch: state.Epoch}
-		defs, e := s.ListMetrics(ctx)
-		if e != nil {
-			return snapshot, e
-		}
+		snapshot = metric.ExportSnapshot{Version: 1, Queries: queries, Summary: r, SummaryIntervals: intervals, UnitsByMetric: map[string]string{}, Instance: state.Instance, Epoch: state.Epoch}
 		for _, d := range defs {
 			snapshot.UnitsByMetric[d.Name] = d.Unit
 		}
@@ -843,10 +854,16 @@ func (w *Worker) step(ctx context.Context, j *Job) error {
 		if j.Committed.Unit < len(snapshot.Summary) {
 			i := j.Committed.Unit
 			r := snapshot.Summary[i]
+			interval := j.Interval
+			if i < len(snapshot.SummaryIntervals) {
+				interval = snapshot.SummaryIntervals[i]
+			}
 			metadata, _ := json.Marshal(struct {
-				Sources, Gaps        []metric.TelemetrySourceSpan
-				Accepted, Summarized int64
-			}{r.Sources, r.Gaps, r.AcceptedThrough, r.AccountedThrough})
+				Sources, Gaps              []metric.TelemetrySourceSpan
+				Accepted, Summarized       int64
+				CoverageStart, CoverageEnd time.Time
+				BoundaryAdjusted           bool
+			}{r.Sources, r.Gaps, r.AcceptedThrough, r.AccountedThrough, r.CoverageStart, r.CoverageEnd, r.BoundaryAdjusted || !snapshot.Queries[i].Start.Equal(j.Start) || !snapshot.Queries[i].End.Equal(j.End)})
 			for _, p := range r.Points {
 				if e = ctx.Err(); e != nil {
 					return e
@@ -856,7 +873,7 @@ func (w *Worker) step(ctx context.Context, j *Job) error {
 				if len(r.Gaps) > 0 {
 					coverage = "partial"
 				}
-				if e = c.Write([]string{p.Bucket.UTC().Format(time.RFC3339Nano), p.Bucket.Add(j.Interval).UTC().Format(time.RFC3339Nano), p.EntityID, p.MetricName, string(tags), strconv.FormatFloat(p.Value, 'g', -1, 64), snapshot.UnitsByMetric[p.MetricName], string(j.Aggregation), strconv.Itoa(p.Count), strconv.FormatFloat(j.Interval.Seconds(), 'f', 0, 64), r.Resolution.String(), coverage, string(metadata)}); e != nil {
+				if e = c.Write([]string{p.Bucket.UTC().Format(time.RFC3339Nano), p.Bucket.Add(interval).UTC().Format(time.RFC3339Nano), p.EntityID, p.MetricName, string(tags), strconv.FormatFloat(p.Value, 'g', -1, 64), snapshot.UnitsByMetric[p.MetricName], string(j.Aggregation), strconv.Itoa(p.Count), strconv.FormatFloat(interval.Seconds(), 'f', 0, 64), r.Resolution.String(), coverage, string(metadata)}); e != nil {
 					return e
 				}
 				j.WrittenRows++

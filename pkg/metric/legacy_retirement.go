@@ -45,6 +45,21 @@ func (s *Store) openRetiredSQLiteStorage(ctx context.Context) error {
 		// Do not turn server startup into a full-table conversion.
 		return nil
 	}
+	if pointKind == "" && rollupKind == "table" {
+		matched, err := inspectSQLiteUpstream131Schema(ctx, s.db, s.tables)
+		if err != nil {
+			return err
+		}
+		if matched {
+			// This is a schema adapter for the explicit legacy reader, not
+			// a restart of the retired compression engine. The conversion is
+			// atomic and writes only ordinary staging rows, never SQL blocks.
+			if err := s.migrateSQLiteUpstream131Storage(ctx); err != nil {
+				return err
+			}
+			pointKind, rollupKind = "view", "view"
+		}
+	}
 	fresh := pointKind == "" && rollupKind == ""
 	if !fresh && (pointKind != "view" || rollupKind != "view") {
 		return fmt.Errorf("metric: legacy layout requires explicit offline migration (points=%q rollups=%q)", pointKind, rollupKind)

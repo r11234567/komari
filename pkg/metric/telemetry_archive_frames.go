@@ -237,7 +237,7 @@ func readTelemetryArchiveIndexPart(f io.ReaderAt, seg telemetrySegment, end int6
 }
 func verifyTelemetryArchiveFile(ctx context.Context, f *os.File, seg telemetrySegment) error {
 	h := sha256.New()
-	n, e := io.Copy(h, &telemetryContextReader{ctx: ctx, r: io.NewSectionReader(f, 0, seg.FileBytes)})
+	n, e := io.Copy(h, &telemetryContextReader{ctx: ctx, r: telemetryArchiveReader(f, seg)})
 	if e != nil {
 		return e
 	}

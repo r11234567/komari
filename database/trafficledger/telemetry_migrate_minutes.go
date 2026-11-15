@@ -14,10 +14,14 @@ import (
 // second posting to daily/cycle billing. Only a complete, byte-reconciled raw
 // population may advertise minute coverage.
 func refineLegacyTrafficWindow(ctx context.Context, db *gorm.DB, client string, start, end, cutoff time.Time, want Usage) (bool, error) {
+	return refineLegacyTrafficWindowFrom(ctx, db, client, start, end, cutoff, want, metricstore.LegacyTrafficDeltas)
+}
+
+func refineLegacyTrafficWindowFrom(ctx context.Context, db *gorm.DB, client string, start, end, cutoff time.Time, want Usage, read func(context.Context, string, time.Time, time.Time) ([]metricstore.LegacyTrafficDelta, bool, error)) (bool, error) {
 	if start.Before(cutoff.Add(-telemetryMinuteRetention)) || !start.Equal(start.Truncate(time.Minute)) {
 		return false, nil
 	}
-	events, complete, err := metricstore.LegacyTrafficDeltas(ctx, client, start, end.Add(-time.Nanosecond))
+	events, complete, err := read(ctx, client, start, end.Add(-time.Nanosecond))
 	if err != nil || !complete {
 		return false, err
 	}

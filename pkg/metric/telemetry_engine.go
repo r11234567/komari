@@ -516,6 +516,16 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 		return result, err
 	}
 	defer tx.Rollback()
+	checkpoint, pointImport := ctx.Value(telemetryImportCheckpointKey{}).(telemetryImportCheckpoint)
+	if pointImport {
+		duplicate, e := t.importCheckpoint(ctx, tx, checkpoint, false)
+		if e != nil {
+			return result, e
+		}
+		if duplicate {
+			return TelemetryReceipt{Duplicate: true, Points: len(b.Points)}, tx.Commit()
+		}
+	}
 	err = tx.QueryRowContext(ctx, t.bind("SELECT ingest_id,points FROM "+t.table("receipts")+" WHERE source=? AND identity=?"), b.Source, b.Identity).Scan(&result.IngestID, &result.Points)
 	if importing && errors.Is(err, sql.ErrNoRows) {
 		err = t.legacyImportReceipt(ctx, tx, b.Source, b.Identity, &result)
@@ -565,7 +575,7 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 	}
 	result = TelemetryReceipt{IngestID: last + 1, Points: len(b.Points)}
 	importFlag := 0
-	if importing {
+	if importing && !pointImport {
 		importFlag = 1
 	}
 	if _, err = tx.ExecContext(ctx, t.bind("INSERT INTO "+t.table("receipts")+" (ingest_id,source,identity,observed,received,points,segment_id,importing) VALUES (?,?,?,?,?,?,?,?)"), result.IngestID, b.Source, b.Identity, oldest, now.UnixNano(), len(b.Points), seg.ID, importFlag); err != nil {
@@ -672,6 +682,11 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 	}
 	if err = t.advance(ctx, tx, "hot_bytes", hotBytes, hotBytes+batchBytes); err != nil {
 		return result, err
+	}
+	if pointImport {
+		if _, err = t.importCheckpoint(ctx, tx, checkpoint, true); err != nil {
+			return TelemetryReceipt{}, err
+		}
 	}
 	if err = t.fault("ingest-before-commit"); err != nil {
 		return TelemetryReceipt{}, err

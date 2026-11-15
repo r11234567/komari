@@ -120,6 +120,23 @@ func TestTelemetryCatalogCoalescesWithoutRewritingOrLosingPinnedExports(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, unit := range frozen.Units {
+		original, err := e.segment(ctx, s.db, unit.Segment.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		liveInfo, err := os.Stat(filepath.Join(e.cfg.ArchiveDirectory, e.segmentPath(original)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		frozenInfo, err := os.Stat(filepath.Join(frozenDir, unit.File))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(liveInfo, frozenInfo) {
+			t.Fatal("v3 snapshot copied archive instead of linking its immutable extent")
+		}
+	}
 	before, err := os.ReadFile(dir + "/archive/" + e.segmentPath(seg))
 	if err != nil {
 		t.Fatal(err)
@@ -209,6 +226,24 @@ func TestTelemetryCatalogCoalescesWithoutRewritingOrLosingPinnedExports(t *testi
 	got, err = e.ExportRawBatch(ctx, q)
 	if err != nil || len(got[0]) != 9 {
 		t.Fatal("append after merge", err)
+	}
+	if got := len(exportSnapshotPoints(t, frozenDir, frozen)); got != 8 {
+		t.Fatal("append changed frozen watermark/extent", got)
+	}
+	for {
+		ok, err := e.ExpireArchiveNext(ctx, time.Now().Add(40*24*time.Hour), 30*24*time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			break
+		}
+	}
+	if got := len(exportSnapshotPoints(t, frozenDir, frozen)); got != 8 {
+		t.Fatal("expiry invalidated linked extents", got)
+	}
+	if got := len(exportSnapshotPoints(t, mergedDir, mergedSnapshot)); got != 8 {
+		t.Fatal("expiry invalidated merged snapshot", got)
 	}
 }
 

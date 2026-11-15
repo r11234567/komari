@@ -23,7 +23,7 @@ import (
 func TestAppInitStoresTelemetryLifecycle(t *testing.T) {
 	mode := os.Getenv("KOMARI_TEST_STORE_STARTUP")
 	if mode == "" {
-		for _, mode := range []string{"fresh", "unmigrated", "migrated", "retired"} {
+		for _, mode := range []string{"fresh", "unmigrated", "migrated", "retired", "monitoring"} {
 			t.Run(mode, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 				defer cancel()
@@ -54,7 +54,18 @@ func TestAppInitStoresTelemetryLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
-	if mode != "fresh" {
+	if mode == "monitoring" {
+		if err := db.AutoMigrate(&models.Record{}, &models.PingRecord{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Create(&models.Record{Client: "kept-node", Time: at, Cpu: 12, NetTotalUp: 100, NetTotalDown: 200}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Create(&models.PingRecord{Client: "kept-node", Time: at, TaskId: 1, Value: 17}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if mode != "fresh" && mode != "monitoring" {
 		s, err := metric.Open(ctx, metric.SQLite("./data/metrics.db", metric.WithTablePrefix("metric_"), metric.WithRetiredLegacyStorage(), metric.WithSQLiteProfile(metric.SQLiteProfileDurable)))
 		if err != nil {
 			t.Fatal(err)
@@ -127,6 +138,20 @@ func TestAppInitStoresTelemetryLifecycle(t *testing.T) {
 	}
 	if mode == "fresh" {
 		return
+	}
+	if mode == "monitoring" {
+		if db.Migrator().HasTable("records") || db.Migrator().HasTable("ping_records") {
+			t.Fatal("startup import did not finalize source")
+		}
+		check, err := sql.Open("sqlite3", "./data/metrics.db")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer check.Close()
+		var oldPoints int
+		if err = check.QueryRow("SELECT COUNT(*) FROM metric_point_values").Scan(&oldPoints); err != nil || oldPoints != 0 {
+			t.Fatal("startup wrote legacy point staging", oldPoints, err)
+		}
 	}
 	ids, err := s.AllEntityIDs(ctx)
 	if err != nil || !reflect.DeepEqual(ids, []string{"kept-node"}) {

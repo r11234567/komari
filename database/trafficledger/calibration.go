@@ -253,6 +253,10 @@ func syncCycleFirstDay(ctx context.Context, db *gorm.DB, client models.Client, n
 		row, found, err := loadStoredCycleFirstDay(ctx, db, client.UUID, cycle)
 		return firstDayUsage(row), found, err
 	}
+	return syncCycleFirstDayWithCalculator(ctx, db, client, now, metricUsageForCalibration)
+}
+
+func syncCycleFirstDayWithCalculator(ctx context.Context, db *gorm.DB, client models.Client, now time.Time, calculate usageCalculator) (Usage, bool, error) {
 	cycleStart, cycle, err := CurrentTrafficCycleFor(client, now)
 	if err != nil {
 		return Usage{}, false, nil
@@ -283,7 +287,7 @@ func syncCycleFirstDay(ctx context.Context, db *gorm.DB, client models.Client, n
 		to = end
 	}
 	if !covered.After(to) {
-		extra, err := metricUsageForCalibration(ctx, client.UUID, covered.UTC(), to.UTC())
+		extra, err := calculate(ctx, client.UUID, covered.UTC(), to.UTC())
 		if err != nil {
 			return Usage{}, false, err
 		}

@@ -187,11 +187,8 @@ func runTelemetryPass(ctx context.Context, s *metric.Store, now time.Time) (Sche
 					break
 				}
 			}
-			if out.Progress > 0 {
+			if out.Progress > 0 && !drained {
 				out.Delay = 200 * time.Millisecond
-				if drained {
-					err = errors.Join(err, t.ExpediteSchedule(work, []string{"tiers"}, now))
-				}
 			}
 		case "traffic":
 			if c := activeTelemetryConsumer.Load(); c != nil && c.apply != nil {

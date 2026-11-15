@@ -65,30 +65,39 @@ type publicMetricQueryParams struct {
 }
 
 type publicMetricPoint struct {
-	Time   time.Time         `json:"time"`
-	Value  *float64          `json:"value"`
-	Count  int               `json:"count,omitempty"`
-	Tags   map[string]string `json:"tags,omitempty"`
-	Labels map[string]string `json:"labels,omitempty"`
+	Coverage              string            `json:"coverage,omitempty"`
+	CoverageReason        string            `json:"coverage_reason,omitempty"`
+	SourceIntervalSeconds float64           `json:"source_interval_seconds,omitempty"`
+	Time                  time.Time         `json:"time"`
+	Value                 *float64          `json:"value"`
+	Count                 int               `json:"count,omitempty"`
+	Tags                  map[string]string `json:"tags,omitempty"`
+	Labels                map[string]string `json:"labels,omitempty"`
 }
 
 type publicMetricSeries struct {
-	MetricKey           string              `json:"metric_key"`
-	EntityID            string              `json:"entity_id"`
-	Type                string              `json:"type,omitempty"`
-	Unit                string              `json:"unit,omitempty"`
-	RetentionDays       int                 `json:"retention_days,omitempty"`
-	Tags                map[string]string   `json:"tags,omitempty"`
-	Downsampled         bool                `json:"downsampled"`
-	DownsampleAlgorithm string              `json:"downsample_algorithm,omitempty"`
-	FillEmpty           bool                `json:"fill_empty,omitempty"`
-	MaxPoints           int                 `json:"max_points,omitempty"`
-	IntervalSeconds     float64             `json:"interval_seconds,omitempty"`
-	CoverageStart       *time.Time          `json:"coverage_start,omitempty"`
-	CoverageEnd         *time.Time          `json:"coverage_end,omitempty"`
-	BoundaryAdjusted    bool                `json:"boundary_adjusted,omitempty"`
-	Count               int                 `json:"count"`
-	Points              []publicMetricPoint `json:"points"`
+	Coverage                 string                   `json:"coverage,omitempty"`
+	Sources                  []publicMetricSourceSpan `json:"sources,omitempty"`
+	Gaps                     []publicMetricSourceSpan `json:"gaps,omitempty"`
+	AcceptedThrough          int64                    `json:"accepted_through,omitempty"`
+	SummarizedThrough        int64                    `json:"summarized_through,omitempty"`
+	RequestedIntervalSeconds float64                  `json:"requested_interval_seconds,omitempty"`
+	MetricKey                string                   `json:"metric_key"`
+	EntityID                 string                   `json:"entity_id"`
+	Type                     string                   `json:"type,omitempty"`
+	Unit                     string                   `json:"unit,omitempty"`
+	RetentionDays            int                      `json:"retention_days,omitempty"`
+	Tags                     map[string]string        `json:"tags,omitempty"`
+	Downsampled              bool                     `json:"downsampled"`
+	DownsampleAlgorithm      string                   `json:"downsample_algorithm,omitempty"`
+	FillEmpty                bool                     `json:"fill_empty,omitempty"`
+	MaxPoints                int                      `json:"max_points,omitempty"`
+	IntervalSeconds          float64                  `json:"interval_seconds,omitempty"`
+	CoverageStart            *time.Time               `json:"coverage_start,omitempty"`
+	CoverageEnd              *time.Time               `json:"coverage_end,omitempty"`
+	BoundaryAdjusted         bool                     `json:"boundary_adjusted,omitempty"`
+	Count                    int                      `json:"count"`
+	Points                   []publicMetricPoint      `json:"points"`
 }
 
 type publicPingMetricStatsParams struct {
@@ -330,7 +339,17 @@ func queryPublicMetricSeries(ctx context.Context, store *metric.Store, params pu
 		}
 	}
 
-	aggregateResults, err := store.SeriesBatch(ctx, aggregateQueries, now)
+	var aggregateResults [][]metric.AggregatePoint
+	var telemetryResults []metric.TelemetryQueryResult
+	if shared {
+		telemetryResults, err = store.Telemetry().ChartBatch(ctx, aggregateQueries, now)
+		aggregateResults = make([][]metric.AggregatePoint, len(telemetryResults))
+		for i, r := range telemetryResults {
+			aggregateResults[i] = r.Points
+		}
+	} else {
+		aggregateResults, err = store.SeriesBatch(ctx, aggregateQueries, now)
+	}
 	if err != nil {
 		return nil, metricQueryError(err, "Failed to query metrics")
 	}
@@ -342,6 +361,7 @@ func queryPublicMetricSeries(ctx context.Context, store *metric.Store, params pu
 	// Distribute each physical result once; rescanning it for every entity
 	// would reintroduce the same multiplicative work after the SQL read.
 	aggregateEntities := make(map[int]map[string][]publicMetricPoint)
+	coverageEntities := make(map[int]map[string]metric.TelemetryQueryResult)
 	rawEntities := make(map[int]map[string][]publicMetricPoint)
 	for _, plan := range plans {
 		item := plan.item
@@ -349,6 +369,20 @@ func queryPublicMetricSeries(ctx context.Context, store *metric.Store, params pu
 			byEntity, ok := aggregateEntities[plan.aggregateSlot]
 			if !ok {
 				byEntity = make(map[string][]publicMetricPoint)
+				if shared {
+					byCoverage := map[string]metric.TelemetryQueryResult{}
+					for _, sp := range telemetryResults[plan.aggregateSlot].Sources {
+						v := byCoverage[sp.EntityID]
+						v.Sources = append(v.Sources, sp)
+						byCoverage[sp.EntityID] = v
+					}
+					for _, sp := range telemetryResults[plan.aggregateSlot].Gaps {
+						v := byCoverage[sp.EntityID]
+						v.Gaps = append(v.Gaps, sp)
+						byCoverage[sp.EntityID] = v
+					}
+					coverageEntities[plan.aggregateSlot] = byCoverage
+				}
 				for _, point := range aggregateResults[plan.aggregateSlot] {
 					byEntity[point.EntityID] = append(byEntity[point.EntityID], publicMetricPoint{
 						Time: point.Bucket.UTC(), Value: publicRawMetricValue(point.MetricName, point.Value, item.FillEmpty),
@@ -374,6 +408,15 @@ func queryPublicMetricSeries(ctx context.Context, store *metric.Store, params pu
 		}
 		if item.Points == nil {
 			item.Points = []publicMetricPoint{}
+		}
+		if shared && plan.downsampled {
+			r := telemetryResults[plan.aggregateSlot]
+			parts := coverageEntities[plan.aggregateSlot][item.EntityID]
+			r.Points = nil
+			r.Sources = parts.Sources
+			r.Gaps = parts.Gaps
+			series = append(series, publicTelemetryMetricSeries(item, r)...)
+			continue
 		}
 		for _, split := range splitPublicMetricSeries(item) {
 			if item.FillEmpty {
@@ -446,6 +489,7 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 		maxPoints = defaultMetricQueryPoints
 	}
 	now := time.Now().UTC()
+	ctx = metric.WithTelemetryEntities(ctx, entityIDs)
 	interval := metricDownsampleInterval(end.Sub(start), maxPoints)
 	if telemetry := store.Telemetry(); telemetry != nil {
 		definition, e := store.GetMetric(ctx, metricstore.MetricPingLatency)
@@ -462,27 +506,15 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 		interval = store.CompatibleSeriesIntervalForMetric(ctx, metricstore.MetricPingLatency, start, now, interval)
 	}
 
-	queries := make([]metric.AggregateQuery, 0, len(entityIDs))
-	for _, entityID := range entityIDs {
-		queries = append(queries, metric.AggregateQuery{
-			Query: metric.Query{
-				MetricName: metricstore.MetricPingLatency,
-				EntityID:   entityID,
-				Start:      start,
-				End:        end,
-				Order:      metric.OrderAsc,
-			},
-			Interval:       interval,
-			PreserveSeries: true,
-		})
-	}
-	summaries, err := store.PingSeriesSummaryBatch(ctx, queries, now)
+	summaries, err := store.PingSummariesForEntities(ctx, metric.AggregateQuery{Query: metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end, Order: metric.OrderAsc}, Interval: interval, PreserveSeries: true}, entityIDs, now)
 	if err != nil {
 		return nil, metricQueryError(err, "Failed to query ping stats")
 	}
 	stats := make([]publicPingMetricTaskStats, 0)
-	for index, entityID := range entityIDs {
-		groups := publicPingMetricGroupsFromSummary(summaries[index])
+	for _, entityID := range entityIDs {
+		summary := summaries[entityID]
+		start, end = summary.CoverageStart, summary.CoverageEnd
+		groups := publicPingMetricGroupsFromSummary(summary)
 		entityStats := publicPingStatsFromAggregateGroups(entityID, groups, taskMap, taskFilter)
 		stats = append(stats, entityStats...)
 	}

@@ -103,14 +103,26 @@ func (t *Telemetry) ChartInterval(ctx context.Context, q Query, now time.Time, r
 // the actual answerable window once, shared by both public protocols.
 func (t *Telemetry) PlanChart(ctx context.Context, q Query, now time.Time, points, retentionDays int) (Query, time.Duration, error) {
 	if retentionDays > 0 {
+		q.Start = minTime(maxTelemetryTime(q.Start, now.Add(-time.Duration(retentionDays)*24*time.Hour)), q.End)
+	}
+	return t.PlanChartInterval(ctx, q, now, TelemetryChartInterval(q.End.Sub(q.Start), points), retentionDays)
+}
+
+// PlanChartInterval also serves exports with an explicit output interval.
+// Both protocols and CSV must respect the same retained source precision.
+func (t *Telemetry) PlanChartInterval(ctx context.Context, q Query, now time.Time, requested time.Duration, retentionDays int) (Query, time.Duration, error) {
+	if retentionDays > 0 {
 		q.Start = maxTelemetryTime(q.Start, now.Add(-time.Duration(retentionDays)*24*time.Hour))
 		q.Start = minTime(q.Start, q.End)
 	}
-	interval, err := t.ChartInterval(ctx, q, now, TelemetryChartInterval(q.End.Sub(q.Start), points))
+	interval, err := t.ChartInterval(ctx, q, now, requested)
 	if err != nil {
 		return q, 0, err
 	}
 	q.Start, q.End, err = t.ChartWindow(q.Start, q.End, interval, now)
+	if err == nil && t.scalar {
+		q, err = t.scalarAnswerableWindow(ctx, q, interval, now)
+	}
 	return q, interval, err
 }
 

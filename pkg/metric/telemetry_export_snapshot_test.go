@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -97,6 +98,42 @@ func TestTelemetryExportSnapshotFramesHotColdAndFixedWatermark(t *testing.T) {
 	}
 	if decoded > 300 || scanned != snapshot.Units[0].Segment.FileBytes {
 		t.Fatalf("frame read amplification: %d %d", decoded, scanned)
+	}
+}
+
+func TestTelemetryExportCrossDeviceCopyKeepsNonzeroExtent(t *testing.T) {
+	// Linux CI's tmpfs forces os.Link to fail with EXDEV. Verify the actual
+	// fallback, including rebasing a later extent of a shared archive file.
+	dir, err := os.MkdirTemp("/dev/shm", "komari-export-copy-")
+	if err != nil {
+		t.Skip("separate tmpfs unavailable")
+	}
+	defer os.RemoveAll(dir)
+	_, e := telemetryFixture(t, "")
+	ctx := WithTelemetryEntities(context.Background(), []string{"node"})
+	at := time.Now().UTC().Add(-2 * time.Hour)
+	for i := 0; i < 2; i++ {
+		if _, err = e.Accept(ctx, telemetryBatch(fmt.Sprint(i), at.Add(time.Duration(i)*time.Minute), float64(i+1)), at); err != nil {
+			t.Fatal(err)
+		}
+		lifecycleArchiveAll(t, e, time.Now())
+	}
+	var offset int64
+	if err = e.s.db.QueryRow("SELECT MAX(archive_offset) FROM " + e.table("segments")).Scan(&offset); err != nil || offset <= 0 {
+		t.Fatal("fixture lacks nonzero extent", offset, err)
+	}
+	snap, err := e.FreezeExport(ctx, []Query{{MetricName: "cpu", EntityID: "node", Start: at, End: at.Add(2 * time.Minute)}}, dir, 8<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range snap.Units {
+		if u.Segment.ArchiveOffset != 0 || u.Segment.ArchiveFile != "" {
+			t.Fatal("copied extent was not rebased", u)
+		}
+	}
+	got := exportSnapshotPoints(t, dir, snap)
+	if len(got) != 2 || got[0].Point.Value != 1 || got[1].Point.Value != 2 {
+		t.Fatal("copy lost extent data", got)
 	}
 }
 func TestTelemetryExportSnapshotScopeErasureFloorAndLeaseCleanup(t *testing.T) {

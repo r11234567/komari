@@ -73,9 +73,6 @@ var ImportLegacyHistoryCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("read active metric store configuration: %w", err)
 		}
-		if cfg.DownsamplingEnabled {
-			return fmt.Errorf("raw history import requires metric downsampling to be disabled")
-		}
 		retentionDays, err := legacyImportRetentionDays(source, legacyImportIncludeLongTerm)
 		if err != nil {
 			return err
@@ -89,7 +86,7 @@ var ImportLegacyHistoryCmd = &cobra.Command{
 		defer store.Close()
 
 		cmd.Printf("Importing legacy history from %s\n", sourcePath)
-		cmd.Printf("Target metric store: %s (downsampling disabled)\n", metricstore.ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
+		cmd.Printf("Target metric store: %s (telemetry summaries + raw archives)\n", metricstore.ResolveDriverFromConfig(cfg.Driver, cfg.DSN))
 		cmd.Printf("records_long_term: %s\n", map[bool]string{true: "included by explicit request", false: "excluded (raw-only mode)"}[legacyImportIncludeLongTerm])
 		lastLog := time.Time{}
 		stats, err := migrations.MigrateLegacyMonitoringWithOptions(ctx, source, store, migrations.LegacyMonitoringImportOptions{

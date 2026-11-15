@@ -142,6 +142,48 @@ func TestPublicMetricsBatchesByMetricAndPreservesEntityScope(t *testing.T) {
 	}
 }
 
+func TestPublicTelemetryCoverageSurvivesTagSplitAndEmptyFill(t *testing.T) {
+	at := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	v := float64(12)
+	base := publicMetricSeries{MetricKey: "cpu", EntityID: "node", Downsampled: true, IntervalSeconds: 60, FillEmpty: true, Points: []publicMetricPoint{{Time: at, Value: &v, Tags: map[string]string{"device": "a"}}}}
+	r := metric.TelemetryQueryResult{CoverageStart: at, CoverageEnd: at.Add(3*time.Minute - time.Nanosecond), BoundaryAdjusted: true, AcceptedThrough: 9, AccountedThrough: 8, Sources: []metric.TelemetrySourceSpan{{MetricName: "cpu", EntityID: "node", Tags: map[string]string{"device": "a"}, Start: at, End: at.Add(time.Minute), Resolution: 10 * time.Second}}, Gaps: []metric.TelemetrySourceSpan{{MetricName: "cpu", EntityID: "node", Tags: map[string]string{"device": "a"}, Start: at.Add(time.Minute), End: at.Add(2 * time.Minute), Reason: "missing raw"}, {MetricName: "cpu", EntityID: "node", Tags: map[string]string{"device": "b"}, Start: at, End: at.Add(time.Minute), Reason: "crossed coarse cell"}, {MetricName: "cpu", EntityID: "hidden", Tags: map[string]string{"device": "secret"}, Start: at, End: at.Add(time.Minute), Reason: "hidden"}}}
+	series := publicTelemetryMetricSeries(base, r)
+	if len(series) != 2 {
+		t.Fatal("lost gap-only tag or leaked hidden series", series)
+	}
+	for _, s := range series {
+		if s.AcceptedThrough != 9 || s.SummarizedThrough != 8 || !s.BoundaryAdjusted || len(s.Gaps) != 1 {
+			t.Fatal("metadata lost", s)
+		}
+		want := "partial"
+		if s.Tags["device"] == "b" {
+			want = "unavailable"
+		}
+		if s.Coverage != want {
+			t.Fatal("coverage collapsed", s)
+		}
+		missing := 0
+		for _, p := range s.Points {
+			if p.Coverage == "unavailable" {
+				missing++
+				if p.Value != nil || p.CoverageReason == "" {
+					t.Fatal("gap became empty/valid", p)
+				}
+			}
+		}
+		if missing != 1 {
+			t.Fatal("gap marker missing", s)
+		}
+	}
+	b, err := json.Marshal(series)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "Resolution") || !strings.Contains(string(b), "source_interval_seconds") {
+		t.Fatal("internal source DTO leaked", string(b))
+	}
+}
+
 func TestMetricQueryParamsRequireRFC3339Time(t *testing.T) {
 	tests := []struct {
 		name    string

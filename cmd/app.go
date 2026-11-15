@@ -176,9 +176,8 @@ func normalizeMetricStorageSettings() error {
 // 未显式配置时使用 SQLite（./data/metrics.db），否则使用配置的 MySQL/PostgreSQL。
 // 初始化失败即启动失败，不再静默 fallback 到旧 records 表。
 //
-// 初始化成功后先执行需要 metric store 的一次性迁移，再执行启动迁移：当 metrics
-// 存储后端发生变化（例如从默认 SQLite 切换到 MySQL/PostgreSQL）时，把上一个
-// metrics 目标库的数据搬运到当前目标。迁移失败同样让启动失败，并打印明确错误。
+// 激活 Telemetry 后才允许任何迁移写入。跨后端的旧 raw-only 自动复制不适用于
+// SQL + 冷档存储集合，必须在删除旧来源之前明确拒绝。
 func (a *App) InitStores() error {
 	if err := metricstore.InitializeStore(); err != nil {
 		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize metric store: %v", err))
@@ -187,7 +186,19 @@ func (a *App) InitStores() error {
 	a.addCleanup("metric-store", func(ctx context.Context) error {
 		return metricstore.CloseStoreContext(ctx)
 	})
+	// Every writer below, including recovery migrations, must target the
+	// active engine. Cutover validation runs before any legacy source changes.
+	trafficledger.ConfigureTelemetry(dbcore.GetDBInstance())
+	metricstore.ConfigureTelemetryConsumer(trafficledger.ConsumeTelemetry)
+	metricstore.ConfigureTelemetryLedgerGC(trafficledger.PruneTelemetrySlices)
+	if err := metricstore.ActivateTelemetry(context.Background()); err != nil {
+		return fmt.Errorf("activate telemetry: %w", err)
+	}
 
+	// Refuse unsupported backend changes before any source import/drop.
+	if err := metricstore.RunStartupMigration(); err != nil {
+		return fmt.Errorf("metrics startup migration failed: %w", err)
+	}
 	if err := migrations.RunMetricStoreMigrations(migrations.MetricContext{
 		DB:    dbcore.GetDBInstance(),
 		Store: metricstore.GetStore(),
@@ -196,21 +207,9 @@ func (a *App) InitStores() error {
 		return fmt.Errorf("metric store one-shot migrations failed: %w", err)
 	}
 
-	// 存储后端切换时把上一个 metrics 目标库的数据搬运到当前目标（失败即启动失败）。
-	if err := metricstore.RunStartupMigration(); err != nil {
-		auditlog.EventLog("error", fmt.Sprintf("Metrics startup migration failed: %v", err))
-
-		return fmt.Errorf("metrics startup migration failed: %w", err)
-	}
 	// Route all store operations through telemetry before cleanup. Offline
 	// compaction may already have retired the legacy tables; orphan cleanup
 	// must enumerate and erase the active engine, never the retired schema.
-	trafficledger.ConfigureTelemetry(dbcore.GetDBInstance())
-	metricstore.ConfigureTelemetryConsumer(trafficledger.ConsumeTelemetry)
-	metricstore.ConfigureTelemetryLedgerGC(trafficledger.PruneTelemetrySlices)
-	if err := metricstore.ActivateTelemetry(context.Background()); err != nil {
-		return fmt.Errorf("activate telemetry: %w", err)
-	}
 	var registeredClients []models.Client
 	if err := dbcore.GetDBInstance().Select("uuid").Find(&registeredClients).Error; err != nil {
 		return fmt.Errorf("failed to list clients for metrics orphan cleanup: %w", err)

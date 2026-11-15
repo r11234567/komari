@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/trafficledger"
 	appconfig "github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/metric"
 	logger "github.com/komari-monitor/komari/utils/log"
@@ -77,6 +79,61 @@ type legacyMonitoringBounds struct {
 }
 
 type legacyBatchProgress func(table string, rows, points int64)
+
+type legacyPointImportsKey struct{}
+type legacyPointImports struct {
+	source  string
+	streams map[string]*metric.LegacyPointImport
+}
+
+func writeLegacyMonitoringPoints(ctx context.Context, s *metric.Store, table string, points []metric.Point) error {
+	imports, ok := ctx.Value(legacyPointImportsKey{}).(*legacyPointImports)
+	if !ok {
+		return s.WriteBatch(ctx, points)
+	}
+	writer := imports.streams[table]
+	if writer == nil {
+		var err error
+		writer, err = s.Telemetry().BeginLegacyPointImport(ctx, imports.source, table)
+		if err != nil {
+			return err
+		}
+		imports.streams[table] = writer
+	}
+	return writer.Write(ctx, points)
+}
+
+func legacyMonitoringSource(ctx context.Context, db *gorm.DB) (string, error) {
+	sqlDB, err := db.DB()
+	if err != nil {
+		return "", err
+	}
+	if db.Dialector.Name() != "sqlite" {
+		return "", fmt.Errorf("legacy monitoring import requires a SQLite source")
+	}
+	rows, err := sqlDB.QueryContext(ctx, "PRAGMA database_list")
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var seq int
+		var name, file string
+		if err = rows.Scan(&seq, &name, &file); err != nil {
+			return "", err
+		}
+		if name == "main" {
+			if file == "" {
+				return fmt.Sprintf("memory/%p", sqlDB), nil
+			}
+			if real, e := filepath.EvalSymlinks(file); e == nil {
+				file = real
+			}
+			return filepath.Clean(file), nil
+		}
+	}
+	return "", fmt.Errorf("legacy source main database not found: %w", rows.Err())
+}
 
 // RunMetricStoreMigrations executes one-shot migrations that need the metric store
 // to be initialized. These cannot run inside Run because Run executes before the
@@ -286,6 +343,9 @@ func runLegacyMonitoringMigration(ctx context.Context, db *gorm.DB, s *metric.St
 	if err != nil {
 		return stats, err
 	}
+	if err := MigrateLegacyMonitoringLedger(ctx, db, s); err != nil {
+		return stats, err
+	}
 	if err := dropLegacyMonitoringTables(db); err != nil {
 		return stats, err
 	}
@@ -301,6 +361,15 @@ func migrateLegacyMonitoringTables(ctx context.Context, db *gorm.DB, s *metric.S
 
 func migrateLegacyMonitoringTablesWithOptions(ctx context.Context, db *gorm.DB, s *metric.Store, options LegacyMonitoringImportOptions, progress func(LegacyMonitoringProgress)) (LegacyMonitoringStats, error) {
 	var stats LegacyMonitoringStats
+	var imports *legacyPointImports
+	if s.Telemetry() != nil {
+		source, err := legacyMonitoringSource(ctx, db)
+		if err != nil {
+			return stats, err
+		}
+		imports = &legacyPointImports{source: source, streams: make(map[string]*metric.LegacyPointImport)}
+		ctx = context.WithValue(ctx, legacyPointImportsKey{}, imports)
+	}
 	summary, err := inspectLegacyMonitoring(db, options.IncludeLongTerm)
 	if err != nil {
 		return stats, err
@@ -343,6 +412,16 @@ func migrateLegacyMonitoringTablesWithOptions(ctx context.Context, db *gorm.DB, 
 		return stats, err
 	}
 	stats.Ping += n
+	if imports != nil && len(imports.streams) > 0 {
+		for _, stream := range imports.streams {
+			if err = stream.ValidateComplete(); err != nil {
+				return stats, err
+			}
+		}
+		if err = s.Telemetry().FinishLegacyPointImport(ctx); err != nil {
+			return stats, err
+		}
+	}
 
 	return stats, nil
 }
@@ -359,30 +438,93 @@ func migrateLegacyRecordTables(ctx context.Context, s *metric.Store, db *gorm.DB
 		return 0, nil
 	}
 
-	parts := make([]string, 0, len(existing))
+	var migrated int64
 	for _, table := range existing {
-		projection, err := legacyRecordProjection(db, table)
+		projection, err := legacyRecordSource(db, table)
 		if err != nil {
-			return 0, err
+			return migrated, err
 		}
-		parts = append(parts, projection)
-	}
-	query := strings.Join(parts, " UNION ALL ") + " ORDER BY client ASC, time ASC"
-	rows, err := db.Raw(query).Rows()
-	if err != nil {
-		return 0, fmt.Errorf("stream legacy record tables: %w", err)
-	}
-	defer rows.Close()
-
-	logger.Infof("migration", "[legacy-migration] importing %d exact rows from %s", total, strings.Join(existing, ","))
-	migrated, err := migrateLegacyStream(ctx, db, s, rows, "records", func() *models.Record { return &models.Record{} }, func(value models.Record) []metric.Point {
-		return recordToPoints(value)
-	}, progress)
-	if err != nil {
-		return migrated, fmt.Errorf("import legacy record tables: %w", err)
+		rows, err := db.WithContext(ctx).Raw(projection + " ORDER BY client ASC, time ASC").Rows()
+		if err != nil {
+			return migrated, err
+		}
+		n, err := migrateLegacyStream(ctx, db, s, rows, table, func() *models.Record { return &models.Record{} }, recordToPoints, progress)
+		rows.Close()
+		migrated += n
+		if err != nil {
+			return migrated, fmt.Errorf("import legacy %s: %w", table, err)
+		}
 	}
 	logger.Infof("migration", "[legacy-migration] imported %d exact rows from %s", migrated, strings.Join(existing, ","))
 	return migrated, nil
+}
+
+// Separate cursors keep raw-only and explicit long-term recovery compatible.
+// Prefer the exact record when old tables overlap at the same series/time.
+func legacyRecordSource(db *gorm.DB, table string) (string, error) {
+	query, err := legacyRecordProjection(db, table)
+	if err == nil && table == "records_long_term" && db.Migrator().HasTable("records") {
+		query += " WHERE NOT EXISTS (SELECT 1 FROM records r WHERE r.client=records_long_term.client AND r.time=records_long_term.time)"
+	}
+	return query, err
+}
+
+// MigrateLegacyMonitoringLedger must finish before the original tables are
+// removed. CLI history recovery deliberately does not rewrite billing state.
+func MigrateLegacyMonitoringLedger(ctx context.Context, db *gorm.DB, s *metric.Store) error {
+	if s.Telemetry() == nil || !db.Migrator().HasTable(&models.Client{}) {
+		return nil
+	}
+	var parts []string
+	for _, table := range []string{"records", "records_long_term"} {
+		if !db.Migrator().HasTable(table) {
+			continue
+		}
+		part, err := legacyRecordSource(db, table)
+		if err != nil {
+			return err
+		}
+		up, down := db.Migrator().HasColumn(table, "traffic_up"), db.Migrator().HasColumn(table, "traffic_down")
+		flag := func(v bool) string {
+			if v {
+				return "1"
+			}
+			return "0"
+		}
+		parts = append(parts, "SELECT m.*, "+flag(up)+" AS up_set, "+flag(down)+" AS down_set FROM ("+part+") m")
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	source := "(" + strings.Join(parts, " UNION ALL ") + ") source"
+	read := func(ctx context.Context, client string, start, end time.Time) ([]trafficledger.DeltaRecord, *trafficledger.DeltaRecord, error) {
+		type row struct {
+			models.Record
+			UpSet   bool
+			DownSet bool
+		}
+		convert := func(r row) trafficledger.DeltaRecord {
+			return trafficledger.DeltaRecord{Time: r.Time, NetTotalUp: r.NetTotalUp, NetTotalDown: r.NetTotalDown, TrafficUp: r.TrafficUp, TrafficDown: r.TrafficDown, TrafficUpSet: r.UpSet, TrafficDownSet: r.DownSet}
+		}
+		var rows []row
+		if err := db.WithContext(ctx).Table(source).Where("client=? AND time>=? AND time<=?", client, start.UTC(), end.UTC()).Order("time ASC").Scan(&rows).Error; err != nil {
+			return nil, nil, err
+		}
+		result := make([]trafficledger.DeltaRecord, 0, len(rows))
+		for _, r := range rows {
+			result = append(result, convert(r))
+		}
+		var prior []row
+		if err := db.WithContext(ctx).Table(source).Where("client=? AND time<?", client, start.UTC()).Order("time DESC").Limit(1).Scan(&prior).Error; err != nil {
+			return nil, nil, err
+		}
+		if len(prior) == 0 {
+			return result, nil, nil
+		}
+		previous := convert(prior[0])
+		return result, &previous, nil
+	}
+	return trafficledger.MigrateMonitoringLedger(ctx, db, s.Telemetry(), time.Now().UTC(), read)
 }
 
 func migrateLegacyGPURecordTable(ctx context.Context, s *metric.Store, db *gorm.DB, table string, total int64, progress legacyBatchProgress) (int64, error) {
@@ -429,7 +571,7 @@ func migrateLegacyPingRecordTable(ctx context.Context, s *metric.Store, db *gorm
 		if len(points) == 0 {
 			return nil
 		}
-		if err := s.WriteBatch(ctx, points); err != nil {
+		if err := writeLegacyMonitoringPoints(ctx, s, table, points); err != nil {
 			return err
 		}
 		if progress != nil {
@@ -476,7 +618,7 @@ func migrateLegacyStream[T any](ctx context.Context, db *gorm.DB, s *metric.Stor
 		if len(points) == 0 {
 			return nil
 		}
-		if err := s.WriteBatch(ctx, points); err != nil {
+		if err := writeLegacyMonitoringPoints(ctx, s, table, points); err != nil {
 			return err
 		}
 		if progress != nil {

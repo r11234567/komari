@@ -169,8 +169,8 @@ func LegacyTrafficBaseline(ctx context.Context, source string, before time.Time)
 	return at, up, down, true, nil
 }
 
-// ActivateTelemetry runs after legacy import/identity migrations, before any
-// public listener/background writer is started. Existing sources are preserved
+// ActivateTelemetry runs before any migration or runtime writer is started.
+// Existing sources are preserved
 // and must be migrated explicitly instead of silently hiding their history.
 func ActivateTelemetry(ctx context.Context) error {
 	if err := storeOperations.Acquire(ctx); err != nil {

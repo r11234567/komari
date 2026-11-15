@@ -443,7 +443,37 @@ func OpenStoreForMigrationWithProgress(ctx context.Context, cfg *MetricStoreConf
 	if legacyRetentionDays < defaultBuiltinMetricRetentionDays {
 		legacyRetentionDays = defaultBuiltinMetricRetentionDays
 	}
-	return openStoreWithDefaultRetentionAndProgress(ctx, cfg, legacyRetentionDays, progress)
+	s, err := openStoreWithDefaultRetentionAndProgress(ctx, cfg, legacyRetentionDays, progress)
+	if err != nil {
+		return nil, err
+	}
+	// Import into the active format. An existing unmigrated target must first
+	// pass the explicit cutover (including its business-ledger bridge).
+	if err = s.RequireTelemetryMigration(ctx); err == nil {
+		var c metric.TelemetryConfig
+		c, err = telemetryConfig(cfg)
+		if err == nil {
+			var state metric.LegacyMigrationState
+			state, err = s.PrepareLegacyMigration(ctx, c)
+			// The guard above proved an incomplete target has no legacy input.
+			// Its empty old-metrics ledger phase needs no replay. Monitoring
+			// source settlement remains explicit before that source is dropped.
+			if err == nil && !state.Complete {
+				err = s.CompleteLegacyLedgerMigration(ctx, c)
+			}
+		}
+		if err == nil {
+			err = MigrateTelemetryOffline(ctx, s, cfg, nil)
+		}
+		if err == nil {
+			err = enableTelemetryStore(ctx, s, cfg)
+		}
+	}
+	if err != nil {
+		s.Close()
+		return nil, err
+	}
+	return s, nil
 }
 
 // InspectSQLiteStorageMigration checks whether the configured metric store

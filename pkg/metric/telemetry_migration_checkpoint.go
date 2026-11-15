@@ -62,7 +62,23 @@ func (s *Store) PrepareLegacyMigration(ctx context.Context, cfg TelemetryConfig)
 		return state, err
 	}
 	if accepted > 0 && started != 1 {
-		return state, errors.New("target already contains online telemetry; refusing an ambiguous offline merge")
+		source, err := s.legacyTelemetryInput(ctx, tx)
+		if err != nil {
+			return state, err
+		}
+		if source != "" {
+			return state, errors.New("target already contains online telemetry; refusing an ambiguous offline merge")
+		}
+		// A store born on telemetry has no old metrics to merge or settle.
+		// Allow offline history import without requiring a fictitious legacy
+		// migration before the first online report was ever accepted.
+		state.Cutoff, state.Complete, state.LedgerComplete = time.Now().UTC(), true, true
+		for key, value := range map[string]int64{"legacy_migration_complete": 1, "legacy_ledger_complete": 1, "legacy_migration_now": state.Cutoff.UnixNano()} {
+			if err = t.setProgress(ctx, tx, key, value); err != nil {
+				return state, err
+			}
+		}
+		return state, tx.Commit()
 	}
 	if epoch == 0 {
 		epoch = time.Now().UTC().UnixNano()

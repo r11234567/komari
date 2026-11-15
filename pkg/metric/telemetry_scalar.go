@@ -379,6 +379,7 @@ func (t *Telemetry) summarizeScalar(ctx context.Context) (int, error) {
 		return 0, errors.New("telemetry scalar input disappeared before handoff")
 	}
 	keys := map[string]int64{}
+	var promotion time.Time
 	for k, stats := range groups {
 		id, ok := keys[k.source]
 		if !ok {
@@ -389,6 +390,21 @@ func (t *Telemetry) summarizeScalar(ctx context.Context) (int, error) {
 			keys[k.source] = id
 		}
 		if err = t.putScalar(ctx, tx, scalarCell{id, k.resolution, k.bucket, *stats}); err != nil {
+			return 0, err
+		}
+		resolution := time.Duration(k.resolution) * time.Second
+		if keep := telemetrySummaryKeep(resolution); keep > 0 {
+			due := time.Unix(k.bucket, 0).Add(resolution + keep)
+			if promotion.IsZero() || due.Before(promotion) {
+				promotion = due
+			}
+		}
+	}
+	// Carry the earliest newly written cell's deadline in this transaction.
+	// No scan of all series, extra transaction, or immediate tiers wakeup on
+	// each report. Lease expiry is compared with now, never a future deadline.
+	if !promotion.IsZero() {
+		if _, err = tx.ExecContext(ctx, t.bind("UPDATE "+t.table("schedule")+" SET due=? WHERE task='tiers' AND due>? AND attempts=0 AND expires<=?"), promotion.UnixNano(), promotion.UnixNano(), now.UnixNano()); err != nil {
 			return 0, err
 		}
 	}
@@ -941,6 +957,21 @@ func (t *Telemetry) scalarPingSummary(ctx context.Context, q AggregateQuery, now
 	ctx = context.WithValue(defaultChartBudget(ctx), telemetryStatisticsCardKey{}, true)
 	q.MetricName, q.Aggregation, q.PreserveSeries = sqliteMergedPingLatencyMetric, AggCount, true
 	q.Interval = t.compatibleInterval(q.Start, now, max(q.Interval, 10*time.Second))
+	tx, shared := ctx.Value(telemetrySnapshotKey{}).(*sql.Tx)
+	if !shared {
+		var err error
+		tx, err = t.s.reader().BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
+		if err != nil {
+			return SeriesSummary{}, err
+		}
+		defer tx.Rollback()
+		ctx = context.WithValue(ctx, telemetrySnapshotKey{}, tx)
+	}
+	var err error
+	q.Query, err = t.scalarAnswerableWindow(ctx, q.Query, q.Interval, now)
+	if err != nil {
+		return SeriesSummary{}, err
+	}
 	r, err := t.Chart(ctx, q, now)
 	if err != nil {
 		return SeriesSummary{}, err
@@ -948,7 +979,7 @@ func (t *Telemetry) scalarPingSummary(ctx context.Context, q AggregateQuery, now
 	if len(r.Gaps) != 0 {
 		return SeriesSummary{}, ErrTelemetryCoverage
 	}
-	var out SeriesSummary
+	out := SeriesSummary{CoverageStart: q.Start, CoverageEnd: q.End}
 	for _, point := range r.Points {
 		h, _, e := tagsFingerprint(point.Tags)
 		if e != nil {
@@ -982,5 +1013,8 @@ func (t *Telemetry) scalarPingSummary(ctx context.Context, q AggregateQuery, now
 			out.Last = append(out.Last, latest)
 		}
 	}
-	return out, nil
+	if !shared {
+		err = tx.Commit()
+	}
+	return out, err
 }

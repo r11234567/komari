@@ -40,6 +40,38 @@ func TestTelemetryMariaDBIntegration(t *testing.T) {
 
 func telemetryExternal(t *testing.T, cfg Config) {
 	t.Helper()
+	t.Run("rawless_recent_ping_window_and_scope", func(t *testing.T) {
+		ctx, e := telemetryExternalFixture(t, cfg)
+		now := time.Now().UTC().Truncate(time.Minute).Add(55 * time.Second)
+		at := now.Add(-3 * time.Minute).Truncate(10 * time.Second)
+		if err := e.s.CreateMetric(ctx, Definition{Name: sqliteMergedPingLatencyMetric, RetentionDays: 30}); err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []string{"visible", "hidden"} {
+			var points []Point
+			for i := 0; i < 3; i++ {
+				for j, v := range []float64{10, -1, 30} {
+					points = append(points, Point{MetricName: sqliteMergedPingLatencyMetric, EntityID: id, Timestamp: at.Add(time.Duration(i*10+j) * time.Second), Value: v, Tags: map[string]string{"task_id": "1"}})
+				}
+			}
+			if _, err := e.Accept(ctx, TelemetryBatch{Source: id, Identity: "scope", Points: points}, now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		summarizeAll(t, e)
+		if _, err := e.s.db.ExecContext(ctx, "DELETE FROM "+e.table("hot")); err != nil {
+			t.Fatal(err)
+		}
+		ctx = WithTelemetryEntities(ctx, []string{"visible"})
+		q, interval, err := e.PlanChart(ctx, Query{MetricName: sqliteMergedPingLatencyMetric, Start: at.Add(time.Second), End: at.Add(21 * time.Second)}, now, 600, 30)
+		if err != nil || !q.Start.Equal(at.Add(10*time.Second)) || !q.End.Equal(at.Add(20*time.Second-time.Nanosecond)) {
+			t.Fatal("rawless boundary SQL", q, interval, err)
+		}
+		r, err := e.PingSummary(ctx, AggregateQuery{Query: q, Interval: interval}, now)
+		if err != nil || len(r.Loss) != 1 || r.Loss[0].Count != 3 || r.Loss[0].EntityID != "visible" || r.Loss[0].Value != 1.0/3 {
+			t.Fatal("scoped card SQL", r, err)
+		}
+	})
 	t.Run("catalog_coalescence_precision_and_expiry", func(t *testing.T) {
 		ctx, e := telemetryExternalFixture(t, cfg)
 		if err := e.s.CreateMetric(ctx, Definition{Name: "cpu", RetentionDays: 365}); err != nil {

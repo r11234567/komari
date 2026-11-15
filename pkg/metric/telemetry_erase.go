@@ -124,6 +124,9 @@ func (t *Telemetry) PruneErasedChunk(ctx context.Context, limit int) (int, error
 	if limit <= 0 || limit > 512 {
 		return 0, ErrInvalidArgument
 	}
+	if t.scalar {
+		return 0, nil
+	}
 	release, err := t.acquire(ctx)
 	if err != nil {
 		return 0, err

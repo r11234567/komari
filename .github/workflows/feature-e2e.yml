@@ -149,6 +149,12 @@ jobs:
       - name: Restore the real downloaded SQL, ledger and cold archive bundle
         if: ${{ !inputs.database_only || inputs.skip_csv }}
         run: bash scripts/ci/run-audit-check.sh e2e-storage-restore go test -race ./pkg/metric -run TestTelemetryE2ERestoreBundle -count=1 -v
+      - name: Verify 1.2.7 monitoring wizard writes telemetry directly
+        if: inputs.skip_csv
+        env:
+          NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
+        run: bash scripts/ci/run-audit-check.sh e2e-monitoring-upgrade node scripts/ci/e2e/monitoring-upgrade.cjs
       - name: Collect service logs and destroy temporary services and secrets
         if: always()
         run: bash scripts/ci/e2e/cleanup.sh

@@ -18,13 +18,27 @@ func MigrateTelemetryLedger(ctx context.Context, db *gorm.DB, now time.Time) err
 	if metricstore.TelemetryEnabled() {
 		return fmt.Errorf("traffic migration requires the offline legacy reader")
 	}
+	return migrateTelemetryLedger(ctx, db, now, offlineTrafficSource{
+		usage: MetricUsage, deltas: metricstore.LegacyTrafficDeltas,
+		baseline: metricstore.LegacyTrafficBaseline, seed: metricstore.SeedTelemetryTrafficBaseline,
+	})
+}
+
+type offlineTrafficSource struct {
+	usage    usageCalculator
+	deltas   func(context.Context, string, time.Time, time.Time) ([]metricstore.LegacyTrafficDelta, bool, error)
+	baseline func(context.Context, string, time.Time) (time.Time, int64, int64, bool, error)
+	seed     func(context.Context, string, time.Time, int64, int64) error
+}
+
+func migrateTelemetryLedger(ctx context.Context, db *gorm.DB, now time.Time, source offlineTrafficSource) error {
 	var clients []models.Client
 	if err := db.WithContext(ctx).Find(&clients).Error; err != nil {
 		return err
 	}
 	today := BeijingDay(now)
 	for _, client := range clients {
-		if err := EnsureRange(ctx, db, []string{client.UUID}, today.AddDate(0, 0, -35), today); err != nil {
+		if err := ensureRangeWithCalculator(ctx, db, []string{client.UUID}, today.AddDate(0, 0, -35), today, source.usage); err != nil {
 			return err
 		}
 		var total Usage
@@ -39,7 +53,7 @@ func MigrateTelemetryLedger(ctx context.Context, db *gorm.DB, now time.Time) err
 				}
 			}
 			until = minTimeTraffic(until, now.Add(time.Nanosecond))
-			usage, err := MetricUsage(ctx, client.UUID, from, until.Add(-time.Nanosecond))
+			usage, err := source.usage(ctx, client.UUID, from, until.Add(-time.Nanosecond))
 			if err != nil {
 				return err
 			}
@@ -49,7 +63,7 @@ func MigrateTelemetryLedger(ctx context.Context, db *gorm.DB, now time.Time) err
 				return err
 			}
 			if !from.Before(now.Add(-telemetryMinuteRetention)) {
-				fine, err := refineLegacyTrafficWindow(ctx, db, client.UUID, from, until, now, usage)
+				fine, err := refineLegacyTrafficWindowFrom(ctx, db, client.UUID, from, until, now, usage, source.deltas)
 				if err != nil {
 					return err
 				}
@@ -75,12 +89,12 @@ func MigrateTelemetryLedger(ctx context.Context, db *gorm.DB, now time.Time) err
 		if err := db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&day).Error; err != nil {
 			return err
 		}
-		if _, _, err := syncCycleFirstDay(ctx, db, client, now); err != nil {
+		if _, _, err := syncCycleFirstDayWithCalculator(ctx, db, client, now, source.usage); err != nil {
 			return err
 		}
 		// An hourly migration reader preserves the previous API's calculation
 		// and baseline recovery. Exact counter baseline comes from the source.
-		at, up, down, found, err := metricstore.LegacyTrafficBaseline(ctx, client.UUID, now)
+		at, up, down, found, err := source.baseline(ctx, client.UUID, now)
 		if err != nil {
 			return err
 		}
@@ -93,7 +107,7 @@ func MigrateTelemetryLedger(ctx context.Context, db *gorm.DB, now time.Time) err
 			if err = db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&state).Error; err != nil {
 				return err
 			}
-			if err = metricstore.SeedTelemetryTrafficBaseline(ctx, client.UUID, at, up, down); err != nil {
+			if err = source.seed(ctx, client.UUID, at, up, down); err != nil {
 				return err
 			}
 		}
