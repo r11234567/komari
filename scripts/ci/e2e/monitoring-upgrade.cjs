@@ -37,7 +37,7 @@ c.commit();c.close()
 (root/'monitoring-window.json').write_text(json.dumps({'start':(now-datetime.timedelta(days=1)).isoformat(),'end':now.isoformat()}))
 `,root,scope.agentId,String(scope.pingTaskId)],{timeout:30000});
  if(process.env.KOMARI_E2E_LOCAL==='1')execFileSync('chown',['-R',process.env.KOMARI_E2E_USER,directory]);
- execFileSync('sudo',['systemd-run','--unit=komari-e2e-panel','--collect','--slice=komari-e2e.slice',`--property=User=${process.env.KOMARI_E2E_USER||process.env.USER}`,`--property=WorkingDirectory=${directory}`,'--property=CPUQuota=100%','--property=MemoryMax=1G',path.join(root,'bin/komari'),'server','--listen','127.0.0.1:29444'],{timeout:30000});
+ execFileSync('sudo',['systemd-run','--unit=komari-e2e-panel','--collect','--slice=komari-e2e.slice',`--property=User=${process.env.KOMARI_E2E_USER||process.env.USER}`,`--property=WorkingDirectory=${directory}`,'--property=CPUQuota=100%','--property=MemoryMax=1G','--setenv=KOMARI_PUBLIC_ORIGIN=https://127.0.0.1:29443','--setenv=KOMARI_TRUSTED_PROXIES=127.0.0.1,::1',path.join(root,'bin/komari'),'server','--listen','127.0.0.1:29444'],{timeout:30000});
  browser=await chromium.launch({headless:true});context=await browser.newContext({baseURL:base});
  await context.addInitScript(()=>localStorage.setItem('i18nextLng','en'));
  const page=await context.newPage();

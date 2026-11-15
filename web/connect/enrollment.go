@@ -26,6 +26,7 @@ import (
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/pkg/requestmeta"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	enrollmentv1 "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1"
@@ -59,6 +60,10 @@ func (s *enrollmentService) BeginEnrollment(ctx context.Context, req *connect.Re
 	if len(key.GetValue()) != ed25519.PublicKeySize {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("agent public key has an unexpected size"))
 	}
+	base, err := requestmeta.PublicOrigin()
+	if err != nil {
+		return nil, connectError(connect.CodeFailedPrecondition, errors.New("configure KOMARI_PUBLIC_ORIGIN before starting enrollment"))
+	}
 
 	device := req.Msg.GetDevice()
 	meta := rpc.MetaFromContext(ctx)
@@ -84,7 +89,6 @@ func (s *enrollmentService) BeginEnrollment(ctx context.Context, req *connect.Re
 	auditlog.Log(remoteIP, "", fmt.Sprintf("agent enrollment requested: host=%s code=%s",
 		attempt.Hostname, attempt.UserCode), "info")
 
-	base := panelBaseURL(req)
 	return connect.NewResponse(&enrollmentv1.BeginEnrollmentResponse{
 		DeviceCode:              attempt.DeviceCode,
 		UserCode:                attempt.UserCode,
@@ -376,27 +380,4 @@ func enrollmentStateToProto(state int32) enrollmentv1.EnrollmentState {
 	default:
 		return enrollmentv1.EnrollmentState_ENROLLMENT_STATE_UNSPECIFIED
 	}
-}
-
-// panelBaseURL reconstructs the address the Agent used.
-//
-// Echoing back what the caller reached is what keeps the printed link usable
-// behind a reverse proxy or on a non-default port, where a configured value
-// would be wrong for exactly the deployments that need it most.
-func panelBaseURL(req connect.AnyRequest) string {
-	header := req.Header()
-	scheme := "https"
-	if forwarded := header.Get("X-Forwarded-Proto"); forwarded != "" {
-		scheme = strings.Split(forwarded, ",")[0]
-	}
-	host := header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = header.Get("Host")
-	}
-	if host == "" {
-		if parsed := req.Peer().Addr; parsed != "" {
-			host = parsed
-		}
-	}
-	return strings.TrimSuffix(scheme+"://"+strings.TrimSpace(host), "/")
 }

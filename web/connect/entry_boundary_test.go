@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/pkg/requestmeta"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/security"
 	"github.com/pquerna/otp/totp"
@@ -41,6 +42,7 @@ func entryBoundaryServer(t *testing.T) *httptest.Server {
 	server := httptest.NewUnstartedServer(router)
 	server.EnableHTTP2 = true
 	server.StartTLS()
+	t.Setenv(requestmeta.PublicOriginEnv, server.URL)
 	t.Cleanup(server.Close)
 	return server
 }
