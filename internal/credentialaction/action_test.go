@@ -1,15 +1,60 @@
 package credentialaction
 
-import "testing"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"testing"
 
-func TestPublicTargetScopeEncoding(t *testing.T) {
-	// SHA-256 of the standard empty JSON array; the Web client uses the same
-	// vector. This is a target checksum, not credential/password hashing.
-	const empty = "action:example:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-	if actual := ScopedResource("example"); actual != empty {
-		t.Fatalf("scope vector: %s", actual)
-	}
-	if actual := WorkspaceResource("node", "alice"); actual != `workspace:["node","alice"]` {
-		t.Fatalf("workspace scope: %s", actual)
-	}
+	"github.com/stretchr/testify/require"
+)
+
+func TestExecutionSpecDigestMatchesFrontendGoldenVector(t *testing.T) {
+	expectedPayload := `["v1","echo <ok&>",["-n","a\u2028b"],[["A_VAR","1"],["Z_VAR","2"]],"/srv/app",30,4096,true]`
+	sum := sha256.Sum256([]byte(expectedPayload))
+	expectedHex := hex.EncodeToString(sum[:])
+
+	digest := ExecutionSpecDigest(
+		"echo <ok&>",
+		[]string{"-n", "a\u2028b"},
+		map[string]string{"Z_VAR": "2", "A_VAR": "1"},
+		"/srv/app",
+		30,
+		4096,
+		true,
+	)
+	require.Equal(t, expectedHex, digest)
+
+	// Reordered env map must produce identical digest.
+	digest2 := ExecutionSpecDigest(
+		"echo <ok&>",
+		[]string{"-n", "a\u2028b"},
+		map[string]string{"A_VAR": "1", "Z_VAR": "2"},
+		"/srv/app",
+		30,
+		4096,
+		true,
+	)
+	require.Equal(t, expectedHex, digest2)
+
+	// Altered command must produce a different digest.
+	require.NotEqual(t, expectedHex, ExecutionSpecDigest(
+		"rm -rf /",
+		[]string{"-n", "a\u2028b"},
+		map[string]string{"A_VAR": "1", "Z_VAR": "2"},
+		"/srv/app",
+		30,
+		4096,
+		true,
+	))
+
+	require.Equal(t, []string{"agent-a", "run-as:root", "spec:" + expectedHex}, ExecutionTargets(
+		[]string{"agent-a"},
+		"echo <ok&>",
+		[]string{"-n", "a\u2028b"},
+		map[string]string{"Z_VAR": "2", "A_VAR": "1"},
+		"/srv/app",
+		30,
+		4096,
+		true,
+	))
 }

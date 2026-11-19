@@ -93,7 +93,7 @@ func verifyRefreshV2(envelope *securityv1.SignedEnvelope, record models.AgentCre
 		return "", nil, denied
 	}
 	digest := sha256.Sum256(signature)
-	if !recordAndVerifyNonce("refresh-v2:"+record.Client+":"+hex.EncodeToString(digest[:]), 2*time.Minute) {
+	if !refreshReplayCache.CheckAndRecord(record.Client, hex.EncodeToString(digest[:]), 2*time.Minute) {
 		return "", nil, denied
 	}
 	return proof.RequestID, proof.Generation, nil

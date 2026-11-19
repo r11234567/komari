@@ -119,7 +119,15 @@ func TestCredentialRotationAuthenticatedReuseRevokesChain(t *testing.T) {
 	id := uuid.NewString()
 	_, err := rotateVerifiedDB(context.Background(), db, record, token, id, nil, 2, func() time.Time { return now })
 	require.NoError(t, err)
+	// Same request ID after recovery window must signal recovery-required without revoking the chain.
 	_, err = rotateVerifiedDB(context.Background(), db, record, token, id, nil, 2, func() time.Time { return now.Add(RefreshRecoveryWindow) })
+	require.ErrorIs(t, err, ErrRefreshRecoveryRequired)
+	var unrevoked models.AgentCredential
+	require.NoError(t, db.First(&unrevoked, "client = ?", record.Client).Error)
+	require.Nil(t, unrevoked.RevokedAt)
+
+	// Different request ID reusing a consumed refresh token must revoke the chain.
+	_, err = rotateVerifiedDB(context.Background(), db, record, token, uuid.NewString(), nil, 2, func() time.Time { return now.Add(RefreshRecoveryWindow) })
 	require.ErrorIs(t, err, ErrRefreshReuse)
 	var current models.AgentCredential
 	require.NoError(t, db.First(&current, "client = ?", record.Client).Error)
@@ -127,6 +135,37 @@ func TestCredentialRotationAuthenticatedReuseRevokesChain(t *testing.T) {
 	require.Empty(t, current.RefreshRecoverySealed)
 	_, err = rotateVerifiedDB(context.Background(), db, current, "unknown-token", uuid.NewString(), nil, 2, func() time.Time { return now })
 	require.ErrorIs(t, err, ErrCredentialRejected)
+}
+
+func TestCredentialRotationSealFailureDoesNotConsumeAndRecoveryReplaysExactSignedBytes(t *testing.T) {
+	db, token, record, now := rotationFixture(t)
+	id := uuid.NewString()
+	_, _, err := rotateVerifiedDBWithSeal(context.Background(), db, record, token, id, nil, 2, func() time.Time { return now }, func(Issued) ([]byte, error) {
+		return nil, errors.New("synthetic signing failure")
+	})
+	require.ErrorContains(t, err, "synthetic signing failure")
+	var usedCount int64
+	require.NoError(t, db.Model(&models.AgentRefreshUse{}).Count(&usedCount).Error)
+	require.Zero(t, usedCount)
+
+	sealCalls := 0
+	expectedBytes := []byte("signed-envelope-bytes-v1")
+	first, signedFirst, err := rotateVerifiedDBWithSeal(context.Background(), db, record, token, id, nil, 2, func() time.Time { return now }, func(Issued) ([]byte, error) {
+		sealCalls++
+		return expectedBytes, nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, sealCalls)
+	require.Equal(t, expectedBytes, signedFirst)
+
+	recovered, signedRecovered, err := rotateVerifiedDBWithSeal(context.Background(), db, record, token, id, nil, 2, func() time.Time { return now.Add(time.Hour) }, func(Issued) ([]byte, error) {
+		sealCalls++
+		return []byte("should-not-resign"), nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, sealCalls)
+	require.Equal(t, first, recovered)
+	require.Equal(t, expectedBytes, signedRecovered)
 }
 
 func TestCredentialRotationRejectsGenerationDowngradeAndChangedKey(t *testing.T) {

@@ -46,6 +46,9 @@ func isWSHookKind(kind string) bool {
 // hooks registered for the connection path; the first denial rejects the
 // connection.
 func (m *Manager) OnConnect(info *connection.ConnInfo) (deny bool, reason string) {
+	if info == nil || protectedWorkspacePath(info.Path) {
+		return false, ""
+	}
 	for _, h := range m.wsHooksFor(hookWSConnect, info.Path) {
 		var denied bool
 		var why string
@@ -97,6 +100,9 @@ func (m *Manager) OnSend(info *connection.ConnInfo, frameType int, data []byte) 
 // wins over later hooks. Timeouts, errors and oversized frames pass the
 // frame through.
 func (m *Manager) runFrameHooks(kind hookKind, info *connection.ConnInfo, frameType int, data []byte) (int, []byte, bool) {
+	if info == nil || protectedWorkspacePath(info.Path) {
+		return frameType, data, false
+	}
 	hooks := m.wsHooksFor(kind, info.Path)
 	if len(hooks) == 0 || len(data) > maxWSFrameBytes {
 		return frameType, data, false
@@ -151,6 +157,9 @@ func (m *Manager) runFrameHooks(kind hookKind, info *connection.ConnInfo, frameT
 
 // OnClose implements connection.FrameInterceptor for connection teardown.
 func (m *Manager) OnClose(info *connection.ConnInfo) {
+	if info == nil || protectedWorkspacePath(info.Path) {
+		return
+	}
 	for _, h := range m.wsHooksFor(hookWSClose, info.Path) {
 		var hookErr error
 		queued, timedOut := runHookTurn(h.host, "plugin wsClose hook "+h.short, func(vm *moejs.Runtime) {

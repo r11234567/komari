@@ -704,6 +704,41 @@ func OpenPublicFile(short, name string) (*os.File, error) {
 	return OpenFile(short, name)
 }
 
+var blockedPublicPluginExtensions = map[string]struct{}{
+	".db":      {},
+	".sqlite":  {},
+	".sqlite3": {},
+	".env":     {},
+	".key":     {},
+	".pem":     {},
+	".crt":     {},
+	".log":     {},
+	".bak":     {},
+	".sql":     {},
+	".yaml":    {},
+	".yml":     {},
+	".toml":    {},
+}
+
+var allowedRootPublicAssetExtensions = map[string]struct{}{
+	".html":  {},
+	".htm":   {},
+	".css":   {},
+	".png":   {},
+	".jpg":   {},
+	".jpeg":  {},
+	".gif":   {},
+	".webp":  {},
+	".svg":   {},
+	".ico":   {},
+	".woff":  {},
+	".woff2": {},
+	".ttf":   {},
+	".eot":   {},
+	".otf":   {},
+	".txt":   {},
+}
+
 func validatePublicFile(short, name string) error {
 	if !validShort(short) {
 		return fmt.Errorf("invalid plugin short %q", short)
@@ -719,12 +754,40 @@ func validatePublicFile(short, name string) error {
 	if !filepath.IsLocal(name) {
 		return fmt.Errorf("invalid plugin file path %q", name)
 	}
+	slashName := filepath.ToSlash(name)
+	for _, seg := range strings.Split(slashName, "/") {
+		if strings.HasPrefix(seg, ".") {
+			return fmt.Errorf("hidden plugin file %q is not public", name)
+		}
+	}
+	lowerBase := strings.ToLower(filepath.Base(name))
+	if lowerBase == "komari-plugin.json" || lowerBase == "plugin.json" {
+		return fmt.Errorf("plugin manifest %q is not public", name)
+	}
+	entry := filepath.Clean(strings.TrimPrefix(info.Entry, "/"))
+	if entry != "" && entry != "." && filepath.ToSlash(entry) == slashName {
+		return fmt.Errorf("plugin entrypoint %q is not public", name)
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	if _, blocked := blockedPublicPluginExtensions[ext]; blocked {
+		return fmt.Errorf("plugin file %q is not public", name)
+	}
 	for _, page := range info.Pages {
 		if page.Visibility != models.PageVisibilityPublic || page.Type != models.PageTypeIframe {
 			continue
 		}
-		dir := filepath.Dir(page.File)
-		if dir == "." || name == dir || strings.HasPrefix(name, dir+string(os.PathSeparator)) {
+		pageFile := filepath.Clean(strings.TrimPrefix(page.File, "/"))
+		if name == pageFile {
+			return nil
+		}
+		dir := filepath.Dir(pageFile)
+		if dir == "." {
+			if _, ok := allowedRootPublicAssetExtensions[ext]; ok {
+				return nil
+			}
+			continue
+		}
+		if name == dir || strings.HasPrefix(name, dir+string(os.PathSeparator)) {
 			return nil
 		}
 	}
@@ -743,7 +806,8 @@ func ResolveFile(short, name string) (string, error) {
 }
 
 // OpenFile securely opens a regular file below an installed plugin directory.
-// os.Root prevents traversal and symlink escapes from the plugin root.
+// Scoping os.OpenRoot to the individual plugin directory prevents both path
+// traversal and cross-plugin symlink escapes.
 func OpenFile(short, name string) (*os.File, error) {
 	if !validShort(short) {
 		return nil, fmt.Errorf("invalid plugin short %q", short)
@@ -751,12 +815,12 @@ func OpenFile(short, name string) (*os.File, error) {
 	if !filepath.IsLocal(name) {
 		return nil, fmt.Errorf("invalid plugin file path %q", name)
 	}
-	root, err := os.OpenRoot(DataDir)
+	root, err := os.OpenRoot(filepath.Join(DataDir, short))
 	if err != nil {
 		return nil, err
 	}
 	defer root.Close()
-	file, err := root.Open(filepath.Join(short, name))
+	file, err := root.Open(name)
 	if err != nil {
 		return nil, err
 	}

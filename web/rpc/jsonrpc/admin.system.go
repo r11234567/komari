@@ -51,8 +51,11 @@ func init() {
 
 	reg("testSendMessage", adminTestSendMessage, "Send a test notification")
 	reg("testGeoip", adminTestGeoip, "Test GeoIP lookup")
-	// 远程命令执行属敏感操作：除 admin 角色外，还需通过敏感操作二次验证。
+	// 远程命令执行与破坏性维护操作属敏感操作：除 admin 角色外，还需通过敏感操作二次验证。
 	rpc.MarkSensitive("admin:exec")
+	rpc.MarkSensitive("admin:deleteAllSessions")
+	rpc.MarkSensitive("admin:clearRecords")
+	rpc.MarkSensitive("admin:vacuumDatabase")
 }
 
 func adminGetLogs(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {

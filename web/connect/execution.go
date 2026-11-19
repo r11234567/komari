@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	agentRuntime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/executionapp"
@@ -24,11 +26,6 @@ func (s *executionService) CreateExecution(ctx context.Context, req *connect.Req
 	ownerID, err := requireAdminUser(meta)
 	if err != nil {
 		return nil, err
-	}
-	if req.Msg.TwoFactor.GetAuthorizationToken() == "" {
-		if err := verifyConnectTwoFactor(meta, req.Msg.TwoFactor); err != nil {
-			return nil, err
-		}
 	}
 	agentIDs := append([]string(nil), req.Msg.AgentIds...)
 	if strings.TrimSpace(req.Msg.AgentId) != "" {
@@ -71,12 +68,29 @@ func (s *executionService) CreateExecution(ctx context.Context, req *connect.Req
 			return nil, connectError(connect.CodeFailedPrecondition, errors.New("agent is offline or does not support Connect execution: "+agentID))
 		}
 	}
-	if req.Msg.TwoFactor.GetAuthorizationToken() != "" {
-		proofTargets := append([]string(nil), agentIDs...)
-		if req.Msg.RunAsRoot {
-			proofTargets = append(proofTargets, "run-as:root")
+	var timeoutSeconds int64
+	if req.Msg.Timeout != nil {
+		if err := req.Msg.Timeout.CheckValid(); err != nil {
+			return nil, connectError(connect.CodeInvalidArgument, err)
 		}
+		timeoutSeconds = int64(req.Msg.Timeout.AsDuration() / time.Second)
+	}
+	if req.Msg.TwoFactor.GetAuthorizationToken() != "" {
+		proofTargets := credentialaction.ExecutionTargets(
+			agentIDs,
+			req.Msg.Command,
+			req.Msg.Arguments,
+			req.Msg.Environment,
+			req.Msg.WorkingDirectory,
+			timeoutSeconds,
+			req.Msg.MaxOutputBytes,
+			req.Msg.RunAsRoot,
+		)
 		if err := verifyConnectCredential(ctx, req.Msg.TwoFactor, "execution:create", proofTargets...); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := verifyConnectTwoFactor(meta, req.Msg.TwoFactor); err != nil {
 			return nil, err
 		}
 	}
@@ -202,6 +216,8 @@ func executionError(err error) error {
 		return connectError(connect.CodeNotFound, err)
 	case errors.Is(err, executionapp.ErrForbidden):
 		return connectError(connect.CodePermissionDenied, err)
+	case errors.Is(err, executionapp.ErrIdempotencyConflict):
+		return connectError(connect.CodeAborted, err)
 	case errors.Is(err, executionapp.ErrInvalid), errors.Is(err, executionapp.ErrTerminal):
 		return connectError(connect.CodeFailedPrecondition, err)
 	case errors.Is(err, executionapp.ErrOutput), errors.Is(err, executionapp.ErrTaskLimit):

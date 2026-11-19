@@ -213,6 +213,24 @@ func deleteLegacyClientRows(tx *gorm.DB, clientUUID string) error {
 	return nil
 }
 
+var allowedClientReportFields = map[string]struct{}{
+	"cpu_name":           {},
+	"cpu_cores":          {},
+	"cpu_physical_cores": {},
+	"arch":               {},
+	"os":                 {},
+	"kernel_version":     {},
+	"virtualization":     {},
+	"gpu_name":           {},
+	"mem_total":          {},
+	"swap_total":         {},
+	"disk_total":         {},
+	"ipv4":               {},
+	"ipv6":               {},
+	"version":            {},
+	"region":             {},
+}
+
 func SaveClientInfo(update map[string]interface{}) error {
 	db := dbcore.GetDBInstance()
 	clientUUID, ok := update["uuid"].(string)
@@ -220,12 +238,19 @@ func SaveClientInfo(update map[string]interface{}) error {
 		return fmt.Errorf("invalid client UUID")
 	}
 
+	sanitized := make(map[string]interface{}, len(allowedClientReportFields)+1)
+	for key, value := range update {
+		if _, allowed := allowedClientReportFields[key]; allowed {
+			sanitized[key] = value
+		}
+	}
+
 	// 确保更新的字段不为空
-	if len(update) == 0 {
+	if len(sanitized) == 0 {
 		return fmt.Errorf("no fields to update")
 	}
 
-	update["updated_at"] = time.Now().UTC()
+	sanitized["updated_at"] = time.Now().UTC()
 
 	toFloat64 := func(value interface{}) (float64, bool) {
 		switch typed := value.(type) {
@@ -265,7 +290,7 @@ func SaveClientInfo(update map[string]interface{}) error {
 	}
 
 	checkOptionalInt := func(name, key string, maxValue float64) error {
-		value, exists := update[key]
+		value, exists := sanitized[key]
 		if !exists || value == nil {
 			return nil
 		}
@@ -280,7 +305,7 @@ func SaveClientInfo(update map[string]interface{}) error {
 		return nil
 	}
 
-	verify := func(update map[string]interface{}) error {
+	verify := func() error {
 		if err := checkOptionalInt("Cpu.Cores", "cpu_cores", math.MaxInt-1); err != nil {
 			return err
 		}
@@ -299,11 +324,11 @@ func SaveClientInfo(update map[string]interface{}) error {
 		return nil
 	}
 
-	if err := verify(update); err != nil {
+	if err := verify(); err != nil {
 		return err
 	}
 
-	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(update).Error
+	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(sanitized).Error
 	if err != nil {
 		return err
 	}

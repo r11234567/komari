@@ -47,10 +47,7 @@ func TestExecutionRootSelectionRequiresPermissionAndBoundHumanProof(t *testing.T
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, owner, _ := actionFixture(t)
 			id := rootPolicyNode(t, tc.grant)
-			targets := []string{id}
-			if tc.rootProof {
-				targets = append(targets, "run-as:root")
-			}
+			targets := credentialaction.ExecutionTargets([]string{id}, "id", nil, nil, "", 0, 0, tc.rootProof)
 			token := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("execution:create", targets...))
 			response, err := (&executionService{}).CreateExecution(ctx, connect.NewRequest(&execv1.CreateExecutionRequest{AgentIds: []string{id}, Command: "id", RunAsRoot: tc.requested, TwoFactor: &commonv1.TwoFactorProof{AuthorizationToken: token}}))
 			if !tc.succeeds {
@@ -64,6 +61,43 @@ func TestExecutionRootSelectionRequiresPermissionAndBoundHumanProof(t *testing.T
 			_, _ = executionapp.Cancel(response.Msg.Execution.ExecutionId, "test cleanup")
 		})
 	}
+}
+
+func TestExecutionRejectsTamperedSpecAndIdempotencyConflict(t *testing.T) {
+	ctx, _, _ := actionFixture(t)
+	id := rootPolicyNode(t, false)
+	targets := credentialaction.ExecutionTargets([]string{id}, "echo safe", nil, nil, "", 0, 0, false)
+	token := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("execution:create", targets...))
+
+	// Proof bound to "echo safe" must reject a different command.
+	_, err := (&executionService{}).CreateExecution(ctx, connect.NewRequest(&execv1.CreateExecutionRequest{
+		AgentIds:  []string{id},
+		Command:   "cat /etc/shadow",
+		TwoFactor: &commonv1.TwoFactorProof{AuthorizationToken: token},
+	}))
+	require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+
+	// First execution with idempotency key succeeds.
+	token1 := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("execution:create", targets...))
+	resp1, err := (&executionService{}).CreateExecution(ctx, connect.NewRequest(&execv1.CreateExecutionRequest{
+		AgentIds:       []string{id},
+		Command:        "echo safe",
+		IdempotencyKey: "idem-spec-check-1",
+		TwoFactor:      &commonv1.TwoFactorProof{AuthorizationToken: token1},
+	}))
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = executionapp.Cancel(resp1.Msg.Execution.ExecutionId, "test cleanup") })
+
+	// Same idempotency key with different command must return CodeAborted.
+	otherTargets := credentialaction.ExecutionTargets([]string{id}, "echo different", nil, nil, "", 0, 0, false)
+	token2 := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("execution:create", otherTargets...))
+	_, err = (&executionService{}).CreateExecution(ctx, connect.NewRequest(&execv1.CreateExecutionRequest{
+		AgentIds:       []string{id},
+		Command:        "echo different",
+		IdempotencyKey: "idem-spec-check-1",
+		TwoFactor:      &commonv1.TwoFactorProof{AuthorizationToken: token2},
+	}))
+	require.Equal(t, connect.CodeAborted, connect.CodeOf(err))
 }
 
 func TestRootWorkspaceRejectsDefaultAndRevokesOnWithdrawal(t *testing.T) {

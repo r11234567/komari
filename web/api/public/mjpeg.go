@@ -34,6 +34,10 @@ const (
 	fontPath     = "./data/font.ttf"
 	fontZipEntry = "MiSans/ttf/MiSans-Normal.ttf"
 
+	maxMJPEGStreams  = 16
+	maxFontZipBytes  = 32 << 20 // 32 MiB
+	maxFontFileBytes = 32 << 20 // 32 MiB
+
 	// 渲染参数
 	imageWidth      = 1280
 	headerHeight    = 60
@@ -184,7 +188,11 @@ var (
 	fontReady    bool
 	fontError    error
 	fontMutex    sync.RWMutex
+	fontDrawMu   sync.Mutex
 	fontOnce     sync.Once
+
+	mjpegStreamSem = make(chan struct{}, maxMJPEGStreams)
+	fontHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 	// 基础字体（用于下载时显示）
 	basicFace = basicfont.Face7x13
@@ -316,8 +324,8 @@ func downloadFont() {
 		return
 	}
 
-	// 下载 ZIP
-	resp, err := http.Get(fontURL)
+	// 下载 ZIP（限制超时与最大体积防止资源耗尽）
+	resp, err := fontHTTPClient.Get(fontURL)
 	if err != nil {
 		fontMutex.Lock()
 		fontError = fmt.Errorf("failed to download font: %w", err)
@@ -335,6 +343,12 @@ func downloadFont() {
 		fmt.Printf("[MJPEG] Font download HTTP error: %d\n", resp.StatusCode)
 		return
 	}
+	if resp.ContentLength > maxFontZipBytes {
+		fontMutex.Lock()
+		fontError = fmt.Errorf("font archive exceeds maximum allowed size")
+		fontMutex.Unlock()
+		return
+	}
 
 	downloadMutex.Lock()
 	downloadProgress.Total = resp.ContentLength
@@ -346,7 +360,7 @@ func downloadFont() {
 	lastBytes := int64(0)
 
 	reader := &progressReader{
-		reader: resp.Body,
+		reader: io.LimitReader(resp.Body, maxFontZipBytes+1),
 		onProgress: func(n int64) {
 			downloadMutex.Lock()
 			defer downloadMutex.Unlock()
@@ -365,6 +379,12 @@ func downloadFont() {
 	if _, err := io.Copy(&buf, reader); err != nil {
 		fontMutex.Lock()
 		fontError = fmt.Errorf("failed to download font data: %w", err)
+		fontMutex.Unlock()
+		return
+	}
+	if buf.Len() > maxFontZipBytes {
+		fontMutex.Lock()
+		fontError = fmt.Errorf("font archive exceeds maximum allowed size")
 		fontMutex.Unlock()
 		return
 	}
@@ -404,10 +424,16 @@ func downloadFont() {
 	}
 	defer rc.Close()
 
-	fontData, err := io.ReadAll(rc)
+	fontData, err := io.ReadAll(io.LimitReader(rc, maxFontFileBytes+1))
 	if err != nil {
 		fontMutex.Lock()
 		fontError = fmt.Errorf("failed to read font from zip: %w", err)
+		fontMutex.Unlock()
+		return
+	}
+	if len(fontData) > maxFontFileBytes {
+		fontMutex.Lock()
+		fontError = fmt.Errorf("font file exceeds maximum allowed size")
 		fontMutex.Unlock()
 		return
 	}
@@ -448,6 +474,14 @@ func (r *progressReader) Read(p []byte) (int, error) {
 
 // MjpegLiveHandler 处理 MJPEG 流请求
 func MjpegLiveHandler(c *gin.Context) {
+	select {
+	case mjpegStreamSem <- struct{}{}:
+		defer func() { <-mjpegStreamSem }()
+	default:
+		c.String(http.StatusServiceUnavailable, "too many active MJPEG streams")
+		return
+	}
+
 	initFont()
 
 	// 获取参数
@@ -1272,6 +1306,9 @@ func drawString(img *image.RGBA, s string, x, y int, c color.Color, face font.Fa
 		return
 	}
 
+	// opentype.Face caches glyph state internally and is not safe for concurrent draws.
+	fontDrawMu.Lock()
+	defer fontDrawMu.Unlock()
 	d := &font.Drawer{
 		Dst:  img,
 		Src:  image.NewUniform(c),
@@ -1288,6 +1325,8 @@ func drawCenteredString(img *image.RGBA, s string, centerX, y int, c color.Color
 		return
 	}
 
+	fontDrawMu.Lock()
+	defer fontDrawMu.Unlock()
 	bounds, _ := font.BoundString(face, s)
 	textW := (bounds.Max.X - bounds.Min.X).Ceil()
 	x := centerX - textW/2

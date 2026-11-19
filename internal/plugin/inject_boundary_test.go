@@ -21,11 +21,19 @@ func TestHTMLInjectorLeavesFileDataPlaneUnwrapped(t *testing.T) {
 		"/api/preview/client/fixture/file/download",
 		"/api/clients/transfer/fixture",
 		"/komari.file.v1.FileService/ListDirectory",
+		"/komari.credential.v1.CredentialService/Begin",
+		"/admin",
+		"/admin/settings",
+		"/terminal",
+		"/bind",
+		"/api/admin/settings",
+		"/api/login",
+		"/api/oauth",
 	} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
 		if recorder.Body.String() != "ordinary file contents" {
-			t.Fatal("file bytes changed")
+			t.Fatalf("protected path %q was modified", path)
 		}
 	}
 }
@@ -37,7 +45,7 @@ func TestHTMLInjectorStillAddsOrdinaryPageMetadata(t *testing.T) {
 		_, _ = w.Write([]byte("<html><head></head><body>Application</body></html>"))
 	}))
 	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/admin", nil))
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
 	if !strings.Contains(recorder.Body.String(), `<meta name="fixture" content="enabled"></head>`) {
 		t.Fatal("normal page metadata injection missing")
 	}

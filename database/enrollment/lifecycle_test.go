@@ -89,7 +89,7 @@ func TestCredentialLifecycleRecoveryCleanupKeepsReuseDetection(t *testing.T) {
 	var count int64
 	require.NoError(t, db.Model(&models.AgentRefreshUse{}).Count(&count).Error)
 	require.EqualValues(t, 1, count)
-	_, err = rotateVerifiedDB(context.Background(), db, record, token, uuid.NewString(), nil, 2, func() time.Time { return now.Add(2 * time.Minute) })
+	_, err = rotateVerifiedDB(context.Background(), db, record, token, uuid.NewString(), nil, 2, func() time.Time { return now.Add(RefreshRecoveryWindow + time.Minute) })
 	require.ErrorIs(t, err, ErrRefreshReuse)
 	require.NoError(t, cleanupLifecycleDB(context.Background(), db, now.Add(181*credentialDay)))
 	require.NoError(t, db.Model(&models.AgentRefreshUse{}).Count(&count).Error)

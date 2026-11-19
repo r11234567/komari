@@ -44,17 +44,11 @@ func New(runtime *bridge.Runtime, filesystem *fs.Module, allowExec bool, started
 }
 func (m *Module) Load(vm *moejs.Runtime, module *engine.Object) {
 	process := events.NewEmitter(vm)
-	environment := make(map[string]string)
-	for _, item := range os.Environ() {
-		parts := strings.SplitN(item, "=", 2)
-		if len(parts) == 2 {
-			environment[parts[0]] = parts[1]
-		}
-	}
-	_ = native.Set(vm, process, "env", environment)
-	_ = native.Set(vm, process, "argv", append([]string{os.Args[0], "script.js"}, os.Args[1:]...))
+	// Do not expose host environment variables, binary path, or process flags to sandboxed JS runtimes.
+	_ = native.Set(vm, process, "env", map[string]string{})
+	_ = native.Set(vm, process, "argv", []string{"node", "script.js"})
 	_ = native.Set(vm, process, "execArgv", []string{})
-	_ = native.Set(vm, process, "execPath", os.Args[0])
+	_ = native.Set(vm, process, "execPath", "node")
 	_ = native.Set(vm, process, "pid", os.Getpid())
 	_ = native.Set(vm, process, "ppid", os.Getppid())
 	_ = native.Set(vm, process, "platform", metrics.Platform())
