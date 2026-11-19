@@ -255,12 +255,11 @@ func restoreFilePerm(cleanPath string, mode os.FileMode) os.FileMode {
 	}
 	slashed := filepath.ToSlash(cleanPath)
 	if slashed == "secret.key" || strings.HasPrefix(slashed, "plugin-data/") {
-		perm &= 0o600
-		if perm == 0 {
-			perm = 0o600
-		}
+		return 0o600
 	}
-	return perm
+	// Ensure restored runtime and SQLite files remain owner-writable even if an
+	// external or legacy archive marked them read-only (e.g. 0444).
+	return perm | 0o600
 }
 
 // RestoreStagedBackup validates and applies dataDir/backup.zip atomically.

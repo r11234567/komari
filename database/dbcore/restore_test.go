@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -172,5 +173,97 @@ func TestAutomaticBackupRestoresPortableExportQueueAndFencesOldConnection(t *tes
 	}
 	if !found {
 		t.Fatal("pre-restore safety backup omitted portable export manifest")
+	}
+}
+
+func TestRestoreStagedBackupMakesReadOnlySQLiteWritableAndKeepsPrivateData0600(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	createRestoreSQLite(t, filepath.Join(dataDir, "komari.db"), "old")
+
+	newDB := filepath.Join(root, "readonly-new.db")
+	createRestoreSQLite(t, newDB, "from-readonly-zip")
+
+	// Build a ZIP where komari.db is explicitly marked 0444 (read-only) and
+	// plugin-data/komari-passkey/passkeys.json is marked 0644 (overly permissive).
+	archivePath := filepath.Join(dataDir, "backup.zip")
+	archive, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(archive)
+
+	dbHeader := &zip.FileHeader{Name: "komari.db", Method: zip.Deflate}
+	dbHeader.SetMode(0o444)
+	dbEntry, err := zw.CreateHeader(dbHeader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcDB, err := os.Open(newDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(dbEntry, srcDB); err != nil {
+		srcDB.Close()
+		t.Fatal(err)
+	}
+	srcDB.Close()
+
+	pkHeader := &zip.FileHeader{Name: "plugin-data/komari-passkey/passkeys.json", Method: zip.Deflate}
+	pkHeader.SetMode(0o644)
+	pkEntry, err := zw.CreateHeader(pkHeader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pkEntry.Write([]byte(`{"version":1,"credentials":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	marker, err := zw.Create("komari-backup-markup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := marker.Write([]byte("backup")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RestoreStagedBackup(dataDir); err != nil {
+		t.Fatalf("restore readonly archive: %v", err)
+	}
+
+	if runtime.GOOS != "windows" {
+		dbInfo, err := os.Stat(filepath.Join(dataDir, "komari.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dbInfo.Mode().Perm()&0o600 != 0o600 {
+			t.Fatalf("restored komari.db perm = %04o, must be owner-writable (>=0600)", dbInfo.Mode().Perm())
+		}
+		pkInfo, err := os.Stat(filepath.Join(dataDir, "plugin-data", "komari-passkey", "passkeys.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pkInfo.Mode().Perm() != 0o600 {
+			t.Fatalf("restored passkeys.json perm = %04o, want 0600", pkInfo.Mode().Perm())
+		}
+	}
+
+	// Prove SQLite can actually write to the restored komari.db.
+	db, err := sql.Open("sqlite3", filepath.Join(dataDir, "komari.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO state VALUES ('post-restore-write')`); err != nil {
+		t.Fatalf("write to restored komari.db failed: %v", err)
 	}
 }
