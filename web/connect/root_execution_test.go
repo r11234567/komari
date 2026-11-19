@@ -64,12 +64,12 @@ func TestExecutionRootSelectionRequiresPermissionAndBoundHumanProof(t *testing.T
 }
 
 func TestExecutionRejectsTamperedSpecAndIdempotencyConflict(t *testing.T) {
-	ctx, _, _ := actionFixture(t)
+	ctx, owner, _ := actionFixture(t)
 	id := rootPolicyNode(t, false)
 	targets := credentialaction.ExecutionTargets([]string{id}, "echo safe", nil, nil, "", 0, 0, false)
 	token := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("execution:create", targets...))
 
-	// Proof bound to "echo safe" must reject a different command.
+	// Proof bound to "echo safe" must reject a different command without consuming the grant.
 	_, err := (&executionService{}).CreateExecution(ctx, connect.NewRequest(&execv1.CreateExecutionRequest{
 		AgentIds:  []string{id},
 		Command:   "cat /etc/shadow",
@@ -77,27 +77,26 @@ func TestExecutionRejectsTamperedSpecAndIdempotencyConflict(t *testing.T) {
 	}))
 	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
 
-	// First execution with idempotency key succeeds.
-	token1 := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("execution:create", targets...))
+	// Same unconsumed grant succeeds for the exact bound specification with an idempotency key.
 	resp1, err := (&executionService{}).CreateExecution(ctx, connect.NewRequest(&execv1.CreateExecutionRequest{
 		AgentIds:       []string{id},
 		Command:        "echo safe",
 		IdempotencyKey: "idem-spec-check-1",
-		TwoFactor:      &commonv1.TwoFactorProof{AuthorizationToken: token1},
+		TwoFactor:      &commonv1.TwoFactorProof{AuthorizationToken: token},
 	}))
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = executionapp.Cancel(resp1.Msg.Execution.ExecutionId, "test cleanup") })
 
-	// Same idempotency key with different command must return CodeAborted.
-	otherTargets := credentialaction.ExecutionTargets([]string{id}, "echo different", nil, nil, "", 0, 0, false)
-	token2 := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("execution:create", otherTargets...))
-	_, err = (&executionService{}).CreateExecution(ctx, connect.NewRequest(&execv1.CreateExecutionRequest{
-		AgentIds:       []string{id},
-		Command:        "echo different",
-		IdempotencyKey: "idem-spec-check-1",
-		TwoFactor:      &commonv1.TwoFactorProof{AuthorizationToken: token2},
-	}))
-	require.Equal(t, connect.CodeAborted, connect.CodeOf(err))
+	// Same idempotency key with the exact same spec returns the existing execution.
+	replayExecs, err := executionapp.CreateBatch([]string{id}, owner, "idem-spec-check-1", &execv1.ExecutionSpec{Command: "echo safe"})
+	require.NoError(t, err)
+	require.Len(t, replayExecs, 1)
+	require.Equal(t, resp1.Msg.Execution.ExecutionId, replayExecs[0].ExecutionId)
+
+	// Same idempotency key with a different command must conflict and map to CodeAborted.
+	_, err = executionapp.CreateBatch([]string{id}, owner, "idem-spec-check-1", &execv1.ExecutionSpec{Command: "echo different"})
+	require.ErrorIs(t, err, executionapp.ErrIdempotencyConflict)
+	require.Equal(t, connect.CodeAborted, connect.CodeOf(executionError(err)))
 }
 
 func TestRootWorkspaceRejectsDefaultAndRevokesOnWithdrawal(t *testing.T) {
