@@ -157,6 +157,20 @@ func maxHookBodyLimit(hooks []*hookEntry) int64 {
 	return limit
 }
 
+// filterAllowedHooks removes hooks belonging to plugins not permitted on path.
+func filterAllowedHooks(hooks []*hookEntry, path string) []*hookEntry {
+	if len(hooks) == 0 {
+		return nil
+	}
+	out := make([]*hookEntry, 0, len(hooks))
+	for _, h := range hooks {
+		if pluginAllowedOnPath(path, h.short) {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
 // wrapHandler installs the hook chain around the application handler. WebSocket
 // upgrades pass through untouched because the response cannot be buffered.
 // Hooks with a path/method filter only run for matching requests; unfiltered
@@ -167,8 +181,8 @@ func (m *Manager) wrapHandler(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		reqHooks := filterHooks(m.hooksOf(hookRequest), r)
-		respHooks := filterHooks(m.hooksOf(hookResponse), r)
+		reqHooks := filterAllowedHooks(filterHooks(m.hooksOf(hookRequest), r), r.URL.Path)
+		respHooks := filterAllowedHooks(filterHooks(m.hooksOf(hookResponse), r), r.URL.Path)
 		if len(reqHooks) == 0 && len(respHooks) == 0 {
 			next.ServeHTTP(w, r)
 			return
@@ -189,7 +203,7 @@ func (m *Manager) wrapHandler(next http.Handler) http.Handler {
 					return
 				}
 			}
-			if protectedWorkspacePath(req.URL.Path) {
+			if protectedWorkspacePath(req.URL.Path) || (isLegacyLoginPagePath(req.URL.Path) && !isLegacyLoginPagePath(r.URL.Path)) {
 				http.Error(w, "plugin hooks cannot redirect into the workspace", http.StatusForbidden)
 				return
 			}

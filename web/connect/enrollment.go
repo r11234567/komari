@@ -163,10 +163,62 @@ func (s *enrollmentService) RefreshCredentials(ctx context.Context, req *connect
 	if err != nil {
 		return nil, connectError(connect.CodeUnauthenticated, errors.New("invalid refresh proof or credential"))
 	}
-	issued, err := enrollment.RotateVerified(ctx, record, refreshToken, requestID, expected, protocol)
+	// Resolve the active signing key before opening the rotation DB transaction
+	// so signing inside the transaction never contends on SQLite's single-conn
+	// pool and unavailable signing keys fail before consuming the refresh token.
+	signingKey, signKeyErr := enrollment.ActiveSigningKey()
+	if signKeyErr != nil {
+		return nil, connectError(connect.CodeUnavailable, enrollment.ErrRefreshSigningUnavailable)
+	}
+	buildSignedResponse := func(issued enrollment.Issued) (*enrollmentv1.RefreshCredentialsResponse, error) {
+		creds := &enrollmentv1.AgentCredentials{
+			AgentId:               issued.AgentID,
+			AccessToken:           issued.AccessToken,
+			AccessTokenExpiresAt:  timestamppb.New(issued.AccessTokenExpiresAt),
+			RefreshToken:          issued.RefreshToken,
+			RefreshTokenExpiresAt: timestamppb.New(issued.RefreshTokenExpiresAt),
+			Scopes:                issued.Scopes,
+		}
+		// V2 signs the complete deterministic credential message and binds it to
+		// the request ID and generation. Legacy Agents retain their existing payload.
+		response := &enrollmentv1.RefreshCredentialsResponse{Credentials: creds}
+		payload := []byte(issued.AgentID + "\n" + issued.AccessToken)
+		if protocol == 2 {
+			body, err := proto.MarshalOptions{Deterministic: true}.Marshal(creds)
+			if err != nil {
+				return nil, errors.New("credential response encoding failed")
+			}
+			digest := sha256.Sum256(body)
+			payload, err = json.Marshal(refreshV2Response{Protocol: 2, AgentID: issued.AgentID, RequestID: issued.RequestID, Generation: issued.Generation, CredentialsSHA256: hex.EncodeToString(digest[:])})
+			if err != nil {
+				return nil, err
+			}
+		}
+		sig := ed25519.Sign(signingKey.PrivateKey, payload)
+		response.Proof = &securityv1.SignedEnvelope{Payload: payload, Signatures: []*securityv1.Signature{{Algorithm: securityv1.SignatureAlgorithm(signingKey.Algorithm), Value: sig, KeyId: signingKey.KeyID}}}
+		return response, nil
+	}
+
+	issued, sealedResponseBytes, err := enrollment.RotateVerifiedWithSeal(ctx, record, refreshToken, requestID, expected, protocol, func(candidate enrollment.Issued) ([]byte, error) {
+		resp, err := buildSignedResponse(candidate)
+		if err != nil {
+			return nil, err
+		}
+		return proto.MarshalOptions{Deterministic: true}.Marshal(resp)
+	})
 	if err != nil {
 		if errors.Is(err, enrollment.ErrRefreshConflict) {
 			return nil, connectError(connect.CodeAborted, err)
+		}
+		if errors.Is(err, enrollment.ErrRefreshRecoveryRequired) {
+			rpcErr := connect.NewError(connect.CodeFailedPrecondition, err)
+			if detail, detailErr := connect.NewErrorDetail(&commonv1.ErrorDetail{Code: "REFRESH_RECOVERY_REQUIRED"}); detailErr == nil {
+				rpcErr.AddDetail(detail)
+			}
+			return nil, rpcErr
+		}
+		if errors.Is(err, enrollment.ErrRefreshSigningUnavailable) {
+			return nil, connectError(connect.CodeUnavailable, enrollment.ErrRefreshSigningUnavailable)
 		}
 		if errors.Is(err, enrollment.ErrRefreshReuse) {
 			auditlog.Log("", "", "agent credential chain revoked after authenticated refresh reuse: client="+record.Client, "warn")
@@ -177,36 +229,18 @@ func (s *enrollmentService) RefreshCredentials(ctx context.Context, req *connect
 		return nil, connectError(connect.CodeInternal, errors.New("credential rotation failed"))
 	}
 
-	creds := &enrollmentv1.AgentCredentials{
-		AgentId:               issued.AgentID,
-		AccessToken:           issued.AccessToken,
-		AccessTokenExpiresAt:  timestamppb.New(issued.AccessTokenExpiresAt),
-		RefreshToken:          issued.RefreshToken,
-		RefreshTokenExpiresAt: timestamppb.New(issued.RefreshTokenExpiresAt),
-		Scopes:                issued.Scopes,
+	if len(sealedResponseBytes) > 0 {
+		var response enrollmentv1.RefreshCredentialsResponse
+		if err := proto.Unmarshal(sealedResponseBytes, &response); err != nil {
+			return nil, connectError(connect.CodeInternal, errors.New("stored credential response invalid"))
+		}
+		return connect.NewResponse(&response), nil
 	}
 
-	// V2 signs the complete deterministic credential message and binds it to
-	// the request ID and generation. Legacy Agents retain their existing payload.
-	response := &enrollmentv1.RefreshCredentialsResponse{Credentials: creds}
-	payload := []byte(issued.AgentID + "\n" + issued.AccessToken)
-	if protocol == 2 {
-		body, err := proto.MarshalOptions{Deterministic: true}.Marshal(creds)
-		if err != nil {
-			return nil, connectError(connect.CodeInternal, errors.New("credential response encoding failed"))
-		}
-		digest := sha256.Sum256(body)
-		payload, err = json.Marshal(refreshV2Response{Protocol: 2, AgentID: issued.AgentID, RequestID: issued.RequestID, Generation: issued.Generation, CredentialsSHA256: hex.EncodeToString(digest[:])})
-		if err != nil {
-			return nil, connectError(connect.CodeInternal, err)
-		}
+	response, err := buildSignedResponse(issued)
+	if err != nil {
+		return nil, connectError(connect.CodeInternal, err)
 	}
-	keyID, algorithm, sig, signErr := enrollment.Sign(payload)
-	if signErr != nil {
-		return nil, connectError(connect.CodeInternal, errors.New("credential response signing unavailable; retry same request"))
-	}
-	response.Proof = &securityv1.SignedEnvelope{Payload: payload, Signatures: []*securityv1.Signature{{Algorithm: securityv1.SignatureAlgorithm(algorithm), Value: sig, KeyId: keyID}}}
-
 	return connect.NewResponse(response), nil
 }
 
@@ -281,85 +315,57 @@ func verifyRefreshProof(envelope *securityv1.SignedEnvelope, storedKey, clientUU
 		return errors.New("the refresh proof has no payload")
 	}
 
-	validSig := false
+	var matchedSig []byte
 	for _, signature := range envelope.GetSignatures() {
 		if signature.GetAlgorithm() != securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ED25519 {
 			continue
 		}
 		if ed25519.Verify(ed25519.PublicKey(raw), payload, signature.GetValue()) {
-			sigHash := hex.EncodeToString(signature.GetValue())
-			if !recordAndVerifyNonce("refresh-sig:"+sigHash, 120*time.Second) {
-				return errors.New("the refresh proof signature was already used (replay rejected)")
-			}
-			validSig = true
+			matchedSig = signature.GetValue()
 			break
 		}
 	}
-	if !validSig {
+	if len(matchedSig) == 0 {
 		return errors.New("the refresh proof signature is not valid")
 	}
 
-	// 1. komari-agent standard wire format:
+	// Only accept the canonical komari-refresh-v1 4-line format.
 	// lines[0]: "komari-refresh-v1"
 	// lines[1]: AgentID
 	// lines[2]: RefreshToken
 	// lines[3]: RFC3339 Timestamp
 	lines := strings.Split(string(payload), "\n")
-	if len(lines) >= 4 && lines[0] == "komari-refresh-v1" {
-		agentID := lines[1]
-		token := lines[2]
-		tsStr := lines[3]
+	if len(lines) != 4 || lines[0] != "komari-refresh-v1" {
+		return errors.New("unsupported or malformed refresh proof payload")
+	}
+	agentID := lines[1]
+	token := lines[2]
+	tsStr := lines[3]
 
-		if agentID != clientUUID {
-			return errors.New("the refresh proof agent ID does not match this agent")
-		}
-		if token != expectedRefreshToken {
-			return errors.New("the refresh proof token does not match the presented refresh token")
-		}
-		t, err := time.Parse(time.RFC3339, tsStr)
-		if err != nil {
-			return errors.New("invalid timestamp in refresh proof")
-		}
-		if math.Abs(time.Since(t).Seconds()) > 120 {
-			return errors.New("the refresh proof timestamp drift exceeds allowed window (120s)")
-		}
-		return nil
+	if agentID != clientUUID {
+		return errors.New("the refresh proof agent ID does not match this agent")
 	}
-
-	// 2. Structured JSON payload (e.g. RefreshProofPayload / SignedInstruction)
-	var proofObj struct {
-		AgentID      string `json:"agent_id"`
-		RefreshToken string `json:"refresh_token"`
-		Timestamp    string `json:"timestamp"`
-		Nonce        string `json:"nonce"`
+	if token != expectedRefreshToken {
+		return errors.New("the refresh proof token does not match the presented refresh token")
 	}
-	if err := json.Unmarshal(payload, &proofObj); err == nil && proofObj.AgentID != "" {
-		if proofObj.AgentID != clientUUID {
-			return errors.New("the refresh proof agent ID does not match this agent")
-		}
-		if proofObj.RefreshToken != "" && proofObj.RefreshToken != expectedRefreshToken {
-			return errors.New("the refresh proof token does not match the presented refresh token")
-		}
-		if proofObj.Timestamp != "" {
-			t, err := time.Parse(time.RFC3339, proofObj.Timestamp)
-			if err == nil && math.Abs(time.Since(t).Seconds()) > 120 {
-				return errors.New("the refresh proof timestamp drift exceeds allowed window (120s)")
-			}
-		}
-		if proofObj.Nonce != "" && !recordAndVerifyNonce("proof-nonce:"+proofObj.Nonce, 120*time.Second) {
-			return errors.New("the refresh proof nonce was already used (replay rejected)")
-		}
-		return nil
+	t, err := time.Parse(time.RFC3339, tsStr)
+	if err != nil {
+		return errors.New("invalid timestamp in refresh proof")
 	}
-
-	// 3. Fallback: must at least contain both clientUUID and expectedRefreshToken
-	if !strings.Contains(string(payload), clientUUID) {
-		return errors.New("the refresh proof does not match this agent")
+	if math.Abs(time.Since(t).Seconds()) > 120 {
+		return errors.New("the refresh proof timestamp drift exceeds allowed window (120s)")
 	}
-	if !strings.Contains(string(payload), expectedRefreshToken) {
-		return errors.New("the refresh proof does not match the presented refresh token")
+	// Consume signature replay entry only after full validation succeeds, and
+	// retain it at least until the signed timestamp window expires.
+	sigDigest := sha256.Sum256(matchedSig)
+	sigHash := hex.EncodeToString(sigDigest[:])
+	replayTTL := time.Until(t.Add(125 * time.Second))
+	if replayTTL < 120*time.Second {
+		replayTTL = 120 * time.Second
 	}
-
+	if !refreshReplayCache.CheckAndRecord(clientUUID, "refresh-sig:"+sigHash, replayTTL) {
+		return errors.New("the refresh proof signature was already used (replay rejected)")
+	}
 	return nil
 }
 

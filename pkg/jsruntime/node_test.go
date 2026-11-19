@@ -931,6 +931,79 @@ func TestEvalRemainsInterruptible(t *testing.T) {
 	}
 }
 
+func TestChildProcessDefaultEnvDoesNotLeakHostSecretsAndBlockPrivateNetBlocksLoopback(t *testing.T) {
+	t.Setenv("KOMARI_SECRET_KEY", "super-secret-host-key")
+	cmd := "printf '%s' \"$KOMARI_SECRET_KEY\""
+	if runtime.GOOS == "windows" {
+		cmd = "if defined KOMARI_SECRET_KEY (echo LEAKED) else (echo CLEAN)"
+	}
+	r, err := New(`
+		function verify(command) {
+			const cp = require("child_process");
+			const out = cp.execSync(command, { encoding: "utf8" }).trim();
+			return out === "" || out === "CLEAN";
+		}
+	`, Options{NodeJS: true, AllowExec: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if err := r.Call("verify", cmd); err != nil {
+		t.Fatalf("child_process default env leaked host secret: %v", err)
+	}
+
+	// BlockPrivateNet must forbid outbound TCP connections to loopback/private IPs.
+	netRT, err := New(`
+		async function verify() {
+			const net = require("net");
+			return await new Promise((resolve) => {
+				const sock = net.connect({ host: "127.0.0.1", port: 9 });
+				sock.on("connect", () => { sock.destroy(); resolve(false); });
+				sock.on("error", (err) => resolve(String(err).includes("forbidden")));
+			});
+		}
+	`, Options{NodeJS: true, BlockPrivateNet: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer netRT.Close()
+	if err := netRT.Call("verify"); err != nil {
+		t.Fatalf("BlockPrivateNet did not block loopback TCP: %v", err)
+	}
+
+	// BlockPrivateNet must also block fetch and XMLHttpRequest to loopback/private hosts.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("secret-local-response"))
+	}))
+	defer server.Close()
+
+	httpBlockedRT, err := New(`
+		async function verifyFetchAndXHR(targetUrl) {
+			let fetchBlocked = false;
+			try {
+				await fetch(targetUrl);
+			} catch (err) {
+				fetchBlocked = String(err).includes("forbidden");
+			}
+			const xhrBlocked = await new Promise((resolve) => {
+				const xhr = new XMLHttpRequest();
+				xhr.open("GET", targetUrl, true);
+				xhr.onload = () => resolve(false);
+				xhr.onerror = () => resolve(true);
+				xhr.send();
+			});
+			return fetchBlocked && xhrBlocked;
+		}
+	`, Options{NodeJS: true, BlockPrivateNet: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer httpBlockedRT.Close()
+	if err := httpBlockedRT.Call("verifyFetchAndXHR", server.URL); err != nil {
+		t.Fatalf("BlockPrivateNet did not block loopback fetch/XHR: %v", err)
+	}
+}
+
 const childHelperModeEnvironment = "KOMARI_JSRUNTIME_CHILD_HELPER_MODE"
 
 func childHelperEnvironment(mode string) map[string]string {

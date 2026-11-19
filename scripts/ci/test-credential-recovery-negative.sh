@@ -23,6 +23,7 @@ from pathlib import Path
 p=Path('ci-artifacts/credential-broken-recovery-go/tests.jsonl')
 events=[json.loads(line) for line in p.read_text().splitlines() if line.strip()]
 assert any(e.get('Action')=='fail' and e.get('Test')=='TestCredentialRotationRecoversAfterDatabaseReopen' for e in events), 'Compile errors do not count as a negative control'
-assert 'consumed refresh credential reused' in ''.join(e.get('Output','') for e in events)
+output = ''.join(e.get('Output','') for e in events)
+assert ('refresh recovery window expired' in output or 'consumed refresh credential reused' in output)
 print('Broken recovery produced the expected assertion failure; complete logs retained.')
 PY

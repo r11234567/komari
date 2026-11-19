@@ -162,8 +162,24 @@ func (m *Module) childCommandArguments(vm *moejs.Runtime, args []moejs.Value, ca
 	_ = callbackExpected
 	return command, arguments, options
 }
+func minimalChildEnv() []string {
+	var allowed []string
+	if runtime.GOOS == "windows" {
+		allowed = []string{"SYSTEMROOT", "COMSPEC", "WINDIR", "TEMP", "TMP", "PATH"}
+	} else {
+		allowed = []string{"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"}
+	}
+	env := make([]string, 0, len(allowed))
+	for _, key := range allowed {
+		if value, ok := os.LookupEnv(key); ok {
+			env = append(env, key+"="+value)
+		}
+	}
+	return env
+}
+
 func (m *Module) childOptions(vm *moejs.Runtime, value moejs.Value) childCommandOptions {
-	options := childCommandOptions{cwd: m.filesystem.Cwd(), env: os.Environ(), maxBuffer: m.maxOutput}
+	options := childCommandOptions{cwd: m.filesystem.Cwd(), env: minimalChildEnv(), maxBuffer: m.maxOutput}
 	if native.IsNil(value) || value.IsUndefined() || value.IsNull() {
 		return options
 	}

@@ -72,7 +72,10 @@ func (s *maintenanceService) DeleteSession(ctx context.Context, req *connect.Req
 	return connect.NewResponse(&adminv1.DeleteSessionResponse{}), nil
 }
 
-func (s *maintenanceService) DeleteAllSessions(ctx context.Context, _ *connect.Request[adminv1.DeleteAllSessionsRequest]) (*connect.Response[adminv1.DeleteAllSessionsResponse], error) {
+func (s *maintenanceService) DeleteAllSessions(ctx context.Context, req *connect.Request[adminv1.DeleteAllSessionsRequest]) (*connect.Response[adminv1.DeleteAllSessionsResponse], error) {
+	if err := verifyConnectHeaderCredential(ctx, req.Header(), "maintenance:delete_all_sessions"); err != nil {
+		return nil, err
+	}
 	if err := accounts.DeleteAllSessions(); err != nil {
 		return nil, connectError(connect.CodeInternal, err)
 	}
@@ -111,6 +114,9 @@ func (s *maintenanceService) ListAuditLogs(_ context.Context, req *connect.Reque
 }
 
 func (s *maintenanceService) ClearRecords(ctx context.Context, req *connect.Request[adminv1.ClearRecordsRequest]) (*connect.Response[adminv1.ClearRecordsResponse], error) {
+	if err := verifyConnectHeaderCredential(ctx, req.Header(), "maintenance:clear_records"); err != nil {
+		return nil, err
+	}
 	if err := records.DeleteAll(); err != nil {
 		return nil, connectError(connect.CodeInternal, err)
 	}
@@ -129,7 +135,10 @@ func (s *maintenanceService) GetDatabaseStatus(ctx context.Context, _ *connect.R
 	return connect.NewResponse(&adminv1.GetDatabaseStatusResponse{Status: databaseToProto(jsonRpc.DatabaseStatus(ctx))}), nil
 }
 
-func (s *maintenanceService) VacuumDatabase(ctx context.Context, _ *connect.Request[adminv1.VacuumDatabaseRequest]) (*connect.Response[adminv1.VacuumDatabaseResponse], error) {
+func (s *maintenanceService) VacuumDatabase(ctx context.Context, req *connect.Request[adminv1.VacuumDatabaseRequest]) (*connect.Response[adminv1.VacuumDatabaseResponse], error) {
+	if err := verifyConnectHeaderCredential(ctx, req.Header(), "maintenance:vacuum_database"); err != nil {
+		return nil, err
+	}
 	report, err := jsonRpc.VacuumDatabases(ctx)
 	if errors.Is(err, jsonRpc.ErrDatabaseMaintenanceBusy) {
 		return nil, connectError(connect.CodeAborted, err)

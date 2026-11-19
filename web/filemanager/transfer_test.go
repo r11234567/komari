@@ -256,6 +256,32 @@ func TestPreviewTokenLifecycle(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("PreviewDownload with expired token code = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
+
+	// 5. Token expires after previewTokenMaxUses is exhausted and TTL is bounded to 2 minutes
+	if previewTokenTTL != 2*time.Minute {
+		t.Fatalf("previewTokenTTL = %s, want 2m", previewTokenTTL)
+	}
+	previewTokenMu.Lock()
+	previewTokens["single-use-token"] = previewToken{
+		ClientUUID:    "client-1",
+		Path:          "/etc/hosts",
+		ExpiresAt:     time.Now().Add(previewTokenTTL),
+		RemainingUses: 1,
+	}
+	previewTokenMu.Unlock()
+
+	// First use consumes the last remaining use (grant is nil so it returns 401, but token must be evicted)
+	rec = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "uuid", Value: "client-1"}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/preview?preview_token=single-use-token", nil)
+	PreviewDownload(c)
+	previewTokenMu.Lock()
+	_, stillPresent := previewTokens["single-use-token"]
+	previewTokenMu.Unlock()
+	if stillPresent {
+		t.Fatal("preview token was not evicted after exhausting RemainingUses")
+	}
 }
 
 func TestCancelUploadReleasesSlot(t *testing.T) {

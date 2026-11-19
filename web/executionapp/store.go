@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	execv1 "github.com/r11234567/komari-proto/gen/go/komari/exec/v1"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
@@ -32,12 +33,13 @@ const (
 )
 
 var (
-	ErrNotFound  = errors.New("execution not found")
-	ErrForbidden = errors.New("execution is owned by another user")
-	ErrInvalid   = errors.New("invalid execution event")
-	ErrOutput    = errors.New("execution output limit exceeded")
-	ErrTaskLimit = errors.New("too many active executions")
-	ErrTerminal  = errors.New("execution already reached a terminal state")
+	ErrNotFound            = errors.New("execution not found")
+	ErrForbidden           = errors.New("execution is owned by another user")
+	ErrInvalid             = errors.New("invalid execution event")
+	ErrOutput              = errors.New("execution output limit exceeded")
+	ErrTaskLimit           = errors.New("too many active executions")
+	ErrTerminal            = errors.New("execution already reached a terminal state")
+	ErrIdempotencyConflict = errors.New("idempotency key already used with different execution parameters")
 )
 
 type Task struct {
@@ -48,6 +50,7 @@ type Task struct {
 	OwnerID        string
 	AssignmentID   string
 	IdempotencyKey string
+	SpecDigest     string
 	Spec           *execv1.ExecutionSpec
 	Execution      *execv1.Execution
 	LeaseExpiresAt time.Time
@@ -86,6 +89,15 @@ func CreateBatch(agentIDs []string, ownerID, idempotencyKey string, spec *execv1
 	if err != nil {
 		return nil, err
 	}
+	specDigest := credentialaction.ExecutionSpecDigest(
+		normalized.Command,
+		normalized.Arguments,
+		normalized.Environment,
+		normalized.WorkingDirectory,
+		int64(normalized.Timeout.AsDuration()/time.Second),
+		normalized.MaxOutputBytes,
+		normalized.RunAsRoot,
+	)
 	store.Lock()
 	defer store.Unlock()
 	pruneLocked(time.Now().UTC())
@@ -101,6 +113,9 @@ func CreateBatch(agentIDs []string, ownerID, idempotencyKey string, spec *execv1
 			found := false
 			for _, existing := range store.values {
 				if existing.AgentID == agentID && existing.OwnerID == ownerID && existing.IdempotencyKey == idempotencyKey {
+					if existing.SpecDigest != specDigest {
+						return nil, ErrIdempotencyConflict
+					}
 					existing.mu.Lock()
 					results = append(results, cloneExecution(existing.Execution))
 					existing.mu.Unlock()
@@ -115,7 +130,7 @@ func CreateBatch(agentIDs []string, ownerID, idempotencyKey string, spec *execv1
 		now := time.Now().UTC()
 		id := uuid.NewString()
 		task := &Task{
-			ID: id, AgentID: agentID, OwnerID: ownerID, AssignmentID: uuid.NewString(), IdempotencyKey: idempotencyKey,
+			ID: id, AgentID: agentID, OwnerID: ownerID, AssignmentID: uuid.NewString(), IdempotencyKey: idempotencyKey, SpecDigest: specDigest,
 			Spec: cloneSpec(normalized), Execution: &execv1.Execution{ExecutionId: id, AgentId: agentID, State: commonv1.OperationState_OPERATION_STATE_QUEUED, CreatedAt: timestamppb.New(now)},
 			notify: make(chan struct{}),
 		}
@@ -384,7 +399,7 @@ func (task *Task) appendTerminalLocked(state commonv1.OperationState, exitCode *
 	task.signalLocked()
 }
 
-func normalizeSpec(spec *execv1.ExecutionSpec) (*execv1.ExecutionSpec, error) {
+func NormalizeSpec(spec *execv1.ExecutionSpec) (*execv1.ExecutionSpec, error) {
 	if spec == nil || strings.TrimSpace(spec.Command) == "" {
 		return nil, errors.New("command is required")
 	}
@@ -398,8 +413,8 @@ func normalizeSpec(spec *execv1.ExecutionSpec) (*execv1.ExecutionSpec, error) {
 		}
 		timeout = spec.Timeout.AsDuration()
 	}
-	if timeout <= 0 || timeout > maximumTimeout {
-		return nil, fmt.Errorf("execution timeout must be between 1s and %s", maximumTimeout)
+	if timeout < time.Second || timeout > maximumTimeout || timeout%time.Second != 0 {
+		return nil, fmt.Errorf("execution timeout must be a whole number of seconds between 1s and %s", maximumTimeout)
 	}
 	maxOutput := spec.MaxOutputBytes
 	if maxOutput == 0 {
@@ -413,6 +428,10 @@ func normalizeSpec(spec *execv1.ExecutionSpec) (*execv1.ExecutionSpec, error) {
 	result.Timeout = durationpb.New(timeout)
 	result.MaxOutputBytes = maxOutput
 	return result, nil
+}
+
+func normalizeSpec(spec *execv1.ExecutionSpec) (*execv1.ExecutionSpec, error) {
+	return NormalizeSpec(spec)
 }
 
 func displayCommand(spec *execv1.ExecutionSpec) string {

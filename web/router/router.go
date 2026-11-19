@@ -60,7 +60,7 @@ func registerPublicRoutes(r *gin.Engine) {
 	r.POST("/api/login", public_api.Login)
 	r.POST("/api/bind/ticket", public_api.RequestBindTicket)
 	r.POST("/api/public/bind/ticket", public_api.RequestBindTicket)
-	r.GET("/api/logout", public_api.Logout)
+	r.POST("/api/logout", public_api.Logout)
 	r.GET("/api/oauth", public_api.OAuth)
 	r.GET("/api/oauth_callback", public_api.OAuthCallback)
 	r.GET("/api/mjpeg_live", public_api.MjpegLiveHandler)
@@ -127,8 +127,8 @@ func registerAdminRoutes(r *gin.Engine) func() error {
 	closeExports := admin.RegisterHistoryExportRoutes(g)
 
 	// --- 二进制/流/重定向类，保留 REST handler ---
-	g.GET("/download/backup", admin.DownloadBackup)
-	g.POST("/upload/backup", admin.UploadBackup)
+	g.GET("/download/backup", api.RequireSensitive2FA(), admin.DownloadBackup)
+	g.POST("/upload/backup", api.RequireSensitive2FA(), admin.UploadBackup)
 	archiveUpload := admin.NewArchiveUploadHandler()
 	uploads := g.Group("/upload")
 	uploads.POST("/init", archiveUpload.Init)
@@ -151,7 +151,7 @@ func registerAdminRoutes(r *gin.Engine) func() error {
 		theme.PUT("/upload", admin.UploadTheme)
 		theme.GET("/list", admin.ListThemes)
 		theme.POST("/delete", admin.DeleteTheme)
-		theme.GET("/set", admin.SetTheme)
+		theme.POST("/set", admin.SetTheme)
 		theme.POST("/update", admin.UpdateTheme)
 		theme.POST("/import", admin.ImportTheme)
 		theme.POST("/settings", admin.UpdateThemeSettings)
@@ -166,18 +166,18 @@ func registerAdminRoutes(r *gin.Engine) func() error {
 	// 2FA 含二维码 PNG / 敏感操作，保留 REST handler。
 	twoFactor := g.Group("/2fa")
 	{
-		twoFactor.GET("/generate", admin.Generate2FA)
+		twoFactor.POST("/generate", admin.Generate2FA)
 		twoFactor.POST("/enable", admin.Enable2FA)
 		twoFactor.POST("/disable", api.RequireSensitive2FA(), admin.Disable2FA)
 		twoFactor.POST("/verify", api.RequireSensitive2FA(), admin.Verify2FA)
 		twoFactor.POST("/sign-on", api.RequireSensitive2FA(), admin.UnlockSignOn)
 	}
 
-	// oauth2 绑定走重定向，保留 REST handler。
+	// oauth2 绑定/解绑需二次验证，保留 REST handler。
 	oauth2 := g.Group("/oauth2")
 	{
-		oauth2.GET("/bind", admin.BindingExternalAccount)
-		oauth2.POST("/unbind", admin.UnbindExternalAccount)
+		oauth2.POST("/bind", api.RequireSensitive2FA(), admin.BindingExternalAccount)
+		oauth2.POST("/unbind", api.RequireSensitive2FA(), admin.UnbindExternalAccount)
 	}
 
 	// --- 以下全部 JSON -> RPC2 ---
