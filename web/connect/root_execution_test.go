@@ -2,6 +2,7 @@ package connectapi
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,6 +120,57 @@ func TestExecutionAcceptsWebDefaultTimeoutAndOutputSpec(t *testing.T) {
 	task, err := executionapp.GetOwned(resp.Msg.Execution.ExecutionId, owner)
 	require.NoError(t, err)
 	require.Equal(t, "uname -a", task.Spec.Command)
+	_, _ = executionapp.Cancel(resp.Msg.Execution.ExecutionId, "test cleanup")
+}
+
+func TestExecutionValidatesSpecBeforeConsumingAuthorization(t *testing.T) {
+	ctx, _, _ := actionFixture(t)
+	id := rootPolicyNode(t, false)
+	targets := credentialaction.ExecutionTargets([]string{id}, "echo ok", nil, nil, "", 300, 1<<20, false)
+	token := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("execution:create", targets...))
+
+	// Invalid specs (oversized command, sub-second timeout, fractional timeout,
+	// oversized output cap) must fail with InvalidArgument BEFORE consuming the ticket.
+	invalidRequests := []*execv1.CreateExecutionRequest{
+		{
+			AgentIds:  []string{id},
+			Command:   strings.Repeat("a", 5000),
+			TwoFactor: &commonv1.TwoFactorProof{AuthorizationToken: token},
+		},
+		{
+			AgentIds:  []string{id},
+			Command:   "echo ok",
+			Timeout:   durationpb.New(500 * time.Millisecond),
+			TwoFactor: &commonv1.TwoFactorProof{AuthorizationToken: token},
+		},
+		{
+			AgentIds:  []string{id},
+			Command:   "echo ok",
+			Timeout:   durationpb.New(1500 * time.Millisecond),
+			TwoFactor: &commonv1.TwoFactorProof{AuthorizationToken: token},
+		},
+		{
+			AgentIds:       []string{id},
+			Command:        "echo ok",
+			MaxOutputBytes: 64 << 20,
+			TwoFactor:      &commonv1.TwoFactorProof{AuthorizationToken: token},
+		},
+	}
+	for _, invalidReq := range invalidRequests {
+		_, err := (&executionService{}).CreateExecution(ctx, connect.NewRequest(invalidReq))
+		require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	}
+
+	// Because none of the invalid requests consumed the single-use ticket, the
+	// matching valid execution request still succeeds.
+	resp, err := (&executionService{}).CreateExecution(ctx, connect.NewRequest(&execv1.CreateExecutionRequest{
+		AgentIds:       []string{id},
+		Command:        "echo ok",
+		Timeout:        durationpb.New(5 * time.Minute),
+		MaxOutputBytes: 1 << 20,
+		TwoFactor:      &commonv1.TwoFactorProof{AuthorizationToken: token},
+	}))
+	require.NoError(t, err)
 	_, _ = executionapp.Cancel(resp.Msg.Execution.ExecutionId, "test cleanup")
 }
 

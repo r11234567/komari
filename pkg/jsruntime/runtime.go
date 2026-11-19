@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -82,8 +83,9 @@ type Options struct {
 	// AllowListen allows net and http servers to bind local ports. Outbound
 	// client connections do not require this permission.
 	AllowListen bool
-	// BlockPrivateNet blocks outbound net/tls TCP connections to loopback,
-	// private (RFC1918/ULA), link-local, and non-global-unicast addresses.
+	// BlockPrivateNet blocks outbound net, tls, fetch, XMLHttpRequest, and
+	// HTTP client connections to loopback, private (RFC1918/ULA/CGNAT),
+	// link-local, and non-global-unicast addresses.
 	BlockPrivateNet bool
 	// AllowAllFileAccess allows require and fs paths to escape BaseDir. The
 	// default confines both module and filesystem access to BaseDir.
@@ -153,6 +155,9 @@ func New(script string, options Options) (*Runtime, error) {
 	client := options.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: timeout}
+	}
+	if options.BlockPrivateNet {
+		client = cloneClientWithPrivateNetBlock(client)
 	}
 
 	baseDir, err := resolveBaseDir(options.BaseDir)
@@ -622,4 +627,34 @@ func truthyResult(name string, v moe.Value) error {
 		return nil
 	}
 	return fmt.Errorf("%s returned false", name)
+}
+
+func cloneClientWithPrivateNetBlock(base *http.Client) *http.Client {
+	cloned := *base
+	var transport *http.Transport
+	switch existing := base.Transport.(type) {
+	case nil:
+		if dt, ok := http.DefaultTransport.(*http.Transport); ok {
+			transport = dt.Clone()
+		} else {
+			transport = &http.Transport{}
+		}
+	case *http.Transport:
+		transport = existing.Clone()
+	default:
+		// Preserve non-Transport custom RoundTrippers (e.g. test doubles) only
+		// when callers explicitly supplied one; otherwise replace with a guarded transport.
+		return &cloned
+	}
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   netmodule.RejectPrivateAddress,
+	}
+	transport.DialContext = dialer.DialContext
+	transport.DialTLSContext = nil
+	// Clear ambient HTTP_PROXY so requests cannot tunnel to private targets via a local proxy.
+	transport.Proxy = nil
+	cloned.Transport = transport
+	return &cloned
 }

@@ -68,11 +68,22 @@ func (s *executionService) CreateExecution(ctx context.Context, req *connect.Req
 			return nil, connectError(connect.CodeFailedPrecondition, errors.New("agent is offline or does not support Connect execution: "+agentID))
 		}
 	}
+	spec := &execv1.ExecutionSpec{
+		Command:          req.Msg.Command,
+		Arguments:        req.Msg.Arguments,
+		Environment:      req.Msg.Environment,
+		WorkingDirectory: req.Msg.WorkingDirectory,
+		Timeout:          req.Msg.Timeout,
+		MaxOutputBytes:   req.Msg.MaxOutputBytes,
+		RunAsRoot:        req.Msg.RunAsRoot,
+	}
+	// Validate command length, argument count, whole-second timeout bounds, and
+	// output limit BEFORE consuming the single-use authorization ticket or TOTP.
+	if _, err := executionapp.NormalizeSpec(spec); err != nil {
+		return nil, connectError(connect.CodeInvalidArgument, err)
+	}
 	var timeoutSeconds int64
 	if req.Msg.Timeout != nil {
-		if err := req.Msg.Timeout.CheckValid(); err != nil {
-			return nil, connectError(connect.CodeInvalidArgument, err)
-		}
 		timeoutSeconds = int64(req.Msg.Timeout.AsDuration() / time.Second)
 	}
 	if req.Msg.TwoFactor.GetAuthorizationToken() != "" {
@@ -94,11 +105,7 @@ func (s *executionService) CreateExecution(ctx context.Context, req *connect.Req
 			return nil, err
 		}
 	}
-	executions, err := executionapp.CreateBatch(agentIDs, ownerID, req.Msg.IdempotencyKey, &execv1.ExecutionSpec{
-		Command: req.Msg.Command, Arguments: req.Msg.Arguments, Environment: req.Msg.Environment,
-		WorkingDirectory: req.Msg.WorkingDirectory, Timeout: req.Msg.Timeout, MaxOutputBytes: req.Msg.MaxOutputBytes,
-		RunAsRoot: req.Msg.RunAsRoot,
-	})
+	executions, err := executionapp.CreateBatch(agentIDs, ownerID, req.Msg.IdempotencyKey, spec)
 	if err != nil {
 		return nil, executionError(err)
 	}

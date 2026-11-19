@@ -399,7 +399,7 @@ func (task *Task) appendTerminalLocked(state commonv1.OperationState, exitCode *
 	task.signalLocked()
 }
 
-func normalizeSpec(spec *execv1.ExecutionSpec) (*execv1.ExecutionSpec, error) {
+func NormalizeSpec(spec *execv1.ExecutionSpec) (*execv1.ExecutionSpec, error) {
 	if spec == nil || strings.TrimSpace(spec.Command) == "" {
 		return nil, errors.New("command is required")
 	}
@@ -413,8 +413,8 @@ func normalizeSpec(spec *execv1.ExecutionSpec) (*execv1.ExecutionSpec, error) {
 		}
 		timeout = spec.Timeout.AsDuration()
 	}
-	if timeout <= 0 || timeout > maximumTimeout {
-		return nil, fmt.Errorf("execution timeout must be between 1s and %s", maximumTimeout)
+	if timeout < time.Second || timeout > maximumTimeout || timeout%time.Second != 0 {
+		return nil, fmt.Errorf("execution timeout must be a whole number of seconds between 1s and %s", maximumTimeout)
 	}
 	maxOutput := spec.MaxOutputBytes
 	if maxOutput == 0 {
@@ -428,6 +428,10 @@ func normalizeSpec(spec *execv1.ExecutionSpec) (*execv1.ExecutionSpec, error) {
 	result.Timeout = durationpb.New(timeout)
 	result.MaxOutputBytes = maxOutput
 	return result, nil
+}
+
+func normalizeSpec(spec *execv1.ExecutionSpec) (*execv1.ExecutionSpec, error) {
+	return NormalizeSpec(spec)
 }
 
 func displayCommand(spec *execv1.ExecutionSpec) string {

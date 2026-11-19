@@ -43,7 +43,12 @@ func New(runtime *bridge.Runtime, allowListen bool, blockPrivateNet bool) *Modul
 	return &Module{runtime: runtime, allowListen: allowListen, blockPrivateNet: blockPrivateNet}
 }
 
-func rejectPrivateAddress(_, address string, _ syscall.RawConn) error {
+var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
+
+// RejectPrivateAddress is a net.Dialer.Control callback that blocks outbound
+// connections to loopback, RFC1918/ULA private, CGNAT, link-local, multicast,
+// and unspecified addresses.
+func RejectPrivateAddress(_, address string, _ syscall.RawConn) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return fmt.Errorf("outbound connection blocked: invalid target address")
@@ -53,7 +58,7 @@ func rejectPrivateAddress(_, address string, _ syscall.RawConn) error {
 		return fmt.Errorf("outbound connection blocked: invalid target IP")
 	}
 	addr = addr.Unmap()
-	if !addr.IsGlobalUnicast() || addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
+	if !addr.IsGlobalUnicast() || addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() || cgnatPrefix.Contains(addr) {
 		return fmt.Errorf("outbound connection to private or loopback address %s is forbidden", addr)
 	}
 	return nil
@@ -63,7 +68,7 @@ func rejectPrivateAddress(_, address string, _ syscall.RawConn) error {
 func (m *Module) DialContext(ctx context.Context, host string, port int) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: m.runtime.Timeout()}
 	if m.blockPrivateNet {
-		dialer.Control = rejectPrivateAddress
+		dialer.Control = RejectPrivateAddress
 	}
 	return dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 }
