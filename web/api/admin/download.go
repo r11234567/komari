@@ -95,22 +95,30 @@ func parseBackupScope(raw string) (backupScope, error) {
 	}
 }
 
-func copyFile(srcPath, destPath string) error {
+func copyFile(srcPath, destPath string, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return fmt.Errorf("create parent directory: %w", err)
+	}
+	perm := mode.Perm()
+	if perm == 0 {
+		perm = 0o644
 	}
 	src, err := os.Open(srcPath)
 	if err != nil {
 		return fmt.Errorf("open source file: %w", err)
 	}
 	defer src.Close()
-	dest, err := os.Create(destPath)
+	dest, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
 		return fmt.Errorf("create destination file: %w", err)
 	}
-	defer dest.Close()
 	if _, err := io.Copy(dest, src); err != nil {
+		dest.Close()
 		return fmt.Errorf("copy file: %w", err)
+	}
+	_ = dest.Chmod(perm)
+	if err := dest.Close(); err != nil {
+		return fmt.Errorf("close destination file: %w", err)
 	}
 	return nil
 }
@@ -120,7 +128,7 @@ func copyDir(srcDir, destDir string) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
+		if !info.IsDir() && !info.Mode().IsRegular() {
 			return nil
 		}
 		relative, err := filepath.Rel(srcDir, path)
@@ -134,7 +142,7 @@ func copyDir(srcDir, destDir string) error {
 		if info.IsDir() {
 			return os.MkdirAll(destination, 0o755)
 		}
-		return copyFile(path, destination)
+		return copyFile(path, destination, info.Mode())
 	})
 }
 
@@ -156,7 +164,7 @@ func copyPersistentFilesFrom(dataDir, contentDir string, scope backupScope) erro
 		if err != nil {
 			return fmt.Errorf("inspect persistent file %s: %w", relative, err)
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
+		if !info.IsDir() && !info.Mode().IsRegular() {
 			continue
 		}
 		destination := filepath.Join(contentDir, relative)
@@ -166,7 +174,7 @@ func copyPersistentFilesFrom(dataDir, contentDir string, scope backupScope) erro
 			}
 			continue
 		}
-		if err := copyFile(source, destination); err != nil {
+		if err := copyFile(source, destination, info.Mode()); err != nil {
 			return fmt.Errorf("copy persistent file %s: %w", relative, err)
 		}
 	}
@@ -351,19 +359,26 @@ func writeDirectoryToZip(writer *zip.Writer, contentDir string) error {
 			return nil
 		}
 		name := filepath.ToSlash(relative)
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
 		if info.IsDir() {
-			_, err := writer.CreateHeader(&zip.FileHeader{Name: name + "/", Method: zip.Deflate, Modified: info.ModTime()})
+			header.Name = name + "/"
+			header.Method = zip.Deflate
+			_, err := writer.CreateHeader(header)
 			return err
 		}
 		file, err := os.Open(path)
 		if err != nil {
 			return err
 		}
-		method := uint16(zip.Deflate)
+		header.Name = name
+		header.Method = zip.Deflate
 		if strings.HasSuffix(name, ".jsonl.zst") {
-			method = zip.Store
+			header.Method = zip.Store
 		}
-		entry, err := writer.CreateHeader(&zip.FileHeader{Name: name, Method: method, Modified: info.ModTime()})
+		entry, err := writer.CreateHeader(header)
 		if err != nil {
 			file.Close()
 			return err
