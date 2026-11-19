@@ -4,10 +4,18 @@ import (
 	"archive/zip"
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/internal/passkeycredential"
+	"github.com/komari-monitor/komari/internal/plugin"
+	"github.com/komari-monitor/komari/web/backup"
 )
 
 func createConfigSnapshotFixture(t *testing.T) string {
@@ -179,3 +187,132 @@ func TestBuildConfigurationArchiveDoesNotContainMetricHistory(t *testing.T) {
 var timeForBackupTest = func() time.Time {
 	return time.Unix(0, 0).UTC()
 }()
+
+func TestFullBackupIncludesPluginsAndRestoresPasskeyCredentials(t *testing.T) {
+	srcData := t.TempDir()
+	mustWrite := func(rel, content string) {
+		t.Helper()
+		full := filepath.Join(srcData, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	userUUID := "user-backup-passkey-1"
+	credID := base64.RawURLEncoding.EncodeToString([]byte("passkey-cred-id-1"))
+	pubKey := base64.RawURLEncoding.EncodeToString([]byte("synthetic-cbor-public-key-bytes"))
+	passkeyJSON, err := json.Marshal(map[string]any{
+		"version": 1,
+		"credentials": []map[string]any{{
+			"userUUID":   userUUID,
+			"id":         credID,
+			"publicKey":  pubKey,
+			"counter":    7,
+			"deviceType": "singleDevice",
+			"backedUp":   false,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mustWrite("theme/custom/theme.json", `{"name":"custom"}`)
+	mustWrite("plugin/komari-passkey/komari-plugin.json", `{"name":"Passkey","short":"komari-passkey","version":"0.1.14","permissions":{"node":true,"timeout":5}}`)
+	mustWrite("plugin/komari-passkey/script.js", `function load() {}`)
+	mustWrite("plugin-data/komari-passkey/passkeys.json", string(passkeyJSON))
+
+	// Configuration-only backup retains its separate scope without plugin runtime/state.
+	configContent := t.TempDir()
+	if err := copyPersistentFilesFrom(srcData, configContent, backupScopeConfig); err != nil {
+		t.Fatalf("copy config persistent files: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(configContent, "theme", "custom", "theme.json")); err != nil {
+		t.Fatalf("config backup missing theme: %v", err)
+	}
+	for _, excluded := range []string{"plugin", "plugin-data"} {
+		if _, err := os.Stat(filepath.Join(configContent, excluded)); !os.IsNotExist(err) {
+			t.Fatalf("config backup unexpectedly included %s", excluded)
+		}
+	}
+
+	// Full backup includes plugin packages and plugin-data (including Passkey passkeys.json).
+	fullContent := t.TempDir()
+	if err := copyPersistentFilesFrom(srcData, fullContent, backupScopeFull); err != nil {
+		t.Fatalf("copy full persistent files: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fullContent, "komari.db"), []byte("main"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(t.TempDir(), "full-backup.zip")
+	if err := buildBackupArchive(archivePath, fullContent, backupScopeFull, timeForBackupTest); err != nil {
+		t.Fatalf("build full archive: %v", err)
+	}
+	if err := backup.ValidateArchive(archivePath); err != nil {
+		t.Fatalf("full archive with plugins failed validation: %v", err)
+	}
+
+	// Simulate restore by unpacking the archive into a fresh data directory and
+	// verifying passkeycredential.Read loads the restored Passkey credential.
+	restoredData := t.TempDir()
+	reader, err := zip.OpenReader(archivePath)
+	if err != nil {
+		t.Fatalf("open full archive: %v", err)
+	}
+	defer reader.Close()
+	for _, entry := range reader.File {
+		target := filepath.Join(restoredData, filepath.FromSlash(entry.Name))
+		if entry.FileInfo().IsDir() {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		rc, err := entry.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := os.Create(target)
+		if err != nil {
+			rc.Close()
+			t.Fatal(err)
+		}
+		_, copyErr := io.Copy(out, rc)
+		rc.Close()
+		out.Close()
+		if copyErr != nil {
+			t.Fatal(copyErr)
+		}
+	}
+
+	_ = plugin.CloseAll()
+	oldDir, oldStorage := plugin.DataDir, plugin.StorageDir
+	plugin.DataDir = filepath.Join(restoredData, "plugin")
+	plugin.StorageDir = filepath.Join(restoredData, "plugin-data")
+	t.Cleanup(func() {
+		_ = plugin.CloseAll()
+		plugin.DataDir = oldDir
+		plugin.StorageDir = oldStorage
+	})
+	gin.SetMode(gin.TestMode)
+	plugin.Init(gin.New())
+	if err := plugin.SetEnabled("komari-passkey", true, true); err != nil {
+		t.Fatalf("enable restored komari-passkey plugin: %v", err)
+	}
+
+	snapshot, err := passkeycredential.Read(context.Background(), userUUID)
+	if err != nil {
+		t.Fatalf("passkeycredential.Read after restore failed: %v", err)
+	}
+	if !snapshot.Running {
+		t.Fatal("restored komari-passkey plugin is not running")
+	}
+	if len(snapshot.Records) != 1 || snapshot.Records[0].ID != credID || snapshot.Records[0].PublicKey != pubKey {
+		t.Fatalf("restored passkey records mismatch: %+v", snapshot.Records)
+	}
+}

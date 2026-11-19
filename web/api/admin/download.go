@@ -35,6 +35,15 @@ var backupPersistentPaths = []string{
 	"theme",
 }
 
+// backupFullExtraPersistentPaths are included in complete backups so installed
+// plugin packages and persistent plugin storage (such as Passkey passkeys.json)
+// survive backup and restore. Configuration-only backups retain their separate
+// scope defined by backupPersistentPaths.
+var backupFullExtraPersistentPaths = []string{
+	"plugin",
+	"plugin-data",
+}
+
 var configOnlyEmptyTables = []string{
 	"clipboards",
 	"sessions",
@@ -111,6 +120,9 @@ func copyDir(srcDir, destDir string) error {
 		if walkErr != nil {
 			return walkErr
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
 		relative, err := filepath.Rel(srcDir, path)
 		if err != nil {
 			return err
@@ -126,15 +138,26 @@ func copyDir(srcDir, destDir string) error {
 	})
 }
 
-func copyPersistentFiles(contentDir string) error {
-	for _, relative := range backupPersistentPaths {
-		source := filepath.Join(".", "data", relative)
-		info, err := os.Stat(source)
+func copyPersistentFiles(contentDir string, scope backupScope) error {
+	return copyPersistentFilesFrom(filepath.Join(".", "data"), contentDir, scope)
+}
+
+func copyPersistentFilesFrom(dataDir, contentDir string, scope backupScope) error {
+	paths := append([]string(nil), backupPersistentPaths...)
+	if scope == backupScopeFull {
+		paths = append(paths, backupFullExtraPersistentPaths...)
+	}
+	for _, relative := range paths {
+		source := filepath.Join(dataDir, relative)
+		info, err := os.Lstat(source)
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
 			return fmt.Errorf("inspect persistent file %s: %w", relative, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			continue
 		}
 		destination := filepath.Join(contentDir, relative)
 		if info.IsDir() {
@@ -414,7 +437,7 @@ func DownloadBackup(c *gin.Context) {
 		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("创建备份内容目录失败: %v", err))
 		return
 	}
-	if err := copyPersistentFiles(contentDir); err != nil {
+	if err := copyPersistentFiles(contentDir, scope); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("复制持久化配置失败: %v", err))
 		return
 	}
