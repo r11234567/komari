@@ -1,4 +1,4 @@
-name: CodeQL
+name: Security / CodeQL
 
 on:
   push:
@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         language: [go, actions, javascript-typescript, python]
     steps:

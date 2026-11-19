@@ -1,4 +1,4 @@
-name: Build Komari 2.1.11 Return Route Snapshot
+name: Legacy / Build Komari 2.1.11 Return Route Snapshot
 
 on:
   push:

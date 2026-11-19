@@ -1,4 +1,4 @@
-name: Verify Linux Self Update
+name: CI / Verify Linux Self Update
 
 on:
   workflow_dispatch:

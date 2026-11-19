@@ -1,4 +1,4 @@
-name: Test Komari Regression and Migrations
+name: Legacy / Test Komari Regression and Migrations
 
 on:
   push:

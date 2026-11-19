@@ -1,4 +1,4 @@
-name: Attach Release Binaries
+name: Release / Attach Release Binaries
 
 on:
   release:

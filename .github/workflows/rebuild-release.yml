@@ -1,4 +1,4 @@
-name: Rebuild Existing Release
+name: Release / Rebuild Existing Release
 
 on:
   workflow_dispatch:

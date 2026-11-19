@@ -1,6 +1,6 @@
-name: Telemetry storage contracts
+name: CI / Telemetry storage contracts
 on:
-  pull_request:
+  workflow_call:
   workflow_dispatch:
 permissions:
   contents: read
@@ -27,13 +27,15 @@ jobs:
       - name: Production schema and exact synthetic browser fixture migration
         env:
           KOMARI_TELEMETRY_MIGRATION_CURVE_FIXTURE: '1'
-        run: bash scripts/ci/run-audit-check.sh telemetry-curve-fixture go test -race -count=1 -timeout=10m ./scripts/ci/migration-fixture -run '^TestSyntheticMigrationCurveFixture$' -v
+        run: bash scripts/ci/run-audit-check.sh telemetry-curve-fixture go test -race -count=1 -timeout=10m ./scripts/ci/migration-fixture -run
+          '^TestSyntheticMigrationCurveFixture$' -v
       - name: Build separate archive measurement process
         run: go test -c ./pkg/metric -o /var/tmp/komari-metric-resource.test
       - name: Sustained online lifecycle with live-window and disk regression
         env:
           KOMARI_TELEMETRY_SUSTAINED: '1'
-        run: bash scripts/ci/run-audit-check.sh telemetry-sustained go test -count=1 -timeout=8m ./pkg/metric -run '^TestTelemetrySustainedLifecycle$' -v
+        run: bash scripts/ci/run-audit-check.sh telemetry-sustained go test -count=1 -timeout=8m ./pkg/metric -run '^TestTelemetrySustainedLifecycle$'
+          -v
       - name: Isolated decoder CPU and process RSS with enforced limits
         run: sudo -n python3 scripts/ci/telemetry-independent-resources.py --binary /var/tmp/komari-metric-resource.test --output ci-artifacts/independent/archive
       - name: Thirty days of six-node catalog turnover without VACUUM
@@ -72,21 +74,24 @@ jobs:
         env:
           POSTGRES_DB: telemetry
           POSTGRES_PASSWORD: fixture
-        ports: ['5432:5432']
+        ports:
+          - 5432:5432
         options: --health-cmd "pg_isready -U postgres -d telemetry" --health-interval 5s --health-timeout 5s --health-retries 20
       mysql:
         image: mysql:8.4
         env:
           MYSQL_DATABASE: telemetry
           MYSQL_ROOT_PASSWORD: fixture
-        ports: ['3306:3306']
+        ports:
+          - 3306:3306
         options: --health-cmd "mysqladmin ping -h 127.0.0.1 -pfixture" --health-interval 5s --health-timeout 5s --health-retries 30
       mariadb:
         image: mariadb:11.4
         env:
           MARIADB_DATABASE: telemetry
           MARIADB_ROOT_PASSWORD: fixture
-        ports: ['3307:3306']
+        ports:
+          - 3307:3306
         options: --health-cmd "healthcheck.sh --connect --innodb_initialized" --health-interval 5s --health-timeout 5s --health-retries 30
     env:
       GOMAXPROCS: '2'
@@ -103,7 +108,8 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Full storage race, real SQL drivers, restart and fault contracts
-        run: bash scripts/ci/run-audit-check.sh telemetry-storage bash scripts/ci/run-go-tests.sh -race ./pkg/metric ./database/metricstore ./database/trafficledger ./pkg/historyexport
+        run: bash scripts/ci/run-audit-check.sh telemetry-storage bash scripts/ci/run-go-tests.sh -race ./pkg/metric ./database/metricstore ./database/trafficledger
+          ./pkg/historyexport
       - name: Production build without retired compression writers
         run: |
           go list -json ./pkg/metric > ci-artifacts/production-metric-package.json

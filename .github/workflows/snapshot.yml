@@ -1,4 +1,4 @@
-name: Publish Snapshot
+name: Release / Publish Snapshot
 
 on:
   workflow_dispatch:
@@ -113,6 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         include:
           - goos: linux

@@ -1,4 +1,4 @@
-name: Update return route BGP rules
+name: Maintenance / Update return route BGP rules
 
 on:
   schedule:

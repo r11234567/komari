@@ -58,7 +58,7 @@ calibration to establish the current total. It must not describe missing history
 as a measured zero. A different reset policy creates a distinct cycle key, so
 old corrections are not silently reused for a different billing period.
 
-Validation runs in GitHub Actions only: `traffic-cycle.yml` covers timezone and
+Validation runs in GitHub Actions only: the traffic steps in `component-checks.yml` covers timezone and
 month boundaries, real SQLite persistence, metric retention, positive/negative
 and repeated/concurrent corrections, and isolation of raw counters from browser
 display values, both input modes, max/min crossover, changed counting rules and

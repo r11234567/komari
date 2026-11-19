@@ -1,4 +1,4 @@
-name: Publish Test Image
+name: Release / Publish Test Image
 
 on:
   workflow_dispatch:

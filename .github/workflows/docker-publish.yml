@@ -1,4 +1,4 @@
-name: Publish Docker Image on Main
+name: Release / Docker image from main
 
 on:
   #push:

@@ -1,4 +1,4 @@
-name: Feature audit - real end-to-end
+name: CI / Feature audit - real end-to-end
 
 on:
   workflow_dispatch:

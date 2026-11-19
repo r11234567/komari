@@ -1,0 +1,192 @@
+name: Backend components
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  components:
+    name: Archives, runtime, account factors, alerts and billing
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Ownership, limits, retries, merge cancellation and archive validation
+        run: bash scripts/ci/run-audit-check.sh archives bash scripts/ci/run-go-tests.sh -race ./web/upload ./web/api/admin ./internal/plugingateway
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: archive-upload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+      - name: Start a fresh log directory after archives
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/archives-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: Resolve migration dependency metadata on the hosted runner
+        run: bash scripts/ci/run-audit-check.sh dependencies go mod tidy
+      - name: MoeJS native modules, deadlines, async lifecycle and sandbox regressions
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh moejs bash scripts/ci/run-go-tests.sh ./pkg/jsruntime/... ./internal/plugin ./internal/notifications
+          ./internal/managedconfig ./utils/messageSender/...
+      - name: RPC2 allowlist, roles and workspace credential isolation
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh gateway bash scripts/ci/run-go-tests.sh ./pkg/rpc ./web/rpc/jsonrpc ./web/workspace ./web/connect
+      - name: Repeat fast-child output and close-order regression
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh child-output bash scripts/ci/run-go-tests.sh -count=20 -run 'TestChildProcessPermissionAndExecution|TestChildSpawnCloseWaitsForBothStreams'
+          ./pkg/jsruntime
+      - name: Require committed dependency metadata
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh dependency-diff git diff --exit-code -- go.mod go.sum
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: moejs-checkpoint-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ci-artifacts/
+            go.mod
+            go.sum
+          retention-days: 30
+      - name: Start a fresh log directory after moejs
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/moejs-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: Public theme password submission, failure handling and factor handoff (no browser E2E)
+        run: bash scripts/ci/run-audit-check.sh public-login-bridge node --test scripts/ci/native-login-bridge.test.cjs
+      - name: Public theme bridge and native login document isolation
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh public-login-document bash scripts/ci/run-go-tests.sh ./web/public
+      - name: Resolve fixed WebAuthn dependency metadata on the runner
+        run: bash scripts/ci/run-audit-check.sh credential-dependencies go mod tidy
+      - name: Passkey public-record compatibility and independent signature verification
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh credential-passkey bash scripts/ci/run-go-tests.sh -race ./internal/passkeycredential
+      - name: Challenge, scope, expiry, quotas and concurrent consumption
+        run: bash scripts/ci/run-audit-check.sh credential-core bash scripts/ci/run-go-tests.sh -race ./internal/trustedcredential ./internal/credentialgateway
+      - name: Eight-character OTP and consecutive successful workspace verifications (synthetic only)
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh otp-followup bash scripts/ci/run-go-tests.sh -race -run 'TestNativeOTPFormatIncludesLettersAndDigits|TestSuccessfulOTPAllowsNextActionImmediately|TestSuccessfulWorkspaceReauthorizationsDoNotSpendFailureBudget'
+          ./internal/notificationotp ./internal/trustedcredential
+      - name: Native TOTP adapter, session invalidation and typed Connect gateway
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh credential-connect bash scripts/ci/run-go-tests.sh ./web/connect ./database/accounts
+      - name: Password and second-factor login checkpoint (synthetic delivery only)
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh password-login bash scripts/ci/run-go-tests.sh -race -run TestPassword ./internal/credentialgateway
+          ./web/connect ./web/api/public
+      - name: Native credential workspace and account consumers (synthetic only)
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh credential-actions bash scripts/ci/run-go-tests.sh -race ./internal/credentialaction ./internal/credentialgateway
+          ./web/connect
+      - name: Native notification OTP and private transport isolation (synthetic only)
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh native-otp bash scripts/ci/run-go-tests.sh -race ./internal/notificationotp ./utils/messageSender/...
+      - name: Internal RPC compatibility, public allowlist and existing login boundaries
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh credential-compat bash scripts/ci/run-go-tests.sh ./pkg/rpc ./web/rpc/jsonrpc ./web/api ./web/signonauth
+          ./web/workspace ./internal/plugingateway
+      - name: Require committed dependency metadata
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh credential-dependency-diff git diff --exit-code -- go.mod go.sum
+      - name: Retain complete logs, test JSON and exit codes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trusted-credentials-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ci-artifacts/
+            go.mod
+            go.sum
+          retention-days: 30
+      - name: Start a fresh log directory after credentials
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/credentials-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: Official plugin payload compatibility, routing, channels, batching and policy changes
+        run: bash scripts/ci/run-audit-check.sh lite-alerts bash scripts/ci/run-go-tests.sh -race ./utils/messageSender/... ./utils/notifier ./internal/plugin
+          ./web/rpc/jsonrpc ./pkg/config
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - name: Preserve RPC error explanations in plugin console logs
+        run: bash scripts/ci/run-audit-check.sh notification-rpc-errors bash scripts/ci/run-go-tests.sh -race ./pkg/jsruntime -run '^TestConsoleRetainsErrorMessagesAndCodes$'
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lite-alerts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+      - name: Start a fresh log directory after notifications
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/notifications-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: FX migration, exact conversion, zero fees, cache regressions and expiry timezone/DST
+        run: bash scripts/ci/run-audit-check.sh lite-billing bash scripts/ci/run-go-tests.sh -race ./database/billing ./database/clients ./database/dbcore
+          ./pkg/expiry ./utils/renewal ./utils/notifier ./web/api/admin
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lite-billing-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+      - name: Start a fresh log directory after billing
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/billing-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: UTC offsets, month ends, persistence, signed correction and raw metric isolation
+        run: bash scripts/ci/run-audit-check.sh traffic-cycle bash scripts/ci/run-go-tests.sh -race ./pkg/trafficreset ./database/trafficledger
+          ./database/clients ./database/billing ./web/api/admin ./web/connect ./utils/notifier
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - name: Canceled and transiently failed reads must not erase calibrated cache entries
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh traffic-cache-recovery bash scripts/ci/run-go-tests.sh -race -run TestCycleCacheDoesNotPublish
+          ./database/trafficledger
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - name: Real calibration to browser list/detail, later counter growth and exact reset timestamps
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh traffic-consumers bash scripts/ci/run-go-tests.sh -race -run 'TestTrafficAccounting|TestTrafficCalibrationReaches'
+          ./web/connect
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - name: Repeated concurrent billing watcher and deterministic snapshot conflict regression
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh billing-snapshot-race bash scripts/ci/run-go-tests.sh -race -count=30 -run 'TestDeploymentProfileRetriesConcurrentBillingSnapshot|TestBillingResetDayGetsNewRevisionAndReachesConnectWatcher'
+          ./database/clients ./web/connect
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: traffic-cycle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30

@@ -1,27 +1,28 @@
 name: CI
-
 on:
   pull_request:
-    branches: [main]
   push:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  release-notes:
-    name: Preserve release descriptions
+  core:
+    name: Go tests, formatting and release policy
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: Check manual descriptions and concurrent edits
         shell: bash
         run: |
@@ -33,21 +34,12 @@ jobs:
           name: release-notes-tests-${{ github.run_id }}
           path: ci-artifacts/release-notes-tests.log
           retention-days: 30
-
-  backend:
-    name: Backend quality and tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-        with:
-          submodules: recursive
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-
+      - name: Start a fresh log directory after release-policy
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/release-policy-ci-artifacts"; fi
+          mkdir -p ci-artifacts
       - name: Verify formatting
         shell: bash
         run: |
@@ -60,10 +52,8 @@ jobs:
             printf 'Files requiring gofmt:\n%s\n' "${unformatted}" >&2
             exit 1
           fi
-
       - name: Run backend tests
         run: bash scripts/ci/run-go-tests.sh ./...
-
       - name: Retain backend logs including failures
         if: always()
         uses: actions/upload-artifact@v4
@@ -71,7 +61,41 @@ jobs:
           name: backend-ci-logs-${{ github.run_id }}-${{ github.run_attempt }}
           path: ci-artifacts/
           retention-days: 30
-
+      - name: Start a fresh log directory after backend
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/backend-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: Protocol pin and tool versions
+        id: protocol
+        run: bash scripts/ci/run-audit-check.sh protocol bash -c 'go version; node --version; node scripts/ci/check-protocol.cjs --resolve-go'
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+          CGO_ENABLED: '1'
+          AUDIT_PACKAGES: ./web/filemanager ./web/connect ./web/api ./web/api/admin ./web/api/public ./web/router ./web/agent ./web/api/terminal
+            ./web/remotemanagement ./internal/plugin ./internal/notifications ./internal/managedconfig ./pkg/jsruntime/... ./utils/messageSender/...
+            ./web/rpc/jsonrpc ./pkg/rpc ./database/metricstore ./database/notification ./database/trafficledger ./utils/notifier ./cmd ./pkg/metric
+      - name: Run complete area tests with race detection
+        if: ${{ !cancelled() }}
+        run: |
+          bash scripts/ci/run-audit-check.sh tests bash scripts/ci/run-go-tests.sh -race $AUDIT_PACKAGES
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+          CGO_ENABLED: '1'
+          AUDIT_PACKAGES: ./web/filemanager ./web/connect ./web/api ./web/api/admin ./web/api/public ./web/router ./web/agent ./web/api/terminal
+            ./web/remotemanagement ./internal/plugin ./internal/notifications ./internal/managedconfig ./pkg/jsruntime/... ./utils/messageSender/...
+            ./web/rpc/jsonrpc ./pkg/rpc ./database/metricstore ./database/notification ./database/trafficledger ./utils/notifier ./cmd ./pkg/metric
+      - name: Upload raw JSON events, compiler errors and readable logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-race-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
   external-databases:
     name: MySQL and PostgreSQL integration
     runs-on: ubuntu-latest
@@ -83,11 +107,7 @@ jobs:
           POSTGRES_PASSWORD: postgres
         ports:
           - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d komari"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
+        options: --health-cmd "pg_isready -U postgres -d komari" --health-interval 10s --health-timeout 5s --health-retries 10
       mysql:
         image: mysql:8.4
         env:
@@ -95,61 +115,186 @@ jobs:
           MYSQL_ROOT_PASSWORD: root
         ports:
           - 3306:3306
-        options: >-
-          --health-cmd "mysqladmin ping -h 127.0.0.1 -proot"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 15
+        options: --health-cmd "mysqladmin ping -h 127.0.0.1 -proot" --health-interval 10s --health-timeout 5s --health-retries 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
           submodules: recursive
-
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-
       - name: Run database integration tests
         env:
           METRIC_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/komari?parseTime=true
           METRIC_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/komari?sslmode=disable
         run: go test ./pkg/metric -run 'Test(MySQL|PostgreSQL)Integration' -count=1 -v
-
-  frontend:
-    name: Frontend lint, tests, and build
+    needs: core
+  bundle:
+    name: Pinned Web checks, embedded UI and server build
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
-
-      - name: Build frontend artifact
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Require every independent Web workflow on the exact gitlink
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/run-audit-check.sh web-workflows python3 scripts/ci/check-web-workflows.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: web-workflow-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+          if-no-files-found: error
+      - name: Start a fresh log directory after web-evidence
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/web-evidence-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: Build the pinned UI using the existing release action
         uses: ./.github/actions/build-frontend
         with:
           artifact-name: komari-frontend
-
-  compile:
-    name: Compile application
-    needs: frontend
+      - name: Compile the complete server with the newly generated embedded UI
+        run: bash scripts/ci/run-audit-check.sh integrated-build go build -trimpath -o "${RUNNER_TEMP}/komari-audit"
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+          NODE_OPTIONS: --max-old-space-size=4096
+          CGO_ENABLED: '1'
+      - name: Retain integration context and generated UI provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature-audit-integrated-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ci-artifacts/
+            web/public/systemUI/dist/source.json
+          if-no-files-found: warn
+          retention-days: 30
+    permissions:
+      contents: read
+      actions: read
+  runtime:
+    name: Files, privileged delivery, plugins and terminal
     runs-on: ubuntu-latest
+    timeout-minutes: 100
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
-
-      - name: Restore frontend artifact
-        uses: ./.github/actions/restore-frontend
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-
-      - name: Compile native CI binary
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Check local protocol dependency and bump regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          node --test scripts/ci/protocol-submodule.test.cjs 2>&1 | tee ci-artifacts/protocol-tests.log
+          node scripts/ci/check-protocol.cjs --resolve-go 2>&1 | tee ci-artifacts/protocol-source.log
+      - name: Ordinary pipe transfer and plugin page compatibility (no exploit inputs)
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh relay-boundary bash scripts/ci/run-go-tests.sh -race -run 'TestCopyExactPipePreservesOrdinaryFileBytes|TestHTMLInjectorLeavesFileDataPlaneUnwrapped|TestHTMLInjectorStillAddsOrdinaryPageMetadata'
+          ./web/filemanager ./internal/plugin
+      - name: FileService Connect, lease, store and HTTP transfer regression
+        if: ${{ !cancelled() }}
+        run: scripts/ci/run-go-tests.sh ./web/filemanager ./web/connect
+      - name: Preserve complete logs, including compiler failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: file-service-backend-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Start a fresh log directory after file-service
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/file-service-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: State machine, migrations, authorization and Connect integration
+        run: scripts/ci/run-go-tests.sh ./database/privilegeddelivery ./database/clients ./web/connect ./web/executionapp ./web/remotemanagement
+          ./web/rescueapp ./web/deployment ./web/api/remote ./web/api/terminal ./web/rpc/jsonrpc
+      - name: Preserve complete logs, including compiler failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: privileged-backend-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Start a fresh log directory after privileged-delivery
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/privileged-delivery-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: Plugin subsystem, JS runtime, notifications and RPC gateway regression
+        run: scripts/ci/run-go-tests.sh ./internal/plugin ./internal/plugingateway ./web/connect ./pkg/jsruntime ./utils/messageSender ./web/rpc/jsonrpc
+      - name: Preserve complete logs, including compiler failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-subsystem-ci-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Start a fresh log directory after plugin-subsystem
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/plugin-subsystem-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: Terminal WebSSH, remote management and Connect settings regression
+        run: scripts/ci/run-go-tests.sh ./web/connect ./web/agent ./web/api/terminal ./web/remotemanagement
+      - name: Historical query partition and concurrent ingestion evidence
+        shell: bash
         env:
-          GIN_MODE: release
-        run: go build -trimpath -o "${RUNNER_TEMP}/komari-ci"
+          CGO_ENABLED: '1'
+          GOMAXPROCS: '3'
+        run: |
+          bash scripts/ci/measure-history.sh ci-artifacts
+      - name: Frontend terminal workbench, clipboard and file manager integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd third_party/komari-web
+          npm ci
+          node --test tests/terminalWorkbench.test.ts tests/terminalClipboard.test.ts tests/fileManagerWorkbench.test.ts 2>&1 | tee ../../ci-artifacts/frontend-workbench-tests.log
+      - name: Preserve complete logs, including compiler failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-workbench-ci-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+    needs: core
+  components:
+    if: github.event_name != 'push'
+    needs: bundle
+    uses: ./.github/workflows/component-checks.yml
+  credentials:
+    if: github.event_name != 'push'
+    needs: bundle
+    uses: ./.github/workflows/credential-lifecycle.yml
+  telemetry:
+    if: github.event_name != 'push'
+    needs: core
+    uses: ./.github/workflows/telemetry-storage.yml
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

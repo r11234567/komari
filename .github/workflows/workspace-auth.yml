@@ -1,6 +1,5 @@
-name: Workspace authorization checkpoint
+name: CI / Workspace authorization
 on:
-  pull_request:
   workflow_dispatch:
     inputs:
       focused_security:
