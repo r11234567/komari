@@ -185,7 +185,8 @@ func protoReportToLegacy(report *reportv1.AgentReport) legacyv1.Report {
 					item.MemoryTotal = int64FromUint64(*gpu.MemoryTotalBytes)
 				}
 				if gpu.TemperatureCelsius != nil {
-					item.Temperature = int(*gpu.TemperatureCelsius)
+					temp := *gpu.TemperatureCelsius
+					item.Temperature = &temp
 				}
 				result.GPU.DetailedInfo = append(result.GPU.DetailedInfo, item)
 			}

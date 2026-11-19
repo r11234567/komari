@@ -45,11 +45,11 @@ type GPUDetailReport struct {
 }
 
 type GPUDeviceInfo struct {
-	Name        string  `json:"name"`
-	MemoryTotal int64   `json:"memory_total"`
-	MemoryUsed  int64   `json:"memory_used"`
-	Utilization float64 `json:"utilization"`
-	Temperature int     `json:"temperature"`
+	Name        string   `json:"name"`
+	MemoryTotal int64    `json:"memory_total"`
+	MemoryUsed  int64    `json:"memory_used"`
+	Utilization float64  `json:"utilization"`
+	Temperature *float64 `json:"temperature,omitempty"`
 }
 
 // GPUReport is the legacy v1 single-GPU shape kept for wire compatibility.
