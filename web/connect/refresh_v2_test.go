@@ -188,3 +188,36 @@ func TestCredentialRefreshV2RejectsMalformedVersionAndBindings(t *testing.T) {
 		})
 	}
 }
+
+func TestCredentialRefreshV2FutureSkewNonceRetentionCoversFullWindow(t *testing.T) {
+	record, token, key, client := refreshFixture(t)
+	futureAt := time.Now().Add(25 * time.Second).UTC().Truncate(time.Millisecond)
+	payload, err := json.Marshal(refreshV2Request{
+		Protocol:     2,
+		AgentID:      record.Client,
+		RefreshToken: token,
+		RequestID:    uuid.NewString(),
+		Timestamp:    futureAt.Format(time.RFC3339Nano),
+		Nonce:        uuid.NewString(),
+	})
+	require.NoError(t, err)
+	sig := ed25519.Sign(key, payload)
+	req := connect.NewRequest(&enrollmentv1.RefreshCredentialsRequest{
+		RefreshToken: token,
+		Proof: &securityv1.SignedEnvelope{
+			Payload:    payload,
+			Signatures: []*securityv1.Signature{{Algorithm: securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ED25519, Value: sig}},
+		},
+	})
+	_, err = client.RefreshCredentials(context.Background(), req)
+	require.NoError(t, err)
+
+	digest := sha256.Sum256(sig)
+	replayKey := record.Client + "\x00" + hex.EncodeToString(digest[:])
+	refreshReplayCache.mu.Lock()
+	entry, exists := refreshReplayCache.entries[replayKey]
+	refreshReplayCache.mu.Unlock()
+	require.True(t, exists)
+	require.True(t, entry.expires.After(futureAt.Add(2*time.Minute)),
+		"v2 replay expiry %s must cover full valid proof window beyond %s", entry.expires, futureAt.Add(2*time.Minute))
+}
