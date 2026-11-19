@@ -142,3 +142,42 @@ func TestVerifyRefreshProofRejectsPermissiveFallbacks(t *testing.T) {
 	require.NoError(t, verifyRefreshProof(env, pubB64, agentID, rt))
 	require.Error(t, verifyRefreshProof(env, pubB64, agentID, rt))
 }
+
+func TestDPoPNonceLengthCapAndFutureTimestampRetention(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	agentID, accessToken, priv := dpopTestAgent(t)
+	principal := rpc.NewAgentPrincipal(agentID)
+
+	// Nonces exceeding maxNonceLength (128) must be rejected.
+	longNonce := string(bytes.Repeat([]byte("a"), 129))
+	longCtx := makeDPoPContext(http.MethodPost, "/komari.report.v1.ReportService/ReportBasicInfo", []byte(`{}`), accessToken, longNonce, priv, false)
+	require.Error(t, verifyDPoP(longCtx, principal))
+
+	// A valid future-skewed signature (ts = now + 100s) must retain its nonce
+	// until after ts + 120s (well beyond a flat 120s TTL from receive time).
+	futureTS := time.Now().Add(100 * time.Second).Unix()
+	futureNonce := "future-nonce-" + uuid.NewString()
+	body := []byte(`{"skew":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/komari.report.v1.ReportService/ReportBasicInfo", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	tsStr := fmt.Sprintf("%d", futureTS)
+	req.Header.Set("X-Komari-Timestamp", tsStr)
+	req.Header.Set("X-Komari-Nonce", futureNonce)
+	bodySum := sha256.Sum256(body)
+	tokSum := sha256.Sum256([]byte(accessToken))
+	canonical := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s",
+		http.MethodPost, "/komari.report.v1.ReportService/ReportBasicInfo", tsStr, futureNonce,
+		hex.EncodeToString(tokSum[:]), hex.EncodeToString(bodySum[:]))
+	req.Header.Set("X-Komari-Signature", base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte(canonical))))
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = req
+	require.NoError(t, verifyDPoP(c, principal))
+
+	key := agentID + "\x00" + futureNonce
+	dpopReplayCache.mu.Lock()
+	entry, exists := dpopReplayCache.entries[key]
+	dpopReplayCache.mu.Unlock()
+	require.True(t, exists)
+	require.True(t, entry.expires.After(time.Unix(futureTS, 0).Add(120*time.Second)),
+		"nonce expiry %s must cover full valid signature window beyond %s", entry.expires, time.Unix(futureTS, 0).Add(120*time.Second))
+}

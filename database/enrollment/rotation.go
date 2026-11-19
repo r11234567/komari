@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -16,13 +17,38 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const RefreshRecoveryWindow = 24 * time.Hour
+const (
+	RefreshRecoveryWindow    = 24 * time.Hour
+	minRefreshRecoveryWindow = time.Minute
+	maxRefreshRecoveryWindow = 7 * 24 * time.Hour
+)
 const AccessHandoffWindow = time.Minute
+
+// refreshRecoveryWindow returns the configured bounded refresh recovery window
+// (env KOMARI_REFRESH_RECOVERY_WINDOW), defaulting to 24h and clamped to [1m, 7d].
+func refreshRecoveryWindow() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("KOMARI_REFRESH_RECOVERY_WINDOW"))
+	if raw == "" {
+		return RefreshRecoveryWindow
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return RefreshRecoveryWindow
+	}
+	if parsed < minRefreshRecoveryWindow {
+		return minRefreshRecoveryWindow
+	}
+	if parsed > maxRefreshRecoveryWindow {
+		return maxRefreshRecoveryWindow
+	}
+	return parsed
+}
 
 var ErrCredentialRejected = errors.New("credential rejected")
 var ErrRefreshConflict = errors.New("credential generation conflict")
 var ErrRefreshReuse = errors.New("consumed refresh credential reused; credential chain revoked")
 var ErrRefreshRecoveryRequired = errors.New("refresh recovery window expired for this operation; reauthenticate machine")
+var ErrRefreshSigningUnavailable = errors.New("credential response signing unavailable; retry same request")
 
 // SealRefreshFunc encodes and signs the issued credential response before the
 // database transaction commits, so a signing failure never consumes the old RT
@@ -171,7 +197,7 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 							var sealErr error
 							reSigned, sealErr = seal(recovered)
 							if sealErr != nil {
-								return fmt.Errorf("seal recovered refresh response: %w", sealErr)
+								return fmt.Errorf("%w: %w", ErrRefreshSigningUnavailable, sealErr)
 							}
 						}
 						plaintext, err := json.Marshal(sealedRefreshRecord{Issued: recovered, SignedResponse: reSigned})
@@ -242,7 +268,7 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 				return errors.New("credential random generation failed")
 			}
 			refreshExp := idleDeadline(cur, policy, now)
-			until := minDeadline(now.Add(RefreshRecoveryWindow), refreshExp)
+			until := minDeadline(now.Add(refreshRecoveryWindow()), refreshExp)
 			if protocol == 1 {
 				until = minDeadline(now.Add(refreshGracePeriod), refreshExp)
 			}
@@ -256,7 +282,7 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 				var sealErr error
 				signedResponse, sealErr = seal(issued)
 				if sealErr != nil {
-					return fmt.Errorf("seal signed refresh response: %w", sealErr)
+					return fmt.Errorf("%w: %w", ErrRefreshSigningUnavailable, sealErr)
 				}
 			}
 			plaintext, err := json.Marshal(sealedRefreshRecord{Issued: issued, SignedResponse: signedResponse})

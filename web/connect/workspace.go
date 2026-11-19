@@ -82,11 +82,29 @@ func checkWorkspace(ctx context.Context, token string, touch bool) (*workspacev1
 	return workspaceAuthorization(token, snapshot), nil
 }
 func (s *workspaceService) GetWorkspace(ctx context.Context, req *connect.Request[workspacev1.GetWorkspaceRequest]) (*connect.Response[workspacev1.GetWorkspaceResponse], error) {
-	authorization, err := checkWorkspace(ctx, req.Msg.GrantToken, false)
+	var authorization *workspacev1.WorkspaceAuthorization
+	var err error
+	if token := strings.TrimSpace(req.Msg.GrantToken); token != "" {
+		authorization, err = checkWorkspace(ctx, token, false)
+	} else if agent := strings.TrimSpace(req.Header().Get(workspace.AgentHeader)); agent != "" {
+		user, session, authErr := workspace.Interactive(rpc.MetaFromContext(ctx))
+		if authErr != nil {
+			return nil, connectError(connect.CodeUnauthenticated, authErr)
+		}
+		activeToken, snapshot, lookupErr := workspace.Default.LookupSession(user, session, agent)
+		if lookupErr != nil {
+			return nil, connectError(connect.CodeUnauthenticated, lookupErr)
+		}
+		authorization = workspaceAuthorization(activeToken, snapshot)
+	} else {
+		authorization, err = checkWorkspace(ctx, "", false)
+	}
 	if err != nil {
 		return nil, err
 	}
-	return connect.NewResponse(&workspacev1.GetWorkspaceResponse{Authorization: authorization}), nil
+	response := connect.NewResponse(&workspacev1.GetWorkspaceResponse{Authorization: authorization})
+	response.Header().Set("Cache-Control", "no-store")
+	return response, nil
 }
 func (s *workspaceService) TouchWorkspace(ctx context.Context, req *connect.Request[workspacev1.TouchWorkspaceRequest]) (*connect.Response[workspacev1.TouchWorkspaceResponse], error) {
 	authorization, err := checkWorkspace(ctx, req.Msg.GrantToken, true)

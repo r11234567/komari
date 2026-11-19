@@ -26,7 +26,7 @@ const (
 	maxDPoPPerSubject      = 1024
 	maxRefreshNonceEntries = 16384
 	maxRefreshPerSubject   = 256
-	maxNonceLength         = 256
+	maxNonceLength         = 128
 	maxDPoPBodyBytes       = 10 << 20
 )
 
@@ -241,7 +241,14 @@ func verifyDPoP(c *gin.Context, principal *rpc.Principal) error {
 
 	// Record nonce only after signature verification succeeds so an attacker
 	// without the enrolled private key cannot pollute or exhaust replay capacity.
-	if !dpopReplayCache.CheckAndRecord(principal.ClientUUID, nonce, 120*time.Second) {
+	// Retain the nonce at least until the signature's own timestamp window
+	// expires (ts + 120s + 5s margin) so future-skewed signatures cannot be
+	// replayed after a shorter fixed retention elapses.
+	nonceTTL := time.Until(time.Unix(ts, 0).Add(125 * time.Second))
+	if nonceTTL < 120*time.Second {
+		nonceTTL = 120 * time.Second
+	}
+	if !dpopReplayCache.CheckAndRecord(principal.ClientUUID, nonce, nonceTTL) {
 		return errors.New("dpop: nonce replay detected")
 	}
 

@@ -82,6 +82,9 @@ type Options struct {
 	// AllowListen allows net and http servers to bind local ports. Outbound
 	// client connections do not require this permission.
 	AllowListen bool
+	// BlockPrivateNet blocks outbound net/tls TCP connections to loopback,
+	// private (RFC1918/ULA), link-local, and non-global-unicast addresses.
+	BlockPrivateNet bool
 	// AllowAllFileAccess allows require and fs paths to escape BaseDir. The
 	// default confines both module and filesystem access to BaseDir.
 	AllowAllFileAccess bool
@@ -238,7 +241,7 @@ func New(script string, options Options) (*Runtime, error) {
 			runtime.consoleMod.WriteError(vm, values, false)
 		})
 		runtime.childProcessModule = childprocess.New(host, filesystem, options.AllowExec, maxChildOutputBytes)
-		runtime.netModule = netmodule.New(host, options.AllowListen)
+		runtime.netModule = netmodule.New(host, options.AllowListen, options.BlockPrivateNet)
 		runtime.tlsModule = tlsmodule.New(host, runtime.netModule)
 		runtime.httpModule = httpmodule.New(host, options.AllowListen, maxHTTPBodyBytes)
 		runtime.cryptoModule = cryptomodule.New(host)

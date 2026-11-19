@@ -49,18 +49,34 @@ func TestHTMLInjectorLoginCompatScopedStrictlyToKomariPasskey(t *testing.T) {
 		_, _ = w.Write([]byte("<html><head></head><body>Login</body></html>"))
 	}))
 
-	// Default compat mode: /login injects ONLY komari-passkey, never arbitrary plugins.
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/login", nil))
-	if !strings.Contains(rec.Body.String(), `name="passkey"`) {
-		t.Fatalf("komari-passkey compat injection missing on /login: %q", rec.Body.String())
-	}
-	if strings.Contains(rec.Body.String(), `name="other"`) {
-		t.Fatalf("generic plugin leaked into /login: %q", rec.Body.String())
+	// Default compat mode: /login and /login/ inject ONLY komari-passkey, never arbitrary plugins.
+	for _, loginPath := range []string{"/login", "/login/", "/login?next=%2Fadmin"} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, loginPath, nil))
+		if !strings.Contains(rec.Body.String(), `name="passkey"`) {
+			t.Fatalf("komari-passkey compat injection missing on %s: %q", loginPath, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), `name="other"`) {
+			t.Fatalf("generic plugin leaked into %s: %q", loginPath, rec.Body.String())
+		}
 	}
 
-	// Hard-protected routes still reject even komari-passkey.
-	for _, blocked := range []string{"/admin", "/terminal", "/bind", "/api/login"} {
+	// Hard-protected routes including /login/verify, private SPA routes, and normalized paths
+	// still reject even komari-passkey.
+	for _, blocked := range []string{
+		"/login/verify",
+		"/login/verify/",
+		"/admin",
+		"//admin",
+		"/terminal",
+		"/bind",
+		"/bind-login",
+		"/enroll",
+		"/install",
+		"/manage",
+		"/database-recovery",
+		"/api/login",
+	} {
 		recBlocked := httptest.NewRecorder()
 		handler.ServeHTTP(recBlocked, httptest.NewRequest(http.MethodGet, blocked, nil))
 		if strings.Contains(recBlocked.Body.String(), `name="passkey"`) {
@@ -68,12 +84,14 @@ func TestHTMLInjectorLoginCompatScopedStrictlyToKomariPasskey(t *testing.T) {
 		}
 	}
 
-	// Explicit disable switch cuts off komari-passkey on /login too.
+	// Explicit disable switch cuts off komari-passkey on /login and /login/ too.
 	t.Setenv("KOMARI_DISABLE_LEGACY_LOGIN_PLUGIN_COMPAT", "true")
-	recDisabled := httptest.NewRecorder()
-	handler.ServeHTTP(recDisabled, httptest.NewRequest(http.MethodGet, "/login", nil))
-	if strings.Contains(recDisabled.Body.String(), `name="passkey"`) {
-		t.Fatalf("compat disable switch did not block /login injection: %q", recDisabled.Body.String())
+	for _, loginPath := range []string{"/login", "/login/"} {
+		recDisabled := httptest.NewRecorder()
+		handler.ServeHTTP(recDisabled, httptest.NewRequest(http.MethodGet, loginPath, nil))
+		if strings.Contains(recDisabled.Body.String(), `name="passkey"`) {
+			t.Fatalf("compat disable switch did not block %s injection: %q", loginPath, recDisabled.Body.String())
+		}
 	}
 }
 

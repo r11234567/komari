@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"os"
+	"path"
 	"strings"
 )
 
@@ -14,55 +15,85 @@ func legacyPasskeyLoginCompatEnabled() bool {
 	return !strings.EqualFold(strings.TrimSpace(os.Getenv("KOMARI_DISABLE_LEGACY_LOGIN_PLUGIN_COMPAT")), "true")
 }
 
-func normalizeBoundaryPath(path string) string {
-	path = strings.ToLower(strings.TrimSpace(path))
-	if idx := strings.IndexByte(path, '?'); idx >= 0 {
-		path = path[:idx]
+func normalizeBoundaryPath(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return ""
 	}
-	return path
+	if idx := strings.IndexByte(raw, '?'); idx >= 0 {
+		raw = raw[:idx]
+	}
+	if raw == "" {
+		return ""
+	}
+	if !strings.HasPrefix(raw, "/") {
+		raw = "/" + raw
+	}
+	cleaned := path.Clean(raw)
+	if cleaned != "/" {
+		cleaned = strings.TrimRight(cleaned, "/")
+	}
+	return cleaned
 }
 
-func isLegacyLoginPagePath(path string) bool {
-	return normalizeBoundaryPath(path) == "/login"
+// isLegacyLoginPagePath matches ONLY the main login entry (/login or /login/),
+// never trusted verification sub-routes such as /login/verify.
+func isLegacyLoginPagePath(p string) bool {
+	return normalizeBoundaryPath(p) == "/login"
 }
 
 // Sensitive control-plane, authentication, admin UI, workspace, Connect RPC,
 // and file transfer routes must never enter generic plugin HTTP/WS hooks or
 // HTML injection. Public storefront pages, custom plugin routes, and legacy
 // public RPC2 paths keep their previous scopes.
-func protectedWorkspacePath(path string) bool {
-	path = normalizeBoundaryPath(path)
-	if path == "" {
+func protectedWorkspacePath(p string) bool {
+	p = normalizeBoundaryPath(p)
+	if p == "" {
 		return false
 	}
-	for _, exact := range []string{"/admin", "/terminal", "/bind", "/bind-login", "/api/login", "/api/logout", "/api/oauth", "/api/oauth_callback"} {
-		if path == exact {
+	for _, exact := range []string{
+		"/admin",
+		"/terminal",
+		"/bind",
+		"/bind-login",
+		"/enroll",
+		"/install",
+		"/manage",
+		"/database-recovery",
+		"/api/login",
+		"/api/logout",
+		"/api/oauth",
+		"/api/oauth_callback",
+	} {
+		if p == exact || strings.HasPrefix(p, exact+"/") {
 			return true
 		}
+	}
+	// Any sub-route under /login (e.g. /login/verify) is hard-protected for all
+	// plugins, including komari-passkey.
+	if strings.HasPrefix(p, "/login/") {
+		return true
 	}
 	for _, prefix := range []string{
-		"/admin/",
-		"/terminal/",
-		"/bind/",
 		"/komari.",
-		"/api/admin/",
-		"/api/oauth/",
-		"/api/clients/transfer/",
+		"/api/admin",
+		"/api/clients/transfer",
 	} {
-		if strings.HasPrefix(path, prefix) {
+		if p == prefix || strings.HasPrefix(p, prefix+"/") || (strings.HasSuffix(prefix, ".") && strings.HasPrefix(p, prefix)) {
 			return true
 		}
 	}
-	return strings.HasPrefix(path, "/api/preview/client/") && strings.Contains(path, "/file/")
+	return strings.HasPrefix(p, "/api/preview/client/") && strings.Contains(p, "/file/")
 }
 
 // pluginAllowedOnPath enforces the hard control-plane boundary for all plugins
-// and restricts /login to the temporary komari-passkey compatibility exception.
-func pluginAllowedOnPath(path, short string) bool {
-	if protectedWorkspacePath(path) {
+// and restricts /login (and /login/) to the temporary komari-passkey
+// compatibility exception.
+func pluginAllowedOnPath(p, short string) bool {
+	if protectedWorkspacePath(p) {
 		return false
 	}
-	if isLegacyLoginPagePath(path) {
+	if isLegacyLoginPagePath(p) {
 		return legacyPasskeyLoginCompatEnabled() && short == legacyPasskeyPluginShort
 	}
 	return true

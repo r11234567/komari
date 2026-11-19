@@ -15,17 +15,20 @@ import (
 	"github.com/komari-monitor/komari/pkg/jsruntime/internal/writequeue"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
 type Module struct {
-	runtime     *bridge.Runtime
-	allowListen bool
-	sockets     sync.Map
+	runtime         *bridge.Runtime
+	allowListen     bool
+	blockPrivateNet bool
+	sockets         sync.Map
 }
 type socketState struct {
 	connection net.Conn
@@ -36,8 +39,33 @@ type socketState struct {
 	closed    atomic.Bool
 }
 
-func New(runtime *bridge.Runtime, allowListen bool) *Module {
-	return &Module{runtime: runtime, allowListen: allowListen}
+func New(runtime *bridge.Runtime, allowListen bool, blockPrivateNet bool) *Module {
+	return &Module{runtime: runtime, allowListen: allowListen, blockPrivateNet: blockPrivateNet}
+}
+
+func rejectPrivateAddress(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("outbound connection blocked: invalid target address")
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return fmt.Errorf("outbound connection blocked: invalid target IP")
+	}
+	addr = addr.Unmap()
+	if !addr.IsGlobalUnicast() || addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
+		return fmt.Errorf("outbound connection to private or loopback address %s is forbidden", addr)
+	}
+	return nil
+}
+
+// DialContext opens an outbound TCP connection honoring blockPrivateNet.
+func (m *Module) DialContext(ctx context.Context, host string, port int) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: m.runtime.Timeout()}
+	if m.blockPrivateNet {
+		dialer.Control = rejectPrivateAddress
+	}
+	return dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 }
 func (m *Module) Load(vm *moejs.Runtime, module *engine.Object) {
 	exports := vm.Realm().NewObject()
@@ -331,7 +359,7 @@ func (m *Module) netConnect(vm *moejs.Runtime, args []moejs.Value) *engine.Objec
 		return placeholder
 	}
 	go func() {
-		connection, err := (&net.Dialer{Timeout: m.runtime.Timeout()}).DialContext(dialContext, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+		connection, err := m.DialContext(dialContext, host, port)
 		cancelDial()
 		m.runtime.RemoveResource(pendingResourceID)
 		queued := m.runtime.RunOnLoop(func(vm *moejs.Runtime) {

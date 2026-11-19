@@ -168,7 +168,7 @@ func (s *enrollmentService) RefreshCredentials(ctx context.Context, req *connect
 	// pool and unavailable signing keys fail before consuming the refresh token.
 	signingKey, signKeyErr := enrollment.ActiveSigningKey()
 	if signKeyErr != nil {
-		return nil, connectError(connect.CodeInternal, errors.New("credential response signing unavailable; retry same request"))
+		return nil, connectError(connect.CodeUnavailable, enrollment.ErrRefreshSigningUnavailable)
 	}
 	buildSignedResponse := func(issued enrollment.Issued) (*enrollmentv1.RefreshCredentialsResponse, error) {
 		creds := &enrollmentv1.AgentCredentials{
@@ -216,6 +216,9 @@ func (s *enrollmentService) RefreshCredentials(ctx context.Context, req *connect
 				rpcErr.AddDetail(detail)
 			}
 			return nil, rpcErr
+		}
+		if errors.Is(err, enrollment.ErrRefreshSigningUnavailable) {
+			return nil, connectError(connect.CodeUnavailable, enrollment.ErrRefreshSigningUnavailable)
 		}
 		if errors.Is(err, enrollment.ErrRefreshReuse) {
 			auditlog.Log("", "", "agent credential chain revoked after authenticated refresh reuse: client="+record.Client, "warn")
@@ -352,10 +355,15 @@ func verifyRefreshProof(envelope *securityv1.SignedEnvelope, storedKey, clientUU
 	if math.Abs(time.Since(t).Seconds()) > 120 {
 		return errors.New("the refresh proof timestamp drift exceeds allowed window (120s)")
 	}
-	// Consume signature replay entry only after full validation succeeds.
+	// Consume signature replay entry only after full validation succeeds, and
+	// retain it at least until the signed timestamp window expires.
 	sigDigest := sha256.Sum256(matchedSig)
 	sigHash := hex.EncodeToString(sigDigest[:])
-	if !refreshReplayCache.CheckAndRecord(clientUUID, "refresh-sig:"+sigHash, 120*time.Second) {
+	replayTTL := time.Until(t.Add(125 * time.Second))
+	if replayTTL < 120*time.Second {
+		replayTTL = 120 * time.Second
+	}
+	if !refreshReplayCache.CheckAndRecord(clientUUID, "refresh-sig:"+sigHash, replayTTL) {
 		return errors.New("the refresh proof signature was already used (replay rejected)")
 	}
 	return nil

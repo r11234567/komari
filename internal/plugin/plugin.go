@@ -328,6 +328,7 @@ func (m *Manager) load(short string) error {
 		NodeJS:              info.Permissions.Node,
 		AllowExec:           info.Permissions.AllowExec,
 		AllowListen:         info.Permissions.AllowListen,
+		BlockPrivateNet:     !strings.EqualFold(strings.TrimSpace(os.Getenv("KOMARI_PLUGIN_ALLOW_PRIVATE_NET")), "true"),
 		AllowAllFileAccess:  info.Permissions.AllowAllFileAccess,
 		MaxHTTPBodyBytes:    info.Permissions.MaxHTTPBodyBytes,
 		MaxChildOutputBytes: info.Permissions.MaxChildOutputBytes,

@@ -151,3 +151,51 @@ func TestWorkspaceFresh2FAToAssignmentsAndCapabilityRevocation(t *testing.T) {
 		t.Fatalf("capability revocation left terminal open: %v", err)
 	}
 }
+
+func TestGetWorkspaceBySessionAgentHeaderSyncsSiblingTabAndRejectsOtherSessions(t *testing.T) {
+	ctx, user, session := actionFixture(t)
+	agent := rootPolicyNode(t, false)
+	ws := &workspaceService{}
+
+	// Unlock once in Tab A.
+	token1, _, err := workspace.Default.Create(workspace.Binding{UserID: user, Session: session, AgentID: agent, SystemUser: "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = workspace.Default.Lock(token1, user, session) })
+
+	// Sibling Tab B (same session, no local grant) pulls the active grant via X-Komari-Workspace-Agent.
+	pullReq := connect.NewRequest(&workspacev1.GetWorkspaceRequest{})
+	pullReq.Header().Set(workspace.AgentHeader, agent)
+	resp, err := ws.GetWorkspace(ctx, pullReq)
+	if err != nil {
+		t.Fatalf("same-session GetWorkspace by agent header failed: %v", err)
+	}
+	if resp.Msg.Authorization.GrantToken != token1 || resp.Msg.Authorization.SystemUser != "alice" {
+		t.Fatalf("unexpected workspace authorization: %+v", resp.Msg.Authorization)
+	}
+	if resp.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("missing no-store header on GetWorkspace")
+	}
+
+	// Re-unlocking replaces token1 with token2; sibling Tab B pulls token2 without BroadcastChannel secrets.
+	token2, _, err := workspace.Default.Create(workspace.Binding{UserID: user, Session: session, AgentID: agent, SystemUser: "bob"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = workspace.Default.Lock(token2, user, session) })
+
+	resp2, err := ws.GetWorkspace(ctx, pullReq)
+	if err != nil {
+		t.Fatalf("same-session GetWorkspace after re-unlock failed: %v", err)
+	}
+	if resp2.Msg.Authorization.GrantToken != token2 || resp2.Msg.Authorization.SystemUser != "bob" {
+		t.Fatalf("expected replaced grant token2/bob, got %+v", resp2.Msg.Authorization)
+	}
+
+	// A different session must NOT be able to pull this session's grant.
+	otherCtx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: rpc.NewUserPrincipal(user), UserUUID: user, SessionToken: "other-session-token"})
+	if _, err := ws.GetWorkspace(otherCtx, pullReq); connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Fatalf("different session unexpectedly pulled workspace grant: %v", err)
+	}
+}

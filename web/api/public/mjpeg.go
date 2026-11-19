@@ -35,8 +35,8 @@ const (
 	fontZipEntry = "MiSans/ttf/MiSans-Normal.ttf"
 
 	maxMJPEGStreams  = 16
-	maxFontZipBytes  = 32 << 20 // 32 MiB
-	maxFontFileBytes = 32 << 20 // 32 MiB
+	maxFontZipBytes  = 10 << 20 // 10 MiB
+	maxFontFileBytes = 10 << 20 // 10 MiB
 
 	// 渲染参数
 	imageWidth      = 1280
@@ -192,7 +192,7 @@ var (
 	fontOnce     sync.Once
 
 	mjpegStreamSem = make(chan struct{}, maxMJPEGStreams)
-	fontHTTPClient = &http.Client{Timeout: 30 * time.Second}
+	fontHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
 	// 基础字体（用于下载时显示）
 	basicFace = basicfont.Face7x13
