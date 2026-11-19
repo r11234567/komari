@@ -152,6 +152,10 @@ func RunMaintenance(ctx context.Context, now time.Time) (SchedulerResult, error)
 		storeOperations.ReleaseShared()
 		return SchedulerResult{}, fmt.Errorf("metric store not initialized")
 	}
+	if activeStore.Telemetry() != nil {
+		defer storeOperations.ReleaseShared()
+		return runTelemetryPass(ctx, activeStore, now)
+	}
 	defs, err := activeStore.ListMetrics(ctx)
 	if err == nil {
 		defs = compactableMetricDefinitions(activeStore, defs)

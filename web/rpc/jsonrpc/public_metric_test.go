@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,173 @@ import (
 	"github.com/komari-monitor/komari/pkg/metric"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
+
+func TestPublicMetricsBatchesByMetricAndPreservesEntityScope(t *testing.T) {
+	for _, telemetry := range []bool{true, false} {
+		t.Run(fmt.Sprint("telemetry=", telemetry), func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			s, err := metric.Open(ctx, metric.SQLite(filepath.Join(dir, "metrics.db"), metric.WithRetiredLegacyStorage(), metric.WithSQLiteProfile(metric.SQLiteProfileDurable)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			if telemetry {
+				if err = s.EnableTelemetry(ctx, metric.TelemetryConfig{ArchiveDirectory: filepath.Join(dir, "archive")}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			now := time.Now().UTC().Truncate(10 * time.Second)
+			at := now.Add(-2*time.Minute + time.Second)
+			var keys, visible []string
+			for n := 0; n < 6; n++ {
+				visible = append(visible, fmt.Sprintf("node-%d", n))
+			}
+			for m := 0; m < 12; m++ {
+				key := fmt.Sprintf("audit.metric.%02d", m)
+				keys = append(keys, key)
+				if err = s.CreateMetric(ctx, metric.Definition{Name: key, RetentionDays: 30}); err != nil {
+					t.Fatal(err)
+				}
+				for n, entity := range append(append([]string{}, visible...), "hidden", "unrelated") {
+					var points []metric.Point
+					for tag := 0; tag < 2; tag++ {
+						for sample := 0; sample < 2; sample++ {
+							points = append(points, metric.Point{MetricName: key, EntityID: entity, Timestamp: at.Add(time.Duration(sample) * time.Second), Value: float64(m*1000 + n*100 + tag*10 + sample*2), Tags: map[string]string{"device": fmt.Sprint(tag)}, Labels: map[string]string{"source": "synthetic"}})
+						}
+					}
+					if err = s.WriteBatch(ctx, points); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if telemetry {
+				for {
+					n, err := s.Telemetry().SummarizeNext(ctx)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if n == 0 {
+						break
+					}
+				}
+			}
+			for _, downsample := range []bool{true, false} {
+				for _, tc := range []struct {
+					name string
+					ids  []string
+					tags map[string]string
+					fill bool
+				}{
+					{"all_visible", visible, nil, false},
+					{"explicit_node_and_tag", visible[2:3], map[string]string{"device": "1"}, false},
+					{"empty_authorized_set", []string{}, nil, true},
+					{"no_data", []string{"unknown"}, nil, false},
+				} {
+					t.Run(fmt.Sprintf("%s/downsample=%t", tc.name, downsample), func(t *testing.T) {
+						params := publicMetricQueryParams{Downsample: &downsample, FillEmpty: &tc.fill, MaxPoints: 600, Tags: tc.tags}
+						series, rpcErr := queryPublicMetricSeries(ctx, s, params, keys, tc.ids, now.Add(-5*time.Minute), now, now)
+						if rpcErr != nil {
+							t.Fatal(rpcErr)
+						}
+						if tc.name == "no_data" {
+							if len(series) != len(keys) {
+								t.Fatal("missing empty series", len(series))
+							}
+							for _, item := range series {
+								if item.EntityID != "unknown" || item.Points == nil || len(item.Points) != 0 {
+									t.Fatal("empty series contract", item)
+								}
+							}
+							return
+						}
+						perEntity := 2
+						if len(tc.tags) > 0 {
+							perEntity = 1
+						}
+						if len(series) != len(keys)*len(tc.ids)*perEntity {
+							t.Fatal("entity/tag series lost", len(series))
+						}
+						for i, item := range series {
+							m := i / (len(tc.ids) * perEntity)
+							entity := tc.ids[(i/perEntity)%len(tc.ids)]
+							var n, tag int
+							fmt.Sscanf(entity, "node-%d", &n)
+							fmt.Sscanf(item.Tags["device"], "%d", &tag)
+							if item.EntityID != entity || item.MetricKey != keys[m] || item.Downsampled != downsample {
+								t.Fatal("response order or identity", item)
+							}
+							wantLen := 2
+							if downsample && telemetry {
+								wantLen = 1
+							}
+							if len(item.Points) != wantLen {
+								t.Fatal("population", item)
+							}
+							for sample, p := range item.Points {
+								want := float64(m*1000 + n*100 + tag*10 + sample*2)
+								if downsample && telemetry {
+									want++
+								}
+								if p.Value == nil || *p.Value != want || p.Tags["device"] != item.Tags["device"] {
+									t.Fatal("cross-entity data or wrong mean", item)
+								}
+								if downsample && p.Count != map[bool]int{true: 2, false: 1}[telemetry] {
+									t.Fatal("aggregate population", p)
+								}
+								if !downsample && (p.Labels["source"] != "synthetic" || !p.Time.Equal(at.Add(time.Duration(sample)*time.Second))) {
+									t.Fatal("raw timestamp/labels changed", p)
+								}
+							}
+						}
+					})
+				}
+			}
+		})
+	}
+}
+
+func TestPublicTelemetryCoverageSurvivesTagSplitAndEmptyFill(t *testing.T) {
+	at := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	v := float64(12)
+	base := publicMetricSeries{MetricKey: "cpu", EntityID: "node", Downsampled: true, IntervalSeconds: 60, FillEmpty: true, Points: []publicMetricPoint{{Time: at, Value: &v, Tags: map[string]string{"device": "a"}}}}
+	r := metric.TelemetryQueryResult{CoverageStart: at, CoverageEnd: at.Add(3*time.Minute - time.Nanosecond), BoundaryAdjusted: true, AcceptedThrough: 9, AccountedThrough: 8, Sources: []metric.TelemetrySourceSpan{{MetricName: "cpu", EntityID: "node", Tags: map[string]string{"device": "a"}, Start: at, End: at.Add(time.Minute), Resolution: 10 * time.Second}}, Gaps: []metric.TelemetrySourceSpan{{MetricName: "cpu", EntityID: "node", Tags: map[string]string{"device": "a"}, Start: at.Add(time.Minute), End: at.Add(2 * time.Minute), Reason: "missing raw"}, {MetricName: "cpu", EntityID: "node", Tags: map[string]string{"device": "b"}, Start: at, End: at.Add(time.Minute), Reason: "crossed coarse cell"}, {MetricName: "cpu", EntityID: "hidden", Tags: map[string]string{"device": "secret"}, Start: at, End: at.Add(time.Minute), Reason: "hidden"}}}
+	series := publicTelemetryMetricSeries(base, r)
+	if len(series) != 2 {
+		t.Fatal("lost gap-only tag or leaked hidden series", series)
+	}
+	for _, s := range series {
+		if s.AcceptedThrough != 9 || s.SummarizedThrough != 8 || !s.BoundaryAdjusted || len(s.Gaps) != 1 {
+			t.Fatal("metadata lost", s)
+		}
+		want := "partial"
+		if s.Tags["device"] == "b" {
+			want = "unavailable"
+		}
+		if s.Coverage != want {
+			t.Fatal("coverage collapsed", s)
+		}
+		missing := 0
+		for _, p := range s.Points {
+			if p.Coverage == "unavailable" {
+				missing++
+				if p.Value != nil || p.CoverageReason == "" {
+					t.Fatal("gap became empty/valid", p)
+				}
+			}
+		}
+		if missing != 1 {
+			t.Fatal("gap marker missing", s)
+		}
+	}
+	b, err := json.Marshal(series)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "Resolution") || !strings.Contains(string(b), "source_interval_seconds") {
+		t.Fatal("internal source DTO leaked", string(b))
+	}
+}
 
 func TestMetricQueryParamsRequireRFC3339Time(t *testing.T) {
 	tests := []struct {
@@ -229,7 +398,6 @@ func TestPublicPingStatsFromAggregateGroupsUsesTaskNamesAndLossMetric(t *testing
 		Loss: map[string][]metric.AggregatePoint{
 			"1": {{Bucket: base, Count: 4, Value: 0.25}},
 		},
-		LossAvailable: true,
 	}
 
 	stats := publicPingStatsFromAggregateGroups("node-a", groups, taskMap, nil)
@@ -272,6 +440,42 @@ func TestPublicPingMetricStatsIncludesZeroVolatility(t *testing.T) {
 	}
 	if value, ok := decoded["p99_p50_ratio"]; !ok || value != float64(0) {
 		t.Fatalf("zero volatility must be present, got %s", payload)
+	}
+}
+
+func TestPublicPingStatisticsUseAttemptPopulationPerTask(t *testing.T) {
+	// Scalar latency counts only successes; loss counts every attempt. Other
+	// tasks having a loss series cannot establish coverage for this task.
+	summary := metric.SeriesSummary{
+		Avg: []metric.AggregatePoint{
+			{Tags: map[string]string{"task_id": "1"}, Count: 2, Value: 20},
+			{Tags: map[string]string{"task_id": "3"}, Count: 1, Value: 10},
+			{Tags: map[string]string{"task_id": "3"}, Count: 1, Value: -1},
+		},
+		Loss: []metric.AggregatePoint{
+			{Tags: map[string]string{"task_id": "1"}, Count: 3, Value: 1.0 / 3},
+			{Tags: map[string]string{"task_id": "2"}, Count: 3, Value: 1},
+		},
+	}
+	stats := publicPingStatsFromAggregateGroups("node", publicPingMetricGroupsFromSummary(summary), nil, nil)
+	if len(stats) != 3 {
+		t.Fatal(stats)
+	}
+	for _, stat := range stats {
+		switch stat.TaskID {
+		case "1":
+			if stat.Total != 3 || stat.Valid != 2 || math.Abs(stat.Loss-100.0/3) > 1e-9 || stat.LossApproximate || stat.Avg == nil || *stat.Avg != 20 {
+				t.Fatal(stat)
+			}
+		case "2":
+			if stat.Total != 3 || stat.Valid != 0 || stat.Loss != 100 || stat.LossApproximate || stat.Avg != nil {
+				t.Fatal(stat)
+			}
+		case "3":
+			if stat.Total != 2 || stat.Valid != 1 || stat.Loss != 50 || !stat.LossApproximate || stat.Avg == nil || *stat.Avg != 10 {
+				t.Fatal(stat)
+			}
+		}
 	}
 }
 

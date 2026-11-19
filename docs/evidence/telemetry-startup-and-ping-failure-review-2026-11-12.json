@@ -1,0 +1,139 @@
+{
+  "recorded_at_utc": "2026-11-12T16:01:38.082296+00:00",
+  "parent_revision": "7e82ad9e0d76557a25f478d3eca33df71e15c206",
+  "failed_runs": [
+    {
+      "run_id": 43246727820,
+      "job_id": 131281272618,
+      "failed_step": "Retain independent measurements",
+      "cause": "Root-owned 0600 chart result was unreadable by runner; historical and resource experiments themselves passed"
+    },
+    {
+      "run_id": 43246818996,
+      "cause": "Real server startup orphan cleanup queried retired metric_rollups before telemetry activation; HTTP never recovered"
+    },
+    {
+      "run_id": 43246815324,
+      "failed_at_utc": "2026-11-12T15:47:44Z",
+      "cause": "Actual foreground GetPingStats returned 400 failed_precondition during export-off pair 2",
+      "requested_start": "2026-11-12T14:42:00.370Z",
+      "requested_end": "2026-11-12T15:42:00.370Z",
+      "two_hour_qualification_completed": false
+    }
+  ],
+  "source_repairs": [
+    "Activate telemetry after migrations and before orphan cleanup; start workers only after cleanup succeeds",
+    "Retained legacy tables no longer hide failure to erase orphan history in the active engine",
+    "Prove coarse-parent coverage using disjoint recent child populations still answerable by bounded hot SQL; do not interpolate, duplicate or read cold archives",
+    "Charge recent coverage-proof allocations to query memory budget; genuine missing historical precision still fails"
+  ],
+  "ci_artifact_repair": "systemd unit uses runner UID/GID; result remains mode 0600, runner explicitly checks readability",
+  "negative_controls": {
+    "original_app_source_loaded_with_go_overlay_failed_retired_startup": true,
+    "original_app_source_left_orphan_history_in_telemetry": true,
+    "original_planner_reproduced_same_precision_error_at_fixed_edge": true,
+    "actual_old_binary_reproduced_missing_table_on_disposable_retired_database": true
+  },
+  "local_verification": {
+    "final_source_five_database_packages_full_race_passed": true,
+    "packages": [
+      "pkg/metric",
+      "database/metricstore",
+      "database/trafficledger",
+      "pkg/historyexport",
+      "database/dbcore"
+    ],
+    "actual_app_startup_modes": [
+      "fresh",
+      "unmigrated-rejected",
+      "migrated-with-legacy-retained",
+      "actually-compacted-and-retired"
+    ],
+    "startup_regression_checks": [
+      "orphan entity hidden",
+      "orphan task hidden",
+      "valid CPU and Ping retained",
+      "no retired tables recreated",
+      "no writers started after migration guard fails"
+    ],
+    "metadata_key_regressions_and_vet_passed": true,
+    "connect_metric_coverage_admission_and_ping_regressions_passed": true,
+    "ping_raw_oracle_checks": [
+      "attempts",
+      "average",
+      "minimum",
+      "maximum",
+      "last",
+      "standard deviation",
+      "loss",
+      "P50/P99 under existing tolerance"
+    ],
+    "ping_archive_root_closed_during_query": true,
+    "historical_fine_cell_removal_still_rejected": true,
+    "new_ping_case_added_to_real_postgresql_mysql_mariadb_ci": true,
+    "real_external_sql_cases_run_locally_this_update": false,
+    "actual_cli_fixture_legacy_rows": 43203,
+    "fixture_metric_retention_days": 30,
+    "actual_process_http": {
+      "baseline_actual_process_reproduced": true,
+      "fixed_actual_process_restarts": [
+        {
+          "iteration": 1,
+          "http_ready_within_seconds": 30,
+          "cpu_population": 8640,
+          "weighted_sum": 426480.0,
+          "chart_points": 360,
+          "ping_value": 17,
+          "billing_days": 30,
+          "run_uid": 65534
+        },
+        {
+          "iteration": 2,
+          "http_ready_within_seconds": 30,
+          "cpu_population": 8640,
+          "weighted_sum": 426480.0,
+          "chart_points": 360,
+          "ping_value": 17,
+          "billing_days": 30,
+          "run_uid": 65534
+        }
+      ],
+      "retired_tables_still_absent": true,
+      "orphan_entity_removed": true,
+      "integrity": "ok",
+      "synthetic_input": true,
+      "long_soak": false
+    },
+    "nonroot_artifact_reader_checked_0600_owner": true,
+    "bounded_nonroot_chart": {
+      "series": 4096,
+      "cpu.max": "10000 100000",
+      "memory.max": "134217728",
+      "memory.swap.max": "0",
+      "process_rss": {
+        "VmHWM": "56832 kB",
+        "VmRSS": "56832 kB"
+      }
+    },
+    "local_long_soak_started": false,
+    "production_database_or_agent_modified": false
+  },
+  "remote_verification": {
+    "status": "New exact revision still requires storage CI, no-CSV database E2E and CSV qualification; identifiers are recorded in PR 76 after dispatch",
+    "confirm_start_once_without_polling": true
+  },
+  "unchanged_acceptance": [
+    "CPU maximum 10%",
+    "foreground p95 maximum 1.2x",
+    "ordinary resume maximum 30 seconds",
+    "chart and traffic population accuracy",
+    "retention"
+  ],
+  "remaining": [
+    "New revision remote results",
+    "Capacity below old engine not accepted",
+    "Full remigration and reconciliation from original incident database",
+    "Sustained over-30-day/multi-archive/high-cardinality/multi-job resource evidence",
+    "Deployment-specific 24-hour observation"
+  ]
+}

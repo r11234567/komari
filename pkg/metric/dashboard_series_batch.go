@@ -32,6 +32,9 @@ type dashboardBatchSeries struct {
 // DashboardSeriesBatch preserves DashboardSeries results while sharing one
 // SQLite snapshot and routing decoded blocks to their requested metric.
 func (s *Store) DashboardSeriesBatch(ctx context.Context, queries []AggregateQuery, now time.Time) ([][]AggregatePoint, error) {
+	if t := s.telemetry.Load(); t != nil {
+		return t.SeriesBatch(ctx, queries, now)
+	}
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}

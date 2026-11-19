@@ -1,0 +1,31 @@
+{
+  "GHSA-3hqg-6m62-cgxf": {
+    "web/security": ["TestAPIKeyMatchesRejectsPartialMalformedAndEmptyCredentials", "TestAPIFailureBudgetDoesNotChargeSuccessfulTrafficAndRecovers", "TestAPISourceIgnoresSpoofedForwardingWithoutExplicitProxyTrust"],
+    "web/connect": ["TestApiKeyFailuresDoNotLockOutEnrolledDevice", "TestApiTokenHTTPResourceScopeAndRevocationCannotFallBackToCookie"]
+  },
+  "GHSA-74qc-gfcj-9273": {
+    "web/api/admin": ["TestIsValidThemeShort_PathTraversal", "TestThemeArchiveCannotEscapeViaTraversalOrSymlink", "TestFailedThemeUpdatePreservesExistingTheme"]
+  },
+  "GHSA-hxjg-93wc-h8p8": {
+    "web/security": ["TestCorsMiddlewareValidatesAPIOrigins", "TestCorsMiddlewareProtectsConnectProcedures"],
+    "web/connect": ["TestApiTokenReductionsNeedHumanSessionAndOwnershipButNoSecondFactor"],
+    "web/router": ["TestMigratedAdminRestBridgesAreRemoved"]
+  },
+  "GHSA-h8jh-mv4w-3gm5": {
+    "database/clients": ["TestTrafficLimitRejectsPollutionWithoutPartialUpdate", "TestTrafficLimitNormalizesSupportedNumericCallers"]
+  },
+  "GHSA-j2jg-mq93-mqg4": {
+    "web/api/admin": ["TestBlockedThemeAddressRejectsNonPublicRanges", "TestThemeDialRevalidatesDNSAndUsesOnlyNumericPublicAddresses", "TestThemeRedirectBlocksPrivateIPv4IPv6AndUnsupportedSchemes"]
+  },
+  "GHSA-q355-h244-969h": {
+    "web/api": ["TestTerminalWebSocketHandshakeRejectsCrossSiteOrigin", "TestRemoteBrowserOriginSupportsInstalledMobileWebApps"],
+    "web/router": ["TestLegacyRemoteRoutesAreUnmountedByDefault", "TestLegacyRemoteRoutesMountWhenCompatEnabled"],
+    "web/api/remote": ["TestBrowserAuthorizationRequiresSessionAndTicket", "TestBrowserAndAgentTicketsAreSingleUse"]
+  },
+  "GHSA-jhmr-57cj-q6g9": {
+    "web/api/public": ["TestLegacyLoginTOTPFailureAndReplayNeverIssueCookie"],
+    "internal/credentialgateway": ["TestPasswordTOTPFailureAndReplayNeverCreateSession"],
+    "internal/trustedcredential": ["TestAuthorizationBindingScopeAndSingleUse", "TestCancellationDuringVerificationDoesNotAuthorize"],
+    "web/connect": ["TestCredentialGatewayNativeTOTPAndSharedInternalRPC"]
+  }
+}

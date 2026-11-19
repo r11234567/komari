@@ -63,20 +63,22 @@ func TestMetricPointsToReportRejectsUnknownAndMissing(t *testing.T) {
 }
 
 func TestConnectMetricBatchResultsSplitByEntity(t *testing.T) {
-	aggregate := connectAggregatePointsForEntity([]metric.AggregatePoint{
+	aggregatePoints := []metric.AggregatePoint{
 		{EntityID: "node-a", Value: 1},
 		{EntityID: "node-b", Value: 2},
 		{EntityID: "node-a", Value: 3},
-	}, "node-a")
-	if len(aggregate) != 2 || aggregate[0].Value != 1 || aggregate[1].Value != 3 {
+	}
+	aggregate := connectAggregatePointIndices(aggregatePoints, "node-a")["node-a"]
+	if len(aggregate) != 2 || aggregatePoints[aggregate[0]].Value != 1 || aggregatePoints[aggregate[1]].Value != 3 {
 		t.Fatalf("unexpected aggregate split: %#v", aggregate)
 	}
 
-	raw := connectRawPointsForEntity([]metric.Point{
+	rawPoints := []metric.Point{
 		{EntityID: "node-b", Value: 4},
 		{EntityID: "node-a", Value: 5},
-	}, "node-a")
-	if len(raw) != 1 || raw[0].Value != 5 {
+	}
+	raw := connectRawPointIndices(rawPoints, "node-a")["node-a"]
+	if len(raw) != 1 || rawPoints[raw[0]].Value != 5 {
 		t.Fatalf("unexpected raw split: %#v", raw)
 	}
 }

@@ -1,3 +1,5 @@
+//go:build metric_legacy_fixture
+
 package metric
 
 import (
@@ -400,6 +402,10 @@ func TestSealVisitsEverySeriesAcrossPasses(t *testing.T) {
 	sealBefore := cutoff.UnixNano()
 	frontier := cutoff.UnixNano()
 	expired := time.Now().Add(-time.Second)
+	// Materialization also performs time-bounded sealing and may leave its
+	// cursor midway through the series list. Start this independent full-sweep
+	// assertion at zero instead of depending on fixture setup speed.
+	store.storeRollupSealCursor(metricName, 0)
 
 	offsets := []int{store.rollupSealCursor(metricName, seriesCount)}
 	wrapped := false

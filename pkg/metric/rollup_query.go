@@ -491,6 +491,9 @@ func rawTagsToJSON(v any) (string, error) {
 // retained tiers, it uses the longest-retained tier so the available portion of
 // the window can still be returned.
 func (s *Store) CompatibleSeriesInterval(start, now time.Time, interval time.Duration) time.Duration {
+	if t := s.telemetry.Load(); t != nil {
+		return t.compatibleInterval(start, now, interval)
+	}
 	return compatibleSeriesInterval(s.cfg.RollupPolicy, start, now, interval)
 }
 
@@ -498,6 +501,9 @@ func (s *Store) CompatibleSeriesInterval(start, now time.Time, interval time.Dur
 // tiers retained for that metric. Callers that know the metric name should use
 // this method; the legacy method remains for third-party compatibility.
 func (s *Store) CompatibleSeriesIntervalForMetric(ctx context.Context, metricName string, start, now time.Time, interval time.Duration) time.Duration {
+	if t := s.telemetry.Load(); t != nil {
+		return t.compatibleInterval(start, now, interval)
+	}
 	return compatibleSeriesInterval(s.rollupPolicyForMetric(ctx, metricName), start, now, interval)
 }
 
@@ -596,6 +602,10 @@ func bestRollupTier(policy RollupPolicy, interval time.Duration, start, now time
 // 这是“降采样 TSDB”的读取路径：近期范围以完整分辨率从原始点回答，旧范围从
 // 逐级更粗的 rollup 回答。
 func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time) ([]AggregatePoint, error) {
+	if t := s.telemetry.Load(); t != nil {
+		r, err := t.Chart(ctx, query, now)
+		return r.Points, err
+	}
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
@@ -626,6 +636,9 @@ func (s *Store) Series(ctx context.Context, query AggregateQuery, now time.Time)
 // Compatible raw filters share QueryBatch, while multiple aggregations of the
 // same physical series share one bucket state.
 func (s *Store) SeriesBatch(ctx context.Context, queries []AggregateQuery, now time.Time) ([][]AggregatePoint, error) {
+	if t := s.telemetry.Load(); t != nil {
+		return t.SeriesBatch(ctx, queries, now)
+	}
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
@@ -650,14 +663,100 @@ func (s *Store) SeriesBatch(ctx context.Context, queries []AggregateQuery, now t
 // All views are derived from one physical scan when ping latency and loss share
 // the SQLite V8 series, so percentile decoding and block IO are not repeated.
 type SeriesSummary struct {
-	Avg    []AggregatePoint
-	Min    []AggregatePoint
-	Max    []AggregatePoint
-	Last   []AggregatePoint
-	P50    []AggregatePoint
-	P99    []AggregatePoint
-	StdDev []AggregatePoint
-	Loss   []AggregatePoint
+	CoverageStart, CoverageEnd time.Time
+	Interval                   time.Duration
+	Avg                        []AggregatePoint
+	Min                        []AggregatePoint
+	Max                        []AggregatePoint
+	Last                       []AggregatePoint
+	P50                        []AggregatePoint
+	P99                        []AggregatePoint
+	StdDev                     []AggregatePoint
+	Loss                       []AggregatePoint
+}
+
+// EntityPingSummaries has one authoritative window for all returned nodes.
+// An empty node cannot replace response metadata while results are projected.
+type EntityPingSummaries struct {
+	CoverageStart, CoverageEnd time.Time
+	Interval                   time.Duration
+	ByEntity                   map[string]SeriesSummary
+}
+
+// PingSummariesForEntities keeps authorization in the planner and reads the
+// telemetry population once, then distributes all views in one linear pass.
+func (s *Store) PingSummariesForEntities(ctx context.Context, q AggregateQuery, entities []string, now time.Time) (EntityPingSummaries, error) {
+	out := EntityPingSummaries{CoverageStart: q.Start, CoverageEnd: q.End, Interval: q.Interval, ByEntity: make(map[string]SeriesSummary, len(entities))}
+	ids := make([]string, 0, len(entities))
+	for _, id := range entities {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		if _, exists := out.ByEntity[id]; exists {
+			continue
+		}
+		ids = append(ids, id)
+		out.ByEntity[id] = SeriesSummary{CoverageStart: q.Start, CoverageEnd: q.End, Interval: q.Interval}
+	}
+	entities = ids
+	if len(entities) == 0 {
+		return out, nil
+	}
+	if s.Telemetry() == nil {
+		queries := make([]AggregateQuery, len(entities))
+		for i, id := range entities {
+			queries[i] = q
+			queries[i].EntityID = id
+		}
+		values, err := s.PingSeriesSummaryBatch(ctx, queries, now)
+		if err != nil {
+			return out, err
+		}
+		for i, id := range entities {
+			v := values[i]
+			v.CoverageStart, v.CoverageEnd = q.Start, q.End
+			out.ByEntity[id] = v
+		}
+		return out, nil
+	}
+	q.EntityID = ""
+	q.PreserveSeries = true
+	value, err := s.PingSeriesSummary(WithTelemetryEntities(ctx, entities), q, now)
+	if err != nil {
+		return out, err
+	}
+	out.CoverageStart, out.CoverageEnd, out.Interval = value.CoverageStart, value.CoverageEnd, value.Interval
+	for _, id := range entities {
+		out.ByEntity[id] = SeriesSummary{CoverageStart: value.CoverageStart, CoverageEnd: value.CoverageEnd, Interval: value.Interval}
+	}
+	for view, points := range [][]AggregatePoint{value.Avg, value.Min, value.Max, value.Last, value.P50, value.P99, value.StdDev, value.Loss} {
+		for _, p := range points {
+			v, ok := out.ByEntity[p.EntityID]
+			if !ok {
+				continue
+			}
+			switch view {
+			case 0:
+				v.Avg = append(v.Avg, p)
+			case 1:
+				v.Min = append(v.Min, p)
+			case 2:
+				v.Max = append(v.Max, p)
+			case 3:
+				v.Last = append(v.Last, p)
+			case 4:
+				v.P50 = append(v.P50, p)
+			case 5:
+				v.P99 = append(v.P99, p)
+			case 6:
+				v.StdDev = append(v.StdDev, p)
+			case 7:
+				v.Loss = append(v.Loss, p)
+			}
+			out.ByEntity[p.EntityID] = v
+		}
+	}
+	return out, nil
 }
 
 // PingSeriesSummary returns latency and loss aggregates without changing the
@@ -689,7 +788,7 @@ func (s *Store) pingSeriesSummaryFromRaw(ctx context.Context, query AggregateQue
 		}
 		return pageBuckets(result, view.BucketLimit, view.BucketOffset), nil
 	}
-	var summary SeriesSummary
+	summary := SeriesSummary{CoverageStart: query.Start, CoverageEnd: query.End, Interval: query.Interval}
 	views := []struct {
 		aggregation Aggregation
 		target      *[]AggregatePoint
@@ -754,7 +853,7 @@ func (s *Store) pingSeriesSummaryCompatibility(ctx context.Context, query Aggreg
 		view.Aggregation = aggregation
 		return s.Series(ctx, view, now)
 	}
-	var summary SeriesSummary
+	summary := SeriesSummary{CoverageStart: query.Start, CoverageEnd: query.End, Interval: query.Interval}
 	var err error
 	if summary.Avg, err = load(query.MetricName, AggAvg); err != nil {
 		return SeriesSummary{}, err

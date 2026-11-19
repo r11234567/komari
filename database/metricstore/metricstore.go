@@ -58,6 +58,12 @@ const (
 // 注意：metric store 现在始终启用（旧的 metric_store_enabled 开关已废弃）。
 // 未显式配置时默认使用 SQLite（./data/metrics.db）。
 type MetricStoreConfig struct {
+	ArchiveDirectory                 string `json:"metric_archive_directory" default:"./data/telemetry"`
+	ArchiveRetentionDays             int    `json:"metric_archive_retention_days" default:"30"`
+	HotWindowMinutes                 int    `json:"metric_hot_window_minutes" default:"15"`
+	HotRetentionMinutes              int    `json:"metric_hot_retention_minutes" default:"0"` // retired: raw is removed after durable handoff
+	ArchiveSegmentMinutes            int    `json:"metric_archive_segment_minutes" default:"1440"`
+	HotBudgetMiB                     int    `json:"metric_hot_budget_mib" default:"16"`
 	Driver                           string `json:"metric_db_driver" default:"sqlite"`                          // 数据库类型: sqlite, mysql, postgresql
 	DSN                              string `json:"metric_db_dsn" default:"./data/metrics.db"`                  // 数据库连接串
 	DownsamplingEnabled              bool   `json:"metric_downsampling_enabled" default:"false"`                // true=降采样并删除已汇总原始点；false=保留原始点并仅生成查询加速 rollup
@@ -105,6 +111,7 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 	opts := []metric.Option{
 		metric.WithTablePrefix(tablePrefix),
 		metric.WithAutoMigrate(autoMigrate),
+		metric.WithRetiredLegacyStorage(),
 	}
 	resources := detectSQLiteResourceProfile()
 	opts = append(opts, metric.WithHeavyReadConcurrency(resources.HeavyReadConcurrent))
@@ -133,6 +140,7 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 		// 这里刻意忽略 cfg.MaxOpenConns/MaxIdleConns —— 对 SQLite 而言多写连接
 		// 只会引入锁竞争而非提升吞吐。
 		opts = append(opts,
+			metric.WithSQLiteProfile(metric.SQLiteProfileDurable),
 			metric.WithMaxOpenConns(1),
 			metric.WithMaxIdleConns(1),
 			metric.WithConnMaxLifetime(0),
@@ -435,7 +443,37 @@ func OpenStoreForMigrationWithProgress(ctx context.Context, cfg *MetricStoreConf
 	if legacyRetentionDays < defaultBuiltinMetricRetentionDays {
 		legacyRetentionDays = defaultBuiltinMetricRetentionDays
 	}
-	return openStoreWithDefaultRetentionAndProgress(ctx, cfg, legacyRetentionDays, progress)
+	s, err := openStoreWithDefaultRetentionAndProgress(ctx, cfg, legacyRetentionDays, progress)
+	if err != nil {
+		return nil, err
+	}
+	// Import into the active format. An existing unmigrated target must first
+	// pass the explicit cutover (including its business-ledger bridge).
+	if err = s.RequireTelemetryMigration(ctx); err == nil {
+		var c metric.TelemetryConfig
+		c, err = telemetryConfig(cfg)
+		if err == nil {
+			var state metric.LegacyMigrationState
+			state, err = s.PrepareLegacyMigration(ctx, c)
+			// The guard above proved an incomplete target has no legacy input.
+			// Its empty old-metrics ledger phase needs no replay. Monitoring
+			// source settlement remains explicit before that source is dropped.
+			if err == nil && !state.Complete {
+				err = s.CompleteLegacyLedgerMigration(ctx, c)
+			}
+		}
+		if err == nil {
+			err = MigrateTelemetryOffline(ctx, s, cfg, nil)
+		}
+		if err == nil {
+			err = enableTelemetryStore(ctx, s, cfg)
+		}
+	}
+	if err != nil {
+		s.Close()
+		return nil, err
+	}
+	return s, nil
 }
 
 // InspectSQLiteStorageMigration checks whether the configured metric store
@@ -465,6 +503,9 @@ func OpenConfiguredStoreForMigration(ctx context.Context, progress metric.Migrat
 // TestConnection 使用给定配置尝试连接 metrics 数据库（不影响当前运行的 store）。
 // 仅打开连接并 Ping，不执行自动建表，连接成功后立即关闭。失败时返回可读错误。
 func TestConnection(ctx context.Context, cfg *MetricStoreConfig) error {
+	if err := ValidateTelemetrySettings(cfg); err != nil {
+		return err
+	}
 	metricCfg, err := buildMetricConfig(cfg, false)
 	if err != nil {
 		return err
@@ -481,6 +522,12 @@ func TestConnection(ctx context.Context, cfg *MetricStoreConfig) error {
 
 // InitializeStore 初始化 metric store（启动时调用，可在失败或关闭后重试）。
 func InitializeStore() error {
+	return InitializeStoreContext(context.Background())
+}
+
+// InitializeStoreContext lets the restricted startup controller cancel the
+// open/schema work as well as the subsequent history conversion.
+func InitializeStoreContext(parent context.Context) error {
 	storeInitMu.Lock()
 	defer storeInitMu.Unlock()
 
@@ -500,6 +547,11 @@ func InitializeStore() error {
 	// timeout. Remote stores retain a bounded startup deadline.
 	ctx, cancel := startupStoreContext(cfg)
 	defer cancel()
+	stop := context.AfterFunc(parent, cancel)
+	defer stop()
+	if err := parent.Err(); err != nil {
+		return err
+	}
 
 	s, err := openStore(ctx, cfg)
 	if err != nil {
@@ -547,9 +599,24 @@ func Reload(ctx context.Context) error {
 	}
 
 	// 用新配置打开并建表（内部已 Ping 校验连接）。
+	if err := ValidateTelemetrySettings(cfg); err != nil {
+		return err
+	}
 	s, err := openStore(ctx, cfg)
 	if err != nil {
 		return err
+	}
+	if telemetryRuntime.Load() {
+		if err := s.RequireTelemetryMigration(ctx); err != nil {
+			s.Close()
+			return err
+		}
+		if err := enableTelemetryStore(ctx, s, cfg); err != nil {
+			s.Close()
+			return err
+		}
+		copy := *cfg
+		activeTelemetrySettings.Store(&copy)
 	}
 
 	storeMu.Lock()
@@ -570,7 +637,26 @@ func Reload(ctx context.Context) error {
 	return nil
 }
 
-// GetStore 获取 metric store 实例（如果未启用返回 nil）
+// AcquireStore pins the active instance until release is called. Acquire before
+// reading the pointer so Reload/Close cannot retire it between queries. Release
+// after closing any rows/streams. Do not acquire a second lease while holding
+// one: an exclusive operation may be queued between the two acquisitions.
+func AcquireStore(ctx context.Context) (*metric.Store, func(), error) {
+	if err := storeOperations.AcquireShared(ctx); err != nil {
+		return nil, nil, fmt.Errorf("wait for metric store lease: %w", err)
+	}
+	storeMu.RLock()
+	active := store
+	storeMu.RUnlock()
+	if active == nil {
+		storeOperations.ReleaseShared()
+		return nil, nil, ErrStoreNotInitialized
+	}
+	return active, sync.OnceFunc(storeOperations.ReleaseShared), nil
+}
+
+// GetStore returns an unleased pointer. Only use during single-threaded startup
+// or while already holding storeOperations. Runtime callers use AcquireStore.
 func GetStore() *metric.Store {
 	storeMu.RLock()
 	defer storeMu.RUnlock()
@@ -586,10 +672,11 @@ type RetentionSummary struct {
 // GetRetentionSummary aggregates the active store's metric definitions. An
 // empty definition set is not considered record-enabled.
 func GetRetentionSummary(ctx context.Context) (RetentionSummary, error) {
-	s := GetStore()
-	if s == nil {
-		return RetentionSummary{}, fmt.Errorf("metric store not initialized")
+	s, release, err := AcquireStore(ctx)
+	if err != nil {
+		return RetentionSummary{}, err
 	}
+	defer release()
 	defs, err := s.ListMetrics(ctx)
 	if err != nil {
 		return RetentionSummary{}, err
@@ -1087,10 +1174,11 @@ func GetRecordsByClientAndTimeForLoadType(ctx context.Context, clientUUID string
 // timeline before legacy response objects are allocated. The storage query can
 // therefore select a coarser materialized tier for large report windows.
 func GetRecordsByClientAndTimeForLoadTypeMaxPoints(ctx context.Context, clientUUID string, start, end time.Time, loadType string, maxPoints int) ([]models.Record, error) {
-	s := GetStore()
-	if s == nil {
-		return nil, fmt.Errorf("metric store not enabled")
+	s, release, err := AcquireStore(ctx)
+	if err != nil {
+		return nil, err
 	}
+	defer release()
 
 	return getRecordsByClientAndTimeFromSeries(ctx, s, clientUUID, start, end, recordMetricNamesForLoadType(loadType), recordClientMaxPoints(maxPoints))
 }
@@ -1099,10 +1187,11 @@ func GetRecordsByClientAndTimeForLoadTypeMaxPoints(ctx context.Context, clientUU
 // needed by report accounting. Avoiding unrelated system metrics keeps ledger
 // settlement inexpensive on low-resource servers.
 func GetTrafficRecordsByClientAndTime(ctx context.Context, clientUUID string, start, end time.Time) ([]models.Record, error) {
-	s := GetStore()
-	if s == nil {
-		return nil, fmt.Errorf("metric store not enabled")
+	s, release, err := AcquireStore(ctx)
+	if err != nil {
+		return nil, err
 	}
+	defer release()
 
 	return getRecordsByClientAndTimeFromSeries(ctx, s, clientUUID, start, end, []string{
 		MetricNetTotalUp,
@@ -1127,10 +1216,11 @@ type DashboardTrafficRecord struct {
 }
 
 func GetTrafficRecordsByClientsAndTime(ctx context.Context, clientUUIDs []string, start, end time.Time) ([]DashboardTrafficRecord, map[string]DashboardTrafficRecord, error) {
-	s := GetStore()
-	if s == nil {
-		return nil, nil, fmt.Errorf("metric store not enabled")
+	s, release, err := AcquireStore(ctx)
+	if err != nil {
+		return nil, nil, err
 	}
+	defer release()
 	if end.Before(start) {
 		return nil, nil, fmt.Errorf("traffic metric range end precedes start")
 	}
@@ -1230,7 +1320,7 @@ func GetTrafficRecordsByClientsAndTime(ctx context.Context, clientUUIDs []string
 		}
 	}
 	if len(missing) > 0 {
-		fallback, err := GetLatestTrafficBefore(ctx, missing, start)
+		fallback, err := getLatestTrafficBeforeWithStore(ctx, s, missing, start)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1286,10 +1376,11 @@ func GetRecordsByTimeForLoadType(ctx context.Context, start, end time.Time, load
 // proportional sampling when nodes have uneven reporting cadence while still
 // avoiding the old 500-points-per-node temporary result on large installations.
 func GetRecordsByTimeForLoadTypeMaxPoints(ctx context.Context, start, end time.Time, loadType string, maxPoints int) ([]models.Record, error) {
-	s := GetStore()
-	if s == nil {
-		return nil, fmt.Errorf("metric store not enabled")
+	s, release, err := AcquireStore(ctx)
+	if err != nil {
+		return nil, err
 	}
+	defer release()
 	metricNames := recordMetricNamesForLoadType(loadType)
 
 	interval := recordSeriesInterval(s, start, end, time.Now().UTC(), 500)
@@ -1530,10 +1621,11 @@ func sortRecords(records []models.Record) {
 
 // GetGPURecordsByClientAndTime 从 metric store 查询 GPU 记录
 func GetGPURecordsByClientAndTime(ctx context.Context, clientUUID string, start, end time.Time) ([]models.GPURecord, error) {
-	s := GetStore()
-	if s == nil {
-		return nil, fmt.Errorf("metric store not enabled")
+	s, release, err := AcquireStore(ctx)
+	if err != nil {
+		return nil, err
 	}
+	defer release()
 
 	// 查询 GPU 相关指标（每设备利用率使用独立指标 gpu.device.usage）
 	gpuMetrics := []string{MetricGPUDeviceUsage, MetricGPUMem, MetricGPUMemTotal, MetricGPUTemp}
@@ -1631,10 +1723,11 @@ func GetGPURecordsByClientAndTime(ctx context.Context, clientUUID string, start,
 // 的 raw 点会被压入 rollup 并删除，因此这里使用 Series 走与 queryMetrics
 // 相同的 raw/rollup 混合读取路径，并保留 task_id 标签。
 func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, end time.Time) ([]models.PingRecord, error) {
-	s := GetStore()
-	if s == nil {
-		return nil, fmt.Errorf("metric store not enabled")
+	s, release, err := AcquireStore(ctx)
+	if err != nil {
+		return nil, err
 	}
+	defer release()
 
 	query := metric.Query{
 		MetricName: MetricPingLatency,
@@ -1707,10 +1800,11 @@ func farFuture() time.Time {
 
 // DeleteAllRecords 删除所有负载/系统类记录（保留指标定义，不含 ping）。
 func DeleteAllRecords(ctx context.Context) error {
-	s := GetStore()
-	if s == nil {
-		return fmt.Errorf("metric store not enabled")
+	s, release, err := AcquireStore(ctx)
+	if err != nil {
+		return err
 	}
+	defer release()
 
 	for _, metricName := range recordMetricNames {
 		if _, err := s.DeleteBefore(ctx, metricName, farFuture()); err != nil {
@@ -1724,10 +1818,11 @@ func DeleteAllRecords(ctx context.Context) error {
 
 // DeleteAllPingRecords 删除全部 ping 记录（保留指标定义）。
 func DeleteAllPingRecords(ctx context.Context) error {
-	s := GetStore()
-	if s == nil {
-		return fmt.Errorf("metric store not enabled")
+	s, release, err := AcquireStore(ctx)
+	if err != nil {
+		return err
 	}
+	defer release()
 	for _, metricName := range pingMetricNames {
 		if _, err := s.DeleteBefore(ctx, metricName, farFuture()); err != nil {
 			return fmt.Errorf("failed to delete ping records: %w", err)
@@ -1794,11 +1889,12 @@ func DeleteEntityAsync(entityID string) {
 // admin retention-policy update response.
 func DeleteMetricDataAsync(metricName string) {
 	go func() {
-		s := GetStore()
-		if s == nil {
-			logger.Errorf("metricstore", "Failed to delete disabled metric %s: metric store not enabled", metricName)
+		s, release, err := AcquireStore(context.Background())
+		if err != nil {
+			logger.Errorf("metricstore", "Failed to acquire store for disabled metric %s: %v", metricName, err)
 			return
 		}
+		defer release()
 		if _, err := s.DeleteMetricDataIfDisabled(context.Background(), metricName); err != nil {
 			logger.Errorf("metricstore", "Failed to delete disabled metric %s: %v", metricName, err)
 		}

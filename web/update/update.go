@@ -18,6 +18,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/migrationutil"
 	"github.com/komari-monitor/komari/web/api"
 	publicapi "github.com/komari-monitor/komari/web/api/public"
+	connectapi "github.com/komari-monitor/komari/web/connect"
 	jsonrpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
 	"gorm.io/gorm"
 )
@@ -97,6 +98,7 @@ func (c *Controller) Deactivate() {
 }
 
 func (c *Controller) Register(r *gin.Engine) {
+	connectapi.RegisterRestrictedPasswordLogin(r)
 	r.POST("/api/login", publicapi.Login)
 	r.GET("/api/me", jsonrpc.Bind("public:getMe", jsonrpc.WithRaw()))
 	r.GET("/api/oauth", publicapi.OAuth)
@@ -283,6 +285,10 @@ func (c *Controller) runMigration(cfg metricstore.MetricStoreConfig, legacyReten
 	c.status.Phase = "finalizing"
 	c.status.Progress = 100
 	c.mu.Unlock()
+	if err := migrations.MigrateLegacyMonitoringLedger(ctx, c.db, store); err != nil {
+		c.failTarget(err, cfg.DSN, "traffic_ledger")
+		return
+	}
 	if err := migrations.CompleteLegacyMonitoringMigration(c.db, nil); err != nil {
 		c.failTarget(err, cfg.DSN, "finalizing")
 		return

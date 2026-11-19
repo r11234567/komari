@@ -54,6 +54,7 @@ type Client struct {
 	TrafficResetCycle      string     `json:"traffic_reset_cycle,omitempty" gorm:"type:varchar(64);not null;default:''"`
 	EffectiveTrafficLimit  int64      `json:"effective_traffic_limit" gorm:"-"`
 	EffectiveTrafficType   string     `json:"effective_traffic_type" gorm:"-"`
+	TrafficNextReset       *time.Time `json:"traffic_next_reset,omitempty" gorm:"-"`
 	DeploymentStatus       string     `json:"deployment_status" gorm:"-"`
 	CreatedAt              time.Time  `json:"created_at"`
 	UpdatedAt              time.Time  `json:"updated_at"`

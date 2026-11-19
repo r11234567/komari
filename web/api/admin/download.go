@@ -16,6 +16,7 @@ import (
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/pkg/historyexport"
 	"github.com/komari-monitor/komari/web/api"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -43,6 +44,12 @@ var configOnlyEmptyTables = []string{
 	"traffic_daily_ledgers",
 	"traffic_calibration_adjustments",
 	"traffic_cycle_first_days",
+	"telemetry_traffic_streams",
+	"telemetry_traffic_states",
+	"telemetry_traffic_slices",
+	"telemetry_traffic_cycles",
+	"telemetry_traffic_minutes",
+	"telemetry_traffic_tails",
 	"return_route_events",
 	"return_route_statuses",
 }
@@ -226,9 +233,10 @@ func normalizePortableMetricConfig(ctx context.Context, db *sql.DB, objects map[
 		return nil
 	}
 	values := map[string]string{
-		"metric_db_driver":        `"sqlite"`,
-		"metric_db_dsn":           `"./data/metrics.db"`,
-		"metric_migration_target": `"sqlite|./data/metrics.db"`,
+		"metric_archive_directory": `"./data/telemetry"`,
+		"metric_db_driver":         `"sqlite"`,
+		"metric_db_dsn":            `"./data/metrics.db"`,
+		"metric_migration_target":  `"sqlite|./data/metrics.db"`,
 	}
 	for key, value := range values {
 		if _, err := db.ExecContext(ctx, `INSERT INTO configs (key, value) VALUES (?, ?)
@@ -328,7 +336,11 @@ func writeDirectoryToZip(writer *zip.Writer, contentDir string) error {
 		if err != nil {
 			return err
 		}
-		entry, err := writer.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Deflate, Modified: info.ModTime()})
+		method := uint16(zip.Deflate)
+		if strings.HasSuffix(name, ".jsonl.zst") {
+			method = zip.Store
+		}
+		entry, err := writer.CreateHeader(&zip.FileHeader{Name: name, Method: method, Modified: info.ModTime()})
 		if err != nil {
 			file.Close()
 			return err
@@ -408,19 +420,34 @@ func DownloadBackup(c *gin.Context) {
 	}
 
 	mainSnapshot := filepath.Join(contentDir, "komari.db")
-	if err := backupMainSQLite(mainSnapshot); err != nil {
+	snapshot := func() error { return backupMainSQLite(mainSnapshot) }
+	if scope == backupScopeFull {
+		snapshot = func() error {
+			queue, err := historyexport.Open("./data/exports-v2")
+			if err != nil {
+				return err
+			}
+			defer queue.Close()
+			lockCtx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+			release, err := historyexport.LockMaintenance(lockCtx, queue.Dir)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("wait for export checkpoint before backup: %w", err)
+			}
+			defer release()
+			if err = queue.BackupLocked(c.Request.Context(), filepath.Join(contentDir, "exports-v2")); err != nil {
+				return err
+			}
+			return metricstore.BackupFull(c.Request.Context(), contentDir, func() error { return backupMainSQLite(mainSnapshot) })
+		}
+	}
+	if err := snapshot(); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if err := sanitizeConfigSnapshot(c.Request.Context(), mainSnapshot, scope); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 		return
-	}
-	if scope == backupScopeFull {
-		if err := metricstore.BackupSQLite(c.Request.Context(), filepath.Join(contentDir, "metrics.db")); err != nil {
-			api.RespondError(c, http.StatusUnprocessableEntity, "完整备份未生成："+err.Error()+"。若使用 MySQL/PostgreSQL，请同时使用数据库自身的备份工具；也可以改用仅配置导出。")
-			return
-		}
 	}
 
 	now := time.Now().UTC()

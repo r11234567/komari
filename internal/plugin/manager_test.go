@@ -177,7 +177,7 @@ func TestLoadAllSkipsDisabledAndApprovesEnabled(t *testing.T) {
 
 	// Persist an enabled+approved state, then LoadAll must load it.
 	hash := approvalPermissionsHash(models.PluginPermissions{AllowRoutes: true, AllowSystemRPC: true})
-	global.stateStore().set("demo", PluginState{Enabled: true, ApprovedPermissionsHash: hash})
+	global.stateStore().set("demo", PluginState{Enabled: true, ApprovedPermissionsHash: hash, ApprovedPackageDigest: receiptDigest("demo")})
 	if err := LoadAll(); err != nil {
 		t.Fatal(err)
 	}

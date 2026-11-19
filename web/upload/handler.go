@@ -106,6 +106,8 @@ func (h *Handler) Merge(c *gin.Context) {
 		return
 	}
 	result, err := h.Store.Finalize(owner, request.UploadID, func(session Session) (Result, error) {
+		session.Actor = api.GetPrincipal(c).UserUUID
+		session.RemoteIP = c.ClientIP()
 		finalize, ok := h.Finalizers[session.Metadata.Purpose]
 		if !ok {
 			return Result{}, fmt.Errorf("unsupported upload purpose")

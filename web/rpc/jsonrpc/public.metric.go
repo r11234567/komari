@@ -18,7 +18,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
-const defaultMetricQueryPoints = 500
+const defaultMetricQueryPoints = 600
 const maxMetricQueryPoints = 10_000
 const historicalQueryTimeout = 20 * time.Second
 const maxRawMetricQueryRange = time.Hour
@@ -65,27 +65,39 @@ type publicMetricQueryParams struct {
 }
 
 type publicMetricPoint struct {
-	Time   time.Time         `json:"time"`
-	Value  *float64          `json:"value"`
-	Count  int               `json:"count,omitempty"`
-	Tags   map[string]string `json:"tags,omitempty"`
-	Labels map[string]string `json:"labels,omitempty"`
+	Coverage              string            `json:"coverage,omitempty"`
+	CoverageReason        string            `json:"coverage_reason,omitempty"`
+	SourceIntervalSeconds float64           `json:"source_interval_seconds,omitempty"`
+	Time                  time.Time         `json:"time"`
+	Value                 *float64          `json:"value"`
+	Count                 int               `json:"count,omitempty"`
+	Tags                  map[string]string `json:"tags,omitempty"`
+	Labels                map[string]string `json:"labels,omitempty"`
 }
 
 type publicMetricSeries struct {
-	MetricKey           string              `json:"metric_key"`
-	EntityID            string              `json:"entity_id"`
-	Type                string              `json:"type,omitempty"`
-	Unit                string              `json:"unit,omitempty"`
-	RetentionDays       int                 `json:"retention_days,omitempty"`
-	Tags                map[string]string   `json:"tags,omitempty"`
-	Downsampled         bool                `json:"downsampled"`
-	DownsampleAlgorithm string              `json:"downsample_algorithm,omitempty"`
-	FillEmpty           bool                `json:"fill_empty,omitempty"`
-	MaxPoints           int                 `json:"max_points,omitempty"`
-	IntervalSeconds     float64             `json:"interval_seconds,omitempty"`
-	Count               int                 `json:"count"`
-	Points              []publicMetricPoint `json:"points"`
+	Coverage                 string                   `json:"coverage,omitempty"`
+	Sources                  []publicMetricSourceSpan `json:"sources,omitempty"`
+	Gaps                     []publicMetricSourceSpan `json:"gaps,omitempty"`
+	AcceptedThrough          int64                    `json:"accepted_through,omitempty"`
+	SummarizedThrough        int64                    `json:"summarized_through,omitempty"`
+	RequestedIntervalSeconds float64                  `json:"requested_interval_seconds,omitempty"`
+	MetricKey                string                   `json:"metric_key"`
+	EntityID                 string                   `json:"entity_id"`
+	Type                     string                   `json:"type,omitempty"`
+	Unit                     string                   `json:"unit,omitempty"`
+	RetentionDays            int                      `json:"retention_days,omitempty"`
+	Tags                     map[string]string        `json:"tags,omitempty"`
+	Downsampled              bool                     `json:"downsampled"`
+	DownsampleAlgorithm      string                   `json:"downsample_algorithm,omitempty"`
+	FillEmpty                bool                     `json:"fill_empty,omitempty"`
+	MaxPoints                int                      `json:"max_points,omitempty"`
+	IntervalSeconds          float64                  `json:"interval_seconds,omitempty"`
+	CoverageStart            *time.Time               `json:"coverage_start,omitempty"`
+	CoverageEnd              *time.Time               `json:"coverage_end,omitempty"`
+	BoundaryAdjusted         bool                     `json:"boundary_adjusted,omitempty"`
+	Count                    int                      `json:"count"`
+	Points                   []publicMetricPoint      `json:"points"`
 }
 
 type publicPingMetricStatsParams struct {
@@ -136,10 +148,11 @@ type publicPingMetricStatsResponse struct {
 }
 
 func publicListMetricDefinitions(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	store := metricstore.GetStore()
-	if store == nil {
-		return nil, rpc.MakeError(rpc.InternalError, "metric store not initialized", nil)
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "acquire metric store: "+err.Error(), nil)
 	}
+	defer releaseStore()
 	defs, err := store.ListMetrics(ctx)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to list metric definitions: "+err.Error(), nil)
@@ -193,10 +206,26 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		downsample = *params.ServerDownsample
 	}
 
-	store := metricstore.GetStore()
-	if store == nil {
-		return nil, rpc.MakeError(rpc.InternalError, "metric store not initialized", nil)
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "acquire metric store: "+err.Error(), nil)
 	}
+	defer releaseStore()
+	series, rpcErr := queryPublicMetricSeries(ctx, store, params, metricKeys, entityIDs, start, end, time.Now().UTC())
+	if rpcErr != nil {
+		return nil, rpcErr
+	}
+	return map[string]any{
+		"start": start.UTC(), "end": end.UTC(),
+		"server_downsample_default": downsample,
+		"default_points":            defaultMetricQueryPoints,
+		"series":                    series, "count": len(series),
+	}, nil
+}
+
+// Telemetry reads each metric once, independently of the number of authorized
+// entities. Keep that authorization in SQL as well as the response.
+func queryPublicMetricSeries(ctx context.Context, store *metric.Store, params publicMetricQueryParams, metricKeys, entityIDs []string, start, end, now time.Time) ([]publicMetricSeries, *rpc.JsonRpcError) {
 	defs, err := store.ListMetrics(ctx)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to list metric definitions: "+err.Error(), nil)
@@ -213,7 +242,10 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		aggregateSlot int
 		rawSlot       int
 	}
-	now := time.Now().UTC()
+	shared := store.Telemetry() != nil
+	if shared {
+		ctx = metric.WithTelemetryEntities(ctx, entityIDs)
+	}
 	plans := make([]publicMetricBatchPlan, 0)
 	aggregateQueries := make([]metric.AggregateQuery, 0, len(plans))
 	rawQueries := make([]metric.Query, 0, len(plans))
@@ -238,17 +270,28 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 
 		interval := time.Duration(0)
 		if metricDownsample {
-			interval = metricDownsampleInterval(end.Sub(start), maxPoints)
-			interval = store.CompatibleSeriesIntervalForMetric(ctx, metricKey, start, now, interval)
+			if store.Telemetry() == nil {
+				interval = metricDownsampleInterval(end.Sub(start), maxPoints)
+				interval = store.CompatibleSeriesIntervalForMetric(ctx, metricKey, start, now, interval)
+			}
 		}
+		query := metric.Query{
+			MetricName: metricKey,
+			Start:      start,
+			End:        end,
+			Tags:       params.Tags,
+			Order:      metric.OrderAsc,
+		}
+		if telemetry := store.Telemetry(); telemetry != nil && metricDownsample && len(entityIDs) > 0 {
+			query, interval, err = telemetry.PlanChart(ctx, query, now, maxPoints, def.RetentionDays)
+			if err != nil {
+				return nil, metricQueryError(err, "Failed to resolve chart window")
+			}
+		}
+		aggregateSlot, rawSlot := -1, -1
 		for _, entityID := range entityIDs {
-			query := metric.Query{
-				MetricName: metricKey,
-				EntityID:   entityID,
-				Start:      start,
-				End:        end,
-				Tags:       params.Tags,
-				Order:      metric.OrderAsc,
+			if !shared {
+				query.EntityID = entityID
 			}
 			plan := publicMetricBatchPlan{
 				metricKey:   metricKey,
@@ -268,24 +311,45 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				rawSlot:       -1,
 			}
 			if metricDownsample {
+				if store.Telemetry() != nil {
+					actualStart, actualEnd := query.Start, query.End
+					plan.item.CoverageStart, plan.item.CoverageEnd = &actualStart, &actualEnd
+					plan.item.BoundaryAdjusted = !query.Start.Equal(start) || !query.End.Equal(end)
+				}
 				plan.item.DownsampleAlgorithm = string(algorithm)
 				plan.item.IntervalSeconds = interval.Seconds()
-				plan.aggregateSlot = len(aggregateQueries)
-				aggregateQueries = append(aggregateQueries, metric.AggregateQuery{
-					Query:          query,
-					Aggregation:    algorithm,
-					Interval:       interval,
-					PreserveSeries: true,
-				})
+				if !shared || aggregateSlot < 0 {
+					aggregateSlot = len(aggregateQueries)
+					aggregateQueries = append(aggregateQueries, metric.AggregateQuery{
+						Query:          query,
+						Aggregation:    algorithm,
+						Interval:       interval,
+						PreserveSeries: true,
+					})
+				}
+				plan.aggregateSlot = aggregateSlot
 			} else {
-				plan.rawSlot = len(rawQueries)
-				rawQueries = append(rawQueries, query)
+				if !shared || rawSlot < 0 {
+					rawSlot = len(rawQueries)
+					rawQueries = append(rawQueries, query)
+				}
+				plan.rawSlot = rawSlot
 			}
 			plans = append(plans, plan)
 		}
 	}
 
-	aggregateResults, err := store.SeriesBatch(ctx, aggregateQueries, now)
+	var aggregateResults [][]metric.AggregatePoint
+	var telemetryResults []metric.TelemetryQueryResult
+	if shared {
+		telemetryResults, err = store.Telemetry().ChartBatch(ctx, aggregateQueries, now)
+		aggregateResults = make([][]metric.AggregatePoint, len(telemetryResults))
+		for i, r := range telemetryResults {
+			aggregateResults[i] = r.Points
+		}
+	} else {
+		aggregateResults, err = store.SeriesBatch(ctx, aggregateQueries, now)
+	}
 	if err != nil {
 		return nil, metricQueryError(err, "Failed to query metrics")
 	}
@@ -294,43 +358,82 @@ func publicQueryMetrics(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		return nil, metricQueryError(err, "Failed to query metrics")
 	}
 	series := make([]publicMetricSeries, 0, len(plans))
+	// Distribute each physical result once; rescanning it for every entity
+	// would reintroduce the same multiplicative work after the SQL read.
+	aggregateEntities := make(map[int]map[string][]publicMetricPoint)
+	coverageEntities := make(map[int]map[string]metric.TelemetryQueryResult)
+	rawEntities := make(map[int]map[string][]publicMetricPoint)
 	for _, plan := range plans {
 		item := plan.item
 		if plan.downsampled {
-			points := aggregateResults[plan.aggregateSlot]
-			item.Points = make([]publicMetricPoint, 0, len(points))
-			for _, point := range points {
-				item.Points = append(item.Points, publicMetricPoint{
-					Time: point.Bucket.UTC(), Value: publicRawMetricValue(point.MetricName, point.Value, item.FillEmpty),
-					Count: point.Count, Tags: point.Tags,
-				})
+			byEntity, ok := aggregateEntities[plan.aggregateSlot]
+			if !ok {
+				byEntity = make(map[string][]publicMetricPoint)
+				if shared {
+					byCoverage := map[string]metric.TelemetryQueryResult{}
+					for _, sp := range telemetryResults[plan.aggregateSlot].Sources {
+						v := byCoverage[sp.EntityID]
+						v.Sources = append(v.Sources, sp)
+						byCoverage[sp.EntityID] = v
+					}
+					for _, sp := range telemetryResults[plan.aggregateSlot].Gaps {
+						v := byCoverage[sp.EntityID]
+						v.Gaps = append(v.Gaps, sp)
+						byCoverage[sp.EntityID] = v
+					}
+					coverageEntities[plan.aggregateSlot] = byCoverage
+				}
+				for _, point := range aggregateResults[plan.aggregateSlot] {
+					byEntity[point.EntityID] = append(byEntity[point.EntityID], publicMetricPoint{
+						Time: point.Bucket.UTC(), Value: publicRawMetricValue(point.MetricName, point.Value, item.FillEmpty),
+						Count: point.Count, Tags: point.Tags,
+					})
+				}
+				aggregateEntities[plan.aggregateSlot] = byEntity
 			}
+			item.Points = byEntity[item.EntityID]
 		} else {
-			points := rawResults[plan.rawSlot]
-			item.Points = make([]publicMetricPoint, 0, len(points))
-			for _, point := range points {
-				item.Points = append(item.Points, publicMetricPoint{
-					Time: point.Timestamp.UTC(), Value: publicRawMetricValue(plan.metricKey, point.Value, item.FillEmpty),
-					Tags: point.Tags, Labels: point.Labels,
-				})
+			byEntity, ok := rawEntities[plan.rawSlot]
+			if !ok {
+				byEntity = make(map[string][]publicMetricPoint)
+				for _, point := range rawResults[plan.rawSlot] {
+					byEntity[point.EntityID] = append(byEntity[point.EntityID], publicMetricPoint{
+						Time: point.Timestamp.UTC(), Value: publicRawMetricValue(plan.metricKey, point.Value, item.FillEmpty),
+						Tags: point.Tags, Labels: point.Labels,
+					})
+				}
+				rawEntities[plan.rawSlot] = byEntity
 			}
+			item.Points = byEntity[item.EntityID]
+		}
+		if item.Points == nil {
+			item.Points = []publicMetricPoint{}
+		}
+		if shared && plan.downsampled {
+			r := telemetryResults[plan.aggregateSlot]
+			parts := coverageEntities[plan.aggregateSlot][item.EntityID]
+			r.Points = nil
+			r.Sources = parts.Sources
+			r.Gaps = parts.Gaps
+			series = append(series, publicTelemetryMetricSeries(item, r)...)
+			continue
 		}
 		for _, split := range splitPublicMetricSeries(item) {
 			if item.FillEmpty {
-				split = adaptiveFillPublicMetricSeries(split, start, end)
+				fillStart, fillEnd := start, end
+				if item.CoverageStart != nil {
+					fillStart = *item.CoverageStart
+				}
+				if item.CoverageEnd != nil {
+					fillEnd = *item.CoverageEnd
+				}
+				split = adaptiveFillPublicMetricSeries(split, fillStart, fillEnd)
 			}
 			series = append(series, split)
 		}
 	}
 
-	return map[string]any{
-		"start":                     start.UTC(),
-		"end":                       end.UTC(),
-		"server_downsample_default": downsample,
-		"default_points":            defaultMetricQueryPoints,
-		"series":                    series,
-		"count":                     len(series),
-	}, nil
+	return series, nil
 }
 
 func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -362,10 +465,11 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 		}, nil
 	}
 
-	store := metricstore.GetStore()
-	if store == nil {
-		return nil, rpc.MakeError(rpc.InternalError, "metric store not initialized", nil)
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "acquire metric store: "+err.Error(), nil)
 	}
+	defer releaseStore()
 
 	taskList, err := tasks.GetAllPingTasks()
 	if err != nil {
@@ -376,6 +480,12 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 		taskMap[strconv.FormatUint(uint64(task.Id), 10)] = task
 	}
 	taskFilter := normalizePingMetricTaskIDs(params.TaskID, params.TaskIDs)
+	var tags map[string]string
+	if len(taskFilter) == 1 {
+		for id := range taskFilter {
+			tags = map[string]string{"task_id": id}
+		}
+	}
 
 	maxPoints := params.MaxPoints
 	if maxPoints == 0 {
@@ -385,30 +495,32 @@ func publicGetPingMetricStats(ctx context.Context, req *rpc.JsonRpcRequest) (any
 		maxPoints = defaultMetricQueryPoints
 	}
 	now := time.Now().UTC()
+	ctx = metric.WithTelemetryEntities(ctx, entityIDs)
 	interval := metricDownsampleInterval(end.Sub(start), maxPoints)
-	interval = store.CompatibleSeriesIntervalForMetric(ctx, metricstore.MetricPingLatency, start, now, interval)
-
-	queries := make([]metric.AggregateQuery, 0, len(entityIDs))
-	for _, entityID := range entityIDs {
-		queries = append(queries, metric.AggregateQuery{
-			Query: metric.Query{
-				MetricName: metricstore.MetricPingLatency,
-				EntityID:   entityID,
-				Start:      start,
-				End:        end,
-				Order:      metric.OrderAsc,
-			},
-			Interval:       interval,
-			PreserveSeries: true,
-		})
+	if telemetry := store.Telemetry(); telemetry != nil {
+		definition, e := store.GetMetric(ctx, metricstore.MetricPingLatency)
+		if e != nil {
+			return nil, metricQueryError(e, "Failed to resolve ping retention")
+		}
+		q := metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end, Tags: tags}
+		q, interval, err = telemetry.PlanChart(ctx, q, now, maxPoints, definition.RetentionDays)
+		if err != nil {
+			return nil, metricQueryError(err, "Failed to resolve ping statistics window")
+		}
+		start, end = q.Start, q.End
+	} else {
+		interval = store.CompatibleSeriesIntervalForMetric(ctx, metricstore.MetricPingLatency, start, now, interval)
 	}
-	summaries, err := store.PingSeriesSummaryBatch(ctx, queries, now)
+
+	summaries, err := store.PingSummariesForEntities(ctx, metric.AggregateQuery{Query: metric.Query{MetricName: metricstore.MetricPingLatency, Start: start, End: end, Tags: tags, Order: metric.OrderAsc}, Interval: interval, PreserveSeries: true}, entityIDs, now)
 	if err != nil {
 		return nil, metricQueryError(err, "Failed to query ping stats")
 	}
+	start, end, interval = summaries.CoverageStart, summaries.CoverageEnd, summaries.Interval
 	stats := make([]publicPingMetricTaskStats, 0)
-	for index, entityID := range entityIDs {
-		groups := publicPingMetricGroupsFromSummary(summaries[index])
+	for _, entityID := range entityIDs {
+		summary := summaries.ByEntity[entityID]
+		groups := publicPingMetricGroupsFromSummary(summary)
 		entityStats := publicPingStatsFromAggregateGroups(entityID, groups, taskMap, taskFilter)
 		stats = append(stats, entityStats...)
 	}
@@ -739,29 +851,27 @@ func isNullPingMetricValue(metricName string, value float64, fillEmpty bool) boo
 }
 
 type publicPingMetricAggregateGroups struct {
-	Avg           map[string][]metric.AggregatePoint
-	Min           map[string][]metric.AggregatePoint
-	Max           map[string][]metric.AggregatePoint
-	Last          map[string][]metric.AggregatePoint
-	P50           map[string][]metric.AggregatePoint
-	P99           map[string][]metric.AggregatePoint
-	StdDev        map[string][]metric.AggregatePoint
-	Loss          map[string][]metric.AggregatePoint
-	LossAvailable bool
+	Avg    map[string][]metric.AggregatePoint
+	Min    map[string][]metric.AggregatePoint
+	Max    map[string][]metric.AggregatePoint
+	Last   map[string][]metric.AggregatePoint
+	P50    map[string][]metric.AggregatePoint
+	P99    map[string][]metric.AggregatePoint
+	StdDev map[string][]metric.AggregatePoint
+	Loss   map[string][]metric.AggregatePoint
 }
 
 func publicPingMetricGroupsFromSummary(summary metric.SeriesSummary) publicPingMetricAggregateGroups {
 	loss := groupPingMetricAggregatePointsByTask(summary.Loss)
 	return publicPingMetricAggregateGroups{
-		Avg:           groupPingMetricAggregatePointsByTask(summary.Avg),
-		Min:           groupPingMetricAggregatePointsByTask(summary.Min),
-		Max:           groupPingMetricAggregatePointsByTask(summary.Max),
-		Last:          groupPingMetricAggregatePointsByTask(summary.Last),
-		P50:           groupPingMetricAggregatePointsByTask(summary.P50),
-		P99:           groupPingMetricAggregatePointsByTask(summary.P99),
-		StdDev:        groupPingMetricAggregatePointsByTask(summary.StdDev),
-		Loss:          loss,
-		LossAvailable: pingMetricGroupsHaveData(loss),
+		Avg:    groupPingMetricAggregatePointsByTask(summary.Avg),
+		Min:    groupPingMetricAggregatePointsByTask(summary.Min),
+		Max:    groupPingMetricAggregatePointsByTask(summary.Max),
+		Last:   groupPingMetricAggregatePointsByTask(summary.Last),
+		P50:    groupPingMetricAggregatePointsByTask(summary.P50),
+		P99:    groupPingMetricAggregatePointsByTask(summary.P99),
+		StdDev: groupPingMetricAggregatePointsByTask(summary.StdDev),
+		Loss:   loss,
 	}
 }
 
@@ -775,17 +885,6 @@ func groupPingMetricAggregatePointsByTask(points []metric.AggregatePoint) map[st
 		out[taskID] = append(out[taskID], point)
 	}
 	return out
-}
-
-func pingMetricGroupsHaveData(groups map[string][]metric.AggregatePoint) bool {
-	for _, points := range groups {
-		for _, point := range points {
-			if point.Count > 0 {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func publicPingStatsFromAggregateGroups(entityID string, groups publicPingMetricAggregateGroups, taskMap map[string]models.PingTask, taskFilter map[string]bool) []publicPingMetricTaskStats {
@@ -804,15 +903,18 @@ func publicPingStatsFromAggregateGroups(entityID string, groups publicPingMetric
 			continue
 		}
 
-		total := aggregatePointCount(groups.Avg[taskID])
+		// Latency counts contain successful probes; loss counts contain all
+		// attempts. The denominator must describe the same probe population.
+		total := aggregatePointCount(groups.Loss[taskID])
+		lossAvailable := total > 0
 		if total == 0 {
-			total = aggregatePointCount(groups.Loss[taskID])
+			total = aggregatePointCount(groups.Avg[taskID])
 		}
 		if total == 0 {
 			continue
 		}
 
-		lossRate, valid, approximate := publicPingLossRate(groups.Avg[taskID], groups.Loss[taskID], total, groups.LossAvailable)
+		lossRate, valid, approximate := publicPingLossRate(groups.Avg[taskID], groups.Loss[taskID], total, lossAvailable)
 		avg, _ := weightedAggregateValue(groups.Avg[taskID], true)
 		p50, _ := weightedAggregateValue(groups.P50[taskID], true)
 		p99, _ := weightedAggregateValue(groups.P99[taskID], true)

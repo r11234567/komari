@@ -187,10 +187,11 @@ func metricDescriptionValue(raw string) any {
 }
 
 func adminListMetricDefinitions(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	store := metricstore.GetStore()
-	if store == nil {
-		return nil, rpc.MakeError(rpc.InternalError, "metric store not initialized", nil)
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "acquire metric store: "+err.Error(), nil)
 	}
+	defer releaseStore()
 	defs, err := store.ListMetrics(ctx)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to list metric definitions: "+err.Error(), nil)
@@ -226,10 +227,11 @@ func adminUpdateMetricDefinition(ctx context.Context, req *rpc.JsonRpcRequest) (
 	if params.RetentionDays < 0 {
 		return nil, rpc.MakeError(rpc.InvalidParams, "retention_days must be a non-negative integer", nil)
 	}
-	store := metricstore.GetStore()
-	if store == nil {
-		return nil, rpc.MakeError(rpc.InternalError, "metric store not initialized", nil)
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "acquire metric store: "+err.Error(), nil)
 	}
+	defer releaseStore()
 	def, err := store.UpdateMetricRetention(ctx, params.Name, params.RetentionDays)
 	if errors.Is(err, metric.ErrNotFound) {
 		return nil, rpc.MakeError(rpc.InvalidParams, "metric not found: "+params.Name, nil)

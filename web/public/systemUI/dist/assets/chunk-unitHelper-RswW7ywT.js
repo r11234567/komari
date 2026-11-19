@@ -1,0 +1,1 @@
+function e(e){let t=[`B`,`KB`,`MB`,`GB`,`TB`,`PB`],n=e,r=0;for(;n>=1024&&r<t.length-1;)n/=1024,r++;return r===0?`${Math.round(n)} ${t[r]}`:r>=2&&e>=1024**3?`${n.toFixed(2)} ${t[r]}`:n>99.99?`${n.toFixed(1)} ${t[r]}`:`${n.toFixed(2)} ${t[r]}`}export{e as t};

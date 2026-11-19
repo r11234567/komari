@@ -66,6 +66,7 @@ type DeploymentProfile struct {
 	GetIPAddrFromNIC         bool    `json:"get_ip_addr_from_nic"`
 	MemoryIncludeCache       bool    `json:"memory_include_cache"`
 	EnableGPU                bool    `json:"enable_gpu"`
+	WindowsGPUEnabled        *bool   `json:"windows_gpu_enabled,omitempty"`
 	DetailedGPU              bool    `json:"detailed_gpu"`
 	RemoteControlEnabled     bool    `json:"remote_control_enabled"`
 	EnableGHProxy            bool    `json:"enable_ghproxy"`
@@ -485,6 +486,7 @@ func copyDeploymentRuntime(target *DeploymentProfile, source DeploymentProfile) 
 	target.IncludeMountpoints = source.IncludeMountpoints
 	target.MemoryIncludeCache = source.MemoryIncludeCache
 	target.DetailedGPU = source.DetailedGPU
+	target.WindowsGPUEnabled = source.WindowsGPUEnabled
 	target.GetIPAddrFromNIC = source.GetIPAddrFromNIC
 }
 
@@ -747,6 +749,10 @@ func (profile DeploymentProfile) RuntimeConfig() v2.ConfigParams {
 	}
 	memoryIncludeCache := profile.MemoryIncludeCache
 	detailedGPU := profile.DetailedGPU
+	var windowsGPU *bool
+	if profile.Platform == "windows" {
+		windowsGPU = profile.WindowsGPUEnabled
+	}
 	return v2.ConfigParams{
 		MonthRotate:        &monthRotate,
 		Interval:           &interval,
@@ -755,6 +761,7 @@ func (profile DeploymentProfile) RuntimeConfig() v2.ConfigParams {
 		IncludeMountpoints: &includeMountpoints,
 		MemoryIncludeCache: &memoryIncludeCache,
 		DetailedGPU:        &detailedGPU,
+		EnableGPU:          windowsGPU,
 	}
 }
 
@@ -797,6 +804,10 @@ func deploymentProfileFromRuntime(platform string, config v2.ConfigParams) (Depl
 	// for display only and are never returned by RuntimeConfig for online apply.
 	if config.EnableGPU != nil {
 		profile.EnableGPU = *config.EnableGPU
+		if profile.Platform == "windows" {
+			enabled := *config.EnableGPU
+			profile.WindowsGPUEnabled = &enabled
+		}
 	}
 	if config.DetailedGPU != nil {
 		profile.DetailedGPU = *config.DetailedGPU
@@ -945,6 +956,9 @@ func PrivilegedCapabilityAllowedWithDB(db *gorm.DB, clientUUID, feature string) 
 	var state models.ClientPrivilegedState
 	err := db.First(&state, "client = ?", clientUUID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) || err == nil && state.ProtocolVersion != 2 {
+		if feature == "root" {
+			return false, nil
+		}
 		profile, saved, e := getDeploymentProfile(db, clientUUID)
 		if feature == "rescue" {
 			return saved && profile.RescueEnabled, e
@@ -961,6 +975,7 @@ func PrivilegedCapabilityAllowedWithDB(db *gorm.DB, clientUUID, feature string) 
 		Remote    bool `json:"remote_control_enabled"`
 		WebSSH    bool `json:"webssh_enabled"`
 		Execution bool `json:"execution_enabled"`
+		Root      bool `json:"root_execution_allowed"`
 		Rescue    bool `json:"rescue_helper_enabled"`
 	}
 	allows := func(revision uint64) (bool, error) {
@@ -984,6 +999,8 @@ func PrivilegedCapabilityAllowedWithDB(db *gorm.DB, clientUUID, feature string) 
 			return s.Remote && s.WebSSH, nil
 		case "execution":
 			return s.Remote && s.Execution, nil
+		case "root":
+			return s.Remote && s.Root, nil
 		case "rescue":
 			return s.Rescue, nil
 		default:

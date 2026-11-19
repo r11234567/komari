@@ -1,3 +1,5 @@
+//go:build metric_legacy_fixture
+
 package metric
 
 import (
@@ -15,16 +17,6 @@ import (
 //
 // newRollupStore 使用给定策略打开内存 SQLite store；每个测试使用唯一 DSN，
 // 避免 shared-cache 内存数据库相互影响。
-func newRollupStore(t *testing.T, policy RollupPolicy) *Store {
-	t.Helper()
-	dsn := fmt.Sprintf("file:rollup-%d?mode=memory&cache=shared", time.Now().UnixNano())
-	store, err := Open(context.Background(), SQLite(dsn, WithRollupPolicy(policy)))
-	if err != nil {
-		t.Fatalf("open rollup store: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
-}
 
 func TestLatestBeforeUsesRawAndRollupData(t *testing.T) {
 	ctx := context.Background()

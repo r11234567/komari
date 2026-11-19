@@ -63,10 +63,11 @@ func loadDashboardLatency(ctx context.Context, clientList []models.Client, now t
 	if pingTasksErr == nil {
 		result.Targets = len(pingTasks)
 	}
-	store := metricstore.GetStore()
-	if store == nil {
-		return result, fmt.Errorf("metric store is not initialized")
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return result, err
 	}
+	defer releaseStore()
 	start := now.Add(-6 * time.Hour)
 	series, err := store.DashboardSeries(ctx, metric.AggregateQuery{
 		Query: metric.Query{
@@ -176,10 +177,11 @@ func dashboardTopLatency(top []dashboardLatencyRankItem, item dashboardLatencyRa
 }
 
 func loadDashboardLatencyJitter(ctx context.Context, clientList []models.Client, now time.Time, rankingLimit int) ([]dashboardLatencyJitterRankItem, error) {
-	store := metricstore.GetStore()
-	if store == nil {
-		return nil, fmt.Errorf("metric store is not initialized")
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return nil, err
 	}
+	defer releaseStore()
 	currentMinute := now.UTC().Truncate(time.Minute)
 	series, err := store.DashboardSeries(ctx, metric.AggregateQuery{
 		Query: metric.Query{

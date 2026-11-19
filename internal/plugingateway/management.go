@@ -51,7 +51,13 @@ func SetEnabled(ctx context.Context, short string, enabled, approved bool) error
 	if err != nil {
 		return err
 	}
-	return plugin.SetEnabled(short, enabled, approved)
+	meta := rpc.MetaFromContext(ctx)
+	if meta.Principal.Type != rpc.PrincipalUser || meta.Principal.UserUUID == "" || meta.Principal.IsAPIKey {
+		return ErrPermissionDenied
+	}
+	// Ignore caller-controlled approval flags. Existing live grants permit a
+	// normal switch; missing or changed grants go through scoped human 2FA.
+	return plugin.SetEnabled(short, enabled, false)
 }
 
 func Logs(ctx context.Context, short string) (string, error) {
@@ -66,6 +72,10 @@ func Delete(ctx context.Context, short string) error {
 	short, err := authorize(ctx, short, true)
 	if err != nil {
 		return err
+	}
+	meta := rpc.MetaFromContext(ctx)
+	if meta.Principal.Type != rpc.PrincipalUser || meta.Principal.UserUUID == "" || meta.Principal.IsAPIKey {
+		return ErrPermissionDenied
 	}
 	return plugin.Delete(short)
 }
@@ -88,5 +98,7 @@ func SaveConfiguration(ctx context.Context, short string, values map[string]any)
 	if err != nil {
 		return err
 	}
+	// Preserve the existing system-RPC/configuration capability contract.
+	// Configuration data is not the package receipt or an execution grant.
 	return plugin.SaveConfiguration(short, values)
 }

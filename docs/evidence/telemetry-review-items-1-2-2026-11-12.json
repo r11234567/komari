@@ -1,0 +1,112 @@
+{
+  "date": "2026-11-12",
+  "scope": "PR 76 review items 1 and 2; SQLite database and CSV paths only",
+  "schema_version": 7,
+  "chart_budget": {
+    "logical_query_budgets_are_not_process_rss_limits": true,
+    "decoded_and_merge_allocations_accounted": true,
+    "caller_supplied_budget_preserved": true,
+    "legacy_deflate_size_validated_before_allocation": true,
+    "summary_plus_hot_quantile_population_regression": {"population": 6, "p50": 51.5},
+    "fresh_process_high_cardinality": {
+      "series": 4096,
+      "encoded_cell_bytes": 179,
+      "retained_digest_bytes": 3175,
+      "eight_mib_query": "rejected with backpressure",
+      "thirty_two_mib_query": "all 4096 series returned, count 256 and mean 3.5 each",
+      "small_query_heap_alloc_delta_bytes": 13733464,
+      "cpu_max": "10000 100000",
+      "memory_max_bytes": 134217728,
+      "memory_swap_max_bytes": 0,
+      "cgroup_memory_peak_bytes": 49512448,
+      "time_max_rss_kib": 58472,
+      "wall_seconds": 1.94,
+      "user_seconds": 0.17,
+      "system_seconds": 0.02,
+      "exit_code": 0
+    }
+  },
+  "offline_compaction": {
+    "command": "telemetry-compact --confirm-offline --retire-legacy --output NEW-METRICS.db --backup-dir NEW-DIRECTORY",
+    "automatically_replaces_source": false,
+    "minimum_backup_retention_days": 7,
+    "preserves_metadata_and_active_file_or_environment_decryption_key": true,
+    "retirement_requires_both_history_and_business_ledger_completion": true,
+    "replacement_integrity_and_canonical_state_hash_verified": true,
+    "export_epoch_advanced": true,
+    "regressions": [
+      "backup, pre-commit and pre-publish interruption; no source loss or published partial replacement",
+      "actual ingestion between backup and writer fence rejected",
+      "incomplete ledger retirement rejected without forging marker",
+      "unresolved dictionary key rejected; orphan erasure retained",
+      "shared immutable file erasure survives direct export, frozen export and membership reindex",
+      "source rollback works; retired replacement requires preserved pre-retirement material",
+      "reopen does not recreate retired compression tables",
+      "continued ingestion and duplicate acknowledgement survive reopen"
+    ],
+    "actual_command_fixture": {
+      "synthetic_legacy_input_rows": 43200,
+      "actual_migrate_then_compact_commands": true,
+      "source_and_backup_legacy_rows_each": 43200,
+      "retired_legacy": true,
+      "replacement_bytes": 9580544,
+      "replacement_sha256": "d87415b9daec025633fa27c035c4fa62927e0ce8138f64b52c089627d61fa149",
+      "metadata_integrity": "ok",
+      "metadata_checksum_and_active_key_copy_verified": true,
+      "post_install_reopened_cpu_population": 8640,
+      "post_install_weighted_cpu_sum": 426480,
+      "post_install_cpu_chart_points": 289,
+      "post_install_decryption_verified": true,
+      "initial_inspector_issue": "A mode=ro SQLite inspector created an empty WAL/SHM before exchange. The command had committed all data. Final validation asserts sidecars absent before inspection and uses immutable=1 only for stopped standalone files."
+    }
+  },
+  "capacity": {
+    "basis": "Inherited incident migration copy at original 2026-07-20 cutoff and 58-day retention; not a fresh full migration",
+    "source_file_with_legacy_and_freelist_bytes": 1011032064,
+    "production_compact_output_still_containing_legacy_bytes": 242241536,
+    "production_compact_elapsed_seconds": 56.468309541,
+    "production_compact_retired_legacy": false,
+    "reason_legacy_retirement_not_authorized_for_incident_copy": "Missing legacy_ledger_complete marker; actual implementation rejected retirement",
+    "production_canonical_state_sha256": "3ae85f51061ae8c01c8ee7b73b877370082bbc61f214e571ca372e8396bcb16e",
+    "baseline_telemetry_only_compact_projection_bytes": 269533184,
+    "final_telemetry_only_projection_with_all_three_shortened_indexes_bytes": 157233152,
+    "incremental_online_reduction_percent": 41.66464044738921,
+    "archive_bytes_unchanged": 151590607,
+    "archive_files": 12620,
+    "archive_raw_observations": 11583271,
+    "summary_rows": 234694,
+    "packed_gap_rows": 16512,
+    "exact_missing_intervals": 305896,
+    "dictionary_rows": 203,
+    "combined_online_projection_and_archive_bytes": 308823759,
+    "old_compact_sql_bytes": 85028864,
+    "online_vs_old_ratio": 1.8491738523050243,
+    "combined_vs_old_ratio": 3.631987356669848,
+    "smaller_than_old_engine_accepted": false,
+    "no_retention_shortening_or_archive_reencoding": true,
+    "backup_space_excluded_from_online_projection": true
+  },
+  "local_verification": {
+    "production_full_race_packages": ["pkg/metric", "database/metricstore", "database/trafficledger", "pkg/historyexport", "database/dbcore"],
+    "legacy_fixture_full_race_packages": ["pkg/metric", "database/metricstore", "database/trafficledger", "pkg/historyexport", "database/dbcore"],
+    "full_race_passed": true,
+    "vet_and_production_binary_build_passed": true,
+    "metadata_active_key_file_environment_and_absent_cases_passed": true,
+    "raw_oracle_history_cases_passed": 24,
+    "history_windows": "online and migrated, 1h/6h/12h/1d/7d/15d through 105d",
+    "local_long_soak_started": false,
+    "production_database_or_agent_modified": false
+  },
+  "remote_verification": {
+    "exact_new_revision_status": "pending; not represented by earlier passing runs",
+    "workflows": ["telemetry-storage", "database_only=true skip_csv=true", "database_only=true skip_csv=false export_qualification=true"],
+    "confirm_start_once_without_polling": true
+  },
+  "remaining": [
+    "New source requires remote CI and E2E results",
+    "Capacity remains above the old compact engine despite measured reduction",
+    "Review item 3: fresh complete migration and semantic reconciliation from original incident database",
+    "Review item 4: sustained over-30-day, multi-archive, varying-density and high-cardinality multi-job resource evidence",
+    "Deployment-specific 24-hour observation"
+  ]
+}

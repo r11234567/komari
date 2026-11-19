@@ -1,0 +1,174 @@
+{
+  "date": "2026-11-12",
+  "runtime_source": "2df97821e6cc863b4fdb14aa8163a070bd5241dd",
+  "capacity_attribution": {
+    "rows": 234694,
+    "stats_json_bytes": 292666539,
+    "digest_binary_bytes": 171875958,
+    "digest_base64_bytes": 229392384,
+    "non_digest_json_bytes": 63274155,
+    "by_metric": {
+      "connections.tcp": {
+        "rows": 267,
+        "stats_json_bytes": 1876737,
+        "digest_base64_bytes": 1803536
+      },
+      "connections.udp": {
+        "rows": 292,
+        "stats_json_bytes": 2040713,
+        "digest_base64_bytes": 1965092
+      },
+      "cpu.usage": {
+        "rows": 524,
+        "stats_json_bytes": 2808332,
+        "digest_base64_bytes": 2624896
+      },
+      "disk.total": {
+        "rows": 6943,
+        "stats_json_bytes": 10044067,
+        "digest_base64_bytes": 8220424
+      },
+      "disk.used": {
+        "rows": 6943,
+        "stats_json_bytes": 10102621,
+        "digest_base64_bytes": 8220424
+      },
+      "gpu.usage": {
+        "rows": 6943,
+        "stats_json_bytes": 9836221,
+        "digest_base64_bytes": 8220424
+      },
+      "load.average": {
+        "rows": 6943,
+        "stats_json_bytes": 10136165,
+        "digest_base64_bytes": 8220424
+      },
+      "memory.total": {
+        "rows": 6943,
+        "stats_json_bytes": 10015448,
+        "digest_base64_bytes": 8220424
+      },
+      "memory.used": {
+        "rows": 6943,
+        "stats_json_bytes": 10088279,
+        "digest_base64_bytes": 8220424
+      },
+      "net.in.rate": {
+        "rows": 6943,
+        "stats_json_bytes": 10002648,
+        "digest_base64_bytes": 8220424
+      },
+      "net.out.rate": {
+        "rows": 6943,
+        "stats_json_bytes": 9991016,
+        "digest_base64_bytes": 8220424
+      },
+      "net.total.down": {
+        "rows": 6943,
+        "stats_json_bytes": 10114240,
+        "digest_base64_bytes": 8220424
+      },
+      "net.total.up": {
+        "rows": 6943,
+        "stats_json_bytes": 10112075,
+        "digest_base64_bytes": 8220424
+      },
+      "ping.latency_ms": {
+        "rows": 122523,
+        "stats_json_bytes": 124907145,
+        "digest_base64_bytes": 91472076
+      },
+      "process.count": {
+        "rows": 6943,
+        "stats_json_bytes": 10004641,
+        "digest_base64_bytes": 8220424
+      },
+      "swap.total": {
+        "rows": 6943,
+        "stats_json_bytes": 10207235,
+        "digest_base64_bytes": 8220424
+      },
+      "swap.used": {
+        "rows": 6943,
+        "stats_json_bytes": 10219263,
+        "digest_base64_bytes": 8220424
+      },
+      "temperature": {
+        "rows": 6943,
+        "stats_json_bytes": 9836221,
+        "digest_base64_bytes": 8220424
+      },
+      "traffic.down": {
+        "rows": 6943,
+        "stats_json_bytes": 10170386,
+        "digest_base64_bytes": 8220424
+      },
+      "traffic.up": {
+        "rows": 6943,
+        "stats_json_bytes": 10153086,
+        "digest_base64_bytes": 8220424
+      }
+    },
+    "summary_owners": 25413,
+    "distinct_series_resolution_buckets": 234694
+  },
+  "capacity_findings": [
+    "stats uses JSON TEXT; []byte digest is encoded as Base64. All successful metrics create a TDigest, not only Ping.",
+    "234694 summary rows contain 292666539 UTF-8 JSON bytes, including 229392384 Base64 characters representing 171875958 binary digest bytes.",
+    "summary table plus indexes occupies 480276480 bytes; gaps plus indexes occupies 103546880 bytes.",
+    "There are 234694 distinct (series,resolution,bucket) groups for 234694 summary rows in this copy. Duplicate owner representations of identical output cells have not been established as the amplification cause.",
+    "This is an inherited schema-4 migration copy upgraded and maintained by current code, not a fresh schema-5 migration replay."
+  ],
+  "csv_failure": {
+    "run": 43172738936,
+    "source": "2df97821e6cc863b4fdb14aa8163a070bd5241dd",
+    "failure": "Export did not resume for paired measurement",
+    "last_resource": {
+      "at": "2026-11-12T07:17:53.341Z",
+      "rows": 3065,
+      "decoded": 3065,
+      "output_bytes": 25932176,
+      "checkpoint": 25,
+      "rss": 24588288,
+      "measurement": "paired_export_off"
+    },
+    "sample_count": 351,
+    "max_cpu_share": 0.01942,
+    "max_worker_memory_current": 24592384,
+    "max_instance_memory_current": 95870976,
+    "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+    "pairs": [
+      {
+        "id": 1,
+        "state": "export_off",
+        "baseline_samples": {
+          "ping": 40,
+          "billing": 40,
+          "traffic": 40,
+          "ping_stats": 40,
+          "chart": 40
+        },
+        "during_samples": {},
+        "output_bytes_before": 25932176
+      }
+    ]
+  },
+  "csv_log_evidence": {
+    "qualification_step_started_utc": "2026-11-12T07:10:22Z",
+    "pause_accepted_utc": "2026-11-12T07:17:03Z",
+    "resume_accepted_utc": "2026-11-12T07:17:23Z",
+    "resume_http_status": 202,
+    "failure_utc": "2026-11-12T07:17:53.9408103Z",
+    "source_resume_path": "Queue.Control changes paused tasks with committed output to recovering. Worker.Step settles outstanding logical-I/O debt before verifyCheckpoint reads and hashes the full committed prefix. Its progress and reads share the same worker budget.",
+    "test_path": "measurePair waits at most 30000ms to see running. No export-on pair samples were collected.",
+    "io_budget_bytes_per_second": 131072,
+    "approximate_full_prefix_io_seconds": 197.8468017578125,
+    "known_limitations": [
+      "The resources JSONL status/phase fields are from the outer loop job object during measurePair, so its paused label does not establish the actual post-resume HTTP state.",
+      "The artifact does not retain each resume-wait response. It cannot distinguish outstanding I/O debt, prefix hashing, or policy pressure as the exact state at the deadline.",
+      "The full-prefix time is a budget calculation for the observed output size, not a measured recovery duration or proof that all bytes were committed.",
+      "No evidence of CPU/memory threshold breach in the 351 available samples. This does not establish sustained resource acceptance."
+    ]
+  },
+  "verdict": "failed qualification; no successful paired export-on latency acceptance and no two-hour completion; source recovery cost and fixed test expectation require reconciliation without weakening checksum or CPU/I/O limits"
+}

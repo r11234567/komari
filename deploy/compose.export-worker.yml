@@ -1,0 +1,41 @@
+# Linux Docker Engine with cgroup v2. Run the panel first, resolve its host
+# cgroup from /proc/<docker-inspect State.Pid>/cgroup, then start export-worker.
+# Both containers must see identical absolute SQLite/archive paths.
+services:
+  panel:
+    image: ${KOMARI_IMAGE:?Set the exact Komari image}
+    user: "${KOMARI_UID:?Set the data owner UID}:${KOMARI_GID:?Set the data owner GID}"
+    working_dir: /srv/komari
+    command: ["/app/komari", "server", "--listen", "0.0.0.0:25774"]
+    cpu_period: 100000
+    cpu_quota: ${KOMARI_PANEL_CPU_QUOTA:-100000}
+    mem_limit: 896m
+    memswap_limit: 896m
+    volumes:
+      - ${KOMARI_DATA:?Set an absolute private data path}:/srv/komari/data
+    ports:
+      - "127.0.0.1:${KOMARI_PORT:-25774}:25774"
+  export-worker:
+    image: ${KOMARI_IMAGE:?Set the exact Komari image}
+    user: "${KOMARI_UID:?Set the same data owner UID}:${KOMARI_GID:?Set the same data owner GID}"
+    working_dir: /srv/komari
+    command:
+      - /app/komari
+      - export-worker
+      - --queue=/srv/komari/data/exports-v2
+      - --instance-cgroup=${KOMARI_PANEL_CGROUP:?Resolve the host panel cgroup before starting the worker}
+    cgroup: host
+    cpu_period: 100000
+    cpu_quota: 4000
+    mem_limit: 128m
+    memswap_limit: 128m
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: 90MiB
+    volumes:
+      - ${KOMARI_DATA:?Set an absolute private data path}:/srv/komari/data
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    restart: "on-failure:3"

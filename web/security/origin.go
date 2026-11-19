@@ -69,11 +69,14 @@ func OriginInAllowlist(origin, rawAllowlist string) bool {
 }
 
 func IsAPIKeyRequest(r *http.Request) bool {
+	if authenticated, ok := r.Context().Value(apiKeyContextKey{}).(bool); ok {
+		return authenticated
+	}
 	apiKeyConfig, err := config.GetAs[string](config.ApiKeyKey, "")
 	if err != nil || apiKeyConfig == "" || len(apiKeyConfig) < 12 {
 		return false
 	}
-	return r.Header.Get("Authorization") == "Bearer "+apiKeyConfig
+	return APIKeyMatches(r.Header.Get("Authorization"), apiKeyConfig)
 }
 
 func IsAuthorizationPreflight(r *http.Request) bool {

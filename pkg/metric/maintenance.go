@@ -144,7 +144,7 @@ func (s *Store) ReclaimSpace(ctx context.Context) error {
 	if _, err := s.cleanupOrphanedMetricData(ctx); err != nil {
 		return err
 	}
-	if s.sqliteStorageV4 {
+	if s.sqliteStorageV4 && !s.cfg.RetireLegacyStorage {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("metric: begin SQLite V4 reclaim seal: %w", err)

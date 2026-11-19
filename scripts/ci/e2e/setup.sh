@@ -21,7 +21,7 @@ certutil -A -n komari-e2e -t 'C,,' -d "sql:$HOME/.pki/nssdb" -i "$E2E_ROOT/tls/c
 # H2 is required for Agent bidirectional Connect streams. The grpc module
 # proxies those paths to the server's h2c listener; ordinary browser requests
 # and the raw file data plane use HTTP/1.1 without request/response buffering.
-runner_user=$(id -un)
+runner_user=${KOMARI_E2E_USER:-$(id -un)}
 cat > "$E2E_ROOT/nginx.conf" <<NGINX
 user $runner_user;
 pid $E2E_ROOT/nginx.pid;
@@ -59,26 +59,42 @@ http {
 }
 NGINX
 cp "$E2E_ROOT/nginx.conf" "$E2E_ARTIFACTS/nginx.conf"
+if [[ "${KOMARI_E2E_LOCAL:-}" = 1 ]]; then
+  chown -R "$runner_user:$(id -gn "$runner_user")" "$E2E_ROOT"
+fi
 sudo nginx -t -c "$E2E_ROOT/nginx.conf" -p "$E2E_ROOT/"
 sudo nginx -c "$E2E_ROOT/nginx.conf" -p "$E2E_ROOT/"
-(
-  cd "$E2E_ROOT/panel"
-  nohup "$E2E_ROOT/bin/komari" server --listen 127.0.0.1:29444 \
-    > "$E2E_ARTIFACTS/server.log" 2>&1 &
-  echo "$!" > "$E2E_ROOT/server.pid"
-)
+sudo systemd-run --unit=komari-e2e-panel --collect \
+	--slice=komari-e2e.slice \
+  --property="User=$runner_user" --property="WorkingDirectory=$E2E_ROOT/panel" \
+  --property=CPUQuota=100% --property=MemoryMax=1G \
+  "$E2E_ROOT/bin/komari" server --listen 127.0.0.1:29444
+sudo systemctl set-property --runtime komari-e2e.slice CPUQuota=100% MemoryMax=1G MemorySwapMax=0
 for attempt in $(seq 1 60); do
   if curl --silent --fail "$E2E_URL/api/install/status" > "$E2E_ARTIFACTS/initial-install-status.json"; then break; fi
   if [[ "$attempt" = 60 ]]; then exit 1; fi
   sleep 1
 done
-sudo install -d /usr/lib/komari/komari-e2e
-sudo install -m0755 "$E2E_ROOT/bin/komari-agent" /usr/lib/komari/komari-e2e/komari-agent
-sudo install -m0755 "$E2E_ROOT/bin/komari-host" /usr/lib/komari/komari-e2e/komari-host
-sudo /usr/lib/komari/komari-e2e/komari-host install \
-  --service komari-e2e --user "$runner_user" --binary-dir /usr/lib/komari/komari-e2e \
-  -- --endpoint "$E2E_URL" --disable-auto-update
-printf 'editor fixture\n' > "$E2E_ROOT/files/editor.txt"
-printf 'destination must survive\n' > "$E2E_ROOT/files/existing.txt"
-mkdir "$E2E_ROOT/files/nonempty"
-printf 'keep\n' > "$E2E_ROOT/files/nonempty/keep.txt"
+if [[ "${KOMARI_E2E_SKIP_CSV:-0}" != 1 ]]; then
+sudo systemd-run --unit=komari-e2e-export --collect \
+	--slice=komari-e2e.slice \
+  --property="User=$runner_user" --property="WorkingDirectory=$E2E_ROOT/panel" \
+  --property=CPUQuota=4% --property=CPUQuotaPeriodSec=100ms \
+  --property=MemoryMax=128M --property=MemorySwapMax=0 \
+  --setenv=GOMEMLIMIT=90MiB --setenv=GOMAXPROCS=1 \
+  "$E2E_ROOT/bin/komari" export-worker --queue "$E2E_ROOT/panel/data/exports-v2" \
+  --instance-cgroup="/sys/fs/cgroup$(systemctl show komari-e2e-panel.service --property=ControlGroup --value)"
+for attempt in $(seq 1 30); do
+  if [[ -s "$E2E_ROOT/panel/data/exports-v2/worker.json" ]]; then break; fi
+  if ! systemctl is-active --quiet komari-e2e-export.service || [[ "$attempt" = 30 ]]; then
+    sudo journalctl -u komari-e2e-export.service --no-pager
+    exit 1
+  fi
+  sleep 1
+done
+systemctl show komari-e2e-export.service \
+  --property=ControlGroup,CPUQuotaPerSecUSec,MemoryMax > "$E2E_ARTIFACTS/resource-groups.txt"
+fi
+systemctl show komari-e2e-panel.service komari-e2e.slice \
+  --property=ControlGroup,CPUQuotaPerSecUSec,MemoryMax >> "$E2E_ARTIFACTS/resource-groups.txt"
+bash "$(dirname "$0")/install-agent.sh"

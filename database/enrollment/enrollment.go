@@ -396,8 +396,14 @@ func ResolveAccessToken(accessToken string) (string, error) {
 	}
 	var row models.AgentCredential
 	now := time.Now().UTC()
-	if err := dbcore.GetDBInstance().Where("access_token_hash = ? OR (previous_access_hash = ? AND previous_access_expires > ?)", digest, digest, now).First(&row).Error; err != nil {
+	if err := dbcore.GetDBInstance().Where("access_token_hash = ? OR previous_access_hash = ?", digest, digest).First(&row).Error; err != nil {
 		return "", err
+	}
+	// SQLite stores datetime offsets in text. Comparing a legacy local-offset
+	// expiry to UTC text can accept an expired handoff. Compare actual instants
+	// after decoding, independently of the host timezone or persisted offset.
+	if digest != row.AccessTokenHash && (row.PreviousAccessExpires == nil || !now.Before(*row.PreviousAccessExpires)) {
+		return "", errors.New("the access token handoff has expired")
 	}
 	if row.RevokedAt != nil {
 		return "", errors.New("these credentials were revoked")

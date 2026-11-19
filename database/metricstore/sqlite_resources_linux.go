@@ -4,6 +4,7 @@ package metricstore
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -13,7 +14,11 @@ import (
 
 func detectEffectiveResources() (int64, int) {
 	memoryBytes := linuxPhysicalMemory()
-	for _, path := range []string{"/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"} {
+	paths := []string{"/sys/fs/cgroup/memory/memory.limit_in_bytes"}
+	for _, dir := range linuxCgroupV2Directories() {
+		paths = append(paths, filepath.Join(dir, "memory.max"))
+	}
+	for _, path := range paths {
 		if limit := readPositiveResourceNumber(path); limit > 0 && (memoryBytes <= 0 || limit < memoryBytes) {
 			memoryBytes = limit
 		}
@@ -53,15 +58,24 @@ func readPositiveResourceNumber(path string) int64 {
 }
 
 func linuxCPUQuota() int {
-	if content, err := os.ReadFile("/sys/fs/cgroup/cpu.max"); err == nil {
-		fields := strings.Fields(string(content))
-		if len(fields) == 2 && fields[0] != "max" {
-			quota, quotaErr := strconv.ParseInt(fields[0], 10, 64)
-			period, periodErr := strconv.ParseInt(fields[1], 10, 64)
-			if quotaErr == nil && periodErr == nil && quota > 0 && period > 0 {
-				return int((quota + period - 1) / period)
+	count := 0
+	for _, dir := range linuxCgroupV2Directories() {
+		if content, err := os.ReadFile(filepath.Join(dir, "cpu.max")); err == nil {
+			fields := strings.Fields(string(content))
+			if len(fields) == 2 && fields[0] != "max" {
+				quota, quotaErr := strconv.ParseInt(fields[0], 10, 64)
+				period, periodErr := strconv.ParseInt(fields[1], 10, 64)
+				if quotaErr == nil && periodErr == nil && quota > 0 && period > 0 {
+					n := int(1 + (quota-1)/period)
+					if count == 0 || n < count {
+						count = n
+					}
+				}
 			}
 		}
+	}
+	if count > 0 {
+		return count
 	}
 	quota := readPositiveResourceNumber("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
 	period := readPositiveResourceNumber("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
@@ -71,17 +85,50 @@ func linuxCPUQuota() int {
 	return 0
 }
 
+// A container commonly mounts its own cgroup as the root; systemd services
+// commonly see the whole hierarchy. Honor both layouts and inherited limits.
+func linuxCgroupV2Directories() []string {
+	b, _ := os.ReadFile("/proc/self/cgroup")
+	return cgroupV2Directories(string(b))
+}
+
+func cgroupV2Directories(membership string) []string {
+	const root = "/sys/fs/cgroup"
+	dirs := []string{root}
+	for _, line := range strings.Split(membership, "\n") {
+		if !strings.HasPrefix(line, "0::/") {
+			continue
+		}
+		rel := strings.TrimPrefix(line, "0::/")
+		if rel == "" || !filepath.IsLocal(rel) {
+			return dirs
+		}
+		path := filepath.Join(root, rel)
+		for path != root && len(dirs) < 64 {
+			dirs = append(dirs, path)
+			path = filepath.Dir(path)
+		}
+		break
+	}
+	return dirs
+}
+
 func linuxCPUSetCount() int {
-	for _, path := range []string{"/sys/fs/cgroup/cpuset.cpus.effective", "/sys/fs/cgroup/cpuset/cpuset.cpus"} {
+	paths := []string{"/sys/fs/cgroup/cpuset/cpuset.cpus"}
+	for _, dir := range linuxCgroupV2Directories() {
+		paths = append(paths, filepath.Join(dir, "cpuset.cpus.effective"))
+	}
+	minimum := 0
+	for _, path := range paths {
 		content, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
-		if count := countCPUSet(strings.TrimSpace(string(content))); count > 0 {
-			return count
+		if count := countCPUSet(strings.TrimSpace(string(content))); count > 0 && (minimum == 0 || count < minimum) {
+			minimum = count
 		}
 	}
-	return 0
+	return minimum
 }
 
 func countCPUSet(value string) int {

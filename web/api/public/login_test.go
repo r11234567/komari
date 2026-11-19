@@ -7,11 +7,53 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
+	"github.com/pquerna/otp/totp"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestLegacyLoginTOTPFailureAndReplayNeverIssueCookie(t *testing.T) {
+	user, err := accounts.CreateAccount("advisory-login", "Synthetic-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = accounts.DeleteAccountByUsername(user.Username) })
+	const secret = "JBSWY3DPEHPK3PXP"
+	if err = accounts.Enable2Fa(user.UUID, secret); err != nil {
+		t.Fatal(err)
+	}
+	router := gin.New()
+	router.POST("/login", Login)
+	login := func(code string, want int) {
+		t.Helper()
+		body, _ := json.Marshal(LoginRequest{Username: user.Username, Password: "Synthetic-password-123", TwoFa: code})
+		req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Fatalf("login status=%d want=%d", w.Code, want)
+		}
+		if want != 200 && (len(w.Result().Cookies()) != 0 || strings.Contains(w.Body.String(), "session_token")) {
+			t.Fatal("failed factor issued a session")
+		}
+	}
+	login("", 401)
+	login("not-a-code", 401)
+	code, err := totp.GenerateCode(secret, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	login(code, 200)
+	login(code, 401)
+	if err = accounts.Enable2Fa(user.UUID, "!invalid-secret!"); err != nil {
+		t.Fatal(err)
+	}
+	login("123456", 401)
+}
 
 func TestLogin(t *testing.T) {
 	// 设置测试模式

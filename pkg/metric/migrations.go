@@ -13,6 +13,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if s.cfg.Driver == DriverSQLite {
+		if s.cfg.RetireLegacyStorage {
+			return s.openRetiredSQLiteStorage(ctx)
+		}
 		return s.migrateSQLiteStorageV4(ctx)
 	}
 	d := s.dialect

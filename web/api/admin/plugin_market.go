@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -264,6 +263,9 @@ func ListPluginMarketCatalog(c *gin.Context) {
 }
 
 func InstallPluginFromMarket(c *gin.Context) {
+	if !requirePluginAdministrator(c) {
+		return
+	}
 	var req struct {
 		SourceID string `json:"source_id" binding:"required"`
 		Short    string `json:"short" binding:"required"`
@@ -334,7 +336,7 @@ func InstallPluginFromMarket(c *gin.Context) {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save temporary plugin file")
 		return
 	}
-	installed, err := plugin.InstallZip(tempPath)
+	installed, err := plugin.InstallOrStageZip(tempPath, source.URL+"\n"+selected.Download, selected.Short, selected.Version, api.GetPrincipal(c).UserUUID)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -343,7 +345,8 @@ func InstallPluginFromMarket(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "Plugin manifest does not match the market catalog")
 		return
 	}
-	api.RespondSuccessMessage(c, "Plugin installed from market", installed)
+	auditPluginInstall(c.ClientIP(), api.GetPrincipal(c).UserUUID, installed)
+	api.RespondSuccessMessage(c, pluginInstallMessage(installed), installed)
 }
 
 func fetchPluginMarketCatalog(source PluginMarketSource, force bool) ([]PluginMarketPlugin, error) {
@@ -457,54 +460,7 @@ func isPluginMarketText(value any) bool {
 }
 
 func downloadPluginMarketURL(rawURL string, maxSize int64) ([]byte, error) {
-	validate := func(candidate string) error {
-		parsed, err := url.Parse(candidate)
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil {
-			return errors.New("only public HTTP and HTTPS URLs are allowed")
-		}
-		if isPrivateIP(parsed.Hostname()) {
-			return errors.New("requests to private or internal addresses are not allowed")
-		}
-		return nil
-	}
-	if err := validate(rawURL); err != nil {
-		return nil, err
-	}
-	client := &http.Client{
-		Timeout: 45 * time.Second,
-		// See downloadThemeMarketURL: URL-level validation resolves the name a
-		// second time at dial, so the connected address has to be re-checked.
-		Transport: &http.Transport{
-			DialContext:           dialPublicAddress,
-			TLSHandshakeTimeout:   15 * time.Second,
-			ResponseHeaderTimeout: 30 * time.Second,
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return errors.New("too many redirects")
-			}
-			return validate(req.URL.String())
-		},
-	}
-	resp, err := client.Get(rawURL)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP status %d", resp.StatusCode)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxSize {
-		return nil, fmt.Errorf("response exceeds the %d byte limit", maxSize)
-	}
-	if len(data) == 0 {
-		return nil, errors.New("empty response")
-	}
-	return data, nil
+	return downloadMarketURL(rawURL, maxSize, 45*time.Second)
 }
 
 func invalidatePluginMarketCache(rawURL string) {

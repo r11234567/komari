@@ -67,6 +67,50 @@ func TestIsThemeShortAllowsBundledDefault(t *testing.T) {
 	}
 }
 
+func TestThemeArchiveCannotEscapeViaTraversalOrSymlink(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, name := range []string{"../outside", "../../outside", "/tmp/outside", "dist/../../../outside"} {
+		archive := themeArchive(t, map[string]string{"komari-theme.json": `{"name":"Test","short":"boundary"}`, "dist/index.html": "safe", name: "escaped"})
+		path := filepath.Join(t.TempDir(), "theme.zip")
+		if err := os.WriteFile(path, archive, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := extractAndValidateTheme(path); err == nil {
+			t.Fatalf("traversal accepted: %s", name)
+		}
+	}
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	for name, content := range map[string]string{"komari-theme.json": `{"name":"Test","short":"boundary"}`, "dist/index.html": "safe"} {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = entry.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	header := &zip.FileHeader{Name: "dist/link"}
+	header.SetMode(os.ModeSymlink | 0777)
+	entry, err := writer.CreateHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = entry.Write([]byte("../../outside")); err != nil {
+		t.Fatal(err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "symlink.zip")
+	if err = os.WriteFile(path, buffer.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = extractAndValidateTheme(path); err == nil {
+		t.Fatal("archive symlink accepted")
+	}
+}
+
 func themeArchive(t *testing.T, files map[string]string) []byte {
 	t.Helper()
 	var buffer bytes.Buffer

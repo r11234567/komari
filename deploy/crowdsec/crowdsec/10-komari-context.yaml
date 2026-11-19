@@ -1,0 +1,15 @@
+name: local/komari-context
+description: Parse server-derived Komari context from the dedicated access log
+filter: "evt.Meta.log_type == 'http_access-log'"
+onsuccess: continue
+pattern_syntax:
+  KOMARI_PRINCIPAL: '(?:agent|user|api-key|anonymous)'
+  KOMARI_ROUTE: '(?:rpc|web)'
+grok:
+  pattern: '"%{KOMARI_PRINCIPAL:komari_principal}" "%{KOMARI_ROUTE:komari_route}" "%{DATA:komari_limit}"$'
+  apply_on: message
+statics:
+  - meta: komari_principal
+    expression: evt.Parsed.komari_principal
+  - meta: komari_route
+    expression: evt.Parsed.komari_route

@@ -38,6 +38,12 @@ func (s *workspaceService) UnlockWorkspace(ctx context.Context, req *connect.Req
 	if err != nil || !allowed {
 		return nil, connectError(connect.CodePermissionDenied, errors.New("remote control is disabled"))
 	}
+	if req.Msg.SystemUser == "root" {
+		rootAllowed, err := clients.PrivilegedCapabilityAllowed(agent, "root")
+		if err != nil || !rootAllowed {
+			return nil, connectError(connect.CodePermissionDenied, errors.New("root WebSSH is not approved for this agent"))
+		}
+	}
 	if token := req.Msg.TwoFactor.GetAuthorizationToken(); token != "" {
 		if _, err := credentialgateway.Default.Consume(ctx, token, credential.UnlockWorkspace, credentialaction.WorkspaceResource(agent, req.Msg.SystemUser)); err != nil {
 			return nil, credentialConnectError(err)

@@ -28,6 +28,9 @@ type Principal struct {
 	ClientUUID string
 	// IsAPIKey 是否为 API Key 调用(快速判定,等价于 Type==PrincipalAPIKey)
 	IsAPIKey bool
+	// APIToken is nonnil only for a scoped programmatic token. It never
+	// supplies UserUUID or an interactive administrator session.
+	APIToken *APITokenPolicy
 	// Roles 角色/能力集。默认由 Type 推导:
 	//   - PrincipalAnonymous → [RoleGuest]
 	//   - PrincipalAgent → [RoleClient]

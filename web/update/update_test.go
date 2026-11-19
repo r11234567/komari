@@ -66,6 +66,7 @@ func TestRestrictedControllerOnlyRegistersLoginOAuthAndUpgradeAPIs(t *testing.T)
 	}
 	for _, route := range []string{
 		"POST /api/login",
+		"POST /komari.credential.v1.PasswordLoginService/*method",
 		"GET /api/me",
 		"GET /api/oauth",
 		"GET /api/oauth_callback",
@@ -78,7 +79,7 @@ func TestRestrictedControllerOnlyRegistersLoginOAuthAndUpgradeAPIs(t *testing.T)
 			t.Fatalf("required restricted route is missing: %s", route)
 		}
 	}
-	if routes["GET /api/public"] || routes["GET /api/rpc2"] || routes["POST /api/clients/report"] {
+	if routes["GET /api/public"] || routes["GET /api/rpc2"] || routes["POST /api/clients/report"] || routes["POST /komari.metrics.v1.MetricsService/*method"] || routes["POST /komari.credential.v1.TrustedCredentialService/*method"] {
 		t.Fatalf("ordinary APIs leaked into restricted routes: %#v", routes)
 	}
 

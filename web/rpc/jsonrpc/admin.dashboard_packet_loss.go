@@ -49,10 +49,11 @@ type dashboardPacketLossKey struct {
 
 func loadDashboardPacketLoss(ctx context.Context, clientList []models.Client, now time.Time, rankingLimit int) (dashboardPacketLossSummary, error) {
 	result := dashboardPacketLossSummary{WindowMinutes: int(dashboardPacketLossWindow / time.Minute)}
-	store := metricstore.GetStore()
-	if store == nil {
-		return result, fmt.Errorf("metric store is not initialized")
+	store, releaseStore, err := metricstore.AcquireStore(ctx)
+	if err != nil {
+		return result, err
 	}
+	defer releaseStore()
 	taskList, err := dbtasks.GetAllPingTasks()
 	if err != nil {
 		return result, fmt.Errorf("list ping tasks: %w", err)

@@ -188,6 +188,11 @@ func CheckPermission(group, method string) bool {
 // 该模型使 agent 与 admin 成为正交主体:admin 不再自动获得 client 能力(反之亦然),
 // 从而堵住"admin 会话冒充 agent 调用 client:* 上报方法"等越权路径。
 func CheckPrincipal(p *Principal, method string) bool {
+	// Scoped API tokens use the explicit typed Connect allowlist. Do not let
+	// legacy REST/RPC2 or plugin gateways promote them via namespace roles.
+	if p != nil && p.APIToken != nil {
+		return false
+	}
 	if p == nil {
 		p = NewAnonymousPrincipal()
 	}

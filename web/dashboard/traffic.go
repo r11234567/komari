@@ -10,7 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/trafficledger"
+	"github.com/komari-monitor/komari/pkg/metric"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -33,6 +35,17 @@ type TrafficTrendBucket struct {
 	Down  int64
 }
 
+type TrafficTrendResult struct {
+	Buckets           []TrafficTrendBucket
+	Interval          time.Duration
+	DataEnd           time.Time
+	AccountingThrough time.Time
+	Coverage          string
+	CatchingUp        bool
+	MissingClients    int
+	Warning           string
+}
+
 // LoadTrafficTrend scans the traffic ledger for every client, which on SQLite
 // takes the store's single heavy-read slot. Several dashboard panels ask for the
 // same trend at once and every open tab repeats it, so the scan is shared: one
@@ -40,13 +53,21 @@ type TrafficTrendBucket struct {
 // that follows. Without this the panels queue behind each other on one slot and
 // time out together.
 func LoadTrafficTrend(ctx context.Context, clientIDs []string, now time.Time, window, interval time.Duration) ([]TrafficTrendBucket, error) {
+	result, err := LoadTrafficTrendSnapshot(ctx, clientIDs, now, window, interval)
+	if err != nil {
+		return nil, err
+	}
+	return result.Buckets, nil
+}
+
+func LoadTrafficTrendSnapshot(ctx context.Context, clientIDs []string, now time.Time, window, interval time.Duration) (*TrafficTrendResult, error) {
 	if window <= 0 {
 		window = DefaultTrafficTrendWindow
 	}
 	if interval <= 0 {
 		interval = DefaultTrafficTrendInterval
 	}
-	if interval < MinTrafficTrendInterval || interval > MaxTrafficTrendInterval {
+	if interval < MinTrafficTrendInterval || interval > MaxTrafficTrendInterval || interval%time.Minute != 0 {
 		return nil, fmt.Errorf("%w: interval must be between 10 and 30 minutes", ErrTrafficTrendBadRequest)
 	}
 	bucketCount := int((window + interval - 1) / interval)
@@ -55,7 +76,7 @@ func LoadTrafficTrend(ctx context.Context, clientIDs []string, now time.Time, wi
 	}
 
 	key := trafficTrendKey(clientIDs, now, window, interval)
-	if cached, ok := cachedTrafficTrend(key, time.Now()); ok {
+	if cached, ok := cachedTrafficTrendSnapshot(key, time.Now()); ok {
 		return cached, nil
 	}
 	scan := trafficTrendFlight.DoChan(key, func() (any, error) {
@@ -65,12 +86,12 @@ func LoadTrafficTrend(ctx context.Context, clientIDs []string, now time.Time, wi
 		// its own and let each caller apply its own deadline by selecting below.
 		scanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), trafficTrendScanBudget)
 		defer cancel()
-		buckets, loadErr := loadTrafficTrendUncached(scanCtx, clientIDs, now, window, interval, bucketCount)
+		result, loadErr := loadTrafficTrendSnapshot(scanCtx, clientIDs, now, window, interval, bucketCount)
 		if loadErr != nil {
 			return nil, loadErr
 		}
-		storeTrafficTrend(key, buckets, time.Now())
-		return buckets, nil
+		storeTrafficTrendSnapshot(key, result, time.Now())
+		return result, nil
 	})
 	select {
 	case result := <-scan:
@@ -78,12 +99,78 @@ func LoadTrafficTrend(ctx context.Context, clientIDs []string, now time.Time, wi
 			return nil, result.Err
 		}
 		// Buckets are read-only once cached; hand every caller the same slice.
-		return result.Val.([]TrafficTrendBucket), nil
+		return result.Val.(*TrafficTrendResult), nil
 	case <-ctx.Done():
 		// Leave the shared scan running so it still populates the cache for the
 		// callers that are waiting on it, and for the client's retry.
 		return nil, ctx.Err()
 	}
+}
+
+func loadTrafficTrendSnapshot(ctx context.Context, ids []string, now time.Time, window, interval time.Duration, count int) (*TrafficTrendResult, error) {
+	result := &TrafficTrendResult{Interval: interval, DataEnd: now.UTC(), Coverage: "complete"}
+	if !metricstore.TelemetryEnabled() {
+		buckets, err := loadTrafficTrendUncached(ctx, ids, now, window, interval, count)
+		result.Buckets = buckets
+		return result, err
+	}
+	end := now.UTC().Truncate(interval).Add(interval)
+	start := end.Add(-time.Duration(count) * interval)
+	_, perClient, info, err := trafficledger.TelemetryUsageSnapshot(ctx, ids, start, now.UTC(), interval)
+	if errors.Is(err, metric.ErrTelemetryCoverage) {
+		// Upgraded hourly-only history cannot be split into invented 20m points.
+		// Serve only complete historical hours and explicitly disclose precision
+		// and the earlier endpoint. New minute history restores the requested grid.
+		result.Interval = time.Hour
+		result.DataEnd = now.UTC().Truncate(time.Hour)
+		start = result.DataEnd.Add(-window).Truncate(time.Hour)
+		count = int(result.DataEnd.Sub(start) / time.Hour)
+		_, perClient, info, err = trafficledger.TelemetryUsageSnapshot(ctx, ids, start, result.DataEnd.Add(-time.Nanosecond), time.Hour)
+		result.Coverage = "coarse"
+		result.Warning = "minute_history_unavailable"
+	}
+	if errors.Is(err, metric.ErrTelemetryCoverage) {
+		result.Coverage = "unavailable"
+		result.Warning = "traffic_history_unavailable"
+		return result, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	result.AccountingThrough = info.AccountingThrough
+	result.MissingClients = info.MissingClients
+	if len(ids) > 0 && info.MissingClients >= len(ids) {
+		result.Coverage = "unavailable"
+		result.Warning = "traffic_clients_missing"
+		return result, nil
+	}
+	if info.MissingClients > 0 {
+		result.Coverage = "partial"
+		result.Warning = "traffic_clients_missing"
+	}
+	pending, pendingErr := metricstore.TelemetryTrafficPending(ctx)
+	if pendingErr != nil {
+		return nil, pendingErr
+	}
+	result.CatchingUp = pending
+	if pending && result.Coverage == "complete" {
+		result.Coverage = "partial"
+		result.Warning = "traffic_accounting_catching_up"
+	}
+	result.Buckets = make([]TrafficTrendBucket, count)
+	for i := range result.Buckets {
+		result.Buckets[i].Start = start.Add(time.Duration(i) * result.Interval)
+	}
+	for _, items := range perClient {
+		for _, item := range items {
+			i := int(item.Hour.Sub(start) / result.Interval)
+			if i >= 0 && i < len(result.Buckets) {
+				result.Buckets[i].Up += item.Up
+				result.Buckets[i].Down += item.Down
+			}
+		}
+	}
+	return result, nil
 }
 
 func loadTrafficTrendUncached(ctx context.Context, clientIDs []string, now time.Time, window, interval time.Duration, bucketCount int) ([]TrafficTrendBucket, error) {
@@ -133,6 +220,7 @@ var trafficTrendCache struct {
 type trafficTrendCacheEntry struct {
 	expiresAt time.Time
 	buckets   []TrafficTrendBucket
+	result    *TrafficTrendResult
 }
 
 func trafficTrendKey(clientIDs []string, now time.Time, window, interval time.Duration) string {
@@ -149,16 +237,28 @@ func trafficTrendKey(clientIDs []string, now time.Time, window, interval time.Du
 }
 
 func cachedTrafficTrend(key string, at time.Time) ([]TrafficTrendBucket, bool) {
+	result, ok := cachedTrafficTrendSnapshot(key, at)
+	if !ok {
+		return nil, false
+	}
+	return result.Buckets, true
+}
+
+func cachedTrafficTrendSnapshot(key string, at time.Time) (*TrafficTrendResult, bool) {
 	trafficTrendCache.Lock()
 	defer trafficTrendCache.Unlock()
 	cached, ok := trafficTrendCache.items[key]
-	if !ok || cached.buckets == nil || !at.Before(cached.expiresAt) {
+	if !ok || cached.result == nil || !at.Before(cached.expiresAt) {
 		return nil, false
 	}
-	return cached.buckets, true
+	return cached.result, true
 }
 
 func storeTrafficTrend(key string, buckets []TrafficTrendBucket, at time.Time) {
+	storeTrafficTrendSnapshot(key, &TrafficTrendResult{Buckets: buckets}, at)
+}
+
+func storeTrafficTrendSnapshot(key string, result *TrafficTrendResult, at time.Time) {
 	trafficTrendCache.Lock()
 	defer trafficTrendCache.Unlock()
 	if trafficTrendCache.items == nil {
@@ -174,5 +274,5 @@ func storeTrafficTrend(key string, buckets []TrafficTrendBucket, at time.Time) {
 			trafficTrendCache.items = make(map[string]trafficTrendCacheEntry)
 		}
 	}
-	trafficTrendCache.items[key] = trafficTrendCacheEntry{expiresAt: at.Add(trafficTrendCacheTTL), buckets: buckets}
+	trafficTrendCache.items[key] = trafficTrendCacheEntry{expiresAt: at.Add(trafficTrendCacheTTL), buckets: result.Buckets, result: result}
 }

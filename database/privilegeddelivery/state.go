@@ -30,6 +30,9 @@ func settingsHash(s Settings) string {
 		}
 	}
 	b = binary.BigEndian.AppendUint32(b, uint32(s.RequiredPrivilegeMode))
+	if s.RootExecutionAllowed {
+		b = append(b, []byte("\x00root_execution_allowed\x01")...)
+	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }

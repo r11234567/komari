@@ -497,7 +497,7 @@ func buildExecutionEnvelope(agentID string, spec *execv1.ExecutionSpec, leaseExp
 		Nonce:           uuid.NewString(),
 		IssuedAt:        timestamppb.New(now),
 		ExpiresAt:       timestamppb.New(leaseExpires),
-		InstructionType: "exec:v1",
+		InstructionType: "exec:identity:v1",
 		Body:            specBytes,
 	}
 	payloadBytes, err := proto.Marshal(instruction)

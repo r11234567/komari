@@ -61,6 +61,7 @@ type Settings struct {
 	RemoteControlEnabled  bool  `json:"remote_control_enabled"`
 	WebSSHEnabled         bool  `json:"webssh_enabled"`
 	ExecutionEnabled      bool  `json:"execution_enabled"`
+	RootExecutionAllowed  bool  `json:"root_execution_allowed"`
 	EnableGPU             bool  `json:"enable_gpu"`
 	RescueHelperEnabled   bool  `json:"rescue_helper_enabled"`
 	RequiredPrivilegeMode int32 `json:"required_privilege_mode"`
@@ -124,6 +125,9 @@ func SaveWithDB(db *gorm.DB, clientUUID string, settings Settings, expectedRevis
 		}
 		if (settings.WebSSHEnabled || settings.ExecutionEnabled) && !settings.RemoteControlEnabled {
 			return errors.New("webssh and execution require remote control")
+		}
+		if settings.RootExecutionAllowed && !settings.RemoteControlEnabled {
+			return errors.New("root execution requires remote control")
 		}
 		if settings.RequiredPrivilegeMode < 0 || settings.RequiredPrivilegeMode > 5 {
 			return errors.New("unsupported privilege mode")

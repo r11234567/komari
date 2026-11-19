@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/trafficreset"
 	"gorm.io/gorm"
@@ -108,6 +109,19 @@ func CurrentTrafficCycleFor(client models.Client, now time.Time) (time.Time, str
 }
 
 func LoadCalibrationSnapshot(ctx context.Context, db *gorm.DB, client models.Client, now time.Time) (CalibrationSnapshot, error) {
+	if metricstore.TelemetryEnabled() {
+		var snapshot CalibrationSnapshot
+		err := WithTelemetryReadSnapshot(ctx, db, func(tx *gorm.DB) error {
+			var err error
+			snapshot, err = loadCalibrationSnapshot(ctx, tx, client, now)
+			return err
+		})
+		return snapshot, err
+	}
+	return loadCalibrationSnapshot(ctx, db, client, now)
+}
+
+func loadCalibrationSnapshot(ctx context.Context, db *gorm.DB, client models.Client, now time.Time) (CalibrationSnapshot, error) {
 	days, snapshot, err := loadCalibrationDays(ctx, db, client, now)
 	if err != nil {
 		return CalibrationSnapshot{}, err
@@ -228,6 +242,21 @@ func firstDayUsage(row models.TrafficCycleFirstDay) Usage {
 // is still open, then seals the row after the day ends. A missing row after
 // the first day has ended is treated as unavailable history, not a real zero.
 func syncCycleFirstDay(ctx context.Context, db *gorm.DB, client models.Client, now time.Time) (Usage, bool, error) {
+	if metricstore.TelemetryEnabled() {
+		if err := ensureTelemetryFresh(ctx); err != nil {
+			return Usage{}, false, err
+		}
+		_, cycle, err := CurrentTrafficCycleFor(client, now)
+		if err != nil {
+			return Usage{}, false, nil
+		}
+		row, found, err := loadStoredCycleFirstDay(ctx, db, client.UUID, cycle)
+		return firstDayUsage(row), found, err
+	}
+	return syncCycleFirstDayWithCalculator(ctx, db, client, now, metricUsageForCalibration)
+}
+
+func syncCycleFirstDayWithCalculator(ctx context.Context, db *gorm.DB, client models.Client, now time.Time, calculate usageCalculator) (Usage, bool, error) {
 	cycleStart, cycle, err := CurrentTrafficCycleFor(client, now)
 	if err != nil {
 		return Usage{}, false, nil
@@ -258,7 +287,7 @@ func syncCycleFirstDay(ctx context.Context, db *gorm.DB, client models.Client, n
 		to = end
 	}
 	if !covered.After(to) {
-		extra, err := metricUsageForCalibration(ctx, client.UUID, covered.UTC(), to.UTC())
+		extra, err := calculate(ctx, client.UUID, covered.UTC(), to.UTC())
 		if err != nil {
 			return Usage{}, false, err
 		}
@@ -334,6 +363,20 @@ func markCycleFirstDayRecovered(ctx context.Context, db *gorm.DB, client models.
 }
 
 func loadCalibrationDays(ctx context.Context, db *gorm.DB, client models.Client, now time.Time) ([]calibrationDay, CalibrationSnapshot, error) {
+	if metricstore.TelemetryEnabled() {
+		var days []calibrationDay
+		var snapshot CalibrationSnapshot
+		err := WithTelemetryReadSnapshot(ctx, db, func(tx *gorm.DB) error {
+			var err error
+			days, snapshot, err = loadCalibrationDaysSnapshot(ctx, tx, client, now)
+			return err
+		})
+		return days, snapshot, err
+	}
+	return loadCalibrationDaysSnapshot(ctx, db, client, now)
+}
+
+func loadCalibrationDaysSnapshot(ctx context.Context, db *gorm.DB, client models.Client, now time.Time) ([]calibrationDay, CalibrationSnapshot, error) {
 	cycleStart, cycle, err := CurrentTrafficCycleFor(client, now)
 	if err != nil {
 		return nil, CalibrationSnapshot{}, err
@@ -385,7 +428,12 @@ func loadCalibrationDays(ctx context.Context, db *gorm.DB, client models.Client,
 	if cycleStart.After(currentStart) {
 		currentStart = cycleStart
 	}
-	current, err := metricUsageForCalibration(ctx, client.UUID, currentStart.UTC(), now.UTC())
+	var current Usage
+	if metricstore.TelemetryEnabled() {
+		current, err = telemetryCurrentCalibrationUsage(ctx, db, client, currentStart, now)
+	} else {
+		current, err = metricUsageForCalibration(ctx, client.UUID, currentStart.UTC(), now.UTC())
+	}
 	if err != nil {
 		return nil, CalibrationSnapshot{}, fmt.Errorf("read current traffic before calibration: %w", err)
 	}
@@ -435,7 +483,9 @@ func CalibrateCurrentCycle(ctx context.Context, db *gorm.DB, client models.Clien
 	// correction, otherwise concurrent saves would apply the same delta twice.
 	calibrationWriteMu.Lock()
 	defer calibrationWriteMu.Unlock()
-	return calibrateCycle(ctx, db, client, target, operator, now, "directions", nil, nil)
+	return withCalibrationAccounting(ctx, func() (CalibrationSnapshot, error) {
+		return calibrateCycle(ctx, db, client, target, operator, now, "directions", nil, nil)
+	})
 }
 
 func calibrateCycle(ctx context.Context, db *gorm.DB, client models.Client, target Usage, operator string, now time.Time, mode string, billableOffset, targetTotal *int64) (CalibrationSnapshot, error) {

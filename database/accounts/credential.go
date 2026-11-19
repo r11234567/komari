@@ -97,5 +97,13 @@ func rotateCredentialVersion(tx *gorm.DB, user models.User) error {
 	if result.RowsAffected != 1 {
 		return ErrCredentialStateChanged
 	}
+	// A security reset must not leave long-lived programmatic access behind.
+	// Older recovery databases may not yet contain the additive token table.
+	if tx.Migrator().HasTable(&models.APIToken{}) {
+		if err := tx.Model(&models.APIToken{}).Where("owner_uuid = ? AND revoked_at IS NULL", user.UUID).
+			Update("revoked_at", time.Now().UTC()).Error; err != nil {
+			return err
+		}
+	}
 	return nil
 }

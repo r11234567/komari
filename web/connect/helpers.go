@@ -58,6 +58,7 @@ func runtimeToProto(profile clients.DeploymentProfile) *configv1.RuntimeConfig {
 	result := &configv1.RuntimeConfig{
 		MemoryIncludeCache: config.MemoryIncludeCache,
 		DetailedGpu:        config.DetailedGPU,
+		EnableGpu:          config.EnableGPU,
 		GetIpAddrFromNic:   &profile.GetIPAddrFromNIC,
 	}
 	if config.IncludeNics != nil {
@@ -86,8 +87,12 @@ func applyRuntime(profile *clients.DeploymentProfile, runtime *configv1.RuntimeC
 	if runtime.MemoryReportRawUsed != nil || runtime.CustomDns != nil || runtime.PreferIpVersion != nil || runtime.InfoReportInterval != nil || runtime.MaxRetries != nil || runtime.ReconnectInterval != nil || runtime.DisableCompression != nil || runtime.CustomIpv4 != nil || runtime.CustomIpv6 != nil || runtime.DisableAutoUpdate != nil || runtime.IgnoreUnsafeCert != nil || len(runtime.ProtoReflect().GetUnknown()) > 0 {
 		return errors.New("runtime config contains unsupported fields; no revision was saved")
 	}
-	if runtime.EnableGpu != nil || runtime.RemoteControlEnabled != nil {
+	if runtime.RemoteControlEnabled != nil || runtime.EnableGpu != nil && profile.Platform != "windows" {
 		return errors.New("GPU enablement and remote control are install-only settings and require reinstalling the Agent")
+	}
+	if runtime.EnableGpu != nil {
+		enabled := runtime.GetEnableGpu()
+		profile.WindowsGPUEnabled = &enabled
 	}
 	if runtime.ReportInterval != nil {
 		if err := runtime.ReportInterval.CheckValid(); err != nil {

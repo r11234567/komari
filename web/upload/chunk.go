@@ -36,6 +36,9 @@ type Metadata struct {
 }
 
 type Session struct {
+	// Supplied only by the authenticated merge handler, never request metadata.
+	Actor       string
+	RemoteIP    string
 	ID          string
 	Metadata    Metadata
 	Directory   string

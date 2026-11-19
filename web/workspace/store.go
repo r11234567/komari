@@ -20,6 +20,24 @@ import (
 
 const AbsoluteLifetime = 30 * time.Minute
 const IdleLifetime = 3 * time.Minute
+
+// TransportDeadline bounds offline transport retention without touching idle
+// activity or extending the human authorization.
+func (g *Grant) TransportDeadline(limit time.Time) time.Time {
+	g.store.mu.Lock()
+	defer g.store.mu.Unlock()
+	if g.store.grants[g.tokenKey] != g || !g.store.validLocked(g) {
+		return time.Time{}
+	}
+	if g.ExpiresAt.Before(limit) {
+		limit = g.ExpiresAt
+	}
+	if g.idleExpiresAt.Before(limit) {
+		limit = g.idleExpiresAt
+	}
+	return limit
+}
+
 const Header = "X-Komari-Workspace-Grant"
 const IdentityHeader = "X-Komari-Workspace-Identity"
 
@@ -67,6 +85,9 @@ var Default = NewStore(time.Now, func(b Binding) bool {
 		return false
 	}
 	allowed, err := clients.PrivilegedCapabilityAllowed(b.AgentID, "webssh")
+	if err == nil && allowed && b.SystemUser == "root" {
+		allowed, err = clients.PrivilegedCapabilityAllowed(b.AgentID, "root")
+	}
 	return err == nil && allowed
 })
 
