@@ -232,7 +232,10 @@ var allowedClientReportFields = map[string]struct{}{
 }
 
 func SaveClientInfo(update map[string]interface{}) error {
-	db := dbcore.GetDBInstance()
+	return saveClientInfoWithDB(dbcore.GetDBInstance(), update)
+}
+
+func saveClientInfoWithDB(db *gorm.DB, update map[string]interface{}) error {
 	clientUUID, ok := update["uuid"].(string)
 	if !ok || clientUUID == "" {
 		return fmt.Errorf("invalid client UUID")

@@ -163,6 +163,13 @@ func (s *enrollmentService) RefreshCredentials(ctx context.Context, req *connect
 	if err != nil {
 		return nil, connectError(connect.CodeUnauthenticated, errors.New("invalid refresh proof or credential"))
 	}
+	// Resolve the active signing key before opening the rotation DB transaction
+	// so signing inside the transaction never contends on SQLite's single-conn
+	// pool and unavailable signing keys fail before consuming the refresh token.
+	signingKey, signKeyErr := enrollment.ActiveSigningKey()
+	if signKeyErr != nil {
+		return nil, connectError(connect.CodeInternal, errors.New("credential response signing unavailable; retry same request"))
+	}
 	buildSignedResponse := func(issued enrollment.Issued) (*enrollmentv1.RefreshCredentialsResponse, error) {
 		creds := &enrollmentv1.AgentCredentials{
 			AgentId:               issued.AgentID,
@@ -187,11 +194,8 @@ func (s *enrollmentService) RefreshCredentials(ctx context.Context, req *connect
 				return nil, err
 			}
 		}
-		keyID, algorithm, sig, signErr := enrollment.Sign(payload)
-		if signErr != nil {
-			return nil, errors.New("credential response signing unavailable; retry same request")
-		}
-		response.Proof = &securityv1.SignedEnvelope{Payload: payload, Signatures: []*securityv1.Signature{{Algorithm: securityv1.SignatureAlgorithm(algorithm), Value: sig, KeyId: keyID}}}
+		sig := ed25519.Sign(signingKey.PrivateKey, payload)
+		response.Proof = &securityv1.SignedEnvelope{Payload: payload, Signatures: []*securityv1.Signature{{Algorithm: securityv1.SignatureAlgorithm(signingKey.Algorithm), Value: sig, KeyId: signingKey.KeyID}}}
 		return response, nil
 	}
 
@@ -349,7 +353,8 @@ func verifyRefreshProof(envelope *securityv1.SignedEnvelope, storedKey, clientUU
 		return errors.New("the refresh proof timestamp drift exceeds allowed window (120s)")
 	}
 	// Consume signature replay entry only after full validation succeeds.
-	sigHash := hex.EncodeToString(matchedSig)
+	sigDigest := sha256.Sum256(matchedSig)
+	sigHash := hex.EncodeToString(sigDigest[:])
 	if !refreshReplayCache.CheckAndRecord(clientUUID, "refresh-sig:"+sigHash, 120*time.Second) {
 		return errors.New("the refresh proof signature was already used (replay rejected)")
 	}

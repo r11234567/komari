@@ -26,7 +26,7 @@ const (
 	maxDPoPPerSubject      = 1024
 	maxRefreshNonceEntries = 16384
 	maxRefreshPerSubject   = 256
-	maxNonceLength         = 128
+	maxNonceLength         = 256
 	maxDPoPBodyBytes       = 10 << 20
 )
 
