@@ -42,20 +42,25 @@ func UpdateUser(c *gin.Context) {
 		api.RespondError(c, 400, "Password must be at least 6 characters long")
 		return
 	}
+	callerUUID, _ := c.Get("uuid")
+	actorUUID, _ := callerUUID.(string)
+	if actorUUID == "" || req.Uuid != actorUUID {
+		api.RespondError(c, http.StatusForbidden, "Cannot modify another user's account")
+		return
+	}
 	if req.Password != nil {
 		c.Set("credential_action_resource", credentialaction.PasswordResource(req.Uuid))
-		c.Set("2fa_code", req.TwoFa)
-		if err := api.VerifySensitive2FA(c); err != nil {
-			api.RespondError(c, 401, err.Error())
-			return
-		}
+	}
+	c.Set("2fa_code", req.TwoFa)
+	if err := api.VerifySensitive2FA(c); err != nil {
+		api.RespondError(c, http.StatusUnauthorized, err.Error())
+		return
 	}
 	if err := accounts.UpdateUser(req.Uuid, req.Name, req.Password, req.SsoType); err != nil {
 		api.RespondError(c, 500, "Failed to update user: "+err.Error())
 		return
 	}
-	uuid, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), uuid.(string), "User updated", "warn")
+	auditlog.Log(c.ClientIP(), actorUUID, "User updated", "warn")
 	api.RespondSuccess(c, gin.H{"uuid": req.Uuid})
 }
 

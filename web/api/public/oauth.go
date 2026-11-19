@@ -3,7 +3,6 @@ package public
 import (
 	"fmt"
 	"net/url"
-	"slices"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -56,28 +55,16 @@ func OAuthCallback(c *gin.Context) {
 	state, _ := c.Cookie("oauth_state")
 	security.SetSensitiveCookie(c, "oauth_state", "", -1)
 
-	// 获取当前OAuth提供商名称
-	providerName := oauth.CurrentProvider().GetName()
 	returnTo := safeOAuthReturnTo("")
 	if destination, err := c.Cookie(oauthReturnToCookie); err == nil {
 		returnTo = safeOAuthReturnTo(destination)
 	}
 	security.SetSensitiveCookie(c, oauthReturnToCookie, "", -1)
 
-	providersSkipStateCheck := []string{"qq"}
-	if slices.Contains(providersSkipStateCheck, providerName) {
-		// 对于QQ登录，由于是通过QQ聚合登录平台中转，state可能会不匹配
-		// 但我们仍然需要验证state的存在性（不能是空的）
-		if state == "" {
-			c.JSON(400, gin.H{"status": "error", "error": "Invalid state"})
-			return
-		}
-	} else {
-		// 对于其他提供商，严格验证state匹配
-		if state == "" || state != c.Query("state") {
-			c.JSON(400, gin.H{"status": "error", "error": "Invalid state"})
-			return
-		}
+	// 严格验证所有 OAuth 提供商的 state 匹配，防止跨站登录/账号绑定 CSRF
+	if state == "" || state != c.Query("state") {
+		c.JSON(400, gin.H{"status": "error", "error": "Invalid state"})
+		return
 	}
 
 	queries := make(map[string]string)

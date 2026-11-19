@@ -39,6 +39,7 @@ func (g *Grant) TransportDeadline(limit time.Time) time.Time {
 }
 
 const Header = "X-Komari-Workspace-Grant"
+const AgentHeader = "X-Komari-Workspace-Agent"
 const IdentityHeader = "X-Komari-Workspace-Identity"
 
 var ErrLocked = errors.New("workspace locked: fresh 2FA and an explicit OS account are required")
@@ -52,6 +53,7 @@ type Grant struct {
 	cancel        context.CancelFunc
 	store         *Store
 	tokenKey      [32]byte
+	rawToken      string    // in-memory only for same-session GetWorkspace re-sync; cleared on removal
 	idleExpiresAt time.Time // guarded by store.mu
 }
 type Snapshot struct {
@@ -127,9 +129,48 @@ func (s *Store) Create(b Binding) (string, Snapshot, error) {
 	}
 	now := s.now()
 	ctx, cancel := context.WithCancel(context.Background())
-	g := &Grant{ID: uuid.NewString(), Binding: b, ExpiresAt: now.Add(AbsoluteLifetime), idleExpiresAt: now.Add(IdleLifetime), ctx: ctx, cancel: cancel, store: s, tokenKey: key}
+	g := &Grant{ID: uuid.NewString(), Binding: b, ExpiresAt: now.Add(AbsoluteLifetime), idleExpiresAt: now.Add(IdleLifetime), ctx: ctx, cancel: cancel, store: s, tokenKey: key, rawToken: token}
 	s.grants[key] = g
 	return token, Snapshot{g, g.idleExpiresAt}, nil
+}
+
+// LookupSession retrieves the active workspace grant for an authenticated
+// interactive browser session and target machine so sibling tabs can pull the
+// current authorization from the server without broadcasting tokens over
+// BroadcastChannel.
+func (s *Store) LookupSession(user, session, agent string) (string, Snapshot, error) {
+	agent = strings.TrimSpace(agent)
+	if user == "" || session == "" || agent == "" {
+		return "", Snapshot{}, ErrLocked
+	}
+	s.mu.Lock()
+	var found *Grant
+	for _, g := range s.grants {
+		if g.Binding.UserID == user && g.Binding.Session == session && g.Binding.AgentID == agent {
+			found = g
+			break
+		}
+	}
+	if found == nil {
+		s.mu.Unlock()
+		return "", Snapshot{}, ErrLocked
+	}
+	if !s.validLocked(found) {
+		s.removeLocked(found)
+		s.mu.Unlock()
+		return "", Snapshot{}, ErrLocked
+	}
+	binding := found.Binding
+	s.mu.Unlock()
+
+	valid := s.sessionValid(binding)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !valid || s.grants[found.tokenKey] != found || !s.validLocked(found) || found.rawToken == "" {
+		s.removeLocked(found)
+		return "", Snapshot{}, ErrLocked
+	}
+	return found.rawToken, Snapshot{found, found.idleExpiresAt}, nil
 }
 
 func (s *Store) Check(token, user, session, agent string, touch bool) (Snapshot, error) {
@@ -201,6 +242,7 @@ func (s *Store) removeLocked(g *Grant) {
 	if s.grants[g.tokenKey] == g {
 		delete(s.grants, g.tokenKey)
 	}
+	g.rawToken = ""
 	g.cancel()
 }
 func (g *Grant) Context() context.Context { return g.ctx }

@@ -953,6 +953,18 @@ func PrivilegedCapabilityAllowed(clientUUID, feature string) (bool, error) {
 	return PrivilegedCapabilityAllowedWithDB(dbcore.GetDBInstance(), clientUUID, feature)
 }
 func PrivilegedCapabilityAllowedWithDB(db *gorm.DB, clientUUID, feature string) (bool, error) {
+	if feature == "remote" || feature == "webssh" || feature == "execution" || feature == "root" {
+		var client models.Client
+		if err := db.Select("uuid", "remote_control_protected").First(&client, "uuid = ?", clientUUID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return false, nil
+			}
+			return false, err
+		}
+		if client.RemoteControlProtected {
+			return false, nil
+		}
+	}
 	var state models.ClientPrivilegedState
 	err := db.First(&state, "client = ?", clientUUID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) || err == nil && state.ProtocolVersion != 2 {

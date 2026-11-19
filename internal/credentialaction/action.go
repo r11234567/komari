@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -79,4 +80,50 @@ func WorkspaceResource(agent, user string) string {
 	encoder.SetEscapeHTML(false)
 	_ = encoder.Encode([]string{agent, user})
 	return "workspace:" + strings.TrimSuffix(b.String(), "\n")
+}
+
+// ExecutionSpecDigest computes the canonical SHA-256 hex digest of an execution
+// specification using a positional JSON tuple identical to komari-web.
+func ExecutionSpecDigest(command string, arguments []string, environment map[string]string, workingDirectory string, timeoutSeconds int64, maxOutputBytes uint64, runAsRoot bool) string {
+	args := arguments
+	if args == nil {
+		args = []string{}
+	}
+	envKeys := make([]string, 0, len(environment))
+	for k := range environment {
+		envKeys = append(envKeys, k)
+	}
+	sort.Strings(envKeys)
+	envPairs := make([][2]string, 0, len(envKeys))
+	for _, k := range envKeys {
+		envPairs = append(envPairs, [2]string{k, environment[k]})
+	}
+	tuple := []any{
+		"v1",
+		command,
+		args,
+		envPairs,
+		workingDirectory,
+		timeoutSeconds,
+		maxOutputBytes,
+		runAsRoot,
+	}
+	var b bytes.Buffer
+	encoder := json.NewEncoder(&b)
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(tuple)
+	digest := sha256.Sum256(bytes.TrimSuffix(b.Bytes(), []byte("\n")))
+	return hex.EncodeToString(digest[:])
+}
+
+// ExecutionTargets binds the execution step-up authorization proof to target
+// agents, root selection, and the full canonical execution specification.
+func ExecutionTargets(agentIDs []string, command string, arguments []string, environment map[string]string, workingDirectory string, timeoutSeconds int64, maxOutputBytes uint64, runAsRoot bool) []string {
+	targets := make([]string, 0, len(agentIDs)+2)
+	targets = append(targets, agentIDs...)
+	if runAsRoot {
+		targets = append(targets, "run-as:root")
+	}
+	targets = append(targets, "spec:"+ExecutionSpecDigest(command, arguments, environment, workingDirectory, timeoutSeconds, maxOutputBytes, runAsRoot))
+	return targets
 }

@@ -25,18 +25,30 @@ func Generate2FA(c *gin.Context) {
 }
 
 func Enable2FA(c *gin.Context) {
-	uuid, _ := c.Get("uuid")
+	uuidRaw, _ := c.Get("uuid")
+	userUUID, _ := uuidRaw.(string)
 	secret, _ := c.Cookie("2fa_secret")
 	code := c.Query("code")
-	if secret == "" || uuid == nil || code == "" {
+	if secret == "" || userUUID == "" || code == "" {
 		api.RespondError(c, 400, "2FA secret or code not provided")
 		return
+	}
+	user, err := accounts.GetUserByUUID(userUUID)
+	if err != nil {
+		api.RespondError(c, http.StatusUnauthorized, "Invalid user")
+		return
+	}
+	if user.TwoFactor != "" {
+		if err := api.VerifySensitive2FA(c); err != nil {
+			api.RespondError(c, http.StatusUnauthorized, err.Error())
+			return
+		}
 	}
 	if !totp.Validate(code, secret) {
 		api.RespondError(c, 400, "Invalid 2FA code")
 		return
 	}
-	err := accounts.Enable2Fa(uuid.(string), secret)
+	err = accounts.Enable2Fa(userUUID, secret)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to enable 2FA: "+err.Error())
 		return

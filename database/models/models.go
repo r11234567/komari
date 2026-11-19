@@ -251,11 +251,12 @@ type AgentCredential struct {
 // Consumed refresh hashes identify an authenticated replay after recovery
 // expires. No token plaintext or recoverable credential pair is stored here.
 type AgentRefreshUse struct {
-	TokenHash  string    `json:"-" gorm:"type:varchar(64);primaryKey"`
-	Client     string    `json:"-" gorm:"type:varchar(36);index;not null"`
-	Generation uint64    `json:"-"`
-	ConsumedAt time.Time `json:"-"`
-	ExpiresAt  time.Time `json:"-" gorm:"index"`
+	TokenHash   string    `json:"-" gorm:"type:varchar(64);primaryKey"`
+	Client      string    `json:"-" gorm:"type:varchar(36);index;not null"`
+	RequestHash string    `json:"-" gorm:"type:varchar(64);index"`
+	Generation  uint64    `json:"-"`
+	ConsumedAt  time.Time `json:"-"`
+	ExpiresAt   time.Time `json:"-" gorm:"index"`
 }
 
 // ControlPlaneKey is a signing key the panel uses for signed instructions.

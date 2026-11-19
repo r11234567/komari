@@ -22,8 +22,20 @@ func (q *QQ) GetConfiguration() factory.Configuration {
 	return &q.Addition
 }
 
+var qqHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+const maxQQResponseBytes = 1 << 20
+
 func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
 	state := utils.GenerateRandomString(16)
+
+	callbackTarget := redirectURI
+	if parsed, err := url.Parse(redirectURI); err == nil {
+		query := parsed.Query()
+		query.Set("state", state)
+		parsed.RawQuery = query.Encode()
+		callbackTarget = parsed.String()
+	}
 
 	// 构建请求QQ聚合登录平台的URL
 	requestURL := fmt.Sprintf(
@@ -32,19 +44,19 @@ func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
 		url.QueryEscape(q.Addition.AppId),
 		url.QueryEscape(q.Addition.AppKey),
 		url.QueryEscape(q.Addition.LoginType),
-		url.QueryEscape(redirectURI),
+		url.QueryEscape(callbackTarget),
 	)
 
 	// 向聚合登录平台发送请求
-	resp, err := http.Get(requestURL)
+	resp, err := qqHTTPClient.Get(requestURL)
 	if err != nil {
 		// 如果请求失败，返回错误信息
 		return "", state
 	}
 	defer resp.Body.Close()
 
-	// 读取响应内容
-	body, err := io.ReadAll(resp.Body)
+	// 读取响应内容（限制大小防止内存耗尽）
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQQResponseBytes))
 	if err != nil {
 		return "", state
 	}
@@ -65,8 +77,30 @@ func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
 		return "", state
 	}
 
-	q.stateCache.Set(state, true, cache.DefaultExpiration)
+	q.stateMu.Lock()
+	if q.stateCache != nil {
+		q.stateCache.Set(state, true, cache.DefaultExpiration)
+	}
+	q.stateMu.Unlock()
 	return result.URL, state
+}
+
+// consumeState atomically verifies and removes a pending OAuth state token so
+// concurrent callbacks cannot replay the same state.
+func (q *QQ) consumeState(state string) bool {
+	if state == "" {
+		return false
+	}
+	q.stateMu.Lock()
+	defer q.stateMu.Unlock()
+	if q.stateCache == nil {
+		return false
+	}
+	if _, ok := q.stateCache.Get(state); !ok {
+		return false
+	}
+	q.stateCache.Delete(state)
+	return true
 }
 
 // OnCallback 处理QQ OAuth回调
@@ -82,14 +116,11 @@ func (q *QQ) OnCallback(ctx *gin.Context, state string, query map[string]string,
 		loginType = q.Addition.LoginType
 	}
 
-	// 验证state防止CSRF攻击
+	// 验证state防止CSRF攻击，并原子消费防并发重放
 	if q.stateCache == nil {
 		return factory.OidcCallback{}, fmt.Errorf("state cache not initialized")
 	}
-	if _, ok := q.stateCache.Get(state); !ok {
-		return factory.OidcCallback{}, fmt.Errorf("invalid state")
-	}
-	if state == "" {
+	if !q.consumeState(state) {
 		return factory.OidcCallback{}, fmt.Errorf("invalid state")
 	}
 
@@ -109,7 +140,7 @@ func (q *QQ) OnCallback(ctx *gin.Context, state string, query map[string]string,
 		url.QueryEscape(code),
 	)
 
-	resp, err := http.Get(callbackURL)
+	resp, err := qqHTTPClient.Get(callbackURL)
 	if err != nil {
 		return factory.OidcCallback{}, fmt.Errorf("failed to get user info: %v", err)
 	}
@@ -120,8 +151,8 @@ func (q *QQ) OnCallback(ctx *gin.Context, state string, query map[string]string,
 		return factory.OidcCallback{}, fmt.Errorf("HTTP request failed with status code: %d", resp.StatusCode)
 	}
 
-	// 读取响应
-	body, err := io.ReadAll(resp.Body)
+	// 读取响应（限制大小）
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQQResponseBytes))
 	if err != nil {
 		return factory.OidcCallback{}, fmt.Errorf("failed to read response: %v", err)
 	}

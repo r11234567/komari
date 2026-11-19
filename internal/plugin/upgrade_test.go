@@ -53,7 +53,7 @@ func TestInjectSurvivesBareConnectionUpgradeHeader(t *testing.T) {
 	withTempDataDir(t)
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.GET("/admin/dashboard", func(c *gin.Context) {
+	engine.GET("/", func(c *gin.Context) {
 		c.Data(http.StatusOK, "text/html; charset=utf-8",
 			[]byte("<!DOCTYPE html><html><head></head><body></body></html>"))
 	})
@@ -78,8 +78,8 @@ func TestInjectSurvivesBareConnectionUpgradeHeader(t *testing.T) {
 
 	handler := HTMLInjectHandler(engine)
 
-	// 仅 Connection: upgrade（反代常见行为）→ 注入照常生效
-	req := httptest.NewRequest(http.MethodGet, "/admin/dashboard", nil)
+	// 仅 Connection: upgrade（反代常见行为）→ 公开页面注入照常生效
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Connection", "upgrade")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -88,7 +88,7 @@ func TestInjectSurvivesBareConnectionUpgradeHeader(t *testing.T) {
 	}
 
 	// 两个头齐全的真实升级 → 放行，不注入
-	req2 := httptest.NewRequest(http.MethodGet, "/admin/dashboard", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
 	req2.Header.Set("Connection", "upgrade")
 	req2.Header.Set("Upgrade", "websocket")
 	rec2 := httptest.NewRecorder()

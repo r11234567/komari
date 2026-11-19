@@ -51,6 +51,12 @@ func (h *Handler) Init(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "unsupported upload purpose")
 		return
 	}
+	if request.Purpose == PurposeBackup {
+		if err := api.VerifySensitive2FA(c); err != nil {
+			api.RespondError(c, http.StatusUnauthorized, err.Error())
+			return
+		}
+	}
 	session, err := h.Store.Init(owner, request.Purpose, request.Filename, request.Size)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())

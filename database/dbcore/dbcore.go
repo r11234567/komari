@@ -230,7 +230,8 @@ func unzipToDir(zipPath, dstDir string) error {
 		if err != nil {
 			return err
 		}
-		out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		perm := restoreFilePerm(name, mode)
+		out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 		if err != nil {
 			rc.Close()
 			return err
@@ -240,10 +241,30 @@ func unzipToDir(zipPath, dstDir string) error {
 			rc.Close()
 			return err
 		}
+		_ = out.Chmod(perm)
 		out.Close()
 		rc.Close()
 	}
 	return nil
+}
+
+func restoreFilePerm(cleanPath string, mode os.FileMode) os.FileMode {
+	perm := mode.Perm() & 0o777
+	if perm == 0 {
+		perm = 0o644
+	}
+	slashed := filepath.ToSlash(cleanPath)
+	if slashed == "secret.key" || strings.HasPrefix(slashed, "plugin-data/") {
+		return 0o600
+	}
+	// Ensure restored runtime and SQLite files remain owner-writable even if an
+	// external or legacy archive marked them read-only (e.g. 0444).
+	return perm | 0o600
+}
+
+// RestoreStagedBackup validates and applies dataDir/backup.zip atomically.
+func RestoreStagedBackup(dataDir string) error {
+	return restoreStagedBackup(dataDir)
 }
 
 func validateRestoredSQLite(path, label string) error {

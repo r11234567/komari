@@ -14,7 +14,6 @@ import (
 	"github.com/komari-monitor/komari/pkg/jsruntime/internal/bridge"
 	netmodule "github.com/komari-monitor/komari/pkg/jsruntime/net"
 	"net"
-	"strconv"
 )
 
 type Module struct {
@@ -90,7 +89,7 @@ func (m *Module) establish(ctx context.Context, cancel context.CancelFunc, socke
 	if sourceSocket != nil {
 		connection, err = m.netModule.DetachSocket(sourceSocket)
 	} else {
-		connection, err = (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+		connection, err = m.netModule.DialContext(ctx, host, port)
 	}
 	if err != nil {
 		m.emitError(socket, err)

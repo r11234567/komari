@@ -60,11 +60,11 @@ func TestProcessStdioAreStreams(t *testing.T) {
 }
 func TestChildProcessStdioAreStreams(t *testing.T) {
 	runtime, err := New(`
-		async function verify(command) {
+		async function verify(command, helperEnv) {
 			const childProcess = require("child_process");
 			const stream = require("stream");
 			const child = childProcess.spawn(command, ["-test.run=^TestNodeChildProcessHelper$"], {
-				env: Object.assign({}, process.env, { KOMARI_JSRUNTIME_CHILD_HELPER_MODE: "echo" }),
+				env: helperEnv,
 			});
 			const checks = [];
 			checks.push(child.stdin instanceof stream.Writable);
@@ -95,7 +95,7 @@ func TestChildProcessStdioAreStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Close()
-	if err := runtime.Call("verify", os.Args[0]); err != nil {
+	if err := runtime.Call("verify", os.Args[0], childHelperEnvironment("echo")); err != nil {
 		t.Fatalf("child_process stdio streams failed: %v", err)
 	}
 }

@@ -28,7 +28,17 @@ func (m *Manager) htmlInjectHandler(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		fragments := m.injectsSnapshot()
+		allFragments := m.injectsSnapshot()
+		if len(allFragments) == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		fragments := make([]*injectEntry, 0, len(allFragments))
+		for _, fragment := range allFragments {
+			if pluginAllowedOnPath(r.URL.Path, fragment.short) {
+				fragments = append(fragments, fragment)
+			}
+		}
 		if len(fragments) == 0 {
 			next.ServeHTTP(w, r)
 			return

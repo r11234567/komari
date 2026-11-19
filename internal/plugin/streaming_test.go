@@ -89,6 +89,7 @@ function load() {
 // TestRouteStreamingMJPEG 用本地“摄像头”（单张 JPEG）验证流式路由：
 // multipart 帧即时写出、客户端断开后脚本通过 isAborted 退出循环。
 func TestRouteStreamingMJPEG(t *testing.T) {
+	t.Setenv("KOMARI_PLUGIN_ALLOW_PRIVATE_NET", "true")
 	withTempDataDir(t)
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()

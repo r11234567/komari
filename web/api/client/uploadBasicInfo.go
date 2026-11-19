@@ -26,6 +26,8 @@ func getClientIPType(ip net.IP) int {
 func saveClientBasicInfo(info map[string]interface{}, uuid string, fallbackIP string) error {
 	monthRotate, reportsMonthRotate := info["month_rotate"]
 	delete(info, "month_rotate")
+	// Region is strictly panel-derived from GeoIP, never caller-controlled.
+	delete(info, "region")
 	info["uuid"] = uuid
 	applyFallbackClientIP(info, fallbackIP)
 	appendClientRegionFromGeoIP(info)

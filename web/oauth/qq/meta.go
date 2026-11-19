@@ -1,6 +1,8 @@
 package qq
 
 import (
+	"sync"
+
 	"github.com/komari-monitor/komari/web/oauth/factory"
 	"github.com/patrickmn/go-cache"
 )
@@ -13,6 +15,7 @@ func init() {
 
 type QQ struct {
 	Addition
+	stateMu    sync.Mutex
 	stateCache *cache.Cache // 用于存储state和用户信息的映射
 }
 
