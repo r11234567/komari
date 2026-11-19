@@ -137,10 +137,26 @@ func Advance(instant time.Time, timezone string, billingCycle int) (time.Time, e
 	default:
 		days = billingCycle
 	}
-	// Anchor the calendar date at noon so a midnight DST change cannot
-	// shift the intended local day before the clock is applied.
-	anchor := time.Date(year, month, day, 12, 0, 0, 0, loc).AddDate(years, months, days)
-	nextYear, nextMonth, nextDay := anchor.Date()
+	var nextYear int
+	var nextMonth time.Month
+	var nextDay int
+	if years != 0 || months != 0 {
+		// Advance from the 1st of the month so Go's time.AddDate cannot
+		// overflow month-end dates (e.g. Oct 31 -> Dec 1, Jan 31 -> Mar 3,
+		// Feb 29 -> Mar 1), then clamp day to the target month's last day.
+		firstOfTarget := time.Date(year, month, 1, 12, 0, 0, 0, loc).AddDate(years, months, 0)
+		nextYear, nextMonth, _ = firstOfTarget.Date()
+		lastDay := time.Date(nextYear, nextMonth+1, 0, 12, 0, 0, 0, time.UTC).Day()
+		nextDay = day
+		if nextDay > lastDay {
+			nextDay = lastDay
+		}
+	} else {
+		// Anchor the calendar date at noon so a midnight DST change cannot
+		// shift the intended local day before the clock is applied.
+		anchor := time.Date(year, month, day, 12, 0, 0, 0, loc).AddDate(0, 0, days)
+		nextYear, nextMonth, nextDay = anchor.Date()
+	}
 	resolved, err := resolveWallTime(loc, nextYear, nextMonth, nextDay, hour, minute, second, nano)
 	if err != nil {
 		return time.Time{}, err
