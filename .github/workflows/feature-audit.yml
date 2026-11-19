@@ -19,7 +19,7 @@ jobs:
       matrix:
         include:
           - area: files-and-2fa
-            packages: ./web/filemanager ./web/connect ./web/api ./web/api/admin ./web/router
+            packages: ./web/filemanager ./web/connect ./web/api ./web/api/admin ./web/api/public ./web/router
           - area: terminal-and-settings
             packages: ./web/agent ./web/api/terminal ./web/remotemanagement
           - area: plugins-js-and-notifications

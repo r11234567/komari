@@ -34,6 +34,7 @@ func Login(c *gin.Context) {
 		return
 	}
 
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
@@ -85,7 +86,7 @@ func Login(c *gin.Context) {
 	}
 	setSessionCookie(c, session, sessionCookieMaxAge)
 	auditlog.Log(c.ClientIP(), uuid, "logged in (password)", "login")
-	api.RespondSuccess(c, gin.H{"set-cookie": gin.H{"session_token": session}})
+	api.RespondSuccess(c, gin.H{"authenticated": true})
 }
 func Logout(c *gin.Context) {
 	session, _ := c.Cookie("session_token")

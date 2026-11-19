@@ -430,7 +430,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
     });
 
     await stage('enable real 2FA and apply a signed same-identity WebSSH grant', async () => {
-      await request('/api/admin/2fa/generate', undefined, { method: 'GET' });
+      await request('/api/admin/2fa/generate', undefined, { method: 'POST' });
       secret = (await context.cookies()).find(c => c.name === '2fa_secret')?.value;
       expect(secret).toBeTruthy();
       console.log(`::add-mask::${secret}`);
@@ -773,7 +773,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         fs.writeFileSync(path.join(artifacts, 'real-history.csv'), csv);
         csvBytes = csv.length;
       }
-      const backup = await request('/api/admin/download/backup?scope=full', undefined, { method: 'GET' });
+      const backup = await request('/api/admin/download/backup?scope=full', undefined, { method: 'GET', headers: { 'X-2FA-Code': await freshCode() } });
       // Credentials stay inside the disposable fixture, outside uploaded artifacts.
       fs.writeFileSync(path.join(root, 'real-full-backup.zip'), await backup.body());
       fs.writeFileSync(path.join(artifacts, 'real-storage-roundtrip.json'), JSON.stringify({ ...storage, csvBytes, csv_scenarios: !skipCSV }, null, 2));
@@ -906,7 +906,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         expect(pausedBackup.id).toBeTruthy();
         await request(`/api/admin/history/export/${pausedBackup.id}/pause`, {});
         expect((await (await request(`/api/admin/history/export/${pausedBackup.id}`, undefined, { method: 'GET' })).json()).data.status).toBe('paused');
-        const backup = await request('/api/admin/download/backup?scope=full', undefined, { method: 'GET' });
+        const backup = await request('/api/admin/download/backup?scope=full', undefined, { method: 'GET', headers: { 'X-2FA-Code': await freshCode() } });
         fs.writeFileSync(path.join(root, 'real-full-backup.zip'), await backup.body());
         fs.writeFileSync(path.join(root, 'export-restore-proof.json'), JSON.stringify({ ready: proofs.map(p=>p.job), paused: pausedBackup }));
       } finally { execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGCONT', 'komari-e2e-export.service']); }

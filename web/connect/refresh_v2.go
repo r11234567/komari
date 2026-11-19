@@ -93,7 +93,14 @@ func verifyRefreshV2(envelope *securityv1.SignedEnvelope, record models.AgentCre
 		return "", nil, denied
 	}
 	digest := sha256.Sum256(signature)
-	if !recordAndVerifyNonce("refresh-v2:"+record.Client+":"+hex.EncodeToString(digest[:]), 2*time.Minute) {
+	// Retain the replay entry at least until the proof's own timestamp window
+	// expires (at + 2m + 5s margin) so future-skewed proofs cannot be replayed
+	// after a shorter fixed retention elapses.
+	nonceTTL := time.Until(at.Add(2*time.Minute + 5*time.Second))
+	if nonceTTL < 2*time.Minute {
+		nonceTTL = 2 * time.Minute
+	}
+	if !refreshReplayCache.CheckAndRecord(record.Client, hex.EncodeToString(digest[:]), nonceTTL) {
 		return "", nil, denied
 	}
 	return proof.RequestID, proof.Generation, nil

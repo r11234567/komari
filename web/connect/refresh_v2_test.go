@@ -84,6 +84,33 @@ func TestCredentialRefreshV2SignedFullResponseAndLostResponseRecovery(t *testing
 	require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
 }
 
+func TestCredentialRefreshV2ExpiredRecoveryWindowReturnsFailedPrecondition(t *testing.T) {
+	record, token, key, client := refreshFixture(t)
+	id := uuid.NewString()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	first, err := client.RefreshCredentials(ctx, refreshRequest(t, record, token, id, nil, key))
+	require.NoError(t, err)
+	require.NotEmpty(t, first.Msg.Credentials.RefreshToken)
+
+	// Expire the 24h recovery window while retaining the consumed AgentRefreshUse row.
+	expired := time.Now().Add(-time.Minute)
+	require.NoError(t, dbcore.GetDBInstance().Model(&models.AgentCredential{}).Where("client = ?", record.Client).Update("refresh_recovery_until", expired).Error)
+
+	zero := uint64(0)
+	_, err = client.RefreshCredentials(ctx, refreshRequest(t, record, token, id, &zero, key))
+	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	require.NotEmpty(t, connectErr.Details())
+
+	// Active chain must NOT have been revoked.
+	var current models.AgentCredential
+	require.NoError(t, dbcore.GetDBInstance().First(&current, "client = ?", record.Client).Error)
+	require.Nil(t, current.RevokedAt)
+}
+
 func TestCredentialRefreshV2InvalidProofCannotRevokeOrRotate(t *testing.T) {
 	record, token, key, client := refreshFixture(t)
 	request := refreshRequest(t, record, token, uuid.NewString(), nil, key)
@@ -160,4 +187,37 @@ func TestCredentialRefreshV2RejectsMalformedVersionAndBindings(t *testing.T) {
 			require.Nil(t, current.RevokedAt)
 		})
 	}
+}
+
+func TestCredentialRefreshV2FutureSkewNonceRetentionCoversFullWindow(t *testing.T) {
+	record, token, key, client := refreshFixture(t)
+	futureAt := time.Now().Add(25 * time.Second).UTC().Truncate(time.Millisecond)
+	payload, err := json.Marshal(refreshV2Request{
+		Protocol:     2,
+		AgentID:      record.Client,
+		RefreshToken: token,
+		RequestID:    uuid.NewString(),
+		Timestamp:    futureAt.Format(time.RFC3339Nano),
+		Nonce:        uuid.NewString(),
+	})
+	require.NoError(t, err)
+	sig := ed25519.Sign(key, payload)
+	req := connect.NewRequest(&enrollmentv1.RefreshCredentialsRequest{
+		RefreshToken: token,
+		Proof: &securityv1.SignedEnvelope{
+			Payload:    payload,
+			Signatures: []*securityv1.Signature{{Algorithm: securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ED25519, Value: sig}},
+		},
+	})
+	_, err = client.RefreshCredentials(context.Background(), req)
+	require.NoError(t, err)
+
+	digest := sha256.Sum256(sig)
+	replayKey := record.Client + "\x00" + hex.EncodeToString(digest[:])
+	refreshReplayCache.mu.Lock()
+	entry, exists := refreshReplayCache.entries[replayKey]
+	refreshReplayCache.mu.Unlock()
+	require.True(t, exists)
+	require.True(t, entry.expires.After(futureAt.Add(2*time.Minute)),
+		"v2 replay expiry %s must cover full valid proof window beyond %s", entry.expires, futureAt.Add(2*time.Minute))
 }

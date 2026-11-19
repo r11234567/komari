@@ -2,6 +2,7 @@ package connectapi
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/komari-monitor/komari/internal/credentialaction"
 	"github.com/komari-monitor/komari/internal/credentialgateway"
@@ -21,4 +22,19 @@ func verifyConnectCredential(ctx context.Context, proof *commonv1.TwoFactorProof
 		return nil
 	}
 	return verifyConnectTwoFactor(rpc.MetaFromContext(ctx), proof)
+}
+
+// verifyConnectHeaderCredential validates step-up credentials passed via HTTP
+// headers for Connect RPCs whose protobuf request schema does not carry an
+// inline TwoFactorProof field.
+func verifyConnectHeaderCredential(ctx context.Context, header http.Header, action string, targets ...string) error {
+	code := header.Get("X-2FA-Code")
+	if code == "" {
+		code = header.Get("X-Two-Factor-Code")
+	}
+	proof := &commonv1.TwoFactorProof{
+		AuthorizationToken: header.Get(credentialaction.Header),
+		Code:               code,
+	}
+	return verifyConnectCredential(ctx, proof, action, targets...)
 }
