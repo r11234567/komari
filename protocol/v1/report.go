@@ -45,10 +45,10 @@ type GPUDetailReport struct {
 }
 
 type GPUDeviceInfo struct {
-	Name        string  `json:"name"`
-	MemoryTotal int64   `json:"memory_total"`
-	MemoryUsed  int64   `json:"memory_used"`
-	Utilization float64 `json:"utilization"`
+	Name        string   `json:"name"`
+	MemoryTotal int64    `json:"memory_total"`
+	MemoryUsed  int64    `json:"memory_used"`
+	Utilization float64  `json:"utilization"`
 	Temperature *float64 `json:"temperature,omitempty"`
 }
 

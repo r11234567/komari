@@ -361,6 +361,9 @@ func TestGetGPURecordsReadsRollupsAfterRawCompaction(t *testing.T) {
 
 	// Missing temperature on a GPU with utilization/memory must NOT write a fake
 	// 0°C MetricGPUTemp point, while a real 0.0°C reading must be preserved.
+	if err := createMetricDefinitions(ctx, s); err != nil {
+		t.Fatalf("create built-in metric definitions: %v", err)
+	}
 	zeroTemp := 0.0
 	noTempReport := v1.Report{
 		UUID:      "node-temp-distinction",
