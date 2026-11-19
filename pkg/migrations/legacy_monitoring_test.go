@@ -41,7 +41,8 @@ func TestLegacyMonitoringTablesMigratedByOneShotMigration(t *testing.T) {
 	if err := mainDB.Table("records_long_term").Create(&models.Record{Client: "client-a", Time: base.Add(time.Minute), Cpu: 22.5, Ram: 4096}).Error; err != nil {
 		t.Fatalf("seed records_long_term: %v", err)
 	}
-	if err := mainDB.Create(&models.GPURecord{Client: "client-a", Time: base, DeviceIndex: 0, DeviceName: "GPU 0", MemUsed: 1024, MemTotal: 2048, Utilization: 67, Temperature: 55}).Error; err != nil {
+	temp55 := 55.0
+	if err := mainDB.Create(&models.GPURecord{Client: "client-a", Time: base, DeviceIndex: 0, DeviceName: "GPU 0", MemUsed: 1024, MemTotal: 2048, Utilization: 67, Temperature: &temp55}).Error; err != nil {
 		t.Fatalf("seed gpu_records: %v", err)
 	}
 	if err := mainDB.Create(&models.PingRecord{Client: "client-a", TaskId: 7, Time: base, Value: 36}).Error; err != nil {

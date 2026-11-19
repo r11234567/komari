@@ -718,12 +718,15 @@ func gpuRecordToPoints(rec models.GPURecord) []metric.Point {
 		"device_index": fmt.Sprintf("%d", rec.DeviceIndex),
 		"device_name":  rec.DeviceName,
 	}
-	return []metric.Point{
+	points := []metric.Point{
 		{MetricName: metricstore.MetricGPUMem, EntityID: rec.Client, Timestamp: ts, Value: float64(rec.MemUsed), Tags: tags},
 		{MetricName: metricstore.MetricGPUMemTotal, EntityID: rec.Client, Timestamp: ts, Value: float64(rec.MemTotal), Tags: tags},
 		{MetricName: metricstore.MetricGPUDeviceUsage, EntityID: rec.Client, Timestamp: ts, Value: float64(rec.Utilization), Tags: tags},
-		{MetricName: metricstore.MetricGPUTemp, EntityID: rec.Client, Timestamp: ts, Value: float64(rec.Temperature), Tags: tags},
 	}
+	if rec.Temperature != nil {
+		points = append(points, metric.Point{MetricName: metricstore.MetricGPUTemp, EntityID: rec.Client, Timestamp: ts, Value: *rec.Temperature, Tags: tags})
+	}
+	return points
 }
 
 func pingRecordToPoints(rec models.PingRecord) []metric.Point {

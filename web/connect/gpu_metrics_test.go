@@ -42,8 +42,28 @@ func TestGPUMetricWireCompatibility(t *testing.T) {
 			t.Fatalf("GPU aggregate lost: %+v", report.GPU)
 		}
 		first := report.GPU.DetailedInfo[0]
-		if first.Name != "GPU 2" || first.Utilization != 75 || first.MemoryUsed != 2<<30 || first.MemoryTotal != 8<<30 || first.Temperature != 60.5 {
+		if first.Name != "GPU 2" || first.Utilization != 75 || first.MemoryUsed != 2<<30 || first.MemoryTotal != 8<<30 || first.Temperature == nil || *first.Temperature != 60.5 {
 			t.Fatalf("GPU identity, numeric ordering or counters lost: %+v", first)
+		}
+	}
+
+	// GPU metrics without gpu.temperature must keep Temperature nil (not fake 0°C).
+	points := completeMetricPoints()
+	points = append(points,
+		&metricsv1.MetricsPoint{Metric: metricstore.MetricGPUDeviceUsage, Value: 40, ObservedAt: points[0].ObservedAt, Labels: map[string]string{"device_index": "0", "device_name": "GPU NoTemp"}},
+		&metricsv1.MetricsPoint{Metric: metricstore.MetricGPUMem, Value: 1 << 30, ObservedAt: points[0].ObservedAt, Labels: map[string]string{"device_index": "0", "device_name": "GPU NoTemp"}},
+	)
+	noTempReport, err := metricPointsToReport(points)
+	if err != nil {
+		t.Fatalf("metricPointsToReport without temperature failed: %v", err)
+	}
+	if noTempReport.GPU == nil || len(noTempReport.GPU.DetailedInfo) != 1 || noTempReport.GPU.DetailedInfo[0].Temperature != nil {
+		t.Fatalf("missing GPU temperature must remain nil, got %+v", noTempReport.GPU)
+	}
+	exported := legacyReportMetricPoints(&noTempReport)
+	for _, pt := range exported {
+		if pt.Metric == metricstore.MetricGPUTemp {
+			t.Fatalf("legacyReportMetricPoints emitted fake gpu.temperature for nil temperature: %+v", pt)
 		}
 	}
 }

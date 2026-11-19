@@ -193,7 +193,7 @@ func TestWriteReportStoresRawMetricsAndResetAwareTraffic(t *testing.T) {
 		GPU: &v1.GPUDetailReport{
 			AverageUsage: 25,
 			DetailedInfo: []v1.GPUDeviceInfo{{
-				Name: "GPU 0", MemoryUsed: 400, MemoryTotal: 800, Utilization: 30, Temperature: 55,
+				Name: "GPU 0", MemoryUsed: 400, MemoryTotal: 800, Utilization: 30, Temperature: func() *float64 { v := 55.0; return &v }(),
 			}},
 		},
 	}

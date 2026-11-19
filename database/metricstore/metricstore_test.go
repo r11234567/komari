@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/komari-monitor/komari/pkg/metric"
+	v1 "github.com/komari-monitor/komari/protocol/v1"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -348,14 +349,46 @@ func TestGetGPURecordsReadsRollupsAfterRawCompaction(t *testing.T) {
 	if len(records) != 2 {
 		t.Fatalf("expected old rollup and recent raw GPU records, got %d: %#v", len(records), records)
 	}
-	if records[0].Utilization != 30 || records[0].MemUsed != 1000 || records[0].MemTotal != 4000 || records[0].Temperature != 60.5 {
+	if records[0].Utilization != 30 || records[0].MemUsed != 1000 || records[0].MemTotal != 4000 || records[0].Temperature == nil || *records[0].Temperature != 60.5 {
 		t.Fatalf("unexpected compacted GPU record: %#v", records[0])
 	}
-	if records[1].Utilization != 50 || records[1].MemUsed != 2000 || records[1].MemTotal != 4000 || records[1].Temperature != 70.25 {
+	if records[1].Utilization != 50 || records[1].MemUsed != 2000 || records[1].MemTotal != 4000 || records[1].Temperature == nil || *records[1].Temperature != 70.25 {
 		t.Fatalf("unexpected recent GPU record: %#v", records[1])
 	}
 	if records[0].DeviceIndex != 1 || records[0].DeviceName != "GPU 1" || records[0].Client != "node-a" {
 		t.Fatalf("GPU series identity was not preserved: %#v", records[0])
+	}
+
+	// Missing temperature on a GPU with utilization/memory must NOT write a fake
+	// 0°C MetricGPUTemp point, while a real 0.0°C reading must be preserved.
+	zeroTemp := 0.0
+	noTempReport := v1.Report{
+		UUID:      "node-temp-distinction",
+		UpdatedAt: now.Add(-2 * time.Minute),
+		GPU: &v1.GPUDetailReport{
+			Count:        2,
+			AverageUsage: 40,
+			DetailedInfo: []v1.GPUDeviceInfo{
+				{Name: "GPU MissingTemp", MemoryUsed: 500, MemoryTotal: 1000, Utilization: 30, Temperature: nil},
+				{Name: "GPU TrueZero", MemoryUsed: 600, MemoryTotal: 1000, Utilization: 50, Temperature: &zeroTemp},
+			},
+		},
+	}
+	if _, err := WriteReport(ctx, noTempReport); err != nil {
+		t.Fatalf("write missing/zero temp GPU report: %v", err)
+	}
+	distRecords, err := GetGPURecordsByClientAndTime(ctx, "node-temp-distinction", now.Add(-10*time.Minute), now)
+	if err != nil {
+		t.Fatalf("query missing/zero temp GPU records: %v", err)
+	}
+	if len(distRecords) != 2 {
+		t.Fatalf("expected 2 GPU records, got %d: %#v", len(distRecords), distRecords)
+	}
+	if distRecords[0].DeviceName != "GPU MissingTemp" || distRecords[0].Temperature != nil {
+		t.Fatalf("missing GPU temperature must remain nil, got %#v", distRecords[0])
+	}
+	if distRecords[1].DeviceName != "GPU TrueZero" || distRecords[1].Temperature == nil || *distRecords[1].Temperature != 0.0 {
+		t.Fatalf("true 0°C GPU temperature must be preserved as 0.0, got %#v", distRecords[1])
 	}
 }
 

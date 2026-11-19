@@ -47,11 +47,13 @@ func TestLegacyReportToProtoPreservesGPUAndDiagnosticMessage(t *testing.T) {
 		OS:      "linux",
 		GpuName: "NVIDIA GeForce RTX 4090",
 	}
+	temp65 := 65.5
+	tempZero := 0.0
 	report := &legacyv1.Report{
 		Message: "collector warning: sample test message",
 		CPU:     legacyv1.CPUReport{Usage: 12.5},
 		GPU: &legacyv1.GPUDetailReport{
-			Count:        2,
+			Count:        3,
 			AverageUsage: 65.0,
 			DetailedInfo: []legacyv1.GPUDeviceInfo{
 				{
@@ -59,14 +61,21 @@ func TestLegacyReportToProtoPreservesGPUAndDiagnosticMessage(t *testing.T) {
 					Utilization: 70.0,
 					MemoryUsed:  4 << 30,
 					MemoryTotal: 24 << 30,
-					Temperature: 65,
+					Temperature: &temp65,
 				},
 				{
 					Name:        "NVIDIA GeForce RTX 4080",
 					Utilization: 60.0,
 					MemoryUsed:  2 << 30,
 					MemoryTotal: 16 << 30,
-					Temperature: 58,
+					Temperature: &tempZero,
+				},
+				{
+					Name:        "GPU Without Sensor",
+					Utilization: 50.0,
+					MemoryUsed:  1 << 30,
+					MemoryTotal: 8 << 30,
+					Temperature: nil,
 				},
 			},
 		},
@@ -79,18 +88,22 @@ func TestLegacyReportToProtoPreservesGPUAndDiagnosticMessage(t *testing.T) {
 	if protoReport.DiagnosticMessage != "collector warning: sample test message" {
 		t.Fatalf("unexpected diagnostic message: %q", protoReport.DiagnosticMessage)
 	}
-	if protoReport.Resources == nil || len(protoReport.Resources.Gpus) != 2 {
-		t.Fatalf("expected 2 GPUs in proto report, got: %#v", protoReport.Resources)
+	if protoReport.Resources == nil || len(protoReport.Resources.Gpus) != 3 {
+		t.Fatalf("expected 3 GPUs in proto report, got: %#v", protoReport.Resources)
 	}
 	gpu0 := protoReport.Resources.Gpus[0]
 	if gpu0.Id != "0" || gpu0.Name != "NVIDIA GeForce RTX 4090" || gpu0.GetUtilizationPercent() != 70.0 ||
-		gpu0.GetMemoryUsedBytes() != 4<<30 || gpu0.GetMemoryTotalBytes() != 24<<30 || gpu0.GetTemperatureCelsius() != 65 {
+		gpu0.GetMemoryUsedBytes() != 4<<30 || gpu0.GetMemoryTotalBytes() != 24<<30 || gpu0.TemperatureCelsius == nil || gpu0.GetTemperatureCelsius() != 65.5 {
 		t.Fatalf("unexpected gpu0 in proto: %+v", gpu0)
 	}
 	gpu1 := protoReport.Resources.Gpus[1]
 	if gpu1.Id != "1" || gpu1.Name != "NVIDIA GeForce RTX 4080" || gpu1.GetUtilizationPercent() != 60.0 ||
-		gpu1.GetMemoryUsedBytes() != 2<<30 || gpu1.GetMemoryTotalBytes() != 16<<30 || gpu1.GetTemperatureCelsius() != 58 {
+		gpu1.GetMemoryUsedBytes() != 2<<30 || gpu1.GetMemoryTotalBytes() != 16<<30 || gpu1.TemperatureCelsius == nil || gpu1.GetTemperatureCelsius() != 0.0 {
 		t.Fatalf("unexpected gpu1 in proto: %+v", gpu1)
+	}
+	gpu2 := protoReport.Resources.Gpus[2]
+	if gpu2.Id != "2" || gpu2.Name != "GPU Without Sensor" || gpu2.TemperatureCelsius != nil {
+		t.Fatalf("missing GPU temperature must remain nil in proto, got: %+v", gpu2)
 	}
 }
 
