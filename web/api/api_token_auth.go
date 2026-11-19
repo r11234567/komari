@@ -15,7 +15,7 @@ import (
 	"github.com/komari-monitor/komari/web/security"
 )
 
-// Runs before identity dispatch. A supplied bearer credential never
+// Runs before CORS and identity dispatch. A supplied bearer credential never
 // falls back to a browser session when it is invalid, expired or revoked.
 func APIAuthenticationMiddleware(pluginRoute ...func(method, pattern string) bool) gin.HandlerFunc {
 	limiter := security.NewAPIKeyAttemptLimiter()
@@ -55,7 +55,7 @@ func APIAuthenticationMiddleware(pluginRoute ...func(method, pattern string) boo
 		}
 		if ok, retry := limiter.Allow(security.AuthSourceIP(c), time.Now()); !ok {
 			c.Header("Retry-After", strconv.Itoa(int(math.Ceil(retry.Seconds()))))
-			security.AbortRequest(c, http.StatusTooManyRequests, "API authentication rate limit exceeded")
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "API authentication rate limit exceeded"})
 			return
 		}
 		var principal *rpc.Principal
@@ -64,30 +64,30 @@ func APIAuthenticationMiddleware(pluginRoute ...func(method, pattern string) boo
 			principal, err = apitokens.Authenticate(c.Request.Context(), secret, security.AuthSourceIP(c))
 			if err != nil {
 				if !errors.Is(err, apitokens.ErrInvalid) {
-					security.AbortRequest(c, http.StatusServiceUnavailable, "API authentication unavailable")
+					c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "API authentication unavailable"})
 					return
 				}
 				limiter.Failure(security.AuthSourceIP(c), time.Now())
-				security.AbortRequest(c, http.StatusUnauthorized, "invalid API credential")
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid API credential"})
 				return
 			}
 		} else if isApiKeyValid(header) {
 			principal = rpc.NewAPIKeyPrincipal()
 		} else {
 			limiter.Failure(security.AuthSourceIP(c), time.Now())
-			security.AbortRequest(c, http.StatusUnauthorized, "invalid API credential")
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid API credential"})
 			return
 		}
 		SetPrincipal(c, principal)
 		security.SetPrincipalHeader(c, principal)
 		if !principal.AllowsAPIProcedure(c.Request.URL.Path) {
-			security.AbortRequest(c, http.StatusForbidden, "API token lacks permission for this procedure")
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "API token lacks permission for this procedure"})
 			return
 		}
 		if principal.APIToken != nil {
 			if ok, retry := usage.Allow(principal.APIToken.ID, c.Request.URL.Path, time.Now()); !ok {
 				c.Header("Retry-After", strconv.Itoa(int(math.Ceil(retry.Seconds()))))
-				security.AbortRequest(c, http.StatusTooManyRequests, "API token request budget exceeded")
+				c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "API token request budget exceeded"})
 				return
 			}
 		}

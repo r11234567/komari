@@ -187,10 +187,6 @@ func (ctrl *RateLimitController) Middleware() gin.HandlerFunc {
 			return
 		}
 		c.Header("Retry-After", strconv.Itoa(int(math.Ceil(retryAfter.Seconds()))))
-		if strings.HasPrefix(c.Request.URL.Path, "/komari.") {
-			AbortRequest(c, http.StatusTooManyRequests, "request rate limit exceeded")
-			return
-		}
 		c.Header("Cache-Control", "no-store")
 		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
 			"code": "resource_exhausted", "message": "request rate limit exceeded", "error": "request rate limit exceeded",

@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/pkg/requestmeta"
 )
 
 // clientIPUnder reports what gin resolves as the client address for a request
@@ -32,10 +31,17 @@ func clientIPUnder(t *testing.T, trusted, peer, forwarded string) string {
 	return resolved
 }
 
-func TestDefaultConfigurationRejectsSpoofedClientIP(t *testing.T) {
+func TestDefaultConfigurationLeavesClientIPSpoofable(t *testing.T) {
+	// This documents the hazard the option exists to close: with gin's default
+	// every proxy is trusted, so the header walk runs to the leftmost entry -
+	// a value the caller chose. Left unaddressed it lets a caller mint a fresh
+	// rate limit bucket per request, or drain someone else's.
 	got := clientIPUnder(t, "", "203.0.113.9:5555", "198.51.100.7")
-	if got != "203.0.113.9" {
-		t.Fatalf("unconfigured peer chose client IP %q", got)
+	if got != "198.51.100.7" {
+		t.Fatalf("client IP = %q, want the spoofed header value under the permissive default", got)
+	}
+	if !ClientIPIsSpoofable("") {
+		t.Fatal("the default configuration was not reported as spoofable")
 	}
 }
 
@@ -43,6 +49,9 @@ func TestNoneIgnoresForwardingHeaders(t *testing.T) {
 	got := clientIPUnder(t, "none", "203.0.113.9:5555", "198.51.100.7")
 	if got != "203.0.113.9" {
 		t.Fatalf("client IP = %q, want the transport peer", got)
+	}
+	if ClientIPIsSpoofable("none") {
+		t.Fatal(`"none" was reported as spoofable`)
 	}
 }
 
@@ -74,13 +83,18 @@ func TestCIDRAndWhitespaceHandling(t *testing.T) {
 	if got != "198.51.100.7" {
 		t.Fatalf("client IP = %q, want the forwarded address for a CIDR-trusted peer", got)
 	}
+	if ClientIPIsSpoofable(" 10.0.0.0/8 ") {
+		t.Fatal("an explicit list was reported as spoofable")
+	}
 }
 
-func TestMalformedEmptyListIsRejected(t *testing.T) {
+func TestEmptyListFallsBackToDefault(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	if err := ConfigureTrustedProxies(engine, " , , "); err == nil {
-		t.Fatal("malformed empty list was accepted")
+	// A value of only separators carries no instruction; it must not be read as
+	// "trust nothing", which would silently change every client address.
+	if err := ConfigureTrustedProxies(engine, " , , "); err != nil {
+		t.Fatalf("ConfigureTrustedProxies: %v", err)
 	}
 }
 
@@ -98,35 +112,5 @@ func TestNoneIsCaseInsensitive(t *testing.T) {
 	got := clientIPUnder(t, "NONE", "203.0.113.9:5555", "198.51.100.7")
 	if got != "203.0.113.9" {
 		t.Fatalf("client IP = %q, want the transport peer", got)
-	}
-}
-
-func TestConfiguredOriginProtectsEveryListenerBeforeAuthentication(t *testing.T) {
-	t.Setenv(TrustedProxyEnv, "127.0.0.1")
-	t.Setenv(requestmeta.PublicOriginEnv, "https://panel.test")
-	for _, path := range []string{"/api/install/complete", "/api/admin/settings", "/komari.browser.v1.BrowserService/GetPublicInfo"} {
-		t.Run(path, func(t *testing.T) {
-			router := gin.New()
-			if err := ConfigureRequestMetadata(router); err != nil {
-				t.Fatal(err)
-			}
-			called := false
-			router.POST(path, func(c *gin.Context) { called = true; c.Status(204) })
-			r := httptest.NewRequest(http.MethodPost, "http://internal.test"+path, nil)
-			r.RemoteAddr = "127.0.0.1:10000"
-			r.Header.Set("X-Forwarded-Host", "evil.test")
-			r.Header.Set("X-Forwarded-Proto", "https")
-			w := httptest.NewRecorder()
-			router.ServeHTTP(w, r)
-			if called || w.Code != 403 {
-				t.Fatalf("unconfigured host reached listener: %d", w.Code)
-			}
-			r.Header.Set("X-Forwarded-Host", "panel.test")
-			w = httptest.NewRecorder()
-			router.ServeHTTP(w, r)
-			if !called || w.Code != 204 {
-				t.Fatalf("valid proxy origin rejected: %d", w.Code)
-			}
-		})
 	}
 }

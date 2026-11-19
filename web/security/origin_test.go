@@ -6,12 +6,10 @@ import (
 )
 
 func TestOriginMatchesRequestThroughPrivateReverseProxy(t *testing.T) {
-	t.Setenv(TrustedProxyEnv, "172.17.0.1")
 	request := httptest.NewRequest("GET", "http://komari:25774/api/clients", nil)
 	request.Host = "komari:25774"
 	request.RemoteAddr = "172.17.0.1:41234"
 	request.Header.Set("X-Forwarded-Host", "monitor.example.com")
-	request.Header.Set("X-Forwarded-Proto", "https")
 
 	if !OriginMatchesRequest("https://monitor.example.com", request) {
 		t.Fatal("forwarded public host was not accepted from a private reverse proxy")
@@ -19,7 +17,6 @@ func TestOriginMatchesRequestThroughPrivateReverseProxy(t *testing.T) {
 }
 
 func TestOriginMatchesRequestSupportsStandardForwardedHost(t *testing.T) {
-	t.Setenv(TrustedProxyEnv, "127.0.0.1")
 	request := httptest.NewRequest("GET", "http://127.0.0.1:25774/api/clients", nil)
 	request.Host = "127.0.0.1:25774"
 	request.RemoteAddr = "127.0.0.1:41234"

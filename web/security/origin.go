@@ -1,12 +1,12 @@
 package security
 
 import (
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/komari-monitor/komari/pkg/config"
-	"github.com/komari-monitor/komari/pkg/requestmeta"
 )
 
 func SplitAllowlist(raw string) []string {
@@ -28,25 +28,40 @@ func OriginMatchesHost(origin, host string) bool {
 	return ok && strings.EqualFold(originHost, host)
 }
 
-// OriginMatchesRequest checks the complete origin against the shared explicit
-// proxy policy. Neither a private peer nor a matching hostname implies trust.
+// OriginMatchesRequest accepts the direct Host and, only behind a local or
+// private reverse proxy, the original host forwarded by that proxy.
 func OriginMatchesRequest(origin string, r *http.Request) bool {
-	requested, err := requestmeta.NormalizeOrigin(origin)
-	if err != nil {
+	if OriginMatchesHost(origin, r.Host) {
+		return true
+	}
+	if !isPrivateProxy(r.RemoteAddr) {
 		return false
 	}
-	actual, err := requestmeta.Origin(r)
-	return err == nil && requested == actual
+	for _, host := range forwardedHosts(r) {
+		if OriginMatchesHost(origin, host) {
+			return true
+		}
+	}
+	return false
 }
 
 func OriginInAllowlist(origin, rawAllowlist string) bool {
-	normalizedOrigin, _, ok := normalizeOrigin(origin)
+	normalizedOrigin, originHost, ok := normalizeOrigin(origin)
 	if !ok {
 		return false
 	}
 	for _, entry := range SplitAllowlist(rawAllowlist) {
-		normalizedEntry, _, ok := normalizeOrigin(entry)
-		if ok && normalizedEntry == normalizedOrigin {
+		if entry == "*" {
+			return true
+		}
+		if strings.Contains(entry, "://") {
+			normalizedEntry, _, ok := normalizeOrigin(entry)
+			if ok && strings.EqualFold(normalizedEntry, normalizedOrigin) {
+				return true
+			}
+			continue
+		}
+		if strings.EqualFold(entry, originHost) {
 			return true
 		}
 	}
@@ -64,11 +79,61 @@ func IsAPIKeyRequest(r *http.Request) bool {
 	return APIKeyMatches(r.Header.Get("Authorization"), apiKeyConfig)
 }
 
+func IsAuthorizationPreflight(r *http.Request) bool {
+	if r.Method != http.MethodOptions {
+		return false
+	}
+	for _, header := range strings.Split(r.Header.Get("Access-Control-Request-Headers"), ",") {
+		if strings.EqualFold(strings.TrimSpace(header), "authorization") {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizeOrigin(raw string) (string, string, bool) {
-	normalized, err := requestmeta.NormalizeOrigin(raw)
-	if err != nil {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", "", false
 	}
-	parsed, _ := url.Parse(normalized)
-	return normalized, parsed.Host, true
+	host := strings.ToLower(parsed.Host)
+	return strings.ToLower(parsed.Scheme) + "://" + host, host, true
+}
+
+func isPrivateProxy(remoteAddr string) bool {
+	host := strings.TrimSpace(remoteAddr)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
+}
+
+func forwardedHosts(r *http.Request) []string {
+	hosts := make([]string, 0, 2)
+	for _, value := range strings.Split(r.Header.Get("X-Forwarded-Host"), ",") {
+		if host := cleanForwardedHost(value); host != "" {
+			hosts = append(hosts, host)
+		}
+	}
+	for _, forwarded := range strings.Split(r.Header.Get("Forwarded"), ",") {
+		for _, parameter := range strings.Split(forwarded, ";") {
+			key, value, ok := strings.Cut(parameter, "=")
+			if !ok || !strings.EqualFold(strings.TrimSpace(key), "host") {
+				continue
+			}
+			if host := cleanForwardedHost(value); host != "" {
+				hosts = append(hosts, host)
+			}
+		}
+	}
+	return hosts
+}
+
+func cleanForwardedHost(value string) string {
+	host := strings.Trim(strings.TrimSpace(value), `"`)
+	if host == "" || strings.ContainsAny(host, "/\\@") {
+		return ""
+	}
+	return host
 }

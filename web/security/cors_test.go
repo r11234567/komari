@@ -59,7 +59,7 @@ func TestCorsMiddlewareValidatesAPIOrigins(t *testing.T) {
 	}
 }
 
-func TestCorsMiddlewareAPIKeyCannotAuthorizeOrigin(t *testing.T) {
+func TestCorsMiddlewareAllowsAPIKeyRequestsFromAnyOrigin(t *testing.T) {
 	setupCORSConfigDB(t, "123456789012")
 	router := setupCORSRouter(true, "")
 
@@ -70,11 +70,11 @@ func TestCorsMiddlewareAPIKeyCannotAuthorizeOrigin(t *testing.T) {
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
 	}
-	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "" {
-		t.Fatalf("credential bypassed origin policy: %q", got)
+	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "https://evil.example" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want %q", got, "https://evil.example")
 	}
 }
 
@@ -109,7 +109,7 @@ func TestCorsMiddlewareProtectsConnectProcedures(t *testing.T) {
 	}
 }
 
-func TestCorsMiddlewareAuthorizationHeaderCannotAuthorizeOrigin(t *testing.T) {
+func TestCorsMiddlewareAllowsAuthorizationPreflightFromAnyOrigin(t *testing.T) {
 	setupCORSConfigDB(t, "")
 	router := setupCORSRouter(true, "")
 
@@ -117,15 +117,14 @@ func TestCorsMiddlewareAuthorizationHeaderCannotAuthorizeOrigin(t *testing.T) {
 	request.Host = "api.example"
 	request.Header.Set("Origin", "https://evil.example")
 	request.Header.Set("Access-Control-Request-Headers", "authorization")
-	request.Header.Set("Access-Control-Request-Method", "POST")
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
 	}
-	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "" {
-		t.Fatalf("requested authorization header bypassed origin policy: %q", got)
+	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "https://evil.example" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want %q", got, "https://evil.example")
 	}
 	if got := response.Header().Get("Access-Control-Allow-Credentials"); got != "" {
 		t.Fatalf("Access-Control-Allow-Credentials = %q, want empty", got)
@@ -197,65 +196,12 @@ func setupCORSConfigDB(t *testing.T, apiKey string) {
 }
 
 func performCORSRequest(handler http.Handler, method, path, host, origin string) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(method, "https://"+host+path, nil)
+	request := httptest.NewRequest(method, path, nil)
 	request.Host = host
 	if origin != "" {
 		request.Header.Set("Origin", origin)
 	}
-	if method == http.MethodOptions {
-		request.Header.Set("Access-Control-Request-Method", "POST")
-	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
-}
-
-func TestCorsPreflightValidatesRPCHeadersAndPreservesVary(t *testing.T) {
-	for _, tc := range []struct {
-		method, headers string
-		status          int
-	}{
-		{"POST", "authorization,content-type,connect-protocol-version,connect-timeout-ms,x-komari-workspace-grant,x-komari-credential-authorization,x-bind-ticket", 204},
-		{"POST", "x-unregistered-credential", 403},
-		{"POST", "Set-Cookie", 403},
-		{"TRACE", "content-type", 403},
-		{"", "content-type", 403},
-	} {
-		router := gin.New()
-		router.Use(func(c *gin.Context) { c.Header("Vary", "Accept-Encoding"); c.Next() })
-		router.Use(NewCorsController(true, "https://console.example").Middleware())
-		router.POST("/komari.test.Service/Call", func(c *gin.Context) { t.Fatal("preflight reached handler") })
-		r := httptest.NewRequest("OPTIONS", "https://api.example/komari.test.Service/Call", nil)
-		r.Header.Set("Origin", "https://console.example")
-		r.Header.Set("Access-Control-Request-Method", tc.method)
-		r.Header.Set("Access-Control-Request-Headers", tc.headers)
-		w := httptest.NewRecorder()
-		router.ServeHTTP(w, r)
-		if w.Code != tc.status {
-			t.Fatalf("%s %s: status %d", tc.method, tc.headers, w.Code)
-		}
-		vary := strings.Join(w.Header().Values("Vary"), ",")
-		for _, field := range []string{"Accept-Encoding", "Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"} {
-			if !strings.Contains(vary, field) {
-				t.Fatalf("Vary lost %s: %s", field, vary)
-			}
-		}
-		if strings.Contains(strings.ToLower(w.Header().Get("Access-Control-Expose-Headers")), "set-cookie") {
-			t.Fatal("exposed forbidden cookie header")
-		}
-	}
-}
-
-func TestOriginAllowlistRequiresExactSchemeHostAndPort(t *testing.T) {
-	for _, entry := range []string{"*", "console.example", "http://console.example", "https://console.example:8443", "https://console.example/path"} {
-		if OriginInAllowlist("https://console.example", entry) {
-			t.Fatalf("non-exact origin authorized: %q", entry)
-		}
-	}
-	if !OriginInAllowlist("https://console.example", "https://console.example:443") {
-		t.Fatal("default-port normalization lost valid origin")
-	}
-	if OriginInAllowlist("null", "*") {
-		t.Fatal("opaque origin was authorized")
-	}
 }

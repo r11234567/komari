@@ -89,7 +89,6 @@ case $stage in
     systemd-run --unit=komari-e2e-panel --collect --slice=komari-e2e.slice \
       --property="User=$KOMARI_E2E_USER" --property="WorkingDirectory=$E2E_ROOT/panel" \
       --property=CPUQuota=100% --property=MemoryMax=1G \
-      --setenv="KOMARI_PUBLIC_ORIGIN=$E2E_URL" --setenv=KOMARI_TRUSTED_PROXIES=127.0.0.1,::1 \
       "$E2E_ROOT/bin/komari" server --listen 127.0.0.1:29444
     systemd-run --unit=komari-e2e-export --collect --slice=komari-e2e.slice \
       --property="User=$KOMARI_E2E_USER" --property="WorkingDirectory=$E2E_ROOT/panel" \

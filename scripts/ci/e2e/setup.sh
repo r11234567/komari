@@ -42,9 +42,6 @@ http {
       grpc_set_header Host \$http_host;
       grpc_set_header X-Forwarded-Proto https;
       grpc_set_header X-Forwarded-Host \$http_host;
-      grpc_set_header X-Forwarded-For \$remote_addr;
-      grpc_set_header X-Real-IP \$remote_addr;
-      grpc_set_header Forwarded '';
       grpc_read_timeout 180s;
     }
     location / {
@@ -53,9 +50,6 @@ http {
       proxy_set_header Host \$http_host;
       proxy_set_header X-Forwarded-Proto https;
       proxy_set_header X-Forwarded-Host \$http_host;
-      proxy_set_header X-Forwarded-For \$remote_addr;
-      proxy_set_header X-Real-IP \$remote_addr;
-      proxy_set_header Forwarded '';
       proxy_set_header Connection '';
       proxy_buffering off;
       proxy_request_buffering off;
@@ -74,7 +68,6 @@ sudo systemd-run --unit=komari-e2e-panel --collect \
 	--slice=komari-e2e.slice \
   --property="User=$runner_user" --property="WorkingDirectory=$E2E_ROOT/panel" \
   --property=CPUQuota=100% --property=MemoryMax=1G \
-  --setenv="KOMARI_PUBLIC_ORIGIN=$E2E_URL" --setenv=KOMARI_TRUSTED_PROXIES=127.0.0.1,::1 \
   "$E2E_ROOT/bin/komari" server --listen 127.0.0.1:29444
 sudo systemctl set-property --runtime komari-e2e.slice CPUQuota=100% MemoryMax=1G MemorySwapMax=0
 for attempt in $(seq 1 60); do

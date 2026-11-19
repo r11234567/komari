@@ -331,9 +331,6 @@ func (a *App) RunInstallGuide() (bool, error) {
 	defer controller.Deactivate()
 
 	r := gin.New()
-	if err := security.ConfigureRequestMetadata(r); err != nil {
-		return false, fmt.Errorf("invalid request metadata configuration: %w", err)
-	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
 	r.Use(func(c *gin.Context) {
@@ -400,14 +397,11 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 	defer controller.Deactivate()
 
 	r := gin.New()
-	if err := security.ConfigureRequestMetadata(r); err != nil {
-		return false, fmt.Errorf("invalid request metadata configuration: %w", err)
-	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
-	r.Use(cors.Middleware())
 	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
+	r.Use(cors.Middleware())
 	r.Use(api.IdentityMiddleware())
 	r.Use(func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, "/api") {
@@ -478,8 +472,8 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 	defer controller.Deactivate()
 
 	r := gin.New()
-	if err := security.ConfigureRequestMetadata(r); err != nil {
-		return false, fmt.Errorf("invalid request metadata configuration: %w", err)
+	if err := security.ConfigureTrustedProxies(r, security.TrustedProxiesFromEnv()); err != nil {
+		return false, fmt.Errorf("invalid %s: %w", security.TrustedProxyEnv, err)
 	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
@@ -655,13 +649,23 @@ func (a *App) BuildRouter() error {
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
 
-	if err := security.ConfigureRequestMetadata(r); err != nil {
-		return fmt.Errorf("invalid request metadata configuration: %w", err)
+	// Establish who may declare the client address before any middleware reads
+	// it. gin's default trusts every proxy, which makes ClientIP() - and so the
+	// rate limit bucket, the audit log source and the session address - a value
+	// the caller supplies.
+	trustedProxies := security.TrustedProxiesFromEnv()
+	if err := security.ConfigureTrustedProxies(r, trustedProxies); err != nil {
+		return fmt.Errorf("invalid %s: %w", security.TrustedProxyEnv, err)
+	}
+	if security.ClientIPIsSpoofable(trustedProxies) {
+		logger.Warnf("server",
+			"%s is not set: X-Forwarded-For is honoured from any peer, so client addresses in rate limiting and audit logs are caller-controlled. Set it to %q behind a local reverse proxy, or to \"none\" when exposed directly.",
+			security.TrustedProxyEnv, security.LoopbackProxies)
 	}
 
+	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
 	r.Use(cors.Middleware())
-	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 
 	r.Use(api.IdentityMiddleware())
 	rateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)

@@ -6,11 +6,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/pkg/requestmeta"
 )
 
 // This process-local key is only for comparison, never a stored verifier.
@@ -42,9 +43,17 @@ func WithAPIKeyAuthentication(r *http.Request, authenticated bool) *http.Request
 	return r.WithContext(context.WithValue(r.Context(), apiKeyContextKey{}, authenticated))
 }
 
-// AuthSourceIP shares the raw HTTP and Gin trust policy.
+// AuthSourceIP never trusts caller-selected forwarding headers when the
+// deployment has left gin's historical trust-all proxy setting in place.
 func AuthSourceIP(c *gin.Context) string {
-	return requestmeta.ClientIP(c.Request)
+	if !ClientIPIsSpoofable(TrustedProxiesFromEnv()) {
+		return c.ClientIP()
+	}
+	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+	if err != nil {
+		return strings.TrimSpace(c.Request.RemoteAddr)
+	}
+	return host
 }
 
 type APIKeyAttemptLimiter struct{ budget *RateLimitController }
