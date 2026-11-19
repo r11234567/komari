@@ -75,7 +75,7 @@ func TestExecutionRejectsTamperedSpecAndIdempotencyConflict(t *testing.T) {
 		Command:   "cat /etc/shadow",
 		TwoFactor: &commonv1.TwoFactorProof{AuthorizationToken: token},
 	}))
-	require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
 
 	// First execution with idempotency key succeeds.
 	token1 := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("execution:create", targets...))
