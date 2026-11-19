@@ -134,7 +134,7 @@ func TestExecutionValidatesSpecBeforeConsumingAuthorization(t *testing.T) {
 	invalidRequests := []*execv1.CreateExecutionRequest{
 		{
 			AgentIds:  []string{id},
-			Command:   strings.Repeat("a", 5000),
+			Command:   strings.Repeat("a", (64<<10)+1),
 			TwoFactor: &commonv1.TwoFactorProof{AuthorizationToken: token},
 		},
 		{
