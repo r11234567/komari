@@ -32,7 +32,8 @@ const (
 	MaxUploadSize               int64 = 8 * 1024 * 1024 * 1024
 	downloadChunkSizeContextKey       = "filemanager.download_chunk_size"
 	uploadSessionTTL                  = 15 * time.Minute
-	previewTokenTTL                   = 10 * time.Minute
+	previewTokenTTL                   = 2 * time.Minute
+	previewTokenMaxUses               = 16
 	maxConcurrentUploads              = 4
 )
 
@@ -52,10 +53,11 @@ type uploadSession struct {
 }
 
 type previewToken struct {
-	Grant      *workspace.Grant
-	ClientUUID string
-	Path       string
-	ExpiresAt  time.Time
+	Grant         *workspace.Grant
+	ClientUUID    string
+	Path          string
+	ExpiresAt     time.Time
+	RemainingUses int
 }
 
 type downloadResponseOptions struct {
@@ -739,10 +741,11 @@ func createPreviewToken(c *gin.Context) {
 		}
 	}
 	previewTokens[token] = previewToken{
-		Grant:      workspace.FromContext(c.Request.Context()),
-		ClientUUID: clientUUID,
-		Path:       path,
-		ExpiresAt:  now.Add(previewTokenTTL),
+		Grant:         workspace.FromContext(c.Request.Context()),
+		ClientUUID:    clientUUID,
+		Path:          path,
+		ExpiresAt:     now.Add(previewTokenTTL),
+		RemainingUses: previewTokenMaxUses,
 	}
 	previewTokenMu.Unlock()
 
@@ -762,9 +765,16 @@ func PreviewDownload(c *gin.Context) {
 
 	previewTokenMu.Lock()
 	item, ok := previewTokens[token]
-	if ok && (item.ClientUUID != clientUUID || time.Now().After(item.ExpiresAt)) {
+	if ok && (item.ClientUUID != clientUUID || time.Now().After(item.ExpiresAt) || item.RemainingUses <= 0) {
 		delete(previewTokens, token)
 		ok = false
+	} else if ok {
+		item.RemainingUses--
+		if item.RemainingUses <= 0 {
+			delete(previewTokens, token)
+		} else {
+			previewTokens[token] = item
+		}
 	}
 	previewTokenMu.Unlock()
 

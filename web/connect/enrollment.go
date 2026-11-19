@@ -211,7 +211,7 @@ func (s *enrollmentService) RefreshCredentials(ctx context.Context, req *connect
 			return nil, connectError(connect.CodeAborted, err)
 		}
 		if errors.Is(err, enrollment.ErrRefreshRecoveryRequired) {
-			rpcErr := connect.NewError(connect.CodeUnauthenticated, err)
+			rpcErr := connect.NewError(connect.CodeFailedPrecondition, err)
 			if detail, detailErr := connect.NewErrorDetail(&commonv1.ErrorDetail{Code: "REFRESH_RECOVERY_REQUIRED"}); detailErr == nil {
 				rpcErr.AddDetail(detail)
 			}

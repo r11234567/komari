@@ -26,6 +26,7 @@ func TestHTMLInjectorLeavesFileDataPlaneUnwrapped(t *testing.T) {
 		"/admin/settings",
 		"/terminal",
 		"/bind",
+		"/login",
 		"/api/admin/settings",
 		"/api/login",
 		"/api/oauth",
@@ -35,6 +36,44 @@ func TestHTMLInjectorLeavesFileDataPlaneUnwrapped(t *testing.T) {
 		if recorder.Body.String() != "ordinary file contents" {
 			t.Fatalf("protected path %q was modified", path)
 		}
+	}
+}
+
+func TestHTMLInjectorLoginCompatScopedStrictlyToKomariPasskey(t *testing.T) {
+	manager := &Manager{injects: []*injectEntry{
+		{short: "fixture", head: `<meta name="other" content="blocked">`},
+		{short: "komari-passkey", head: `<meta name="passkey" content="compat">`},
+	}}
+	handler := manager.htmlInjectHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<html><head></head><body>Login</body></html>"))
+	}))
+
+	// Default compat mode: /login injects ONLY komari-passkey, never arbitrary plugins.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/login", nil))
+	if !strings.Contains(rec.Body.String(), `name="passkey"`) {
+		t.Fatalf("komari-passkey compat injection missing on /login: %q", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `name="other"`) {
+		t.Fatalf("generic plugin leaked into /login: %q", rec.Body.String())
+	}
+
+	// Hard-protected routes still reject even komari-passkey.
+	for _, blocked := range []string{"/admin", "/terminal", "/bind", "/api/login"} {
+		recBlocked := httptest.NewRecorder()
+		handler.ServeHTTP(recBlocked, httptest.NewRequest(http.MethodGet, blocked, nil))
+		if strings.Contains(recBlocked.Body.String(), `name="passkey"`) {
+			t.Fatalf("komari-passkey must not inject into %s", blocked)
+		}
+	}
+
+	// Explicit disable switch cuts off komari-passkey on /login too.
+	t.Setenv("KOMARI_DISABLE_LEGACY_LOGIN_PLUGIN_COMPAT", "true")
+	recDisabled := httptest.NewRecorder()
+	handler.ServeHTTP(recDisabled, httptest.NewRequest(http.MethodGet, "/login", nil))
+	if strings.Contains(recDisabled.Body.String(), `name="passkey"`) {
+		t.Fatalf("compat disable switch did not block /login injection: %q", recDisabled.Body.String())
 	}
 }
 

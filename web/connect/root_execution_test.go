@@ -18,6 +18,7 @@ import (
 	execv1 "github.com/r11234567/komari-proto/gen/go/komari/exec/v1"
 	workspacev1 "github.com/r11234567/komari-proto/gen/go/komari/workspace/v1"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 func rootPolicyNode(t *testing.T, root bool) string {
@@ -97,6 +98,28 @@ func TestExecutionRejectsTamperedSpecAndIdempotencyConflict(t *testing.T) {
 	_, err = executionapp.CreateBatch([]string{id}, owner, "idem-spec-check-1", &execv1.ExecutionSpec{Command: "echo different"})
 	require.ErrorIs(t, err, executionapp.ErrIdempotencyConflict)
 	require.Equal(t, connect.CodeAborted, connect.CodeOf(executionError(err)))
+}
+
+func TestExecutionAcceptsWebDefaultTimeoutAndOutputSpec(t *testing.T) {
+	ctx, owner, _ := actionFixture(t)
+	id := rootPolicyNode(t, false)
+	// Matches komari-web's DEFAULT_EXECUTION_TIMEOUT_SECONDS (300s) and DEFAULT_EXECUTION_MAX_OUTPUT_BYTES (1 MiB).
+	targets := credentialaction.ExecutionTargets([]string{id}, "uname -a", nil, nil, "", 300, 1<<20, false)
+	token := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("execution:create", targets...))
+
+	resp, err := (&executionService{}).CreateExecution(ctx, connect.NewRequest(&execv1.CreateExecutionRequest{
+		AgentIds:       []string{id},
+		Command:        "uname -a",
+		Timeout:        durationpb.New(5 * time.Minute),
+		MaxOutputBytes: 1 << 20,
+		IdempotencyKey: "web-defaults-check-1",
+		TwoFactor:      &commonv1.TwoFactorProof{AuthorizationToken: token},
+	}))
+	require.NoError(t, err)
+	task, err := executionapp.GetOwned(resp.Msg.Execution.ExecutionId, owner)
+	require.NoError(t, err)
+	require.Equal(t, "uname -a", task.Spec.Command)
+	_, _ = executionapp.Cancel(resp.Msg.Execution.ExecutionId, "test cleanup")
 }
 
 func TestRootWorkspaceRejectsDefaultAndRevokesOnWithdrawal(t *testing.T) {

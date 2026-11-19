@@ -84,6 +84,33 @@ func TestCredentialRefreshV2SignedFullResponseAndLostResponseRecovery(t *testing
 	require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
 }
 
+func TestCredentialRefreshV2ExpiredRecoveryWindowReturnsFailedPrecondition(t *testing.T) {
+	record, token, key, client := refreshFixture(t)
+	id := uuid.NewString()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	first, err := client.RefreshCredentials(ctx, refreshRequest(t, record, token, id, nil, key))
+	require.NoError(t, err)
+	require.NotEmpty(t, first.Msg.Credentials.RefreshToken)
+
+	// Expire the 24h recovery window while retaining the consumed AgentRefreshUse row.
+	expired := time.Now().Add(-time.Minute)
+	require.NoError(t, dbcore.GetDBInstance().Model(&models.AgentCredential{}).Where("client = ?", record.Client).Update("refresh_recovery_until", expired).Error)
+
+	zero := uint64(0)
+	_, err = client.RefreshCredentials(ctx, refreshRequest(t, record, token, id, &zero, key))
+	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	require.NotEmpty(t, connectErr.Details())
+
+	// Active chain must NOT have been revoked.
+	var current models.AgentCredential
+	require.NoError(t, dbcore.GetDBInstance().First(&current, "client = ?", record.Client).Error)
+	require.Nil(t, current.RevokedAt)
+}
+
 func TestCredentialRefreshV2InvalidProofCannotRevokeOrRotate(t *testing.T) {
 	record, token, key, client := refreshFixture(t)
 	request := refreshRequest(t, record, token, uuid.NewString(), nil, key)

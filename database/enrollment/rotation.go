@@ -154,6 +154,48 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 					if expected != nil && *expected+1 != cur.Generation {
 						return ErrRefreshConflict
 					}
+					// Within the 24h recovery window, replay the exact sealed response bytes
+					// while its AccessToken is still fresh. If the retry arrives after the 1h
+					// AccessToken expired (while RefreshToken and recovery window remain valid),
+					// mint a fresh AccessToken for the SAME generation & RefreshToken and
+					// re-seal so Agent response validation succeeds across the entire 24h window.
+					if !recovered.AccessTokenExpiresAt.After(now.Add(30 * time.Second)) {
+						freshAccess := utils.GenerateRandomString(43)
+						if freshAccess == "" {
+							return errors.New("credential random generation failed")
+						}
+						recovered.AccessToken = freshAccess
+						recovered.AccessTokenExpiresAt = minDeadline(now.Add(AccessTokenLifetime), *cur.EnrollmentExpiresAt)
+						var reSigned []byte
+						if seal != nil {
+							var sealErr error
+							reSigned, sealErr = seal(recovered)
+							if sealErr != nil {
+								return fmt.Errorf("seal recovered refresh response: %w", sealErr)
+							}
+						}
+						plaintext, err := json.Marshal(sealedRefreshRecord{Issued: recovered, SignedResponse: reSigned})
+						if err != nil {
+							return err
+						}
+						reSealed, err := secureconfig.EncryptString(string(plaintext))
+						if err != nil {
+							return errors.New("cannot seal refresh recovery")
+						}
+						res := tx.Model(&models.AgentCredential{}).Where("client = ? AND generation = ? AND refresh_token_hash = ? AND revoked_at IS NULL", cur.Client, cur.Generation, cur.RefreshTokenHash).Updates(map[string]any{
+							"access_token_hash":       hashToken(freshAccess),
+							"access_expires_at":       recovered.AccessTokenExpiresAt,
+							"refresh_recovery_sealed": reSealed,
+							"updated_at":              now,
+						})
+						if res.Error != nil {
+							return res.Error
+						}
+						if res.RowsAffected != 1 {
+							return ErrRefreshConflict
+						}
+						recoveredSigned = reSigned
+					}
 					issued = recovered
 					signedResponse = recoveredSigned
 					return nil
@@ -171,9 +213,12 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 				if protocol < 2 {
 					return ErrCredentialRejected
 				}
-				// Distinguish a late idempotent retry of the same operation from
-				// genuine reuse of a consumed refresh token by a different operation.
-				if consumed.RequestHash != "" && consumed.RequestHash == requestHash {
+				// Distinguish a late idempotent retry of the same operation (or a
+				// pre-upgrade consumed row for the immediately previous generation that
+				// predates RequestHash recording) from genuine reuse of a consumed refresh
+				// token by a different operation.
+				if (consumed.RequestHash != "" && consumed.RequestHash == requestHash) ||
+					(consumed.RequestHash == "" && digest == cur.PreviousRefreshHash) {
 					return ErrRefreshRecoveryRequired
 				}
 				result := tx.Model(&models.AgentCredential{}).Where("client = ? AND revoked_at IS NULL", cur.Client).Updates(map[string]any{

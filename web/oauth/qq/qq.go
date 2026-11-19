@@ -77,8 +77,30 @@ func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
 		return "", state
 	}
 
-	q.stateCache.Set(state, true, cache.DefaultExpiration)
+	q.stateMu.Lock()
+	if q.stateCache != nil {
+		q.stateCache.Set(state, true, cache.DefaultExpiration)
+	}
+	q.stateMu.Unlock()
 	return result.URL, state
+}
+
+// consumeState atomically verifies and removes a pending OAuth state token so
+// concurrent callbacks cannot replay the same state.
+func (q *QQ) consumeState(state string) bool {
+	if state == "" {
+		return false
+	}
+	q.stateMu.Lock()
+	defer q.stateMu.Unlock()
+	if q.stateCache == nil {
+		return false
+	}
+	if _, ok := q.stateCache.Get(state); !ok {
+		return false
+	}
+	q.stateCache.Delete(state)
+	return true
 }
 
 // OnCallback 处理QQ OAuth回调
@@ -94,17 +116,13 @@ func (q *QQ) OnCallback(ctx *gin.Context, state string, query map[string]string,
 		loginType = q.Addition.LoginType
 	}
 
-	// 验证state防止CSRF攻击，并立即消费防重放
+	// 验证state防止CSRF攻击，并原子消费防并发重放
 	if q.stateCache == nil {
 		return factory.OidcCallback{}, fmt.Errorf("state cache not initialized")
 	}
-	if state == "" {
+	if !q.consumeState(state) {
 		return factory.OidcCallback{}, fmt.Errorf("invalid state")
 	}
-	if _, ok := q.stateCache.Get(state); !ok {
-		return factory.OidcCallback{}, fmt.Errorf("invalid state")
-	}
-	q.stateCache.Delete(state)
 
 	// 检查是否提供了Authorization Code
 	if code == "" {
