@@ -263,7 +263,7 @@ func legacyReportMetricPoints(report *legacyv1.Report) []*metricsv1.MetricsPoint
 				point(metricstore.MetricGPUDeviceUsage, gpu.Utilization, labels),
 				point(metricstore.MetricGPUMem, float64(gpu.MemoryUsed), labels),
 				point(metricstore.MetricGPUMemTotal, float64(gpu.MemoryTotal), labels),
-				point(metricstore.MetricGPUTemp, float64(gpu.Temperature), labels),
+				point(metricstore.MetricGPUTemp, gpu.Temperature, labels),
 			)
 		}
 	}
@@ -380,7 +380,7 @@ func metricPointsToReport(points []*metricsv1.MetricsPoint) (legacyv1.Report, er
 			case metricstore.MetricGPUMemTotal:
 				gpu.MemoryTotal = int64(value)
 			case metricstore.MetricGPUTemp:
-				gpu.Temperature = int(value)
+				gpu.Temperature = value
 			}
 		default:
 			return report, fmt.Errorf("unknown aggregate metric %q", point.Metric)

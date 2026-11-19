@@ -21,7 +21,7 @@ func gpuWireFixture(legacy bool) []*metricsv1.MetricsPoint {
 		indexKey, nameKey = "id", "name"
 	}
 	for index, id := range []string{"10", "2"} {
-		values := []float64{25 + float64(index)*50, float64(1<<30) * float64(index+1), 8 << 30, 50 + float64(index)*10}
+		values := []float64{25 + float64(index)*50, float64(1<<30) * float64(index+1), 8 << 30, 50.25 + float64(index)*10.25}
 		for field, name := range names {
 			points = append(points, &metricsv1.MetricsPoint{
 				Metric: name, Value: values[field], ObservedAt: points[0].ObservedAt,
@@ -42,7 +42,7 @@ func TestGPUMetricWireCompatibility(t *testing.T) {
 			t.Fatalf("GPU aggregate lost: %+v", report.GPU)
 		}
 		first := report.GPU.DetailedInfo[0]
-		if first.Name != "GPU 2" || first.Utilization != 75 || first.MemoryUsed != 2<<30 || first.MemoryTotal != 8<<30 || first.Temperature != 60 {
+		if first.Name != "GPU 2" || first.Utilization != 75 || first.MemoryUsed != 2<<30 || first.MemoryTotal != 8<<30 || first.Temperature != 60.5 {
 			t.Fatalf("GPU identity, numeric ordering or counters lost: %+v", first)
 		}
 	}

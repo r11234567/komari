@@ -465,7 +465,7 @@ func legacyReportToProto(client models.Client, report *legacyv1.Report, includeP
 				memTotal := uint64(gpu.MemoryTotal)
 				item.MemoryTotalBytes = &memTotal
 			}
-			temp := float64(gpu.Temperature)
+			temp := gpu.Temperature
 			item.TemperatureCelsius = &temp
 			result.Resources.Gpus = append(result.Resources.Gpus, item)
 		}

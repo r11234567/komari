@@ -315,7 +315,7 @@ func TestGetGPURecordsReadsRollupsAfterRawCompaction(t *testing.T) {
 		MetricGPUDeviceUsage: {30, 50},
 		MetricGPUMem:         {1000, 2000},
 		MetricGPUMemTotal:    {4000, 4000},
-		MetricGPUTemp:        {60, 70},
+		MetricGPUTemp:        {60.5, 70.25},
 	}
 	points := make([]metric.Point, 0, len(metricNames)*2)
 	for _, name := range metricNames {
@@ -348,10 +348,10 @@ func TestGetGPURecordsReadsRollupsAfterRawCompaction(t *testing.T) {
 	if len(records) != 2 {
 		t.Fatalf("expected old rollup and recent raw GPU records, got %d: %#v", len(records), records)
 	}
-	if records[0].Utilization != 30 || records[0].MemUsed != 1000 || records[0].MemTotal != 4000 || records[0].Temperature != 60 {
+	if records[0].Utilization != 30 || records[0].MemUsed != 1000 || records[0].MemTotal != 4000 || records[0].Temperature != 60.5 {
 		t.Fatalf("unexpected compacted GPU record: %#v", records[0])
 	}
-	if records[1].Utilization != 50 || records[1].MemUsed != 2000 || records[1].MemTotal != 4000 || records[1].Temperature != 70 {
+	if records[1].Utilization != 50 || records[1].MemUsed != 2000 || records[1].MemTotal != 4000 || records[1].Temperature != 70.25 {
 		t.Fatalf("unexpected recent GPU record: %#v", records[1])
 	}
 	if records[0].DeviceIndex != 1 || records[0].DeviceName != "GPU 1" || records[0].Client != "node-a" {
