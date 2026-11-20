@@ -12,7 +12,7 @@ import (
 // OIDC provider 配置的 get/set 已迁移为 RPC2 方法（见 web/rpc/jsonrpc/admin.provider.go）。
 
 func BindingExternalAccount(c *gin.Context) {
-	session, _ := c.Cookie("session_token")
+	session, _ := c.Cookie(security.SessionCookieName)
 	user, err := accounts.GetUserBySession(session)
 	if err != nil {
 		api.RespondError(c, 500, "No user found: "+err.Error())
@@ -23,7 +23,7 @@ func BindingExternalAccount(c *gin.Context) {
 }
 
 func UnbindExternalAccount(c *gin.Context) {
-	session, _ := c.Cookie("session_token")
+	session, _ := c.Cookie(security.SessionCookieName)
 	user, err := accounts.GetUserBySession(session)
 	if err != nil {
 		api.RespondError(c, 500, "No user found: "+err.Error())

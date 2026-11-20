@@ -1,6 +1,7 @@
 package api
 
 import (
+	"github.com/komari-monitor/komari/web/security"
 	"net/http"
 	"strings"
 	"time"
@@ -32,7 +33,7 @@ func GetClients(c *gin.Context) {
 	var (
 		isLogin    = false
 		hiddenMap  = map[string]bool{}
-		session, _ = c.Cookie("session_token")
+		session, _ = c.Cookie(security.SessionCookieName)
 	)
 
 	// 登录状态检查

@@ -20,3 +20,7 @@ Preview opens SQLite read-only. Apply commits all records and the source digest 
 During a maintenance window, freeze all legacy credential writes, drain ceremonies and take a consistent backup. Repeat preview and apply on the upgraded primary database. Start with the same native RP settings. At the original origin, use an existing device to sign in without a username, complete a protected action, register a second key, list and delete it. Check password with 2FA and OAuth in fresh browser sessions. Keep the plugin stopped until the operator records the device checks, binary revision, migration counts and configuration digest.
 
 If access fails, use an independently verified login and retain the current native database. Preserve counter high-water marks and revocations before any restoration. Turning the native settings off selects legacy mode and can reactivate the old store. A pre-cutover snapshot alone cannot safely roll back post-cutover credential changes.
+
+## Session-cookie upgrade
+
+After upgrading to the host-prefixed session cookie, sign in again using the normal HTTPS panel origin. Login and logout clear the old cookie. On startup, the primary database discards legacy plaintext session rows and retains versioned session digests. Use a cookie's raw value only in the browser. Session-management APIs accept the stored identifier returned by the session list. OAuth callbacks use top-level GET navigation with SameSite=Lax, including when binding an external identity to a signed-in account.

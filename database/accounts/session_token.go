@@ -27,15 +27,11 @@ import (
 // the server keeps.
 const sessionDigestPrefix = "v1:"
 
-// hashSessionToken maps a cookie value to the value stored in the session
-// column. Values that already carry the digest prefix are returned unchanged so
-// callers can pass either form.
-func hashSessionToken(token string) string {
-	if token == "" {
+// SessionIDForCookie maps a cookie value to the value stored in the session
+// column. Storage identifiers cannot be presented as browser credentials.
+func SessionIDForCookie(token string) string {
+	if token == "" || isSessionDigest(token) {
 		return ""
-	}
-	if strings.HasPrefix(token, sessionDigestPrefix) {
-		return token
 	}
 	mac := hmac.New(sha256.New, sessionDigestKey())
 	mac.Write([]byte(token))

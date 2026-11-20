@@ -1,6 +1,7 @@
 package accounts
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -33,7 +34,7 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 
 	sessionRecord := models.Session{
 		UUID:         uuid,
-		Session:      hashSessionToken(session),
+		Session:      SessionIDForCookie(session),
 		Expires:      time.Now().UTC().Add(time.Duration(expires) * time.Second),
 		UserAgent:    userAgent,
 		Ip:           ip,
@@ -81,12 +82,6 @@ func GetSessionIdentity(session string) (uuid string, createdAt time.Time, err e
 		return "", time.Time{}, err
 	}
 
-	if time.Now().UTC().After(sessionRecord.Expires) {
-		// 会话已过期，删除它
-		_ = DeleteSession(session)
-		return "", time.Time{}, errors.New("session expired")
-	}
-
 	return sessionRecord.UUID, sessionRecord.CreatedAt, nil
 }
 
@@ -98,53 +93,36 @@ func GetUserBySession(session string) (models.User, error) {
 	return GetUserByUUID(sessionRecord.UUID)
 }
 
-// findSessionRecord looks a cookie up against the stored digest, falling back
-// to the legacy plaintext row so sessions issued before hashing keep working
-// until they expire. A value that is already a digest is refused outright:
-// accepting it would make the stored column itself a usable credential.
-func findSessionRecord(session string) (models.Session, error) {
-	if session == "" || isSessionDigest(session) {
+func findSessionRecord(cookie string) (models.Session, error) {
+	id := SessionIDForCookie(cookie)
+	if id == "" {
 		return models.Session{}, gorm.ErrRecordNotFound
 	}
-	db := dbcore.GetDBInstance()
 	var record models.Session
-	if err := db.Where("session = ?", hashSessionToken(session)).First(&record).Error; err == nil {
-		return record, nil
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return models.Session{}, err
-	}
-	if err := db.Where("session = ?", session).First(&record).Error; err != nil {
-		return models.Session{}, err
-	}
-	return record, nil
+	err := dbcore.GetDBInstance().Where("session = ? AND expires > ?", id, time.Now().UTC()).First(&record).Error
+	return record, err
 }
 
-// StoredSessionKey resolves a caller-supplied value to the stored column value,
-// accepting a raw cookie, a legacy plaintext row, or a digest read back from
-// the session list. Callers that display or compare session identities need the
-// stored form, since that is what the session list carries.
-func StoredSessionKey(session string) string {
-	if session == "" || isSessionDigest(session) {
-		return session
+// DeleteSession revokes the session identified by a browser cookie at logout.
+func DeleteSession(cookie string) error {
+	id := SessionIDForCookie(cookie)
+	if id == "" {
+		return nil
 	}
-	hashed := hashSessionToken(session)
-	db := dbcore.GetDBInstance()
-	var count int64
-	if err := db.Model(&models.Session{}).Where("session = ?", hashed).Count(&count).Error; err == nil && count > 0 {
-		return hashed
-	}
-	return session
+	return DeleteSessionByID(id)
 }
 
-// DeleteSession 删除指定会话
-func DeleteSession(session string) (err error) {
-	db := dbcore.GetDBInstance()
-	result := db.Where("session = ?", StoredSessionKey(session)).Delete(&models.Session{})
-	if result.Error != nil {
-		return result.Error
+func DeleteSessionByID(id string) error {
+	if len(id) != len(sessionDigestPrefix)+64 || !isSessionDigest(id) {
+		return ErrInvalidSessionID
 	}
-	return nil
+	if _, err := hex.DecodeString(id[len(sessionDigestPrefix):]); err != nil {
+		return ErrInvalidSessionID
+	}
+	return dbcore.GetDBInstance().Where("session = ?", id).Delete(&models.Session{}).Error
 }
+
+var ErrInvalidSessionID = errors.New("invalid session identifier")
 
 func DeleteAllSessions() error {
 	db := dbcore.GetDBInstance()
@@ -157,7 +135,7 @@ func DeleteAllSessions() error {
 
 func UpdateLatest(session, useragent, ip string) error {
 	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", StoredSessionKey(session)).Updates(map[string]interface{}{
+	return db.Model(&models.Session{}).Where("session = ? AND expires > ?", SessionIDForCookie(session), time.Now().UTC()).Updates(map[string]interface{}{
 		"latest_online":     time.Now().UTC(),
 		"latest_user_agent": useragent,
 		"latest_ip":         ip,

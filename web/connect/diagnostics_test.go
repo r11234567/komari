@@ -47,7 +47,7 @@ func TestDiagnosticsRealConnectAuthenticationAndRecovery(t *testing.T) {
 	}
 	_, _, session := credentialTestIdentity(t)
 	req := connect.NewRequest(&credentialv1.ListTrustedCredentialProvidersRequest{})
-	req.Header().Set("Cookie", "session_token="+session)
+	req.Header().Set("Cookie", "__Host-komari_session="+session)
 	if _, err := client.ListTrustedCredentialProviders(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestDiagnosticsAdminEndpointAuthorizationAndNoSQL(t *testing.T) {
 	// bypassed or cached by the diagnostics feature.
 	_, _, session := credentialTestIdentity(t)
 	req, _ := http.NewRequest("GET", server.URL+"/api/admin/diagnostics", nil)
-	req.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+	req.AddCookie(&http.Cookie{Name: "__Host-komari_session", Value: session})
 	resp, err = server.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)

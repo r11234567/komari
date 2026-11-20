@@ -1,6 +1,7 @@
 package public
 
 import (
+	"github.com/komari-monitor/komari/web/security"
 	"math"
 	"net/http"
 	"time"
@@ -15,7 +16,7 @@ import (
 // RequestBindTicket exchanges an existing console session for a reusable
 // two-minute ticket scoped to enrollment authorization.
 func RequestBindTicket(c *gin.Context) {
-	session, err := c.Cookie("session_token")
+	session, err := c.Cookie(security.SessionCookieName)
 	if err != nil || session == "" {
 		api.RespondError(c, http.StatusUnauthorized, "A completed console login is required")
 		return

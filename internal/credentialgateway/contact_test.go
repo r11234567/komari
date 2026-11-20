@@ -64,7 +64,7 @@ func newContactFixture(t *testing.T, withTOTP bool) *contactFixture {
 	}
 	session := "synthetic-contact-session-" + uuid.NewString()
 	db := dbcore.GetDBInstance()
-	if err := db.Create(&models.Session{UUID: user.UUID, Session: session, Expires: time.Now().Add(time.Hour)}).Error; err != nil {
+	if err := db.Create(&models.Session{UUID: user.UUID, Session: accounts.SessionIDForCookie(session), Expires: time.Now().Add(time.Hour)}).Error; err != nil {
 		t.Fatal(err)
 	}
 	for _, kind := range []string{"email", "telegram"} {

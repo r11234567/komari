@@ -2,6 +2,7 @@ package connectapi
 
 import (
 	"context"
+	"github.com/komari-monitor/komari/web/security"
 	"net/http"
 
 	"connectrpc.com/connect"
@@ -112,5 +113,5 @@ func (s *passwordLoginService) CancelPasswordLogin(_ context.Context, req *conne
 }
 
 func setLoginSession[T any](response *connect.Response[T], session string) {
-	response.Header().Add("Set-Cookie", (&http.Cookie{Name: "session_token", Value: session, Path: "/", MaxAge: credentialgateway.LoginSessionLifetime, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode}).String())
+	security.SetSessionCookie(response.Header(), session, credentialgateway.LoginSessionLifetime)
 }

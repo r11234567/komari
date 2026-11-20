@@ -28,7 +28,7 @@ func credentialTestIdentity(t *testing.T) (context.Context, string, string) {
 	if err := db.Create(&models.User{UUID: id, Username: "credential-" + id, Passwd: "synthetic-unused-password", TwoFactor: "JBSWY3DPEHPK3PXP"}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Create(&models.Session{UUID: id, Session: session, Expires: time.Now().Add(time.Hour)}).Error; err != nil {
+	if err := db.Create(&models.Session{UUID: id, Session: accounts.SessionIDForCookie(session), Expires: time.Now().Add(time.Hour)}).Error; err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -148,7 +148,7 @@ func TestCredentialServicePolicyAndHTTPAuthentication(t *testing.T) {
 	}
 	ctx, _, session := credentialTestIdentity(t)
 	req := connect.NewRequest(&credentialv1.ListTrustedCredentialProvidersRequest{})
-	req.Header().Set("Cookie", "session_token="+session)
+	req.Header().Set("Cookie", "__Host-komari_session="+session)
 	listed, err := client.ListTrustedCredentialProviders(context.Background(), req)
 	if err != nil || len(listed.Msg.Providers) != 1 {
 		t.Fatalf("interactive HTTP: %v", err)

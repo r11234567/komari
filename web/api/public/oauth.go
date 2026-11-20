@@ -88,7 +88,7 @@ func OAuthCallback(c *gin.Context) {
 	security.SetSensitiveCookie(c, "binding_external_account", "", -1)
 	if uuid != "" {
 		// 绑定外部账号
-		session, _ := c.Cookie("session_token")
+		session, _ := c.Cookie(security.SessionCookieName)
 		user, err := accounts.GetUserBySession(session)
 		if err != nil || user.UUID != uuid {
 			c.JSON(500, gin.H{"status": "error", "message": "Binding failed"})

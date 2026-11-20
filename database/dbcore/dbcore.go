@@ -731,7 +731,11 @@ func doInitialize() error {
 	if err := instance.AutoMigrate(
 		&models.Session{},
 	); err != nil {
-		logger.Errorf("dbcore", "Failed to create Session table, it may already exist: %v", err)
+		return fmt.Errorf("migrate session table: %w", err)
+	}
+	// Primary authentication storage is SQLite. Only exact lowercase v1 HMAC rows survive upgrades and restores.
+	if err := instance.Where("length(session) <> 67 OR substr(session,1,3) <> 'v1:' OR substr(session,4) GLOB '*[^0-9a-f]*'").Delete(&models.Session{}).Error; err != nil {
+		return fmt.Errorf("retire legacy session rows: %w", err)
 	}
 	if err := instance.AutoMigrate(
 		&models.Task{},

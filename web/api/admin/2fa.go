@@ -74,7 +74,7 @@ func Verify2FA(c *gin.Context) {
 
 // UnlockSignOn is separate from account-page verification and workspace unlocks.
 func UnlockSignOn(c *gin.Context) {
-	session, _ := c.Cookie("session_token")
+	session, _ := c.Cookie(security.SessionCookieName)
 	var token string
 	var err error
 	if c.GetBool("trusted_credential_verified") {
