@@ -132,6 +132,11 @@ func signedAssertion(t *testing.T, private *ecdsa.PrivateKey, id []byte, owner, 
 func TestNativeImportAndDiscoverableLogin(t *testing.T) {
 	t.Setenv("KOMARI_PASSKEY_RP_ID", "panel.example.test")
 	t.Setenv("KOMARI_PASSKEY_ORIGIN", "https://panel.example.test")
+	service := credential.New(credential.Options{})
+	if err := service.Register(Provider{}); err != nil {
+		t.Fatalf("native passkey registration at startup: %v", err)
+	}
+
 	ctx := WithRequestOrigin(t.Context(), "panel.example.test", true)
 	user, err := accounts.CreateAccount("import-"+uuid.NewString(), "Synthetic-password-123")
 	if err != nil {
