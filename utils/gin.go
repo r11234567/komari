@@ -1,8 +1,10 @@
 package utils
 
-import "github.com/gin-gonic/gin"
-
-import "github.com/komari-monitor/komari/utils/requestscheme"
+import (
+	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/utils/requestscheme"
+)
 
 // https://github.com/labstack/echo/blob/98ca08e7dd64075b858e758d6693bf9799340756/context.go#L275-L294
 func GetScheme(c *gin.Context) string {
@@ -13,6 +15,9 @@ func GetScheme(c *gin.Context) string {
 }
 
 func GetCallbackURL(c *gin.Context) string {
+	if panelOrigin := flags.EffectivePanelOrigin(); panelOrigin != "" {
+		return panelOrigin + "/api/oauth_callback"
+	}
 	scheme := GetScheme(c)
 	host := c.Request.Host
 	return scheme + "://" + host + "/api/oauth_callback"

@@ -1,13 +1,11 @@
 package api
 
 import (
-	"github.com/komari-monitor/komari/web/security"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/trafficledger"
@@ -29,27 +27,17 @@ func GetClients(c *gin.Context) {
 	}
 	defer conn.Close()
 
-	// 初始化用户信息
-	var (
-		isLogin    = false
-		hiddenMap  = map[string]bool{}
-		session, _ = c.Cookie(security.SessionCookieName)
-	)
-
-	// 登录状态检查
-	_, err = accounts.GetUserBySession(session)
-	if err == nil {
-		isLogin = true
-	}
-
-	// 仅在未登录时需要 Hidden 信息做过滤
-	if !isLogin {
+	// PublicViewer invariant: /api/clients always filters Hidden nodes and
+	// ignores session cookies.
+	loadHiddenSet := func() map[string]bool {
+		hiddenMap := map[string]bool{}
 		var hiddenClients []models.Client
 		db := dbcore.GetDBInstance()
 		_ = db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error
 		for _, cli := range hiddenClients {
 			hiddenMap[cli.UUID] = true
 		}
+		return hiddenMap
 	}
 
 	// 请求
@@ -78,9 +66,11 @@ func GetClients(c *gin.Context) {
 			}
 		}
 
+		hiddenMap := loadHiddenSet()
+
 		// 在线客户端uuid列表（WebSocket 与非 WebSocket）
 		for _, key := range agent_runtime.GetAllOnlineUUIDs() {
-			if !isLogin && hiddenMap[key] {
+			if hiddenMap[key] {
 				continue
 			}
 			if uuID != "" && key != uuID {
@@ -94,7 +84,7 @@ func GetClients(c *gin.Context) {
 			c.Request.Context(), dbcore.GetDBInstance(), time.Now().UTC(),
 		)
 		for key, report := range agent_runtime.GetLatestReport() {
-			if !isLogin && hiddenMap[key] {
+			if hiddenMap[key] {
 				continue
 			}
 			if uuID != "" && key != uuID {

@@ -1,0 +1,1 @@
+import{F as e}from"./chunk-client-DDx_eF1E.js";import{g as t,h as n}from"./chunk-credential_pb-yK5QisoF.js";function r(r){let i=r<0?-1:1,a=Math.abs(r),o=Math.floor(a/1e3),s=(a-o*1e3)*1e6;return n(e,{seconds:t.parse(o*i),nanos:s===0?0:s*i})}export{r as t};

@@ -88,6 +88,57 @@ func Register(r *gin.Engine) {
 	}
 }
 
+// RegisterPublic mounts only the read-only public Connect procedures on the
+// dedicated Public Listener and forces every call onto an anonymous PublicViewer
+// context, leaving all management and Agent control procedures unmounted (404).
+func RegisterPublic(r *gin.Engine) {
+	policy := newPolicyInterceptor()
+	opts := []connect.HandlerOption{
+		connect.WithInterceptors(diagnostics.OutcomeInterceptor{}, policy),
+		connect.WithReadMaxBytes(maxConnectRequestBytes),
+	}
+	browserPath, browserHandler := browserv1connect.NewBrowserServiceHandler(&browserService{}, opts...)
+	registerDiagnosticProcedures(browserPath)
+	for _, method := range []string{
+		"GetPublicInfo",
+		"ListAgents",
+		"GetAgent",
+		"GetSession",
+		"GetThemeContract",
+		"WatchAgentStatus",
+	} {
+		r.Any(browserPath+method, bridgePublic(browserHandler))
+	}
+
+	metricsPath, metricsHandler := metricsv1connect.NewMetricsServiceHandler(&metricsService{}, opts...)
+	registerDiagnosticProcedures(metricsPath)
+	for _, method := range []string{
+		"QueryMetrics",
+		"ListMetricDefinitions",
+		"ListPingTasks",
+		"GetPingStats",
+	} {
+		r.Any(metricsPath+method, bridgePublic(metricsHandler))
+	}
+}
+
+func bridgePublic(handler http.Handler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		anon := rpc.NewAnonymousPrincipal()
+		security.SetPrincipalHeader(c, anon)
+		meta := &rpc.ContextMeta{
+			Principal:      anon,
+			Permission:     anon.PrimaryRole(),
+			RemoteIP:       security.AuthSourceIP(c),
+			UserAgent:      c.Request.UserAgent(),
+			TempShareValid: api.HasTempAccess(c),
+		}
+		ctx := rpc.NewContextWithMeta(c.Request.Context(), meta)
+		c.Request = c.Request.WithContext(ctx)
+		handler.ServeHTTP(c.Writer, c.Request)
+	}
+}
+
 func registerDiagnosticProcedures(path string) {
 	name := protoreflect.FullName(strings.Trim(path, "/"))
 	descriptor, err := protoregistry.GlobalFiles.FindDescriptorByName(name)

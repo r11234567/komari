@@ -17,10 +17,18 @@ func init() {
 	Register("getRecords", getRecords)
 }
 
+const maxCompatibilityRecordPoints = 4000
+
+func clampCompatibilityRecordMaxCount(requested int) int {
+	if requested <= 0 || requested > maxCompatibilityRecordPoints {
+		return maxCompatibilityRecordPoints
+	}
+	return requested
+}
+
 func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	ctx, cancel := context.WithTimeout(ctx, historicalQueryTimeout)
 	defer cancel()
-	meta := rpc.MetaFromContext(ctx)
 	var params struct {
 		Type     string     `json:"type"`      // "load" | "ping"; default "load"
 		UUID     string     `json:"uuid"`      // client uuid; empty = all clients
@@ -29,7 +37,7 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		End      *time.Time `json:"end"`       // RFC3339 with an explicit timezone (optional)
 		LoadType string     `json:"load_type"` // for type=load: cpu|gpu|ram|swap|load|temp|disk|network|process|connections|all
 		TaskID   int        `json:"task_id"`   // for type=ping: optional task id; -1 or omitted means all
-		MaxCount int        `json:"maxCount"`  // max number of points; -1 unlimited; default 4000
+		MaxCount int        `json:"maxCount"`  // max number of points; capped to [1, 4000]
 	}
 	if err := req.BindParams(&params); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
@@ -63,52 +71,37 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		startTime = endTime.Add(-time.Duration(hours) * time.Hour)
 	}
 
-	// Hidden filtering for non-admin
-	isAdmin := meta.Principal != nil && meta.Principal.HasRole(rpc.RoleAdmin)
+	// PublicViewer invariant: always exclude Hidden nodes regardless of session cookies.
 	hidden := map[string]bool{}
-	if !isAdmin {
-		cinfo, err := clients.GetAllClientBasicInfo()
-		if err != nil {
-			return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", err.Error())
+	cinfo, err := clients.GetAllClientBasicInfo()
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", err.Error())
+	}
+	for _, c := range cinfo {
+		if c.Hidden {
+			hidden[c.UUID] = true
 		}
-		for _, c := range cinfo {
-			if c.Hidden {
-				hidden[c.UUID] = true
-			}
-		}
-		if params.UUID != "" && hidden[params.UUID] {
-			return nil, rpc.MakeError(rpc.InvalidParams, "UUID not found", params.UUID)
-		}
+	}
+	if params.UUID != "" && hidden[params.UUID] {
+		return nil, rpc.MakeError(rpc.InvalidParams, "UUID not found", params.UUID)
 	}
 
 	switch params.Type {
 	case "load":
-		maxCount := params.MaxCount
-		if maxCount == 0 {
-			maxCount = 4000
-		}
-		queryMaxCount := maxCount
-		if !isAdmin {
-			// Keep hidden-node filtering exact for public responses. Logged-in
-			// admin reads can safely push the final budget into storage.
-			queryMaxCount = -1
-		}
-		// fetch load records
-		recs, err := getLoadRecordsCombined(ctx, params.UUID, startTime, endTime, params.LoadType, queryMaxCount)
+		maxCount := clampCompatibilityRecordMaxCount(params.MaxCount)
+		// Enforce hard point ceiling in storage; never pass -1 unbounded queries.
+		recs, err := getLoadRecordsCombined(ctx, params.UUID, startTime, endTime, params.LoadType, maxCount)
 		if err != nil {
 			return nil, metricQueryError(err, "Failed to fetch records")
 		}
-		// hidden filter on non-admin
-		if !isAdmin {
-			filtered := recs[:0]
-			for _, r := range recs {
-				if hidden[r.Client] {
-					continue
-				}
-				filtered = append(filtered, r)
+		filtered := recs[:0]
+		for _, r := range recs {
+			if hidden[r.Client] {
+				continue
 			}
-			recs = filtered
+			filtered = append(filtered, r)
 		}
+		recs = filtered
 
 		// optional load_type filtering -> group by client
 		if params.LoadType != "" && params.LoadType != "all" {
@@ -184,17 +177,14 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		if err != nil {
 			return nil, metricQueryError(err, "Failed to fetch ping records")
 		}
-		// hidden filter
-		if !isAdmin {
-			filtered := recs[:0]
-			for _, r := range recs {
-				if r.Client != "" && hidden[r.Client] {
-					continue
-				}
-				filtered = append(filtered, r)
+		filtered := recs[:0]
+		for _, r := range recs {
+			if r.Client != "" && hidden[r.Client] {
+				continue
 			}
-			recs = filtered
+			filtered = append(filtered, r)
 		}
+		recs = filtered
 
 		type RecordsResp struct {
 			TaskId uint      `json:"task_id,omitempty"`
@@ -253,7 +243,7 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		if len(clientStats) > 0 {
 			response.BasicInfo = make([]ClientBasicInfo, 0, len(clientStats))
 			for client, st := range clientStats {
-				if client != "" && !isAdmin && hidden[client] {
+				if client != "" && hidden[client] {
 					continue
 				}
 				loss := float64(0)
@@ -387,12 +377,9 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			toList = append(toList, info)
 		}
 		response.Tasks = toList
-		// apply maxCount for ping
-		maxCount := params.MaxCount
-		if maxCount == 0 {
-			maxCount = 4000
-		}
-		if maxCount != -1 && len(response.Records) > maxCount {
+		// apply hard-bounded maxCount for ping
+		maxCount := clampCompatibilityRecordMaxCount(params.MaxCount)
+		if len(response.Records) > maxCount {
 			// group records by TaskId for proportional downsampling
 			taskGroups := make(map[uint][]RecordsResp)
 			for _, r := range response.Records {

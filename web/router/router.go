@@ -31,16 +31,15 @@ func legacyRemoteCompatEnabled() bool {
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("KOMARI_LEGACY_REMOTE_COMPAT")), "true")
 }
 
-// Register binds all HTTP, WebSocket, JSON-RPC and static frontend routes.
+// Register binds all HTTP, WebSocket, JSON-RPC and static frontend routes in
+// single-port combined mode (KOMARI_PANEL_LISTEN unset).
 //
 // 设计：JSON 类接口统一经声明式路由桥 jsonRpc.Bind 绑定到对应 RPC2 方法，
 // 不再有 per-resource gin handler 层。仅二进制/流/重定向/特殊鉴权类接口保留为 REST handler。
 func Register(r *gin.Engine) func() error {
-	r.Any("/ping", func(c *gin.Context) {
-		c.String(200, "pong")
-	})
-
-	registerPublicRoutes(r)
+	registerHealthRoute(r)
+	registerPublicReadRoutes(r)
+	registerPanelAuthAndSystemRoutes(r)
 	registerAgentRoutes(r)
 	closeExports := registerAdminRoutes(r)
 	connectapi.Register(r)
@@ -51,25 +50,50 @@ func Register(r *gin.Engine) func() error {
 	return closeExports
 }
 
-// registerPublicRoutes 公开路由。JSON 读接口经 Bind 绑定到 public: 命名空间方法。
-func registerPublicRoutes(r *gin.Engine) {
-	installweb.RegisterCompleted(r)
-	storageupdate.RegisterCompleted(r)
+// MountPublicRoutes binds strictly the public theme, read-only public Connect,
+// and read-only compatibility RPC2/REST/WS surface onto the dedicated Public Listener.
+func MountPublicRoutes(r *gin.Engine) {
+	registerHealthRoute(r)
+	registerPublicReadRoutes(r)
+	connectapi.RegisterPublic(r)
+	public.StaticPublic(r.Group("/"), func(handlers ...gin.HandlerFunc) {
+		r.NoRoute(handlers...)
+	})
+}
 
-	// 非 JSON / 特殊流程，保留 REST handler。
-	r.POST("/api/login", public_api.Login)
-	r.POST("/api/bind/ticket", public_api.RequestBindTicket)
-	r.POST("/api/public/bind/ticket", public_api.RequestBindTicket)
-	r.POST("/api/logout", public_api.Logout)
-	r.GET("/api/oauth", public_api.OAuth)
-	r.GET("/api/oauth_callback", public_api.OAuthCallback)
+// MountPanelRoutes binds strictly the built-in management UI, authentication,
+// step-up ceremonies, admin APIs, and Agent control routes onto the dedicated Panel Listener.
+func MountPanelRoutes(r *gin.Engine) func() error {
+	registerHealthRoute(r)
+	registerPanelAuthAndSystemRoutes(r)
+	// System UI status/session/readiness probes needed on the Panel origin.
+	r.GET("/api/me", jsonRpc.Bind("public:getMe", jsonRpc.WithRaw()))
+	r.GET("/api/public", jsonRpc.Bind("public:getPublicSettings"))
+	r.GET("/api/version", jsonRpc.Bind("public:getVersion"))
+	registerAgentRoutes(r)
+	closeExports := registerAdminRoutes(r)
+	connectapi.Register(r)
+	public.StaticPanel(r.Group("/"), func(handlers ...gin.HandlerFunc) {
+		r.NoRoute(handlers...)
+	})
+	return closeExports
+}
+
+func registerHealthRoute(r *gin.Engine) {
+	r.Any("/ping", func(c *gin.Context) {
+		c.String(200, "pong")
+	})
+}
+
+// registerPublicReadRoutes mounts public read-only compatibility endpoints and
+// the bounded native visitor-event endpoint.
+func registerPublicReadRoutes(r *gin.Engine) {
 	r.GET("/api/mjpeg_live", public_api.MjpegLiveHandler)
 	r.GET("/api/plugin/:short/*filepath", public_api.ServePluginFile)
-	// /api/clients 是 WebSocket 端点（客户端发 "get"/"get <uuid>" 拉取在线列表与最新上报），
-	// 非 JSON-RPC，保留为 WS handler。
+	r.POST("/api/public/visitor-event", jsonRpc.RecordVisitorEventHTTP)
+	// /api/clients 是公开只读 WebSocket 端点（客户端发 "get"/"get <uuid>" 拉取在线列表与最新上报）。
 	r.GET("/api/clients", api.GetClients)
 
-	// JSON 接口 -> RPC2。
 	r.GET("/api/me", jsonRpc.Bind("public:getMe", jsonRpc.WithRaw()))
 	r.GET("/api/nodes", jsonRpc.Bind("public:getNodesInformation"))
 	r.GET("/api/public", jsonRpc.Bind("public:getPublicSettings"))
@@ -78,14 +102,28 @@ func registerPublicRoutes(r *gin.Engine) {
 	r.GET("/api/records/load", jsonRpc.Bind("public:getRecordsByUUID", jsonRpc.WithQuery("uuid", "load_type", "hours")))
 	r.GET("/api/records/ping", jsonRpc.Bind("public:getPingRecords", jsonRpc.WithQuery("uuid", "task_id", "hours")))
 	r.GET("/api/task/ping", jsonRpc.Bind("public:getPublicPingTasks"))
+
+	// 只读第三方主题兼容 JSON-RPC 入口。
+	r.GET("/api/rpc2", jsonRpc.OnRpcRequest)
+	r.POST("/api/rpc2", jsonRpc.OnRpcRequest)
+}
+
+// registerPanelAuthAndSystemRoutes mounts authentication, enrollment tickets,
+// install/upgrade completion markers, and one-shot file preview download routes.
+func registerPanelAuthAndSystemRoutes(r *gin.Engine) {
+	installweb.RegisterCompleted(r)
+	storageupdate.RegisterCompleted(r)
+
+	r.POST("/api/login", public_api.Login)
+	r.POST("/api/bind/ticket", public_api.RequestBindTicket)
+	r.POST("/api/public/bind/ticket", public_api.RequestBindTicket)
+	r.POST("/api/logout", public_api.Logout)
+	r.GET("/api/oauth", public_api.OAuth)
+	r.GET("/api/oauth_callback", public_api.OAuthCallback)
 	// Office Online and image/video previews fetch this URL directly. Access is
 	// gated by the one-shot preview token created below.
 	r.GET("/api/preview/client/:uuid/file/download", filemanager.PreviewDownload)
 	r.HEAD("/api/preview/client/:uuid/file/download", filemanager.PreviewDownload)
-
-	// JSON-RPC 直连入口。
-	r.GET("/api/rpc2", jsonRpc.OnRpcRequest)
-	r.POST("/api/rpc2", jsonRpc.OnRpcRequest)
 }
 
 // registerAgentRoutes agent（客户端）上报与拉取路由。
@@ -150,6 +188,8 @@ func registerAdminRoutes(r *gin.Engine) func() error {
 	{
 		theme.PUT("/upload", admin.UploadTheme)
 		theme.GET("/list", admin.ListThemes)
+		theme.GET("/:short/manifest", admin.GetThemeManifest)
+		theme.GET("/:short/preview", admin.GetThemePreview)
 		theme.POST("/delete", admin.DeleteTheme)
 		theme.POST("/set", admin.SetTheme)
 		theme.POST("/update", admin.UpdateTheme)

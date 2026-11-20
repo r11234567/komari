@@ -37,3 +37,16 @@ func TestAllocateTargetsSupportsTypedKeys(t *testing.T) {
 		t.Fatalf("allocateTargets() = %v, want map[7:3 9:2]", got)
 	}
 }
+
+func TestClampCompatibilityRecordMaxCountEnforcesCeiling(t *testing.T) {
+	for _, input := range []int{-1, -100, 0, 4001, 100_000} {
+		if got := clampCompatibilityRecordMaxCount(input); got != maxCompatibilityRecordPoints {
+			t.Fatalf("clampCompatibilityRecordMaxCount(%d) = %d, want %d", input, got, maxCompatibilityRecordPoints)
+		}
+	}
+	for _, input := range []int{1, 120, 4000} {
+		if got := clampCompatibilityRecordMaxCount(input); got != input {
+			t.Fatalf("clampCompatibilityRecordMaxCount(%d) = %d, want %d", input, got, input)
+		}
+	}
+}

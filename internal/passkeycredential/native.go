@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	credential "github.com/komari-monitor/komari/internal/trustedcredential"
@@ -49,6 +50,7 @@ func nativePolicy() (map[string]any, error) {
 	}
 	rawOrigins := strings.TrimSpace(os.Getenv("KOMARI_PASSKEY_ORIGIN"))
 	panelOrigins := strings.TrimSpace(os.Getenv("KOMARI_PASSKEY_PANEL_ORIGIN"))
+	effectivePanelOrigin := flags.EffectivePanelOrigin()
 	combined := rawOrigins
 	if panelOrigins != "" {
 		if combined != "" {
@@ -57,12 +59,15 @@ func nativePolicy() (map[string]any, error) {
 			combined = panelOrigins
 		}
 	}
+	if combined == "" && effectivePanelOrigin != "" {
+		combined = effectivePanelOrigin
+	}
 	if combined == "" {
 		return nil, credential.ErrProviderUnavailable
 	}
 	parts := strings.FieldsFunc(combined, func(r rune) bool { return r == ',' || r == '\r' || r == '\n' })
-	normalized := make([]string, 0, len(parts))
-	seen := make(map[string]bool, len(parts))
+	normalized := make([]string, 0, len(parts)+1)
+	seen := make(map[string]bool, len(parts)+1)
 	for _, part := range parts {
 		if strings.TrimSpace(part) == "" {
 			continue
@@ -72,6 +77,12 @@ func nativePolicy() (map[string]any, error) {
 			return nil, credential.ErrProviderUnavailable
 		}
 		if !seen[entry] {
+			seen[entry] = true
+			normalized = append(normalized, entry)
+		}
+	}
+	if effectivePanelOrigin != "" {
+		if entry, ok := normalizeOriginEntry(effectivePanelOrigin, rp); ok && !seen[entry] {
 			seen[entry] = true
 			normalized = append(normalized, entry)
 		}
@@ -135,6 +146,7 @@ func nativeSnapshot(ctx context.Context, user string) (Snapshot, error) {
 			os.Getenv("KOMARI_PASSKEY_RP_ID"),
 			os.Getenv("KOMARI_PASSKEY_ORIGIN"),
 			os.Getenv("KOMARI_PASSKEY_PANEL_ORIGIN"),
+			flags.EffectivePanelOrigin(),
 			os.Getenv("KOMARI_PASSKEY_ALLOW_SYNCED"),
 			stable,
 		})

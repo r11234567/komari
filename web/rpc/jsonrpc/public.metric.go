@@ -687,20 +687,17 @@ func clonePublicMetricTags(tags map[string]string) map[string]string {
 	return out
 }
 
-func publicMetricEntityIDs(ctx context.Context, requested []string) ([]string, *rpc.JsonRpcError) {
+func publicMetricEntityIDs(_ context.Context, requested []string) ([]string, *rpc.JsonRpcError) {
 	allClients, err := clients.GetAllClientBasicInfo()
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to retrieve client information: "+err.Error(), nil)
 	}
-	isLogin := isLoginFromCtx(ctx)
 	hidden := make(map[string]bool, len(allClients))
 	visible := make(map[string]bool, len(allClients))
 	var allVisible []string
 	for _, client := range allClients {
 		if client.Hidden {
 			hidden[client.UUID] = true
-		}
-		if client.Hidden && !isLogin {
 			continue
 		}
 		visible[client.UUID] = true
@@ -711,7 +708,7 @@ func publicMetricEntityIDs(ctx context.Context, requested []string) ([]string, *
 	}
 	out := make([]string, 0, len(requested))
 	for _, entityID := range requested {
-		if hidden[entityID] && !isLogin {
+		if hidden[entityID] {
 			continue
 		}
 		if visible[entityID] || !hidden[entityID] {

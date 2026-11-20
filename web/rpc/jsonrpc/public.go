@@ -39,24 +39,15 @@ func regPublic(name string, h rpc.Handler, summary string) {
 	RegisterWithGroupAndMeta(name, "public", h, &rpc.MethodMeta{Name: "public:" + name, Summary: summary})
 }
 
-// isLoginFromCtx 依据 meta 判断是否为已登录管理员。
-func isLoginFromCtx(ctx context.Context) bool {
-	if meta := rpc.MetaFromContext(ctx); meta != nil {
-		return meta.Principal != nil && meta.Principal.HasRole(rpc.RoleAdmin)
-	}
-	return false
-}
-
-func publicGetNodesInformation(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func publicGetNodesInformation(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	clientList, err := clients.GetAllClientBasicInfo()
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to retrieve client information: "+err.Error(), nil)
 	}
 	applyThemeTrafficCompatibility(clientList)
-	isLogin := isLoginFromCtx(ctx)
 	j := 0
 	for i := 0; i < len(clientList); i++ {
-		if clientList[i].Hidden && !isLogin {
+		if clientList[i].Hidden {
 			continue
 		}
 		clientList[i].IPv4 = ""
@@ -64,6 +55,8 @@ func publicGetNodesInformation(ctx context.Context, _ *rpc.JsonRpcRequest) (any,
 		clientList[i].Remark = ""
 		clientList[i].Version = ""
 		clientList[i].Token = ""
+		clientList[i].RegionOverride = ""
+		clientList[i].RemoteControlProtected = false
 		clientList[j] = clientList[i]
 		j++
 	}
@@ -122,8 +115,8 @@ func publicGetClientRecentRecords(ctx context.Context, req *rpc.JsonRpcRequest) 
 	if params.UUID == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "UUID is required", nil)
 	}
-	if !isLoginFromCtx(ctx) && isHiddenClient(params.UUID) {
-		return nil, rpc.MakeError(rpc.InvalidParams, "UUID is required", nil) // 防止未登录获取隐藏客户端
+	if isHiddenClient(params.UUID) {
+		return nil, rpc.MakeError(rpc.InvalidParams, "UUID is required", nil)
 	}
 	reports := agent_runtime.GetRecentReports(params.UUID)
 	if usage, ok := calibratedUsageForClient(ctx, params.UUID); ok && len(reports) > 0 {
@@ -157,11 +150,7 @@ func publicGetRecordsByUUID(ctx context.Context, req *rpc.JsonRpcRequest) (any, 
 		Hours    string `json:"hours"`
 	}
 	req.BindParams(&params)
-	isLogin := isLoginFromCtx(ctx)
-	if !isLogin && params.UUID != "" && isHiddenClient(params.UUID) {
-		return nil, rpc.MakeError(rpc.InvalidParams, "UUID is required", nil)
-	}
-	if params.UUID == "" {
+	if params.UUID == "" || isHiddenClient(params.UUID) {
 		return nil, rpc.MakeError(rpc.InvalidParams, "UUID is required", nil)
 	}
 	hours := params.Hours
@@ -322,7 +311,6 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	if params.UUID == "" && params.TaskID == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "UUID or task_id is required", nil)
 	}
-	isLogin := isLoginFromCtx(ctx)
 
 	type recordsResp struct {
 		TaskId uint      `json:"task_id,omitempty"`
@@ -346,16 +334,14 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	hiddenMap := map[string]bool{}
 	response := &resp{Count: 0, Records: []recordsResp{}}
 
-	if !isLogin {
-		var hiddenClients []models.Client
-		db := dbcore.GetDBInstance()
-		_ = db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error
-		for _, cli := range hiddenClients {
-			hiddenMap[cli.UUID] = true
-		}
-		if params.UUID != "" && hiddenMap[params.UUID] {
-			return response, nil // 对尝试获取隐藏 uuid 返回空
-		}
+	var hiddenClients []models.Client
+	db := dbcore.GetDBInstance()
+	_ = db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error
+	for _, cli := range hiddenClients {
+		hiddenMap[cli.UUID] = true
+	}
+	if params.UUID != "" && hiddenMap[params.UUID] {
+		return response, nil
 	}
 
 	hours := params.Hours
@@ -386,7 +372,7 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 		total, loss, min, max int
 	})
 	for _, r := range recs {
-		if r.Client != "" && !isLogin && hiddenMap[r.Client] {
+		if r.Client != "" && hiddenMap[r.Client] {
 			continue
 		}
 		rec := recordsResp{Time: r.Time.UTC(), Value: r.Value, Client: r.Client, TaskId: r.TaskId}
@@ -409,7 +395,7 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	if len(clientStats) > 0 {
 		response.BasicInfo = make([]clientBasicInfo, 0, len(clientStats))
 		for client, stats := range clientStats {
-			if client != "" && !isLogin && hiddenMap[client] {
+			if client != "" && hiddenMap[client] {
 				continue
 			}
 			loss := float64(0)

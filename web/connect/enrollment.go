@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/database/models"
@@ -390,6 +391,9 @@ func enrollmentStateToProto(state int32) enrollmentv1.EnrollmentState {
 // behind a reverse proxy or on a non-default port, where a configured value
 // would be wrong for exactly the deployments that need it most.
 func panelBaseURL(req connect.AnyRequest) string {
+	if panelOrigin := flags.EffectivePanelOrigin(); panelOrigin != "" {
+		return panelOrigin
+	}
 	header := req.Header()
 	scheme := "https"
 	if forwarded := header.Get("X-Forwarded-Proto"); forwarded != "" {

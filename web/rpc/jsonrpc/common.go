@@ -226,35 +226,35 @@ func getNodes(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcEr
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", cinfo)
 	}
 	applyThemeTrafficCompatibility(cinfo)
-	meta := rpc.MetaFromContext(ctx)
-
 	SendIpAddrToGuest, _ := config.GetAs[bool](config.SendIpAddrToGuestKey)
-	if meta.Principal == nil || !meta.Principal.HasRole(rpc.RoleAdmin) {
-		// 过滤 Hidden 节点并隐藏敏感字段
-		filtered := make([]models.Client, 0, len(cinfo))
-		for _, node := range cinfo {
-			if node.Hidden { // 非 admin 不显示隐藏节点
-				continue
-			}
-			if SendIpAddrToGuest {
-				if node.IPv4 != "" {
-					node.IPv4 = strings.Split(node.IPv4, ".")[0] + ".*.*.*"
-				}
-				if node.IPv6 != "" {
-					node.IPv6 = strings.Split(node.IPv6, ":")[0] + ":*:*:*:*:*:*:*"
-				}
-			} else {
-				node.IPv4 = ""
-				node.IPv6 = ""
-			}
-
-			node.Remark = ""
-			node.Version = ""
-			node.Token = ""
-			filtered = append(filtered, node)
+	// PublicViewer invariant: common:getNodes always projects public-safe node
+	// metadata and never leaks Hidden nodes, unmasked IPs, Remark, Version, or
+	// Token even when an administrator session cookie accompanies the request.
+	filtered := make([]models.Client, 0, len(cinfo))
+	for _, node := range cinfo {
+		if node.Hidden {
+			continue
 		}
-		cinfo = filtered
+		if SendIpAddrToGuest {
+			if node.IPv4 != "" {
+				node.IPv4 = strings.Split(node.IPv4, ".")[0] + ".*.*.*"
+			}
+			if node.IPv6 != "" {
+				node.IPv6 = strings.Split(node.IPv6, ":")[0] + ":*:*:*:*:*:*:*"
+			}
+		} else {
+			node.IPv4 = ""
+			node.IPv6 = ""
+		}
+
+		node.Remark = ""
+		node.Version = ""
+		node.Token = ""
+		node.RegionOverride = ""
+		node.RemoteControlProtected = false
+		filtered = append(filtered, node)
 	}
+	cinfo = filtered
 	if params.UUID != "" {
 		for _, node := range cinfo {
 			if node.UUID == params.UUID {
@@ -297,7 +297,6 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	}
 	req.BindParams(&params)
 
-	meta := rpc.MetaFromContext(ctx)
 	latest := agent_runtime.GetLatestReport() // map[string]*v1.Report (copy)
 	// The compact admin view also shows billing-cycle usage. This helper is
 	// cached for 15 seconds, so the 5-second status poll does not rescan SQLite.
@@ -308,22 +307,20 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 		onlineSet[uuid] = true
 	}
 
-	// Hidden 过滤
-	if meta.Principal == nil || !meta.Principal.HasRole(rpc.RoleAdmin) {
-		cinfo, err := clients.GetAllClientBasicInfo()
-		if err != nil {
-			return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", err.Error())
+	// PublicViewer invariant: always exclude Hidden nodes from compatibility status.
+	cinfo, err := clients.GetAllClientBasicInfo()
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", err.Error())
+	}
+	hidden := make(map[string]bool, len(cinfo))
+	for _, c := range cinfo {
+		if c.Hidden {
+			hidden[c.UUID] = true
 		}
-		hidden := make(map[string]bool, len(cinfo))
-		for _, c := range cinfo {
-			if c.Hidden {
-				hidden[c.UUID] = true
-			}
-		}
-		for uuid := range latest {
-			if hidden[uuid] {
-				delete(latest, uuid)
-			}
+	}
+	for uuid := range latest {
+		if hidden[uuid] {
+			delete(latest, uuid)
 		}
 	}
 
@@ -510,26 +507,8 @@ func getNodeRecentStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rp
 	if params.UUID == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "UUID is required", params)
 	}
-	meta := rpc.MetaFromContext(ctx)
-	// 登录状态检查
-	isLogin := false
-	if meta.Principal != nil && meta.Principal.HasRole(rpc.RoleAdmin) {
-		isLogin = true
-	}
-
-	// 仅在未登录时需要 Hidden 信息做过滤
-	hiddenMap := map[string]bool{}
-	if !isLogin {
-		var hiddenClients []models.Client
-		db := dbcore.GetDBInstance()
-		_ = db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error
-		for _, cli := range hiddenClients {
-			hiddenMap[cli.UUID] = true
-		}
-
-		if hiddenMap[params.UUID] {
-			return nil, rpc.MakeError(rpc.InvalidParams, "UUID is required", params) //防止未登录用户获取隐藏客户端数据
-		}
+	if isHiddenClient(params.UUID) {
+		return nil, rpc.MakeError(rpc.InvalidParams, "UUID is required", params)
 	}
 
 	reports := agent_runtime.GetRecentReports(params.UUID)

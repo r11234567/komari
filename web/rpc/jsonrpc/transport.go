@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,9 +19,9 @@ import (
 	"github.com/komari-monitor/komari/web/signonauth"
 )
 
-// rpc2CompatibilityMethods is the complete compatibility surface for
-// third-party dashboards. Admin and client methods are reached over Connect;
-// exposing them here would create a second, less constrained management API.
+// rpc2CompatibilityMethods is the complete read-only compatibility surface for
+// third-party dashboards (11 public:* + 7 common:* + 2 rpc.* heartbeat methods).
+// Admin, client, plugin, and audit-mutation methods are never exposed here.
 var rpc2CompatibilityMethods = map[string]struct{}{
 	"public:getMe":                  {},
 	"public:getNodesInformation":    {},
@@ -35,24 +34,21 @@ var rpc2CompatibilityMethods = map[string]struct{}{
 	"public:listMetricDefinitions":  {},
 	"public:queryMetrics":           {},
 	"public:getPingMetricStats":     {},
-	"public:recordVisitorEvent":     {},
 	"common:getNodes":               {},
 	"common:getNodesLatestStatus":   {},
+	"common:getVersion":             {},
+	"common:getRecords":             {},
+	"common:getNodeRecentStatus":    {},
+	"common:getPublicInfo":          {},
+	"common:getMe":                  {},
+	"rpc.ping":                      {},
+	"rpc.version":                   {},
 }
 
 // rpc2TransportAllowed reports whether method may be reached through /api/rpc2.
-// Plugin-owned methods are admitted only after the plugin runtime registered
-// them; an admin namespace never becomes reachable by naming a plugin method.
 func rpc2TransportAllowed(method string) bool {
-	if _, ok := rpc2CompatibilityMethods[method]; ok {
-		return true
-	}
-	namespace, _, _ := strings.Cut(strings.ToLower(method), ":")
-	switch namespace {
-	case "admin", "client", "public", "common", "rpc":
-		return false
-	}
-	return rpc.IsPluginMethod(method)
+	_, ok := rpc2CompatibilityMethods[method]
+	return ok
 }
 
 func rpc2DeniedResponse(req *rpc.JsonRpcRequest) *rpc.JsonRpcResponse {
@@ -96,7 +92,7 @@ func CallFromGin(c *gin.Context, method string, params any) *rpc.JsonRpcResponse
 // 若请求已被 RequireSensitive2FA 中间件校验过(sensitive_2fa_verified),则跳过,避免重复校验。
 func dispatchWithSensitive(ctx context.Context, c *gin.Context, meta *rpc.ContextMeta, req *rpc.JsonRpcRequest) *rpc.JsonRpcResponse {
 	switch req.Method {
-	case "public:queryMetrics", "public:getPingMetricStats", "public:getClientRecentRecords", "public:getRecordsByUUID", "public:getPingRecords":
+	case "public:queryMetrics", "public:getPingMetricStats", "public:getClientRecentRecords", "public:getRecordsByUUID", "public:getPingRecords", "common:getRecords", "common:getNodeRecentStatus":
 		release, wait := security.AcquireCompatibilityHistoryRead(c)
 		if release == nil {
 			return rpc.ErrorResponse(req.ID, rpc.Unavailable, "historical reads are busy; retry shortly", map[string]int{"retry_after_seconds": int(wait.Seconds())})
@@ -169,6 +165,9 @@ func serveWebSocket(c *gin.Context) {
 	}
 	defer conn.Close()
 
+	wsCtx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+
 	meta := buildContextMeta(c)
 	for {
 		var req rpc.JsonRpcRequest
@@ -191,7 +190,7 @@ func serveWebSocket(c *gin.Context) {
 			continue
 		}
 		// 同步写：SafeConn 内部有锁，串行写避免响应乱序与并发竞态。
-		conn.WriteJSON(dispatchWithSensitive(context.Background(), c, meta, &req))
+		conn.WriteJSON(dispatchWithSensitive(wsCtx, c, meta, &req))
 	}
 }
 
@@ -228,6 +227,16 @@ func servePost(c *gin.Context) {
 // 复用 IdentityMiddleware 已识别的 principal(api.GetPrincipal)；若未识别则兜底调用
 // api.IdentifyPrincipal。填充 principal、Permission(兼容)、User、各 UUID、token 等字段。
 func buildContextMeta(c *gin.Context) *rpc.ContextMeta {
+	if c != nil && c.GetBool("public_listener") {
+		anon := rpc.NewAnonymousPrincipal()
+		return &rpc.ContextMeta{
+			Principal:      anon,
+			Permission:     anon.PrimaryRole(),
+			RemoteIP:       c.ClientIP(),
+			UserAgent:      c.GetHeader("User-Agent"),
+			TempShareValid: hasTempShareAccess(c),
+		}
+	}
 	// 优先读取中间件已识别的 principal；未识别时兜底自行识别(如 /api/rpc2 请求)。
 	p := api.GetPrincipal(c)
 	if p == nil {

@@ -1,0 +1,1 @@
+import{i as e,o as t,r as n}from"./chunk-credential_pb-yK5QisoF.js";var r=t(n,e({baseUrl:typeof window>`u`?`http://localhost`:window.location.origin,useBinaryFormat:!0,defaultTimeoutMs:3e4,fetch:(e,t)=>fetch(e,{...t,credentials:`same-origin`})})),i=`X-Komari-Credential-Authorization`,a=(e,t)=>`workspace:${JSON.stringify([e,t])}`;export{r as n,a as r,i as t};
