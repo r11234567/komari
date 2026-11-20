@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -79,20 +80,45 @@ type cleanupFunc struct {
 // 每个阶段返回错误即可让上层决定是否中止启动；各资源在创建时把对应清理登记到
 // cleanup 栈，关闭时按后进先出（LIFO）顺序释放。
 type App struct {
-	settings   *config.Settings
-	engine     *gin.Engine
-	server     *http.Server
-	reload     *ReloadManager
-	dbReady    bool
-	oauthReady bool
+	settings     *config.Settings
+	engine       *gin.Engine
+	panelEngine  *gin.Engine
+	server       *http.Server
+	panelServer  *http.Server
+	addrMu       sync.RWMutex
+	publicAddr   string
+	panelAddr    string
+	reload       *ReloadManager
+	dbReady      bool
+	oauthReady   bool
+	stopOnce     sync.Once
+	stopCh       chan struct{}
+	shutdownOnce sync.Once
+	shutdownDone chan struct{}
 
 	cleanups []cleanupFunc
+}
+
+// PublicAddr returns the bound public listener address once Run has bound its socket.
+func (a *App) PublicAddr() string {
+	a.addrMu.RLock()
+	defer a.addrMu.RUnlock()
+	return a.publicAddr
+}
+
+// PanelAddr returns the bound panel listener address once Run has bound its socket.
+func (a *App) PanelAddr() string {
+	a.addrMu.RLock()
+	defer a.addrMu.RUnlock()
+	return a.panelAddr
 }
 
 // NewApp 构造一个空的 App。真正的初始化在各阶段方法中完成。
 func NewApp() *App {
 	return &App{
-		reload: NewReloadManager(),
+		reload:       NewReloadManager(),
+		stopCh:       make(chan struct{}),
+		shutdownDone: make(chan struct{}),
 	}
 }
 
@@ -103,6 +129,9 @@ func (a *App) addCleanup(name string, fn func(ctx context.Context) error) {
 
 // Bootstrap 初始化基础设施：数据目录、数据库、配置快照。
 func (a *App) Bootstrap() error {
+	if err := flags.ValidateListenerConfig(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll("./data/theme", os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create theme directory: %w", err)
 	}
@@ -324,6 +353,14 @@ func firstRunInstallRedirect() gin.HandlerFunc {
 	}
 }
 
+func mountRestrictedStatic(r *gin.Engine, noRoute func(handlers ...gin.HandlerFunc)) {
+	if flags.SplitPanelEnabled() {
+		frontendpublic.StaticPanel(r.Group("/"), noRoute)
+		return
+	}
+	frontendpublic.Static(r.Group("/"), noRoute)
+}
+
 // RunInstallGuide starts the restricted first-run HTTP server.
 func (a *App) RunInstallGuide() (bool, error) {
 	controller := installweb.NewController(dbcore.GetDBInstance())
@@ -341,7 +378,7 @@ func (a *App) RunInstallGuide() (bool, error) {
 	})
 	r.Use(firstRunInstallRedirect())
 	controller.Register(r)
-	frontendpublic.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
+	mountRestrictedStatic(r, func(handlers ...gin.HandlerFunc) {
 		r.NoRoute(func(c *gin.Context) {
 			requestPath := c.Request.URL.Path
 			if strings.HasPrefix(requestPath, "/api") {
@@ -357,10 +394,11 @@ func (a *App) RunInstallGuide() (bool, error) {
 		})
 	})
 
+	listenAddr := flags.ControlListenAddr()
 	a.engine = r
-	a.server = &http.Server{Addr: flags.Listen, Handler: h2c.NewHandler(r, &http2.Server{})}
+	a.server = &http.Server{Addr: listenAddr, Handler: h2c.NewHandler(r, &http2.Server{})}
 	serverErr := make(chan error, 1)
-	logger.Infof("server", "First-run installation guide is available on %s", flags.Listen)
+	logger.Infof("server", "First-run installation guide is available on %s", listenAddr)
 	go func() {
 		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			serverErr <- err
@@ -387,7 +425,7 @@ func (a *App) RunInstallGuide() (bool, error) {
 	}
 }
 
-// RunLegacyUpgrade starts a restricted HTTP server on the normal listen
+// RunLegacyUpgrade starts a restricted HTTP server on the control listen
 // address. It returns only after the migration finishes and the restricted
 // listener has released the port, or after shutdown/interruption.
 func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool, error) {
@@ -399,7 +437,8 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 	r := gin.New()
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
-	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
+	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
+		WithTrustedOrigins(flags.EffectivePanelOrigin())
 	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 	r.Use(cors.Middleware())
 	r.Use(api.IdentityMiddleware())
@@ -411,7 +450,7 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 	})
 
 	controller.Register(r)
-	frontendpublic.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
+	mountRestrictedStatic(r, func(handlers ...gin.HandlerFunc) {
 		r.NoRoute(func(c *gin.Context) {
 			requestPath := c.Request.URL.Path
 			if strings.HasPrefix(requestPath, "/api") {
@@ -431,10 +470,11 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 		})
 	})
 
+	listenAddr := flags.ControlListenAddr()
 	a.engine = r
-	a.server = &http.Server{Addr: flags.Listen, Handler: h2c.NewHandler(r, &http2.Server{})}
+	a.server = &http.Server{Addr: listenAddr, Handler: h2c.NewHandler(r, &http2.Server{})}
 	serverErr := make(chan error, 1)
-	logger.Infof("server", "Legacy monitoring data requires the 1.2.7 upgrade wizard on %s", flags.Listen)
+	logger.Infof("server", "Legacy monitoring data requires the 1.2.7 upgrade wizard on %s", listenAddr)
 	go func() {
 		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			serverErr <- err
@@ -477,7 +517,8 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
-	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
+	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
+		WithTrustedOrigins(flags.EffectivePanelOrigin())
 	r.Use(cors.Middleware())
 	r.Use(api.IdentityMiddleware())
 	r.Use(func(c *gin.Context) {
@@ -488,7 +529,7 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 	})
 
 	controller.Register(r)
-	frontendpublic.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
+	mountRestrictedStatic(r, func(handlers ...gin.HandlerFunc) {
 		r.NoRoute(func(c *gin.Context) {
 			requestPath := c.Request.URL.Path
 			if strings.HasPrefix(requestPath, "/api") || strings.HasPrefix(requestPath, "/komari.") {
@@ -510,10 +551,11 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 		})
 	})
 
+	listenAddr := flags.ControlListenAddr()
 	a.engine = r
-	a.server = &http.Server{Addr: flags.Listen, Handler: h2c.NewHandler(r, &http2.Server{})}
+	a.server = &http.Server{Addr: listenAddr, Handler: h2c.NewHandler(r, &http2.Server{})}
 	serverErr := make(chan error, 1)
-	logger.Infof("server", "Metric storage upgrade progress is available on %s", flags.Listen)
+	logger.Infof("server", "Metric storage upgrade progress is available on %s", listenAddr)
 	go func() {
 		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			serverErr <- err
@@ -594,7 +636,7 @@ func (a *App) StartBackground() error {
 }
 
 // registerReloadHandlers 把此前散落各处的 config.Subscribe 统一登记到 reload 管理器。
-func (a *App) registerReloadHandlers(cors *security.CorsController) {
+func (a *App) registerReloadHandlers(corsControllers ...*security.CorsController) {
 	// OAuth provider 切换。
 	a.reload.Register("oauth-provider", func(event config.ConfigEvent) {
 		if ok, t := config.IsChangedT[string](event, config.OAuthProviderKey); ok {
@@ -638,39 +680,26 @@ func (a *App) registerReloadHandlers(cors *security.CorsController) {
 
 	// CORS 配置热更新。
 	a.reload.Register("cors", func(event config.ConfigEvent) {
-		cors.Update(event)
+		for _, cors := range corsControllers {
+			if cors != nil {
+				cors.Update(event)
+			}
+		}
 	})
 }
 
-// BuildRouter 构建 Gin 引擎、中间件与全部路由，并登记热重载处理器。
-func (a *App) BuildRouter() error {
-	r := gin.New()
+func configureBaseEngine(r *gin.Engine, trustedProxies string) error {
 	r.Use(diagnostics.Default.Middleware())
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
-
-	// Establish who may declare the client address before any middleware reads
-	// it. gin's default trusts every proxy, which makes ClientIP() - and so the
-	// rate limit bucket, the audit log source and the session address - a value
-	// the caller supplies.
-	trustedProxies := security.TrustedProxiesFromEnv()
 	if err := security.ConfigureTrustedProxies(r, trustedProxies); err != nil {
 		return fmt.Errorf("invalid %s: %w", security.TrustedProxyEnv, err)
 	}
-	if security.ClientIPIsSpoofable(trustedProxies) {
-		logger.Warnf("server",
-			"%s is not set: X-Forwarded-For is honoured from any peer, so client addresses in rate limiting and audit logs are caller-controlled. Set it to %q behind a local reverse proxy, or to \"none\" when exposed directly.",
-			security.TrustedProxyEnv, security.LoopbackProxies)
-	}
+	return nil
+}
 
-	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
-	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
-	r.Use(cors.Middleware())
-
-	r.Use(api.IdentityMiddleware())
-	rateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)
-	r.Use(rateLimiter.Middleware())
-	r.Use(func(c *gin.Context) {
+func foregroundHistoryObserverMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
 		path := c.Request.URL.Path
 		observe := strings.HasSuffix(path, "/QueryMetrics") || strings.HasSuffix(path, "/GetTrafficTrend") || strings.HasSuffix(path, "/GetDashboardCharts") || strings.HasPrefix(path, "/api/records/")
 		if !observe {
@@ -680,32 +709,115 @@ func (a *App) BuildRouter() error {
 		started := time.Now()
 		c.Next()
 		historyexport.ObserveForeground(time.Since(started))
-	})
-	r.Use(api.PrivateSiteMiddleware())
+	}
+}
 
-	r.Use(func(c *gin.Context) {
+func apiNoStoreMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
 		if len(c.Request.URL.Path) >= 4 && c.Request.URL.Path[:4] == "/api" {
 			c.Header("Cache-Control", "no-store")
 		}
 		c.Next()
-	})
+	}
+}
 
-	closeExports := router.Register(r)
-	a.addCleanup("history-export-queue", func(context.Context) error { return closeExports() })
-	plugin.Init(r)
+// BuildRouter 构建 Gin 引擎、中间件与全部路由，并登记热重载处理器。
+// 当设置 KOMARI_PANEL_LISTEN 时，构建两个物理隔离的 Gin 引擎：
+//   - a.engine:      Public Listener（仅挂载公开主题与强制 PublicViewer 只读路由）
+//   - a.panelEngine: Panel Listener（仅挂载内置管理 UI、认证/Step-Up 与 Agent 控制面）
+func (a *App) BuildRouter() error {
+	if err := flags.ValidateListenerConfig(); err != nil {
+		return err
+	}
+
+	trustedProxies := security.TrustedProxiesFromEnv()
+	if security.ClientIPIsSpoofable(trustedProxies) {
+		logger.Warnf("server",
+			"%s is not set: X-Forwarded-For is honoured from any peer, so client addresses in rate limiting and audit logs are caller-controlled. Set it to %q behind a local reverse proxy, or to \"none\" when exposed directly.",
+			security.TrustedProxyEnv, security.LoopbackProxies)
+	}
+
+	if !flags.SplitPanelEnabled() {
+		r := gin.New()
+		if err := configureBaseEngine(r, trustedProxies); err != nil {
+			return err
+		}
+		r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
+		cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
+			WithTrustedOrigins(flags.EffectivePublicOrigin(), flags.EffectivePanelOrigin())
+		r.Use(cors.Middleware())
+		r.Use(api.IdentityMiddleware())
+		rateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)
+		r.Use(rateLimiter.Middleware())
+		r.Use(foregroundHistoryObserverMiddleware())
+		r.Use(api.PrivateSiteMiddleware())
+		r.Use(apiNoStoreMiddleware())
+
+		closeExports := router.Register(r)
+		a.addCleanup("history-export-queue", func(context.Context) error { return closeExports() })
+		plugin.Init(r)
+		if err := plugin.LoadAll(); err != nil {
+			logger.ErrorArgs("server", "Failed to load some plugins:", err)
+		}
+		a.addCleanup("plugins", func(context.Context) error { return plugin.CloseAll() })
+
+		a.registerReloadHandlers(cors)
+		a.reload.Register("rate-limit", func(event config.ConfigEvent) {
+			rateLimiter.Update(event)
+		})
+		a.reload.Start()
+
+		a.engine = r
+		a.panelEngine = nil
+		return nil
+	}
+
+	publicEngine := gin.New()
+	if err := configureBaseEngine(publicEngine, trustedProxies); err != nil {
+		return err
+	}
+	publicEngine.Use(api.PublicViewerMiddleware())
+	publicCors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
+		WithTrustedOrigins(flags.EffectivePublicOrigin())
+	publicEngine.Use(publicCors.Middleware())
+	publicRateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)
+	publicEngine.Use(publicRateLimiter.Middleware())
+	publicEngine.Use(foregroundHistoryObserverMiddleware())
+	publicEngine.Use(api.PublicPrivateSiteMiddleware())
+	publicEngine.Use(apiNoStoreMiddleware())
+	router.MountPublicRoutes(publicEngine)
+	plugin.Init(publicEngine)
 	if err := plugin.LoadAll(); err != nil {
 		logger.ErrorArgs("server", "Failed to load some plugins:", err)
 	}
 	a.addCleanup("plugins", func(context.Context) error { return plugin.CloseAll() })
 
-	// 集中登记并启动热重载订阅。
-	a.registerReloadHandlers(cors)
+	panelEngine := gin.New()
+	if err := configureBaseEngine(panelEngine, trustedProxies); err != nil {
+		return err
+	}
+	panelEngine.Use(api.APIAuthenticationMiddleware())
+	panelCors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
+		WithTrustedOrigins(flags.EffectivePanelOrigin())
+	panelEngine.Use(panelCors.Middleware())
+	panelEngine.Use(api.IdentityMiddleware())
+	panelRateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)
+	panelEngine.Use(panelRateLimiter.Middleware())
+	panelEngine.Use(foregroundHistoryObserverMiddleware())
+	panelEngine.Use(api.PrivateSiteMiddleware())
+	panelEngine.Use(apiNoStoreMiddleware())
+	closeExports := router.MountPanelRoutes(panelEngine)
+	a.addCleanup("history-export-queue", func(context.Context) error { return closeExports() })
+
+	a.registerReloadHandlers(publicCors, panelCors)
 	a.reload.Register("rate-limit", func(event config.ConfigEvent) {
-		rateLimiter.Update(event)
+		publicRateLimiter.Update(event)
+		panelRateLimiter.Update(event)
 	})
 	a.reload.Start()
 
-	a.engine = r
+	a.engine = publicEngine
+	a.panelEngine = panelEngine
 	return nil
 }
 
@@ -723,22 +835,64 @@ func (a *App) Run() error {
 		return httpsserver.Default.Shutdown(ctx)
 	})
 
+	publicLn, err := net.Listen("tcp", flags.Listen)
+	if err != nil {
+		a.onFatal(err)
+		return fmt.Errorf("listen public (%s): %w", flags.Listen, err)
+	}
+
+	var panelLn net.Listener
+	if a.panelEngine != nil {
+		panelAddr := flags.EffectivePanelListen()
+		panelLn, err = net.Listen("tcp", panelAddr)
+		if err != nil {
+			_ = publicLn.Close()
+			a.onFatal(err)
+			return fmt.Errorf("listen panel (%s): %w", panelAddr, err)
+		}
+	}
+
+	a.addrMu.Lock()
+	a.publicAddr = publicLn.Addr().String()
+	if panelLn != nil {
+		a.panelAddr = panelLn.Addr().String()
+	} else {
+		a.panelAddr = ""
+	}
+	a.addrMu.Unlock()
+
 	rootHandler := httpsserver.Default.HTTPRedirectHandler(plugin.HTMLInjectHandler(plugin.WrapHandler(a.engine)))
 	a.server = &http.Server{
-		Addr:    flags.Listen,
+		Addr:    a.PublicAddr(),
 		Handler: h2c.NewHandler(rootHandler, &http2.Server{}),
 	}
 
-	serverErr := make(chan error, 1)
-	logger.Infof("server", "Starting server on %s ...", flags.Listen)
+	serverErr := make(chan error, 2)
+	if panelLn != nil {
+		a.panelServer = &http.Server{
+			Addr:    a.PanelAddr(),
+			Handler: h2c.NewHandler(a.panelEngine, &http2.Server{}),
+		}
+		logger.Infof("server", "Starting split listeners: public=%s panel=%s ...", a.PublicAddr(), a.PanelAddr())
+		go func() {
+			if err := a.panelServer.Serve(panelLn); err != nil && err != http.ErrServerClosed {
+				serverErr <- fmt.Errorf("panel listener: %w", err)
+			}
+		}()
+	} else {
+		a.panelServer = nil
+		logger.Infof("server", "Starting server on %s ...", a.PublicAddr())
+	}
+
 	go func() {
-		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			serverErr <- err
+		if err := a.server.Serve(publicLn); err != nil && err != http.ErrServerClosed {
+			serverErr <- fmt.Errorf("public listener: %w", err)
 		}
 	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(quit)
 
 	select {
 	case err := <-serverErr:
@@ -746,31 +900,56 @@ func (a *App) Run() error {
 		return fmt.Errorf("listen: %w", err)
 	case <-quit:
 		return a.Shutdown()
+	case <-a.stopCh:
+		if a.shutdownDone != nil {
+			<-a.shutdownDone
+		}
+		return nil
 	}
 }
 
 // Shutdown 优雅关闭：先停止接收新请求，再反序执行已登记的清理函数。
 func (a *App) Shutdown() error {
-	if a.dbReady {
-		auditlog.Log("", "", "server is shutting down", "info")
+	if a.stopCh != nil {
+		a.stopOnce.Do(func() {
+			close(a.stopCh)
+		})
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// 先关闭 HTTP 服务，停止接收新请求。
-	if a.server != nil {
-		if err := a.server.Shutdown(ctx); err != nil {
-			logger.Infof("server", "HTTP server forced to shutdown: %v", err)
+	a.shutdownOnce.Do(func() {
+		defer func() {
+			if a.shutdownDone != nil {
+				close(a.shutdownDone)
+			}
+		}()
+		if a.dbReady {
+			auditlog.Log("", "", "server is shutting down", "info")
 		}
-	}
 
-	// 反序释放资源（后进先出）。
-	for i := len(a.cleanups) - 1; i >= 0; i-- {
-		c := a.cleanups[i]
-		if err := c.fn(ctx); err != nil {
-			logger.Errorf("server", "cleanup %q failed: %v", c.name, err)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// 先关闭 HTTP 服务，停止接收新请求。
+		if a.panelServer != nil {
+			if err := a.panelServer.Shutdown(ctx); err != nil {
+				logger.Infof("server", "Panel HTTP server forced to shutdown: %v", err)
+			}
 		}
+		if a.server != nil {
+			if err := a.server.Shutdown(ctx); err != nil {
+				logger.Infof("server", "HTTP server forced to shutdown: %v", err)
+			}
+		}
+
+		// 反序释放资源（后进先出）。
+		for i := len(a.cleanups) - 1; i >= 0; i-- {
+			c := a.cleanups[i]
+			if err := c.fn(ctx); err != nil {
+				logger.Errorf("server", "cleanup %q failed: %v", c.name, err)
+			}
+		}
+	})
+	if a.shutdownDone != nil {
+		<-a.shutdownDone
 	}
 	return nil
 }
@@ -782,6 +961,12 @@ func (a *App) onFatal(err error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if a.panelServer != nil {
+		_ = a.panelServer.Shutdown(ctx)
+	}
+	if a.server != nil {
+		_ = a.server.Shutdown(ctx)
+	}
 	for i := len(a.cleanups) - 1; i >= 0; i-- {
 		c := a.cleanups[i]
 		if cerr := c.fn(ctx); cerr != nil {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/pkg/config"
@@ -180,10 +181,98 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 	}
 }
 
+// PublicViewerMiddleware forces every request on the dedicated Public Listener
+// onto an anonymous PublicViewer identity, ignoring session cookies and
+// Authorization headers so management credentials have zero authority there.
+func PublicViewerMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		anon := rpc.NewAnonymousPrincipal()
+		c.Set("public_listener", true)
+		SetPrincipal(c, anon)
+		security.SetPrincipalHeader(c, anon)
+		c.Set("role", RoleGuest)
+		c.Next()
+	}
+}
+
+// RedeemTempShareQuery exchanges a valid ?temp_key= query parameter on GET
+// requests into the sensitive temp_key cookie and marks the current request.
+func RedeemTempShareQuery(c *gin.Context) bool {
+	if c == nil || c.Request == nil || c.Request.Method != http.MethodGet {
+		return false
+	}
+	tempKey := strings.TrimSpace(c.Query("temp_key"))
+	if tempKey == "" {
+		return false
+	}
+	expireAt, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
+	if err != nil {
+		return false
+	}
+	allowKey, err := config.GetAs[string]("tempory_share_token", "")
+	if err != nil || allowKey == "" || tempKey != allowKey {
+		return false
+	}
+	now := time.Now().Unix()
+	if expireAt < now {
+		return false
+	}
+	expireSeconds := int(expireAt - now)
+	if expireSeconds > 0 {
+		security.SetSensitiveCookie(c, "temp_key", tempKey, expireSeconds)
+	}
+	c.Set("temp_share_redeemed", true)
+	return true
+}
+
+// PublicPrivateSiteMiddleware gates data routes on the dedicated Public
+// Listener when private_site is enabled. Unlike PrivateSiteMiddleware, it never
+// honors administrator session cookies or exposes login/Passkey ceremonies;
+// callers without a temporary share token are directed to KOMARI_PANEL_ORIGIN.
+func PublicPrivateSiteMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		RedeemTempShareQuery(c)
+		path := c.Request.URL.Path
+		switch path {
+		case "/ping", "/favicon.ico", "/api/public", "/api/version", "/api/me", "/api/rpc2",
+			"/komari.browser.v1.BrowserService/GetPublicInfo",
+			"/komari.browser.v1.BrowserService/GetThemeContract",
+			"/komari.browser.v1.BrowserService/GetSession":
+			c.Next()
+			return
+		}
+		if !strings.HasPrefix(path, "/api") && !strings.HasPrefix(path, "/komari.") {
+			c.Next()
+			return
+		}
+		privateSite, err := config.GetAs[bool](config.PrivateSiteKey, false)
+		if err != nil {
+			RespondError(c, http.StatusInternalServerError, "Failed to get configuration.")
+			c.Abort()
+			return
+		}
+		if !privateSite || HasTempAccess(c) {
+			c.Next()
+			return
+		}
+		resp := gin.H{
+			"status":  "error",
+			"message": "Private site is enabled; please sign in on the management panel.",
+		}
+		if panelOrigin := flags.EffectivePanelOrigin(); panelOrigin != "" {
+			resp["panel_login_url"] = panelOrigin + "/login"
+		}
+		c.AbortWithStatusJSON(http.StatusUnauthorized, resp)
+	}
+}
+
 // HasTempAccess reports whether the request carries a valid temporary share
 // cookie. Transport adapters use the same check to populate canonical RPC
 // context metadata.
 func HasTempAccess(c *gin.Context) bool {
+	if c != nil && c.GetBool("temp_share_redeemed") {
+		return true
+	}
 	tempKey, err := c.Cookie("temp_key")
 	if err != nil {
 		return false

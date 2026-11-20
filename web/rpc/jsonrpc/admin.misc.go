@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -128,6 +129,15 @@ func adminGetSettings(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.Jso
 	delete(cst, config.CloudflareTunnelTokenKey)
 	delete(cst, config.LowResourceModeKey)
 	delete(cst, metricstore.MetricDownsamplingEnabledKey)
+	if flags.SplitPanelEnabled() {
+		cst["panel_isolation_mode"] = "split"
+		cst["panel_listen_enabled"] = true
+	} else {
+		cst["panel_isolation_mode"] = "single_origin"
+		cst["panel_listen_enabled"] = false
+	}
+	cst["public_origin"] = flags.EffectivePublicOrigin()
+	cst["panel_origin"] = flags.EffectivePanelOrigin()
 	return cst, nil
 }
 
@@ -221,6 +231,10 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	// startup normalizer keeps their persisted compatibility values fixed.
 	delete(cfg, config.LowResourceModeKey)
 	delete(cfg, metricstore.MetricDownsamplingEnabledKey)
+	delete(cfg, "panel_isolation_mode")
+	delete(cfg, "panel_listen_enabled")
+	delete(cfg, "public_origin")
+	delete(cfg, "panel_origin")
 
 	// 若本次修改涉及 metrics 数据库配置，则在落库前先用「当前配置 + 本次改动」
 	// 合并出的目标配置做一次连接测试。metric store 始终启用，只要触及 metrics

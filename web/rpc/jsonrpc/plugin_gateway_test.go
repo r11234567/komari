@@ -17,11 +17,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// TestPluginRPCGatewayAccess verifies /api/rpc2 behaves as intended for plugin methods:
-// - Plugin-registered methods are allowed through /api/rpc2 for admin principals.
-// - Guest/unauthenticated requests to plugin methods are rejected by ACL (PermissionDenied).
-// - Admin internal methods (like admin:*) remain blocked on /api/rpc2.
-// - Unregistered/unloaded plugin methods are blocked by /api/rpc2.
+// TestPluginRPCGatewayAccess verifies /api/rpc2 blocks plugin, admin, and
+// write methods while serving third-party read/heartbeat compatibility methods.
 func TestPluginRPCGatewayAccess(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
@@ -45,7 +42,6 @@ func TestPluginRPCGatewayAccess(t *testing.T) {
 	engine.POST("/api/rpc2", OnRpcRequest)
 
 	const pluginMethod = "myplugin:compute"
-	// Register RPC handler as a plugin method
 	if err := rpc.Register(pluginMethod, func(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 		return map[string]any{"computed": true}, nil
 	}); err != nil {
@@ -74,33 +70,26 @@ func TestPluginRPCGatewayAccess(t *testing.T) {
 		return &resp
 	}
 
-	// 1. Admin caller calls plugin method -> Success
-	adminResp := callRPC("admin", pluginMethod, nil)
-	if adminResp.Error != nil {
-		t.Fatalf("admin call to plugin method failed: %v", adminResp.Error)
-	}
-	resMap, ok := adminResp.Result.(map[string]any)
-	if !ok || resMap["computed"] != true {
-		t.Fatalf("unexpected result: %#v", adminResp.Result)
+	// 1. Plugin methods are blocked on /api/rpc2 even for admin principals.
+	for _, role := range []string{"admin", "guest"} {
+		resp := callRPC(role, pluginMethod, nil)
+		if resp.Error == nil || resp.Error.Code != rpc.PermissionDenied {
+			t.Fatalf("plugin method must be denied on /api/rpc2 for %s, got: %#v", role, resp)
+		}
 	}
 
-	// 2. Guest caller calls plugin method -> Permission Denied
-	guestResp := callRPC("guest", pluginMethod, nil)
-	if guestResp.Error == nil || guestResp.Error.Code != rpc.PermissionDenied {
-		t.Fatalf("guest call must be denied, got: %#v", guestResp)
+	// 2. Admin and visitor-audit write methods are blocked by gateway allowlist.
+	for _, blocked := range []string{"admin:getClientList", "public:recordVisitorEvent"} {
+		resp := callRPC("admin", blocked, nil)
+		if resp.Error == nil || resp.Error.Code != rpc.PermissionDenied {
+			t.Fatalf("%s must be blocked by gateway allowlist, got: %#v", blocked, resp)
+		}
 	}
 
-	// 3. Admin calls admin:* -> Blocked by gateway allowlist
-	blockedResp := callRPC("admin", "admin:getClientList", nil)
-	if blockedResp.Error == nil || blockedResp.Error.Code != rpc.PermissionDenied {
-		t.Fatalf("admin:* must be blocked by gateway allowlist, got: %#v", blockedResp)
-	}
-
-	// 4. Unregister method -> Blocked by gateway allowlist
-	rpc.Unregister(pluginMethod)
-	unregisteredResp := callRPC("admin", pluginMethod, nil)
-	if unregisteredResp.Error == nil || unregisteredResp.Error.Code != rpc.PermissionDenied {
-		t.Fatalf("unregistered method must be blocked by gateway allowlist, got: %#v", unregisteredResp)
+	// 3. Read-only heartbeat rpc.ping succeeds without PermissionDenied.
+	pingResp := callRPC("guest", "rpc.ping", nil)
+	if pingResp.Error != nil || pingResp.Result != "pong" {
+		t.Fatalf("rpc.ping failed on /api/rpc2: %#v", pingResp)
 	}
 }
 

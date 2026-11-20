@@ -20,6 +20,9 @@ func init() {
 	// 从环境变量获取监听地址
 	listenAddr := GetEnv("KOMARI_LISTEN", "0.0.0.0:25774")
 	ServerCmd.PersistentFlags().StringVarP(&flags.Listen, "listen", "l", listenAddr, "监听地址 [env: KOMARI_LISTEN]")
+	ServerCmd.PersistentFlags().StringVar(&flags.PanelListen, "panel-listen", "", "管理台与控制面独立监听地址 [env: KOMARI_PANEL_LISTEN]")
+	ServerCmd.PersistentFlags().StringVar(&flags.PanelOrigin, "panel-origin", "", "管理台外部 Origin [env: KOMARI_PANEL_ORIGIN]")
+	ServerCmd.PersistentFlags().StringVar(&flags.PublicOrigin, "public-origin", "", "公开状态页外部 Origin [env: KOMARI_PUBLIC_ORIGIN]")
 	RootCmd.AddCommand(ServerCmd)
 }
 

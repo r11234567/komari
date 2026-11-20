@@ -19,6 +19,7 @@ type CorsController struct {
 	mu             sync.RWMutex
 	enabled        bool
 	allowedOrigins string
+	extraOrigins   string
 }
 
 // NewCorsController 使用初始配置构造一个 CORS 控制器。
@@ -27,6 +28,22 @@ func NewCorsController(enabled bool, allowedOrigins string) *CorsController {
 		enabled:        enabled,
 		allowedOrigins: allowedOrigins,
 	}
+}
+
+// WithTrustedOrigins binds listener-specific configured origins (such as
+// KOMARI_PUBLIC_ORIGIN on the public listener or KOMARI_PANEL_ORIGIN on the
+// panel listener) without merging public and panel origins across listeners.
+func (ctrl *CorsController) WithTrustedOrigins(origins ...string) *CorsController {
+	cleaned := make([]string, 0, len(origins))
+	for _, origin := range origins {
+		if trimmed := strings.TrimSpace(origin); trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	ctrl.mu.Lock()
+	ctrl.extraOrigins = strings.Join(cleaned, ",")
+	ctrl.mu.Unlock()
+	return ctrl
 }
 
 // Update 根据配置事件刷新 CORS 相关状态。返回是否有字段发生变化。
@@ -45,10 +62,10 @@ func (ctrl *CorsController) Update(event config.ConfigEvent) bool {
 	return changed
 }
 
-func (ctrl *CorsController) snapshot() (bool, string) {
+func (ctrl *CorsController) snapshot() (bool, string, string) {
 	ctrl.mu.RLock()
 	defer ctrl.mu.RUnlock()
-	return ctrl.enabled, ctrl.allowedOrigins
+	return ctrl.enabled, ctrl.allowedOrigins, ctrl.extraOrigins
 }
 
 // Middleware 返回读取当前控制器状态的 gin 中间件。
@@ -59,7 +76,7 @@ func (ctrl *CorsController) Middleware() gin.HandlerFunc {
 			return
 		}
 
-		corsEnabled, corsAllowedOrigins := ctrl.snapshot()
+		corsEnabled, corsAllowedOrigins, extraOrigins := ctrl.snapshot()
 
 		if !corsEnabled {
 			c.Next()
@@ -70,7 +87,9 @@ func (ctrl *CorsController) Middleware() gin.HandlerFunc {
 		allowOrigin := ""
 		allowCredentials := false
 		if origin != "" {
-			if OriginMatchesRequest(origin, c.Request) || OriginInAllowlist(origin, corsAllowedOrigins) {
+			if OriginMatchesRequest(origin, c.Request) ||
+				OriginInAllowlist(origin, corsAllowedOrigins) ||
+				(extraOrigins != "" && OriginInAllowlist(origin, extraOrigins)) {
 				allowOrigin = origin
 				allowCredentials = true
 			} else if IsAPIKeyRequest(c.Request) {

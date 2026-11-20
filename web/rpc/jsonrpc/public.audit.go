@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
@@ -128,6 +131,47 @@ func publicRecordVisitorEvent(ctx context.Context, req *rpc.JsonRpcRequest) (any
 
 	auditlog.Log(ip, uuid, message, "visitor")
 	return map[string]any{"status": "success"}, nil
+}
+
+const visitorAuditMaxRequestBytes = 8 << 10
+
+// RecordVisitorEventHTTP handles bounded native visitor audit writes outside
+// the read-only /api/rpc2 compatibility transport.
+func RecordVisitorEventHTTP(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, visitorAuditMaxRequestBytes)
+	rawBody, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"status": "error", "message": "visitor event payload too large"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "invalid request body"})
+		return
+	}
+	var params map[string]any
+	if len(rawBody) > 0 {
+		if err := json.Unmarshal(rawBody, &params); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "invalid JSON payload"})
+			return
+		}
+	}
+	meta := &rpc.ContextMeta{
+		Principal: rpc.NewAnonymousPrincipal(),
+		RemoteIP:  c.ClientIP(),
+		UserAgent: c.GetHeader("User-Agent"),
+	}
+	ctx := rpc.NewContextWithMeta(c.Request.Context(), meta)
+	result, rpcErr := publicRecordVisitorEvent(ctx, &rpc.JsonRpcRequest{
+		Version: rpc.RPC_VERSION,
+		Method:  "public:recordVisitorEvent",
+		Params:  params,
+	})
+	if rpcErr != nil {
+		c.JSON(rpcErrorHTTPStatus(rpcErr.Code), gin.H{"status": "error", "message": rpcErr.Message})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "success", "data": result})
 }
 
 func newVisitorAuditRateLimiter() *visitorAuditRateLimiter {

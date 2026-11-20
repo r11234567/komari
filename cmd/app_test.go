@@ -1,13 +1,19 @@
 package cmd
 
 import (
+	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/pkg/config"
 	installweb "github.com/komari-monitor/komari/web/install"
@@ -112,5 +118,125 @@ func TestMetricCompactCycleStateConcurrentAddAndReset(t *testing.T) {
 	}
 	if written, err := state.finish(); written != 0 || err != nil {
 		t.Fatalf("reset cycle = buckets %d, err %v; want zero state", written, err)
+	}
+}
+
+func TestSplitListenersStartServeAndShutdownWithoutPortLeak(t *testing.T) {
+	if os.Getenv("KOMARI_TEST_SPLIT_LISTENERS") != "1" {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSplitListenersStartServeAndShutdownWithoutPortLeak$", "-test.v")
+		cmd.Dir = t.TempDir()
+		cmd.Env = append(os.Environ(), "KOMARI_TEST_SPLIT_LISTENERS=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("split listener subprocess failed: %v\n%s", err, out)
+		}
+		return
+	}
+
+	gin.SetMode(gin.TestMode)
+
+	origListen, origPanel, origPanelOrigin, origPublicOrigin, origDBFile, origDBType := flags.Listen, flags.PanelListen, flags.PanelOrigin, flags.PublicOrigin, flags.DatabaseFile, flags.DatabaseType
+	t.Cleanup(func() {
+		flags.Listen, flags.PanelListen, flags.PanelOrigin, flags.PublicOrigin, flags.DatabaseFile, flags.DatabaseType = origListen, origPanel, origPanelOrigin, origPublicOrigin, origDBFile, origDBType
+	})
+
+	flags.DatabaseType = "sqlite"
+	flags.DatabaseFile = "./data/komari.db"
+	flags.Listen = "127.0.0.1:0"
+	flags.PanelListen = "127.0.0.1:0"
+	flags.PublicOrigin = "https://status.example.com"
+	flags.PanelOrigin = "https://panel.example.com"
+
+	app := NewApp()
+	if err := app.Bootstrap(); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if err := app.BuildRouter(); err != nil {
+		_ = app.Shutdown()
+		t.Fatalf("BuildRouter: %v", err)
+	}
+
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- app.Run()
+	}()
+
+	var pubAddr, panAddr string
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		pubAddr = app.PublicAddr()
+		panAddr = app.PanelAddr()
+		if pubAddr != "" && panAddr != "" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pubAddr == "" || panAddr == "" || pubAddr == panAddr {
+		_ = app.Shutdown()
+		t.Fatalf("listeners failed to bind distinct addresses: public=%q panel=%q", pubAddr, panAddr)
+	}
+
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	// Public listener serves /ping (200) and rejects /admin and /api/admin/* (404).
+	resp, err := client.Get("http://" + pubAddr + "/ping")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		_ = app.Shutdown()
+		t.Fatalf("public /ping = %v, err=%v", resp, err)
+	}
+	_ = resp.Body.Close()
+
+	for _, path := range []string{"/admin", "/api/admin/settings/"} {
+		resp, err = client.Get("http://" + pubAddr + path)
+		if err != nil || resp.StatusCode != http.StatusNotFound {
+			_ = app.Shutdown()
+			t.Fatalf("public %s = %v, err=%v; want 404", path, resp, err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	// Panel listener serves /admin (200) and rejects /api/rpc2 and /themes/* (404).
+	resp, err = client.Get("http://" + panAddr + "/admin")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		_ = app.Shutdown()
+		t.Fatalf("panel /admin = %v, err=%v; want 200", resp, err)
+	}
+	_ = resp.Body.Close()
+
+	for _, path := range []string{"/api/rpc2", "/themes/default/komari-theme.json"} {
+		resp, err = client.Get("http://" + panAddr + path)
+		if err != nil || resp.StatusCode != http.StatusNotFound {
+			_ = app.Shutdown()
+			t.Fatalf("panel %s = %v, err=%v; want 404", path, resp, err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	// Graceful Shutdown releases both sockets and exits Run cleanly.
+	if err := app.Shutdown(); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run returned error after Shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not exit after Shutdown")
+	}
+
+	for _, addr := range []string{pubAddr, panAddr} {
+		rebind, err := net.Listen("tcp", addr)
+		if err != nil {
+			t.Fatalf("socket %s remained bound after Shutdown: %v", addr, err)
+		}
+		_ = rebind.Close()
 	}
 }

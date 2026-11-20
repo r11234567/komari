@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/utils/fsmove"
 	websecurity "github.com/komari-monitor/komari/web/security"
@@ -545,6 +546,10 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			}
 		}()
 		reqPath := c.Request.URL.Path
+		if isUnmountedAPIOrConnectPath(reqPath) {
+			c.Status(http.StatusNotFound)
+			return
+		}
 		cfg := getConfig()
 		// index.html is a live document, not a static asset. It must pass
 		// through serveIndex so site metadata and custom Head/Body content
@@ -584,13 +589,246 @@ func setNoStoreHeaders(c *gin.Context) {
 	c.Header("Expires", "0")
 }
 
+func isUnmountedAPIOrConnectPath(requestPath string) bool {
+	return requestPath == "/api" ||
+		strings.HasPrefix(requestPath, "/api/") ||
+		strings.HasPrefix(requestPath, "/komari.")
+}
+
 func isPrivateApplicationPath(requestPath string) bool {
-	for _, prefix := range []string{"/admin", "/login", "/terminal", "/install", "/manage", "/bind", "/bind-login", "/enroll"} {
+	for _, prefix := range []string{"/admin", "/login", "/terminal", "/install", "/manage", "/bind", "/bind-login", "/enroll", "/database-recovery"} {
 		if requestPath == prefix || strings.HasPrefix(requestPath, prefix+"/") {
 			return true
 		}
 	}
 	return false
+}
+
+func redeemOrCheckTempShare(c *gin.Context) bool {
+	expireAt, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
+	if err != nil {
+		return false
+	}
+	allowKey, err := config.GetAs[string]("tempory_share_token", "")
+	if err != nil || allowKey == "" {
+		return false
+	}
+	now := time.Now().Unix()
+	if expireAt < now {
+		return false
+	}
+	if queryKey := strings.TrimSpace(c.Query("temp_key")); queryKey != "" && queryKey == allowKey {
+		if expireSeconds := int(expireAt - now); expireSeconds > 0 {
+			websecurity.SetSensitiveCookie(c, "temp_key", queryKey, expireSeconds)
+		}
+		return true
+	}
+	cookieKey, err := c.Cookie("temp_key")
+	return err == nil && cookieKey == allowKey
+}
+
+func renderPrivateSitePublicNotice(sitename, panelOrigin string) []byte {
+	title := strings.TrimSpace(sitename)
+	if title == "" {
+		title = "Komari Monitor"
+	}
+	escapedTitle := html.EscapeString(title)
+	actionMarkup := `<p class="hint">Please sign in from the dedicated management panel domain configured by your administrator.</p>`
+	if strings.TrimSpace(panelOrigin) != "" {
+		loginURL := html.EscapeString(strings.TrimSuffix(strings.TrimSpace(panelOrigin), "/") + "/login")
+		actionMarkup = `<p><a class="btn" href="` + loginURL + `" rel="noopener noreferrer">Proceed to Management Panel</a></p>`
+	}
+	doc := `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + escapedTitle + `</title>` +
+		`<style>:root{color-scheme:light dark;font-family:system-ui,-apple-system,sans-serif}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}.card{max-width:460px;padding:28px;border:1px solid rgba(128,128,128,.3);border-radius:12px}h1{margin:0 0 12px;font-size:20px}p{margin:0 0 16px;line-height:1.5;opacity:.85}.btn{display:inline-block;padding:10px 16px;border-radius:8px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600}.hint{font-size:14px;margin-bottom:0}</style></head>` +
+		`<body><main class="card"><h1>` + escapedTitle + `</h1><p>Private site mode is enabled. Credentials and Passkeys are never accepted on the public status listener.</p>` + actionMarkup + `</main></body></html>`
+	return []byte(doc)
+}
+
+// StaticPublic mounts only public theme assets and SPA routes on the dedicated
+// Public Listener. Management routes (/admin, /login, /terminal, /bind, etc.)
+// and /system-assets/* are intentionally unmounted and return 404.
+func StaticPublic(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
+	getConfig := func() map[string]any {
+		cfg, _ := config.GetMany(map[string]any{
+			config.DescriptionKey: "A simple server monitor tool.",
+			config.CustomHeadKey:  "",
+			config.CustomBodyKey:  "",
+			config.SitenameKey:    "Komari Monitor",
+			config.ThemeKey:       DefaultTheme,
+			config.PrivateSiteKey: false,
+		})
+		return cfg
+	}
+
+	getPublicFileContent := func(themeID, relativePath string) ([]byte, string, bool) {
+		if IsLocalThemeUsable(themeID) {
+			return localThemeFileContent(themeID, relativePath)
+		}
+		return embeddedFileContent("rescueTheme", relativePath)
+	}
+
+	servePublicIndex := func(c *gin.Context, cfg map[string]any, tempShareValid bool) {
+		setNoStoreHeaders(c)
+		privateSite, _ := cfg[config.PrivateSiteKey].(bool)
+		if privateSite && !tempShareValid {
+			c.Header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+			c.Header("X-Content-Type-Options", "nosniff")
+			sitename, _ := cfg[config.SitenameKey].(string)
+			c.Data(http.StatusOK, "text/html; charset=utf-8", renderPrivateSitePublicNotice(sitename, flags.EffectivePanelOrigin()))
+			return
+		}
+
+		themeName, _ := cfg[config.ThemeKey].(string)
+		content, _, exists := getPublicFileContent(themeName, path.Join(DistDir, IndexFile))
+		if !exists {
+			c.String(http.StatusNotFound, "Application index is unavailable.")
+			return
+		}
+
+		htmlStr := string(content)
+		if language, err := c.Cookie(LanguageCookieName); err == nil {
+			htmlStr = replaceHTMLLanguage(htmlStr, language)
+		}
+		customHead, _ := cfg[config.CustomHeadKey].(string)
+		customBody, _ := cfg[config.CustomBodyKey].(string)
+		description, _ := cfg[config.DescriptionKey].(string)
+		sitename, _ := cfg[config.SitenameKey].(string)
+
+		htmlStr = injectCustomHTML(htmlStr, customHead, customBody)
+		rendered := renderPublicDocumentTitle(
+			strings.ReplaceAll(htmlStr, "A simple server monitor tool.", description),
+			sitename,
+		)
+		// Never inject native_login_bridge.js on the Public Listener: public
+		// status origins never accept passwords or Passkeys.
+		c.Data(http.StatusOK, "text/html; charset=utf-8",
+			[]byte(injectHTTPErrorNotice(injectThemeChangeReload(rendered))))
+	}
+
+	r.GET("/favicon.ico", func(c *gin.Context) {
+		setNoStoreHeaders(c)
+		localFavicon := filepath.Join(DataDir, FaviconFile)
+		if _, err := os.Stat(localFavicon); err == nil {
+			c.Header("Content-Type", contentTypeForPath(localFavicon))
+			c.File(localFavicon)
+			return
+		}
+		cfg := getConfig()
+		themeName, _ := cfg[config.ThemeKey].(string)
+		themeFaviconPath := path.Join(DistDir, FaviconFile)
+		if content, mimeType, exists := getPublicFileContent(themeName, themeFaviconPath); exists {
+			c.Data(http.StatusOK, mimeType, content)
+			return
+		}
+		if content, mimeType, exists := embeddedFileContent("systemUI", themeFaviconPath); exists {
+			c.Data(http.StatusOK, mimeType, content)
+			return
+		}
+		c.Status(http.StatusNotFound)
+	})
+
+	r.GET("/themes/:id/*path", func(c *gin.Context) {
+		content, mimeType, exists := localThemeFileContent(c.Param("id"), c.Param("path"))
+		if !exists {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		c.Data(http.StatusOK, mimeType, content)
+	})
+
+	noRoute(func(c *gin.Context) {
+		if c.Request.Method != http.MethodGet {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		reqPath := c.Request.URL.Path
+		if isPrivateApplicationPath(reqPath) ||
+			strings.HasPrefix(reqPath, "/system-assets/") ||
+			isUnmountedAPIOrConnectPath(reqPath) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		tempShareValid := redeemOrCheckTempShare(c)
+		cfg := getConfig()
+		if reqPath == "/index.html" {
+			servePublicIndex(c, cfg, tempShareValid)
+			return
+		}
+		themeName, _ := cfg[config.ThemeKey].(string)
+		if content, mimeType, exists := getPublicFileContent(themeName, path.Join(DistDir, reqPath)); exists {
+			setStaticCacheHeaders(c, reqPath)
+			c.Data(http.StatusOK, mimeType, content)
+			return
+		}
+		if ext := filepath.Ext(reqPath); ext != "" && ext != ".html" {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		servePublicIndex(c, cfg, tempShareValid)
+	})
+}
+
+// StaticPanel mounts only the built-in trusted management UI (systemUI) on the
+// dedicated Panel Listener. Third-party theme files (/themes/*) and public SPA
+// routes are never mounted and return 404.
+func StaticPanel(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
+	serveSystemIndex := func(c *gin.Context) {
+		setNoStoreHeaders(c)
+		content, _, exists := embeddedFileContent("systemUI", path.Join(DistDir, IndexFile))
+		if !exists {
+			c.String(http.StatusNotFound, "Application index is unavailable.")
+			return
+		}
+		htmlStr := string(content)
+		if language, err := c.Cookie(LanguageCookieName); err == nil {
+			htmlStr = replaceHTMLLanguage(htmlStr, language)
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(injectHTTPErrorNotice(htmlStr)))
+	}
+
+	r.GET("/favicon.ico", func(c *gin.Context) {
+		setNoStoreHeaders(c)
+		localFavicon := filepath.Join(DataDir, FaviconFile)
+		if _, err := os.Stat(localFavicon); err == nil {
+			c.Header("Content-Type", contentTypeForPath(localFavicon))
+			c.File(localFavicon)
+			return
+		}
+		if content, mimeType, exists := embeddedFileContent("systemUI", path.Join(DistDir, FaviconFile)); exists {
+			c.Data(http.StatusOK, mimeType, content)
+			return
+		}
+		c.Status(http.StatusNotFound)
+	})
+
+	r.GET("/system-assets/*path", func(c *gin.Context) {
+		filePath := path.Join(DistDir, c.Param("path"))
+		content, mimeType, exists := embeddedFileContent("systemUI", filePath)
+		if !exists {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		setStaticCacheHeaders(c, c.Request.URL.Path)
+		c.Data(http.StatusOK, mimeType, content)
+	})
+
+	noRoute(func(c *gin.Context) {
+		if c.Request.Method != http.MethodGet {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		reqPath := c.Request.URL.Path
+		if reqPath == "/" {
+			setNoStoreHeaders(c)
+			c.Redirect(http.StatusTemporaryRedirect, "/admin")
+			return
+		}
+		if !isPrivateApplicationPath(reqPath) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		serveSystemIndex(c)
+	})
 }
 
 func setStaticCacheHeaders(c *gin.Context, requestPath string) {

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -1164,4 +1166,132 @@ func UpdateThemeSettings(c *gin.Context) {
 		Assign(models.ThemeConfiguration{Short: theme, Data: string(data)}).
 		FirstOrCreate(&themeCfg)
 	api.RespondSuccess(c, nil)
+}
+
+const maxThemePreviewSize = 16 << 20
+
+// GetThemeManifest serves an installed theme's komari-theme.json over the
+// authenticated admin surface so the Panel listener never mounts /themes/*.
+func GetThemeManifest(c *gin.Context) {
+	short := strings.TrimSpace(c.Param("short"))
+	if !isThemeShort(short) {
+		api.RespondError(c, http.StatusBadRequest, "无效的主题名称")
+		return
+	}
+
+	themesRoot, err := os.OpenRoot("./data/theme")
+	if err != nil {
+		api.RespondError(c, http.StatusNotFound, "主题不存在")
+		return
+	}
+	defer themesRoot.Close()
+
+	file, err := themesRoot.Open(filepath.Join(short, "komari-theme.json"))
+	if err != nil {
+		api.RespondError(c, http.StatusNotFound, "主题不存在")
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxThemeManifestSize+1))
+	if err != nil || len(data) == 0 || len(data) > maxThemeManifestSize {
+		api.RespondError(c, http.StatusBadRequest, "读取主题配置失败")
+		return
+	}
+
+	var manifest map[string]any
+	if err := json.Unmarshal(data, &manifest); err != nil || manifest == nil {
+		api.RespondError(c, http.StatusBadRequest, "主题配置格式错误")
+		return
+	}
+
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Content-Security-Policy", "default-src 'none'; sandbox")
+	api.RespondSuccess(c, manifest)
+}
+
+// GetThemePreview serves an installed theme's raster preview image over the
+// admin API, refusing SVG/HTML/script media types and verifying magic bytes.
+func GetThemePreview(c *gin.Context) {
+	short := strings.TrimSpace(c.Param("short"))
+	if !isThemeShort(short) {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+
+	configPath, err := safepath.JoinUnder("./data/theme", filepath.Join(short, "komari-theme.json"))
+	if err != nil {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+	themeInfo, err := loadThemeConfig(configPath)
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	previewRel := strings.TrimSpace(themeInfo.Preview)
+	if previewRel == "" || strings.Contains(previewRel, "\\") {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	cleanRel := path.Clean(strings.TrimPrefix(previewRel, "/"))
+	if cleanRel == "." || cleanRel == ".." || strings.HasPrefix(cleanRel, "../") {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+	switch strings.ToLower(path.Ext(cleanRel)) {
+	case ".png", ".jpg", ".jpeg", ".webp", ".gif":
+	default:
+		c.Status(http.StatusUnsupportedMediaType)
+		return
+	}
+
+	themeRoot, err := os.OpenRoot(filepath.Join("./data/theme", short))
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	defer themeRoot.Close()
+
+	file, err := themeRoot.Open(filepath.FromSlash(cleanRel))
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.IsDir() || info.Size() <= 0 || info.Size() > maxThemePreviewSize {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	content, err := io.ReadAll(io.LimitReader(file, maxThemePreviewSize+1))
+	if err != nil || len(content) == 0 || len(content) > maxThemePreviewSize {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	mimeType, ok := detectSafeRasterImageMIME(content)
+	if !ok {
+		c.Status(http.StatusUnsupportedMediaType)
+		return
+	}
+	c.Header("Cache-Control", "private, max-age=300")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Content-Security-Policy", "default-src 'none'; sandbox")
+	c.Data(http.StatusOK, mimeType, content)
+}
+
+func detectSafeRasterImageMIME(data []byte) (string, bool) {
+	switch {
+	case len(data) >= 8 && bytes.Equal(data[:8], []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}):
+		return "image/png", true
+	case len(data) >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff:
+		return "image/jpeg", true
+	case len(data) >= 6 && (bytes.Equal(data[:6], []byte("GIF87a")) || bytes.Equal(data[:6], []byte("GIF89a"))):
+		return "image/gif", true
+	case len(data) >= 12 && bytes.Equal(data[:4], []byte("RIFF")) && bytes.Equal(data[8:12], []byte("WEBP")):
+		return "image/webp", true
+	default:
+		return "", false
+	}
 }
