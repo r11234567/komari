@@ -39,31 +39,22 @@ func TestHTMLInjectorLeavesFileDataPlaneUnwrapped(t *testing.T) {
 	}
 }
 
-func TestHTMLInjectorLoginCompatScopedStrictlyToKomariPasskey(t *testing.T) {
+func TestHTMLInjectorBlocksAllPluginsOnLoginAndProtectedPaths(t *testing.T) {
 	manager := &Manager{injects: []*injectEntry{
 		{short: "fixture", head: `<meta name="other" content="blocked">`},
-		{short: "komari-passkey", head: `<meta name="passkey" content="compat">`},
+		{short: "komari-passkey", head: `<meta name="passkey" content="legacy">`},
 	}}
 	handler := manager.htmlInjectHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte("<html><head></head><body>Login</body></html>"))
 	}))
 
-	// Default compat mode: /login and /login/ inject ONLY komari-passkey, never arbitrary plugins.
-	for _, loginPath := range []string{"/login", "/login/", "/login?next=%2Fadmin"} {
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, loginPath, nil))
-		if !strings.Contains(rec.Body.String(), `name="passkey"`) {
-			t.Fatalf("komari-passkey compat injection missing on %s: %q", loginPath, rec.Body.String())
-		}
-		if strings.Contains(rec.Body.String(), `name="other"`) {
-			t.Fatalf("generic plugin leaked into %s: %q", loginPath, rec.Body.String())
-		}
-	}
-
-	// Hard-protected routes including /login/verify, private SPA routes, and normalized paths
-	// still reject even komari-passkey.
+	// P2B removes the temporary /login compat exception: all login, verify,
+	// private SPA, and control-plane routes unconditionally reject every plugin.
 	for _, blocked := range []string{
+		"/login",
+		"/login/",
+		"/login?next=%2Fadmin",
 		"/login/verify",
 		"/login/verify/",
 		"/admin",
@@ -79,18 +70,8 @@ func TestHTMLInjectorLoginCompatScopedStrictlyToKomariPasskey(t *testing.T) {
 	} {
 		recBlocked := httptest.NewRecorder()
 		handler.ServeHTTP(recBlocked, httptest.NewRequest(http.MethodGet, blocked, nil))
-		if strings.Contains(recBlocked.Body.String(), `name="passkey"`) {
-			t.Fatalf("komari-passkey must not inject into %s", blocked)
-		}
-	}
-
-	// Explicit disable switch cuts off komari-passkey on /login and /login/ too.
-	t.Setenv("KOMARI_DISABLE_LEGACY_LOGIN_PLUGIN_COMPAT", "true")
-	for _, loginPath := range []string{"/login", "/login/"} {
-		recDisabled := httptest.NewRecorder()
-		handler.ServeHTTP(recDisabled, httptest.NewRequest(http.MethodGet, loginPath, nil))
-		if strings.Contains(recDisabled.Body.String(), `name="passkey"`) {
-			t.Fatalf("compat disable switch did not block %s injection: %q", loginPath, recDisabled.Body.String())
+		if strings.Contains(recBlocked.Body.String(), `name="passkey"`) || strings.Contains(recBlocked.Body.String(), `name="other"`) {
+			t.Fatalf("plugin must not inject into %s: %q", blocked, recBlocked.Body.String())
 		}
 	}
 }

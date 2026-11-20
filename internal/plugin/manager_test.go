@@ -51,13 +51,18 @@ func TestManagerSwitchRouteCallAndLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Register a test RPC method the plugin calls through server.call.
+	// Register a test RPC method and explicitly allowlist it for this test.
 	if err := rpc.Register("plugin:testEcho", func(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 		return req.Params, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	defer rpc.Unregister("plugin:testEcho")
+	rpc.Allow("plugin:testEcho", rpc.RoleGuest)
+	SetSystemRPCAllowlist("plugin:testEcho")
+	defer func() {
+		SetSystemRPCAllowlist()
+		rpc.Unregister("plugin:testEcho")
+	}()
 
 	rec := httptest.NewRecorder()
 	engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/plug?x=7", nil))

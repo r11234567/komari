@@ -5,8 +5,8 @@
 // exposed as __storageDir__ (which survives plugin updates), declares runtime
 // permissions in its manifest, and receives the host-injected "server" module
 // (server.route / server.call / server.hook, whose ws kinds can intercept
-// WebSocket connections and frames). Plugins run with admin authority inside
-// the system.
+// WebSocket connections and frames). Plugins never receive administrator
+// authority and may only invoke explicitly allowlisted non-privileged RPCs.
 //
 // Lifecycle: plugins are installed as directories under DataDir. The
 // persisted state file (state.json) records which plugins are enabled, which
@@ -16,6 +16,7 @@
 package plugin
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -111,6 +112,9 @@ type Manager struct {
 
 	logsMu sync.Mutex
 	logs   map[string]*LogBuffer
+
+	rpcAllowMu   sync.RWMutex
+	rpcAllowlist map[string]struct{}
 }
 
 // Instance is one loaded plugin runtime plus its host bindings.
@@ -119,6 +123,8 @@ type Instance struct {
 	mu                   sync.RWMutex
 	info                 models.Plugin
 	dir                  string
+	ctx                  context.Context
+	cancel               context.CancelFunc
 	runtime              *jsruntime.Runtime
 	host                 *jsruntime.Host
 	handlers             map[string]moejs.Value   // "METHOD path" -> current route handler
@@ -311,7 +317,8 @@ func (m *Manager) load(short string) error {
 	logs.Reset()
 	_, _ = logs.Write([]byte("[plugin] loading " + short + "\n"))
 
-	inst := &Instance{generation: runtimeGeneration.Add(1), info: info, dir: dir, handlers: make(map[string]moejs.Value), statics: make(map[string]*staticConfig)}
+	instCtx, instCancel := context.WithCancel(context.Background())
+	inst := &Instance{generation: runtimeGeneration.Add(1), info: info, dir: dir, ctx: instCtx, cancel: instCancel, handlers: make(map[string]moejs.Value), statics: make(map[string]*staticConfig)}
 	m.mu.Lock()
 	if _, ok := m.instances[short]; ok {
 		m.mu.Unlock()
@@ -385,6 +392,9 @@ func (m *Manager) dropInstance(short string, inst *Instance) {
 	}
 	delete(m.instances, short)
 	m.mu.Unlock()
+	if inst.cancel != nil {
+		inst.cancel()
+	}
 	_ = m.unregisterNotificationChannels(inst)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -428,6 +438,9 @@ func (m *Manager) unload(short string) error {
 	}
 	delete(m.instances, short)
 	m.mu.Unlock()
+	if inst.cancel != nil {
+		inst.cancel()
+	}
 
 	inst.mu.RLock()
 	rt := inst.runtime

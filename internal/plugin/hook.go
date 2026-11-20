@@ -203,7 +203,7 @@ func (m *Manager) wrapHandler(next http.Handler) http.Handler {
 					return
 				}
 			}
-			if protectedWorkspacePath(req.URL.Path) || (isLegacyLoginPagePath(req.URL.Path) && !isLegacyLoginPagePath(r.URL.Path)) {
+			if protectedWorkspacePath(req.URL.Path) {
 				http.Error(w, "plugin hooks cannot redirect into the workspace", http.StatusForbidden)
 				return
 			}
