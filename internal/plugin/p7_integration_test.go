@@ -89,8 +89,8 @@ func TestPluginRPCRegistrationAndLifecycle(t *testing.T) {
 }
 
 // TestPluginInterPluginAndSystemRPCCall verifies server.call():
-// 1. Calling system RPC methods (with admin privileges).
-// 2. Inter-plugin RPC calling between two loaded plugins.
+// 1. Admin RPC methods are NEVER callable via forged admin credentials.
+// 2. Explicitly allowlisted inter-plugin RPC calls succeed with unprivileged guest principal.
 // 3. Permission enforcement (allowSystemRPC: false rejects server.call).
 func TestPluginInterPluginAndSystemRPCCall(t *testing.T) {
 	withTempDataDir(t)
@@ -98,17 +98,17 @@ func TestPluginInterPluginAndSystemRPCCall(t *testing.T) {
 	engine := gin.New()
 	Init(engine)
 
-	// Register a mock system rpc method for testing
+	// Register a mock admin RPC method: plugins must NEVER reach it.
 	systemCalled := false
 	_ = rpc.Register("admin:testSystemAction", func(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-		meta := rpc.MetaFromContext(ctx)
-		if meta == nil || meta.Principal == nil || !meta.Principal.HasRole(rpc.RoleAdmin) {
-			return nil, &rpc.JsonRpcError{Code: rpc.PermissionDenied, Message: "admin required"}
-		}
 		systemCalled = true
 		return map[string]any{"status": "ok", "system": true}, nil
 	})
-	t.Cleanup(func() { rpc.Unregister("admin:testSystemAction") })
+	SetSystemRPCAllowlist("pluginA:add", "admin:testSystemAction") // admin:* must be ignored even if passed
+	t.Cleanup(func() {
+		SetSystemRPCAllowlist()
+		rpc.Unregister("admin:testSystemAction")
+	})
 
 	// Plugin A: provider plugin registering pluginA:add
 	zipA := writePluginZip(t, map[string]string{
@@ -129,24 +129,23 @@ func TestPluginInterPluginAndSystemRPCCall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Plugin B: consumer plugin with allowSystemRPC: true calling pluginA:add and admin:testSystemAction
+	// Plugin B: consumer plugin with allowSystemRPC: true calling pluginA:add and attempting admin:testSystemAction
 	zipB := writePluginZip(t, map[string]string{
 		"komari-plugin.json": `{"name":"PluginB","short":"plugin-b","version":"1.0.0","permissions":{"allowSystemRPC":true,"allowRoutes":true,"timeout":5}}`,
 		"script.js": `
 			const server = require("server");
 			function load() {
 				server.route("GET", "/test-calls", async (req, res) => {
+					const addRes = await server.call("pluginA:add", { a: 15, b: 25 });
+					let adminDenied = false;
 					try {
-						const addRes = await server.call("pluginA:add", { a: 15, b: 25 });
-						const sysRes = await server.call("admin:testSystemAction");
-						res.statusCode = 200;
-						res.setHeader("Content-Type", "application/json");
-						res.end(JSON.stringify({ add: addRes, sys: sysRes }));
+						await server.call("admin:testSystemAction");
 					} catch (e) {
-						res.statusCode = 500;
-						res.setHeader("Content-Type", "application/json");
-						res.end(JSON.stringify({ error: e.message }));
+						adminDenied = true;
 					}
+					res.statusCode = 200;
+					res.setHeader("Content-Type", "application/json");
+					res.end(JSON.stringify({ add: addRes, adminDenied }));
 				});
 			}
 		`,
@@ -172,8 +171,8 @@ func TestPluginInterPluginAndSystemRPCCall(t *testing.T) {
 	if addRes["sum"] != float64(40) {
 		t.Fatalf("expected sum 40, got %#v", addRes)
 	}
-	if !systemCalled {
-		t.Fatal("expected admin:testSystemAction to be called with admin credentials")
+	if out["adminDenied"] != true || systemCalled {
+		t.Fatalf("admin:testSystemAction must be denied before dispatch: adminDenied=%v systemCalled=%v", out["adminDenied"], systemCalled)
 	}
 
 	// Plugin C: without allowSystemRPC attempting server.call

@@ -140,14 +140,18 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 			params := callParams(vm, args)
 			promise, resolve, reject := vm.NewPromise()
 			go func() {
-				if !inst.info.Permissions.AllowSystemRPC {
+				meta, authErr := m.authorizePluginRPC(inst, method)
+				if authErr != nil {
 					host.RunOnLoop(func(vm *moejs.Runtime) {
-						_ = reject(native.GoError(vm, errors.New("server.call requires the \"system RPC\" permission (allowSystemRPC)")))
+						_ = reject(engine.ObjectValue(jsRPCError(vm, authErr)))
 					})
 					return
 				}
-				meta := &rpc.ContextMeta{Permission: rpc.RoleAdmin, Principal: rpc.PrincipalFromRole(rpc.RoleAdmin)}
-				bounded, cancel := context.WithTimeout(context.Background(), host.Timeout())
+				baseCtx := inst.ctx
+				if baseCtx == nil {
+					baseCtx = context.Background()
+				}
+				bounded, cancel := context.WithTimeout(baseCtx, host.Timeout())
 				defer cancel()
 				ctx := rpc.NewContextWithMeta(bounded, meta)
 				resp := rpc.CallWithContext(ctx, nil, method, params)

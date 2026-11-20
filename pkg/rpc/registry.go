@@ -68,6 +68,14 @@ func Unregister(method string) bool {
 	return exists
 }
 
+// HasMethod reports whether method is currently registered.
+func HasMethod(method string) bool {
+	muHandlers.RLock()
+	_, ok := handlers[method]
+	muHandlers.RUnlock()
+	return ok
+}
+
 // ListMethods 列出当前已注册的方法名（副本）
 func ListMethods() []string {
 	muHandlers.RLock()
