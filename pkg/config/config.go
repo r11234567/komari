@@ -28,6 +28,9 @@ var (
 		if err := db.AutoMigrate(&ConfigItem{}); err != nil {
 			panic("failed to migrate config item table: " + err.Error())
 		}
+		if err := db.Where("key = ?", RetiredAdminKey).Delete(&ConfigItem{}).Error; err != nil {
+			panic("failed to retire legacy administrator key: " + err.Error())
+		}
 	}
 )
 
@@ -357,7 +360,7 @@ func convertAndSet(val any, fieldVal reflect.Value) error {
 func GetAll() (map[string]any, error) {
 	var items []ConfigItem
 	result := make(map[string]any)
-	if err := db.Find(&items).Error; err != nil {
+	if err := db.Where("key <> ?", RetiredAdminKey).Find(&items).Error; err != nil {
 		return nil, err
 	}
 
@@ -372,6 +375,9 @@ func GetAll() (map[string]any, error) {
 
 // Set 设置单个配置
 func Set(key string, value any) error {
+	if key == RetiredAdminKey {
+		return fmt.Errorf("legacy administrator key is retired")
+	}
 	oldVal := map[string]any{}
 	{
 		var oldItem ConfigItem
@@ -407,6 +413,9 @@ func Set(key string, value any) error {
 }
 
 func SetMany(cst map[string]any) error {
+	if _, found := cst[RetiredAdminKey]; found {
+		return fmt.Errorf("legacy administrator key is retired")
+	}
 	var items []ConfigItem
 	for k, v := range cst {
 		bytes, err := json.Marshal(v)

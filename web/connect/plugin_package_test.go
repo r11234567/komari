@@ -100,7 +100,7 @@ func TestPluginPackageApprovalRequiresFreshScoped2FA(t *testing.T) {
 }
 
 func TestPluginPackageApprovalRejectsTokenAgentAndPluginPrincipals(t *testing.T) {
-	for _, principal := range []*rpc.Principal{rpc.NewAnonymousPrincipal(), rpc.NewAgentPrincipal("node"), rpc.NewAPIKeyPrincipal(), rpc.PrincipalFromRole(rpc.RoleAdmin), rpc.NewUserPrincipal("no-session")} {
+	for _, principal := range []*rpc.Principal{rpc.NewAnonymousPrincipal(), rpc.NewAgentPrincipal("node"), rpc.NewAPITokenPrincipal(rpc.APITokenPolicy{}), rpc.PrincipalFromRole(rpc.RoleAdmin), rpc.NewUserPrincipal("no-session")} {
 		ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: principal})
 		service := &pluginService{}
 		_, err := service.ListPluginPackages(ctx, connect.NewRequest(&pluginv1.ListPluginPackagesRequest{}))

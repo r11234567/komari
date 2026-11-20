@@ -19,12 +19,12 @@ import (
 var trafficResetDayTagPattern = regexp.MustCompile(`(?i)<\s*TRD\s*:\s*(\d{1,2})\s*>`)
 
 type legacyModelConfig struct {
-	ID                         uint    `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
-	Sitename                   string  `json:"sitename" gorm:"type:varchar(100);not null"`
-	Description                string  `json:"description" gorm:"type:text"`
-	Theme                      string  `json:"theme" gorm:"type:varchar(100);default:'default'"`
-	PrivateSite                bool    `json:"private_site" gorm:"default:false"`
-	ApiKey                     string  `json:"api_key" gorm:"type:varchar(255);default:''"`
+	ID          uint   `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
+	Sitename    string `json:"sitename" gorm:"type:varchar(100);not null"`
+	Description string `json:"description" gorm:"type:text"`
+	Theme       string `json:"theme" gorm:"type:varchar(100);default:'default'"`
+	PrivateSite bool   `json:"private_site" gorm:"default:false"`
+
 	AutoDiscoveryKey           string  `json:"auto_discovery_key" gorm:"type:varchar(255);default:''"`
 	ScriptDomain               string  `json:"script_domain" gorm:"type:varchar(255);default:''"`
 	SendIpAddrToGuest          bool    `json:"send_ip_addr_to_guest" gorm:"default:false"`
@@ -53,12 +53,12 @@ func (legacyModelConfig) TableName() string {
 }
 
 type legacyConfig struct {
-	ID                         uint      `json:"id,omitempty"`
-	Sitename                   string    `json:"sitename"`
-	Description                string    `json:"description"`
-	Theme                      string    `json:"theme"`
-	PrivateSite                bool      `json:"private_site"`
-	ApiKey                     string    `json:"api_key"`
+	ID          uint   `json:"id,omitempty"`
+	Sitename    string `json:"sitename"`
+	Description string `json:"description"`
+	Theme       string `json:"theme"`
+	PrivateSite bool   `json:"private_site"`
+
 	AutoDiscoveryKey           string    `json:"auto_discovery_key"`
 	ScriptDomain               string    `json:"script_domain"`
 	SendIpAddrToGuest          bool      `json:"send_ip_addr_to_guest"`

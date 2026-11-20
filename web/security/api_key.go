@@ -2,10 +2,6 @@ package security
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"net"
 	"net/http"
 	"strings"
@@ -13,29 +9,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
-
-// This process-local key is only for comparison, never a stored verifier.
-// Legacy keys may be human-selected, so do not produce unkeyed secret hashes.
-var apiKeyComparisonKey = func() []byte {
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		panic("cannot initialize API key comparison key")
-	}
-	return key
-}()
-
-// Fixed-length keyed digests avoid length-dependent secret comparison without
-// persisting a verifier or changing the configured legacy credential.
-func APIKeyMatches(authorization, configured string) bool {
-	if len(configured) < 12 {
-		return false
-	}
-	want := hmac.New(sha256.New, apiKeyComparisonKey)
-	_, _ = want.Write([]byte("Bearer " + configured))
-	got := hmac.New(sha256.New, apiKeyComparisonKey)
-	_, _ = got.Write([]byte(authorization))
-	return subtle.ConstantTimeCompare(want.Sum(nil), got.Sum(nil)) == 1
-}
 
 type apiKeyContextKey struct{}
 

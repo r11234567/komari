@@ -21,7 +21,7 @@ type APITokenPolicy struct {
 // never inferred from a token; future procedures remain denied by default.
 func (p *Principal) AllowsAPIProcedure(procedure string) bool {
 	if p == nil || p.APIToken == nil {
-		return true
+		return p != nil && p.Type != PrincipalAPIKey
 	}
 	if !time.Now().Before(p.APIToken.ExpiresAt) {
 		return false

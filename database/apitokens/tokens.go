@@ -209,7 +209,7 @@ func authenticate(ctx context.Context, db *gorm.DB, secret, remoteIP string, now
 	if err := db.WithContext(ctx).Model(&models.APIToken{}).Where("id = ? AND revoked_at IS NULL AND (last_used_at IS NULL OR last_used_at < ?)", id, now.Add(-time.Minute)).Update("last_used_at", now).Error; err != nil {
 		return nil, err
 	}
-	return &rpc.Principal{Type: rpc.PrincipalAPIKey, IsAPIKey: true, Roles: []string{rpc.RoleGuest}, APIToken: &rpc.APITokenPolicy{ID: row.ID, OwnerUUID: row.OwnerUUID, Scopes: scopes, AgentIDs: agents, AllAgents: row.AllAgents, ExpiresAt: row.ExpiresAt}}, nil
+	return rpc.NewAPITokenPrincipal(rpc.APITokenPolicy{ID: row.ID, OwnerUUID: row.OwnerUUID, Scopes: scopes, AgentIDs: agents, AllAgents: row.AllAgents, ExpiresAt: row.ExpiresAt}), nil
 }
 
 func List(ctx context.Context, owner string, page int) ([]models.APIToken, int64, error) {

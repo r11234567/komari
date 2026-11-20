@@ -17,7 +17,7 @@ func TestPrincipalClassCoversEveryCredentialKind(t *testing.T) {
 	}{
 		{"agent", rpc.NewAgentPrincipal("node-a"), PrincipalHeaderAgent},
 		{"user", rpc.NewUserPrincipal("user-1"), PrincipalHeaderUser},
-		{"api key", rpc.NewAPIKeyPrincipal(), PrincipalHeaderAPIKey},
+		{"api key", rpc.NewAPITokenPrincipal(rpc.APITokenPolicy{}), PrincipalHeaderAPIKey},
 		{"anonymous", rpc.NewAnonymousPrincipal(), PrincipalHeaderAnonymous},
 		{"nil", nil, PrincipalHeaderAnonymous},
 	}

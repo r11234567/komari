@@ -10,7 +10,7 @@ import (
 )
 
 func TestOnlyInteractiveIdentitiesReachStorage(t *testing.T) {
-	for _, p := range []*rpc.Principal{nil, rpc.NewAnonymousPrincipal(), rpc.NewAgentPrincipal("synthetic"), rpc.NewAPIKeyPrincipal(), rpc.PrincipalFromRole(rpc.RoleAdmin), rpc.NewUserPrincipal("synthetic-user")} {
+	for _, p := range []*rpc.Principal{nil, rpc.NewAnonymousPrincipal(), rpc.NewAgentPrincipal("synthetic"), rpc.NewAPITokenPrincipal(rpc.APITokenPolicy{}), rpc.PrincipalFromRole(rpc.RoleAdmin), rpc.NewUserPrincipal("synthetic-user")} {
 		ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: p})
 		g := New()
 		if _, err := g.List(ctx, ""); !errors.Is(err, credential.ErrUnauthenticated) {

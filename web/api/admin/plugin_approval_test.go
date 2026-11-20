@@ -105,7 +105,7 @@ func TestPluginUploadAndChunkFinalizationStageWithoutExecution(t *testing.T) {
 }
 
 func TestPluginUploadsAndCatalogInstallRejectProgrammaticPrincipals(t *testing.T) {
-	for _, principal := range []*rpc.Principal{nil, rpc.NewAnonymousPrincipal(), rpc.NewAgentPrincipal("node"), rpc.NewAPIKeyPrincipal(), rpc.PrincipalFromRole(rpc.RoleAdmin)} {
+	for _, principal := range []*rpc.Principal{nil, rpc.NewAnonymousPrincipal(), rpc.NewAgentPrincipal("node"), rpc.NewAPITokenPrincipal(rpc.APITokenPolicy{}), rpc.PrincipalFromRole(rpc.RoleAdmin)} {
 		engine := gin.New()
 		engine.Use(func(c *gin.Context) { api.SetPrincipal(c, principal); c.Next() })
 		engine.POST("/upload", UploadPlugin)

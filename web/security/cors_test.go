@@ -3,17 +3,12 @@ package security
 import (
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/pkg/config"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 )
 
 func TestCorsMiddlewareValidatesAPIOrigins(t *testing.T) {
-	setupCORSConfigDB(t, "")
 	router := setupCORSRouter(true, "https://allowed.example")
 
 	tests := []struct {
@@ -59,8 +54,7 @@ func TestCorsMiddlewareValidatesAPIOrigins(t *testing.T) {
 	}
 }
 
-func TestCorsMiddlewareAllowsAPIKeyRequestsFromAnyOrigin(t *testing.T) {
-	setupCORSConfigDB(t, "123456789012")
+func TestCorsMiddlewareRejectsUnverifiedBearerFromForeignOrigin(t *testing.T) {
 	router := setupCORSRouter(true, "")
 
 	request := httptest.NewRequest(http.MethodGet, "/api/ping", nil)
@@ -70,16 +64,12 @@ func TestCorsMiddlewareAllowsAPIKeyRequestsFromAnyOrigin(t *testing.T) {
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
-	}
-	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "https://evil.example" {
-		t.Fatalf("Access-Control-Allow-Origin = %q, want %q", got, "https://evil.example")
+	if response.Code != http.StatusForbidden || response.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("retired key gained cross-origin access: %d", response.Code)
 	}
 }
 
 func TestCorsMiddlewareHandlesAPIPreflight(t *testing.T) {
-	setupCORSConfigDB(t, "")
 	router := setupCORSRouter(true, "https://allowed.example")
 
 	allowed := performCORSRequest(router, http.MethodOptions, "/api/ping", "api.example", "https://allowed.example")
@@ -97,7 +87,6 @@ func TestCorsMiddlewareHandlesAPIPreflight(t *testing.T) {
 }
 
 func TestCorsMiddlewareProtectsConnectProcedures(t *testing.T) {
-	setupCORSConfigDB(t, "")
 	router := setupCORSRouter(true, "https://allowed.example")
 	router.POST("/komari.browser.v1.BrowserService/GetPublicInfo", func(c *gin.Context) {
 		c.Status(http.StatusOK)
@@ -110,7 +99,6 @@ func TestCorsMiddlewareProtectsConnectProcedures(t *testing.T) {
 }
 
 func TestCorsMiddlewareAllowsAuthorizationPreflightFromAnyOrigin(t *testing.T) {
-	setupCORSConfigDB(t, "")
 	router := setupCORSRouter(true, "")
 
 	request := httptest.NewRequest(http.MethodOptions, "/api/ping", nil)
@@ -132,7 +120,6 @@ func TestCorsMiddlewareAllowsAuthorizationPreflightFromAnyOrigin(t *testing.T) {
 }
 
 func TestCorsMiddlewareDisabledSkipsAPIValidation(t *testing.T) {
-	setupCORSConfigDB(t, "")
 	router := setupCORSRouter(false, "")
 
 	response := performCORSRequest(router, http.MethodGet, "/api/ping", "api.example", "https://evil.example")
@@ -145,7 +132,6 @@ func TestCorsMiddlewareDisabledSkipsAPIValidation(t *testing.T) {
 }
 
 func TestCorsMiddlewareSkipsNonAPIPaths(t *testing.T) {
-	setupCORSConfigDB(t, "")
 	router := setupCORSRouter(true, "")
 
 	response := performCORSRequest(router, http.MethodGet, "/public", "api.example", "https://evil.example")
@@ -168,31 +154,6 @@ func setupCORSRouter(enabled bool, allowlist string) *gin.Engine {
 		c.String(http.StatusOK, "ok")
 	})
 	return router
-}
-
-func setupCORSConfigDB(t *testing.T, apiKey string) {
-	t.Helper()
-
-	name := strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
-	db, err := gorm.Open(sqlite.Open("file:"+name+"?mode=memory&cache=shared"), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open sqlite test db: %v", err)
-	}
-	sqlDB, err := db.DB()
-	if err != nil {
-		t.Fatalf("get sqlite test db handle: %v", err)
-	}
-	sqlDB.SetMaxOpenConns(1)
-	t.Cleanup(func() {
-		_ = sqlDB.Close()
-	})
-
-	config.SetDb(db)
-	if apiKey != "" {
-		if err := config.Set(config.ApiKeyKey, apiKey); err != nil {
-			t.Fatalf("set api key: %v", err)
-		}
-	}
 }
 
 func performCORSRequest(handler http.Handler, method, path, host, origin string) *httptest.ResponseRecorder {

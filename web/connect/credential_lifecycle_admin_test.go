@@ -26,7 +26,7 @@ func TestCredentialLifecycleAdminFreshScopeReplayAndPrincipalBoundaries(t *testi
 			ctx, user, session := actionFixture(t)
 			principal := rpc.NewUserPrincipal(user)
 			if kind == "api-key" {
-				principal = rpc.NewAPIKeyPrincipal()
+				principal = rpc.NewAPITokenPrincipal(rpc.APITokenPolicy{})
 			}
 			if kind == "anonymous" {
 				principal = rpc.NewAnonymousPrincipal()

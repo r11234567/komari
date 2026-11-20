@@ -11,7 +11,6 @@ import (
 	"github.com/komari-monitor/komari/database/apitokens"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/models"
-	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	adminv1 "github.com/r11234567/komari-proto/gen/go/komari/admin/v1"
 	adminv1connect "github.com/r11234567/komari-proto/gen/go/komari/admin/v1/adminv1connect"
@@ -49,11 +48,7 @@ func (s *apiTokenService) ListApiTokens(ctx context.Context, req *connect.Reques
 	if err != nil {
 		return nil, connectError(connect.CodeInternal, err)
 	}
-	legacy, err := config.GetAs[string](config.ApiKeyKey, "")
-	if err != nil {
-		return nil, connectError(connect.CodeInternal, err)
-	}
-	response := &adminv1.ListApiTokensResponse{Total: uint32(total), Page: page, LegacyApiKeyEnabled: len(legacy) >= 12}
+	response := &adminv1.ListApiTokensResponse{Total: uint32(total), Page: page}
 	for _, row := range rows {
 		response.Tokens = append(response.Tokens, apiTokenView(row))
 	}
@@ -113,13 +108,9 @@ func (s *apiTokenService) RevokeApiToken(ctx context.Context, req *connect.Reque
 }
 
 func (s *apiTokenService) DisableLegacyApiKey(ctx context.Context, _ *connect.Request[adminv1.DisableLegacyApiKeyRequest]) (*connect.Response[adminv1.DisableLegacyApiKeyResponse], error) {
-	owner, err := requireInteractiveAdministrator(ctx)
+	_, err := requireInteractiveAdministrator(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := config.Set(config.ApiKeyKey, ""); err != nil {
-		return nil, connectError(connect.CodeInternal, err)
-	}
-	auditlog.Log(rpc.MetaFromContext(ctx).RemoteIP, owner, "disable legacy global API key", "warn")
 	return connect.NewResponse(&adminv1.DisableLegacyApiKeyResponse{}), nil
 }

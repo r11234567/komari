@@ -49,7 +49,7 @@ func TestGrantSessionExpiryAndRevocation(t *testing.T) {
 }
 
 func TestOnlyInteractiveAdminsCanUseLoginSettingsGrant(t *testing.T) {
-	for _, p := range []*rpc.Principal{nil, rpc.NewAnonymousPrincipal(), rpc.NewAgentPrincipal("node"), rpc.NewAPIKeyPrincipal(), rpc.PrincipalFromRole(rpc.RoleAdmin)} {
+	for _, p := range []*rpc.Principal{nil, rpc.NewAnonymousPrincipal(), rpc.NewAgentPrincipal("node"), rpc.NewAPITokenPrincipal(rpc.APITokenPolicy{}), rpc.PrincipalFromRole(rpc.RoleAdmin)} {
 		ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: p})
 		if Require(WithToken(ctx, "plugin-or-workspace-token")) == nil {
 			t.Fatalf("accepted %v", p)

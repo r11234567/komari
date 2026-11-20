@@ -115,7 +115,8 @@ func VerifySensitive2FA(c *gin.Context) error {
 		c.Set("trusted_credential_verified", true)
 		return nil
 	}
-	_, isAPIKey := c.Get("api_key")
+	principal := GetPrincipal(c)
+	isAPIKey := principal != nil && principal.IsAPIKey
 	uuidRaw, _ := c.Get("uuid")
 	uuid, _ := uuidRaw.(string)
 	return VerifySensitive2FACore(uuid, get2FACode(c), isAPIKey)
