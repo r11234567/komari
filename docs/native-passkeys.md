@@ -13,7 +13,7 @@ komari --database ./data/komari.db import-passkeys ./credentials-v1.json
 komari --database ./data/komari.db import-passkeys ./credentials-v1.json --apply-offline
 ```
 
-Preview opens SQLite read-only. Apply commits all records and the source digest together. An identical completed import reports zero new records. A changed input or conflicting credential stops the import. The importer preserves higher counters already recorded by Komari. The primary authentication database is SQLite. The metrics database is independent.
+Preview opens SQLite read-only and reports eligible, conflicting and re-enrollment counts. Apply rolls back the entire transaction if any record requires reconciliation. Apply commits all records and the source digest together. An identical completed import reports that the source was previously applied. A changed input or conflicting credential stops the import. The importer preserves higher counters already recorded by Komari. The primary authentication database is SQLite. The metrics database is independent.
 
 ## Cut over
 

@@ -53,12 +53,9 @@ func init() {
 			return err
 		}
 		defer sqlDB.Close()
-		n, err := passkeycredential.Import(c.Context(), db, f, apply)
-		if err != nil {
-			return err
-		}
-		c.Printf("Credentials processed: %d (apply=%t)\n", n, apply)
-		return nil
+		report, err := passkeycredential.Import(c.Context(), db, f, apply)
+		c.Printf("Eligible: %d, conflicts: %d, re-enroll: %d, previously applied: %t\n", report.Eligible, report.Conflicts, report.Rebind, report.AlreadyApplied)
+		return err
 	}}
 	c.Flags().BoolVar(&apply, "apply-offline", false, "Commit the import after stopping the service and freezing legacy credential writes")
 	RootCmd.AddCommand(c)

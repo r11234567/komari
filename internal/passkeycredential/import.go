@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 
 	"github.com/go-webauthn/webauthn/protocol/webauthncose"
@@ -16,28 +15,63 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+type ImportReport struct {
+	Eligible       int
+	Conflicts      int
+	Rebind         int
+	AlreadyApplied bool
+}
+
+func validPublicRecord(r Record, synced bool) ([]byte, bool) {
+	key, err := base64.RawURLEncoding.Strict().DecodeString(r.PublicKey)
+	if err != nil || len(key) > 4096 || base64.RawURLEncoding.EncodeToString(key) != r.PublicKey || r.UserUUID == "" || len(r.Transports) > 8 {
+		return nil, false
+	}
+	switch r.DeviceType {
+	case "singleDevice":
+		if r.BackedUp {
+			return nil, false
+		}
+	case "multiDevice":
+		if !synced {
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
+	for _, transport := range r.Transports {
+		switch transport {
+		case "usb", "nfc", "ble", "internal", "hybrid", "smart-card", "cable":
+		default:
+			return nil, false
+		}
+	}
+	_, err = webauthncose.ParsePublicKey(key)
+	return key, err == nil
+}
+
 // Import reads only the v1 public credential records. The caller opens a
 // read-only database for preview; applying requires an offline primary DB.
-func Import(ctx context.Context, db *gorm.DB, input io.Reader, apply bool) (int, error) {
+func Import(ctx context.Context, db *gorm.DB, input io.Reader, apply bool) (ImportReport, error) {
+	var report ImportReport
 	cfg, err := nativePolicy()
 	if err != nil {
-		return 0, err
+		return report, err
 	}
 	rp := cfg["rp_id"].(string)
 	raw, err := io.ReadAll(io.LimitReader(input, maxStoreBytes+1))
 	if err != nil {
-		return 0, err
+		return report, err
 	}
 	var doc struct {
 		Version     int
 		Credentials []Record
 	}
 	if len(raw) > maxStoreBytes || json.Unmarshal(raw, &doc) != nil || doc.Version != 1 || doc.Credentials == nil || len(doc.Credentials) > 1024 {
-		return 0, errors.New("invalid v1 credential store")
+		return report, errors.New("invalid v1 credential store")
 	}
 	digest := sha256.Sum256(raw)
 	mark := models.PasskeyImport{Source: pluginID, Digest: hex.EncodeToString(digest[:]), RPID: rp}
-	count := 0
 	err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var prior models.PasskeyImport
 		err := tx.Where("source = ?", pluginID).Take(&prior).Error
@@ -45,41 +79,46 @@ func Import(ctx context.Context, db *gorm.DB, input io.Reader, apply bool) (int,
 			if prior.RPID != rp || prior.Digest != mark.Digest {
 				return errors.New("import source or RP changed; reconcile before retrying")
 			}
+			report.AlreadyApplied = true
 			return nil
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
-		seen := map[string]bool{}
-		for i, r := range doc.Credentials {
+		frequency := make(map[string]int, len(doc.Credentials))
+		for _, record := range doc.Credentials {
+			frequency[record.ID]++
+		}
+		for _, r := range doc.Credentials {
 			pk, err := credentialKey(r.ID)
-			key, ke := base64.RawURLEncoding.Strict().DecodeString(r.PublicKey)
-			if err != nil || ke != nil || len(key) > 4096 || seen[pk] || r.UserUUID == "" || len(r.Transports) > 8 || (r.DeviceType != "singleDevice" && r.DeviceType != "multiDevice") || (r.BackedUp && r.DeviceType != "multiDevice") {
-				return fmt.Errorf("invalid or duplicate credential at record %d", i+1)
+			if err != nil {
+				report.Rebind++
+				continue
 			}
-			if r.DeviceType == "multiDevice" && cfg["allow_synced_credentials"] != true {
-				return fmt.Errorf("synced credential requires re-enrollment or an approved synced policy at record %d", i+1)
+			if frequency[r.ID] != 1 {
+				report.Conflicts++
+				continue
 			}
-			for _, transport := range r.Transports {
-				switch transport {
-				case "usb", "nfc", "ble", "internal", "hybrid", "smart-card", "cable":
-				default:
-					return fmt.Errorf("invalid transport at record %d", i+1)
-				}
+			key, valid := validPublicRecord(r, cfg["allow_synced_credentials"] == true)
+			if !valid {
+				report.Rebind++
+				continue
 			}
-			if _, err = webauthncose.ParsePublicKey(key); err != nil {
-				return fmt.Errorf("invalid public key at record %d", i+1)
-			}
-			seen[pk] = true
 			var user models.User
-			if err = tx.Select("uuid").Where("uuid = ?", r.UserUUID).Take(&user).Error; err != nil || user.UUID != r.UserUUID {
-				return fmt.Errorf("unknown owner at record %d", i+1)
+			err = tx.Select("uuid").Where("uuid = ?", r.UserUUID).Take(&user).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				report.Rebind++
+				continue
+			}
+			if err != nil {
+				return err
 			}
 			var row models.UserPasskey
 			err = tx.Where("credential_hash = ?", pk).Take(&row).Error
 			if err == nil {
 				if row.UserUUID != r.UserUUID || row.CredentialID != r.ID || row.PublicKey != r.PublicKey || row.RPID != rp || row.DeviceType != r.DeviceType {
-					return fmt.Errorf("credential conflict at record %d", i+1)
+					report.Conflicts++
+					continue
 				}
 			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
@@ -99,15 +138,15 @@ func Import(ctx context.Context, db *gorm.DB, input io.Reader, apply bool) (int,
 					return err
 				}
 			}
-			count++
+			report.Eligible++
 		}
 		if apply {
+			if report.Conflicts+report.Rebind > 0 {
+				return errors.New("import needs reconciliation; transaction rolled back")
+			}
 			return tx.Create(&mark).Error
 		}
 		return nil
 	})
-	if err != nil {
-		return 0, err
-	}
-	return count, nil
+	return report, err
 }
