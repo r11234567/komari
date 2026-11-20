@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,10 +18,21 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	credential "github.com/komari-monitor/komari/internal/trustedcredential"
+	"github.com/komari-monitor/komari/pkg/config"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
-const CeremonyLifetime = 2 * time.Minute
+const (
+	CeremonyLifetime     = 2 * time.Minute
+	loginBudgetWindow    = 5 * time.Minute
+	loginIPBudgetLimit   = 30
+	loginUserBudgetLimit = 15
+	maxLoginPending      = 256
+	maxRegisterPending   = 128
+	maxPendingPerSource  = 8
+	maxBudgetBuckets     = 4096
+)
 
 type ceremony struct {
 	session              *webauthn.SessionData
@@ -30,47 +42,136 @@ type ceremony struct {
 	register             bool
 }
 
-var pending = struct {
-	sync.Mutex
+type ceremonyPool struct {
+	mu      sync.Mutex
+	maxAll  int
 	records map[string]ceremony
-}{records: make(map[string]ceremony)}
+}
 
-func remember(c ceremony) (string, error) {
+var (
+	loginPool    = &ceremonyPool{maxAll: maxLoginPending, records: make(map[string]ceremony)}
+	registerPool = &ceremonyPool{maxAll: maxRegisterPending, records: make(map[string]ceremony)}
+)
+
+type rateBucket struct {
+	count   int
+	expires time.Time
+}
+
+var loginLimiter = struct {
+	mu      sync.Mutex
+	buckets map[string]rateBucket
+}{buckets: make(map[string]rateBucket)}
+
+func reserveLoginBudget(ip, username string) bool {
+	keys := make([]string, 0, 2)
+	limits := make([]int, 0, 2)
+	if ip != "" {
+		keys = append(keys, "ip:"+ip)
+		limits = append(limits, loginIPBudgetLimit)
+	}
+	if username != "" {
+		keys = append(keys, "user:"+strings.ToLower(username))
+		limits = append(limits, loginUserBudgetLimit)
+	}
+	if len(keys) == 0 {
+		return true
+	}
+	now := time.Now()
+	loginLimiter.mu.Lock()
+	defer loginLimiter.mu.Unlock()
+	for k, b := range loginLimiter.buckets {
+		if !now.Before(b.expires) {
+			delete(loginLimiter.buckets, k)
+		}
+	}
+	missing := 0
+	for i, k := range keys {
+		b, ok := loginLimiter.buckets[k]
+		if ok && b.count >= limits[i] {
+			return false
+		}
+		if !ok {
+			missing++
+		}
+	}
+	if len(loginLimiter.buckets)+missing > maxBudgetBuckets {
+		return false
+	}
+	for _, k := range keys {
+		b, ok := loginLimiter.buckets[k]
+		if !ok {
+			b.expires = now.Add(loginBudgetWindow)
+		}
+		b.count++
+		loginLimiter.buckets[k] = b
+	}
+	return true
+}
+
+func poolFor(reg bool) *ceremonyPool {
+	if reg {
+		return registerPool
+	}
+	return loginPool
+}
+
+func remember(c ceremony, replaceToken string) (string, error) {
 	var nonce [32]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", err
 	}
+	pool := poolFor(c.register)
 	now := time.Now()
-	pending.Lock()
-	defer pending.Unlock()
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if replaceToken != "" {
+		if existing, ok := pool.records[replaceToken]; ok && existing.source == c.source {
+			delete(pool.records, replaceToken)
+		}
+	}
 	same := 0
-	for k, v := range pending.records {
+	for k, v := range pool.records {
 		if !v.session.Expires.After(now) {
-			delete(pending.records, k)
+			delete(pool.records, k)
 		} else if v.source == c.source {
 			same++
 		}
 	}
-	if same >= 8 || len(pending.records) >= 256 {
+	if same >= maxPendingPerSource || len(pool.records) >= pool.maxAll {
 		return "", credential.ErrLimit
 	}
 	c.session.Expires = now.Add(CeremonyLifetime)
 	token := base64.RawURLEncoding.EncodeToString(nonce[:])
-	pending.records[token] = c
+	pool.records[token] = c
 	return token, nil
 }
+
 func take(token string, reg bool) (ceremony, error) {
-	pending.Lock()
-	defer pending.Unlock()
-	c, ok := pending.records[token]
+	pool := poolFor(reg)
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	c, ok := pool.records[token]
 	if !ok || c.register != reg {
 		return ceremony{}, credential.ErrVerificationFailed
 	}
-	delete(pending.records, token)
+	delete(pool.records, token)
 	if !time.Now().Before(c.session.Expires) {
 		return ceremony{}, credential.ErrVerificationFailed
 	}
 	return c, nil
+}
+
+// CancelLogin discards an unused login ceremony belonging to the same source IP.
+func CancelLogin(token, ip string) {
+	if token == "" {
+		return
+	}
+	loginPool.mu.Lock()
+	if existing, ok := loginPool.records[token]; ok && (ip == "" || existing.source == ip) {
+		delete(loginPool.records, token)
+	}
+	loginPool.mu.Unlock()
 }
 func AvailableAtOrigin(ctx context.Context) bool {
 	_, _, _, err := nativeVerifier(ctx)
@@ -105,18 +206,25 @@ var accountMaskKey = func() []byte {
 }()
 
 func BeginLogin(ctx context.Context, username, ip string) (any, string, error) {
+	return BeginLoginWithPrior(ctx, username, ip, "")
+}
+
+func BeginLoginWithPrior(ctx context.Context, username, ip, priorToken string) (any, string, error) {
 	w, origin, synced, err := nativeVerifier(ctx)
 	if err != nil {
 		return nil, "", err
+	}
+	if len(username) > 255 {
+		return nil, "", credential.ErrInvalidArgument
+	}
+	if !reserveLoginBudget(ip, username) {
+		return nil, "", credential.ErrLimit
 	}
 	var options *protocol.CredentialAssertion
 	var session *webauthn.SessionData
 	if username == "" {
 		options, session, err = w.BeginDiscoverableLogin()
 	} else {
-		if len(username) > 255 {
-			return nil, "", credential.ErrInvalidArgument
-		}
 		var u models.User
 		err = dbcore.GetDBInstance().WithContext(ctx).Select("uuid").Where("username = ?", username).Take(&u).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -127,6 +235,11 @@ func BeginLogin(ctx context.Context, username, ip string) (any, string, error) {
 			a, err = currentAccount(ctx, u.UUID, synced)
 			if err != nil {
 				return nil, "", err
+			}
+			// Omit optional transports hints on anonymous account-first login so
+			// real and synthetic descriptors share the same response shape.
+			for i := range a.records {
+				a.records[i].Transport = nil
 			}
 		}
 		if len(a.records) == 0 {
@@ -141,13 +254,24 @@ func BeginLogin(ctx context.Context, username, ip string) (any, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	token, err := remember(ceremony{session: session, origin: origin, synced: synced, source: ip})
+	token, err := remember(ceremony{session: session, origin: origin, synced: synced, source: ip}, priorToken)
 	return options, token, err
 }
+
 func CompleteLogin(ctx context.Context, token string, raw []byte) (string, error) {
+	return CompleteLoginWithIP(ctx, "", token, raw)
+}
+
+func CompleteLoginWithIP(ctx context.Context, ip, token string, raw []byte) (string, error) {
+	if ip != "" && !reserveLoginBudget(ip, "") {
+		return "", credential.ErrLimit
+	}
 	c, err := take(token, false)
 	if err != nil {
 		return "", err
+	}
+	if ip == "" && c.source != "" && !reserveLoginBudget(c.source, "") {
+		return "", credential.ErrLimit
 	}
 	w, origin, synced, err := nativeVerifier(ctx)
 	if err != nil || origin != c.origin || c.synced != synced || c.session.RelyingPartyID != w.Config.RPID {
@@ -175,6 +299,9 @@ func CompleteLogin(ctx context.Context, token string, raw []byte) (string, error
 			return a, nil
 		}, *c.session, parsed)
 	} else {
+		if !bytes.Equal(c.session.UserID, a.WebAuthnID()) {
+			return "", credential.ErrVerificationFailed
+		}
 		verified, err = w.ValidateLogin(a, *c.session, parsed)
 	}
 	if err != nil || verified == nil || verified.Authenticator.CloneWarning || !verified.Flags.UserVerified {
@@ -194,6 +321,10 @@ func BeginRegistration(ctx context.Context, b credential.Binding, name string) (
 	if err != nil {
 		return nil, "", err
 	}
+	var u models.User
+	if err := dbcore.GetDBInstance().WithContext(ctx).Select("username").Where("uuid = ?", b.UserID).Take(&u).Error; err == nil {
+		a.username = u.Username
+	}
 	if len(a.records) >= 64 {
 		return nil, "", credential.ErrLimit
 	}
@@ -201,7 +332,7 @@ func BeginRegistration(ctx context.Context, b credential.Binding, name string) (
 	if err != nil {
 		return nil, "", err
 	}
-	token, err := remember(ceremony{session: session, register: true, binding: b, name: name, origin: origin, synced: synced, source: b.UserID})
+	token, err := remember(ceremony{session: session, register: true, binding: b, name: name, origin: origin, synced: synced, source: b.UserID}, "")
 	return options, token, err
 }
 func CompleteRegistration(ctx context.Context, b credential.Binding, user models.User, token string, raw []byte) (models.UserPasskey, error) {
@@ -218,7 +349,7 @@ func CompleteRegistration(ctx context.Context, b credential.Binding, user models
 	if err != nil {
 		return row, credential.ErrVerificationFailed
 	}
-	key, err := w.CreateCredential(account{id: b.UserID}, *c.session, parsed)
+	key, err := w.CreateCredential(account{id: b.UserID, username: user.Username}, *c.session, parsed)
 	if err != nil || !key.Flags.UserVerified || (!synced && key.Flags.BackupEligible) {
 		return row, credential.ErrVerificationFailed
 	}
@@ -233,6 +364,13 @@ func CompleteRegistration(ctx context.Context, b credential.Binding, user models
 	err = dbcore.GetDBInstance().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := accounts.RotateCredentialVersion(tx, user); err != nil {
 			return err
+		}
+		var revoked int64
+		if err := tx.Model(&models.PasskeyRevocation{}).Where("credential_hash = ?", row.CredentialHash).Count(&revoked).Error; err != nil {
+			return err
+		}
+		if revoked > 0 {
+			return credential.ErrVerificationFailed
 		}
 		var enrolled int64
 		if err := tx.Model(&models.UserPasskey{}).Where("user_uuid = ? AND rp_id = ?", user.UUID, w.Config.RPID).Count(&enrolled).Error; err != nil {
@@ -266,23 +404,24 @@ func Delete(ctx context.Context, u models.User, id string, hasContact bool) erro
 	if err != nil {
 		return credential.ErrInvalidArgument
 	}
+	disablePasswordLogin, _ := config.GetAs[bool](config.DisablePasswordLoginKey, false)
+	oauthEnabled, _ := config.GetAs[bool](config.OAuthEnabledKey, false)
+	hasAlternateSignIn := !disablePasswordLogin || (oauthEnabled && strings.TrimSpace(u.SSOID) != "")
 	return dbcore.GetDBInstance().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		user := u.UUID
 		if err := accounts.RotateCredentialVersion(tx, u); err != nil {
 			return err
 		}
-		if u.TwoFactor == "" && !hasContact {
-			var n int64
-			q := tx.Model(&models.UserPasskey{}).Where("user_uuid = ? AND rp_id = ? AND credential_hash <> ?", user, w.Config.RPID, k)
-			if !synced {
-				q = q.Where("device_type = ?", "singleDevice")
-			}
-			if err := q.Count(&n).Error; err != nil {
-				return err
-			}
-			if n == 0 {
-				return accounts.ErrLastCredential
-			}
+		var n int64
+		q := tx.Model(&models.UserPasskey{}).Where("user_uuid = ? AND rp_id = ? AND credential_hash <> ?", user, w.Config.RPID, k)
+		if !synced {
+			q = q.Where("device_type = ?", "singleDevice")
+		}
+		if err := q.Count(&n).Error; err != nil {
+			return err
+		}
+		if n == 0 && ((u.TwoFactor == "" && !hasContact) || !hasAlternateSignIn) {
+			return accounts.ErrLastCredential
 		}
 		res := tx.Where("user_uuid = ? AND rp_id = ? AND credential_hash = ?", user, w.Config.RPID, k).Delete(&models.UserPasskey{})
 		if res.Error != nil {
@@ -291,6 +430,12 @@ func Delete(ctx context.Context, u models.User, id string, hasContact bool) erro
 		if res.RowsAffected != 1 {
 			return credential.ErrNotFound
 		}
-		return nil
+		revocation := models.PasskeyRevocation{
+			CredentialHash: k,
+			UserUUID:       user,
+			RPID:           w.Config.RPID,
+			RevokedAt:      time.Now().UTC(),
+		}
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&revocation).Error
 	})
 }

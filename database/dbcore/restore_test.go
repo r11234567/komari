@@ -267,3 +267,94 @@ func TestRestoreStagedBackupMakesReadOnlySQLiteWritableAndKeepsPrivateData0600(t
 		t.Fatalf("write to restored komari.db failed: %v", err)
 	}
 }
+
+func TestRestoreStagedBackupPreservesPasskeyCountersAndRevocations(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	initPasskeyDB := func(path string) *sql.DB {
+		db, err := sql.Open("sqlite3", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stmts := []string{
+			`CREATE TABLE users (uuid varchar(36) PRIMARY KEY, username text)`,
+			`CREATE TABLE user_passkeys (credential_hash char(64) PRIMARY KEY, credential_id text NOT NULL, user_uuid varchar(36) NOT NULL, rp_id varchar(253) NOT NULL, name varchar(80) NOT NULL, public_key text NOT NULL, device_type text, backed_up integer)`,
+			`CREATE TABLE passkey_counters (user_uuid varchar(36), key_digest varchar(64), counter integer, PRIMARY KEY (user_uuid, key_digest))`,
+			`CREATE TABLE passkey_revocations (credential_hash char(64) PRIMARY KEY, user_uuid varchar(36) NOT NULL, rp_id varchar(253) NOT NULL, revoked_at datetime NOT NULL)`,
+			`INSERT INTO users VALUES ('u1', 'admin')`,
+			`INSERT INTO user_passkeys VALUES ('hash-a', 'cred-a', 'u1', 'panel.example.test', 'Key A', 'pub-a', 'singleDevice', 0)`,
+			`INSERT INTO user_passkeys VALUES ('hash-b', 'cred-b', 'u1', 'panel.example.test', 'Key B', 'pub-b', 'singleDevice', 0)`,
+			`INSERT INTO passkey_counters VALUES ('u1', 'digest-a', 2)`,
+			`INSERT INTO passkey_counters VALUES ('u1', 'digest-b', 1)`,
+		}
+		for _, s := range stmts {
+			if _, err := db.Exec(s); err != nil {
+				db.Close()
+				t.Fatalf("exec %q: %v", s, err)
+			}
+		}
+		return db
+	}
+
+	// Backup snapshot contains Key A (counter=2) and Key B (counter=1).
+	backupDBPath := filepath.Join(root, "backup-src.db")
+	bdb := initPasskeyDB(backupDBPath)
+	if err := bdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writeRestoreArchive(t, filepath.Join(dataDir, "backup.zip"), backupDBPath)
+
+	// Live DB has advanced Key A counter to 25 and explicitly revoked Key B.
+	liveDBPath := filepath.Join(dataDir, "komari.db")
+	ldb := initPasskeyDB(liveDBPath)
+	if _, err := ldb.Exec(`UPDATE passkey_counters SET counter = 25 WHERE user_uuid = 'u1' AND key_digest = 'digest-a'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ldb.Exec(`DELETE FROM user_passkeys WHERE credential_hash = 'hash-b'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ldb.Exec(`INSERT INTO passkey_revocations VALUES ('hash-b', 'u1', 'panel.example.test', '2026-11-20T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ldb.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := restoreStagedBackup(dataDir); err != nil {
+		t.Fatalf("restoreStagedBackup failed: %v", err)
+	}
+
+	restored, err := sql.Open("sqlite3", filepath.Join(dataDir, "komari.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+
+	var counterA uint32
+	if err := restored.QueryRow(`SELECT counter FROM passkey_counters WHERE user_uuid = 'u1' AND key_digest = 'digest-a'`).Scan(&counterA); err != nil {
+		t.Fatal(err)
+	}
+	if counterA != 25 {
+		t.Fatalf("Key A counter rolled back to %d, want 25", counterA)
+	}
+
+	var keyBCount int
+	if err := restored.QueryRow(`SELECT COUNT(*) FROM user_passkeys WHERE credential_hash = 'hash-b'`).Scan(&keyBCount); err != nil {
+		t.Fatal(err)
+	}
+	if keyBCount != 0 {
+		t.Fatalf("revoked Key B was resurrected in user_passkeys (count=%d)", keyBCount)
+	}
+
+	var revCount int
+	if err := restored.QueryRow(`SELECT COUNT(*) FROM passkey_revocations WHERE credential_hash = 'hash-b'`).Scan(&revCount); err != nil {
+		t.Fatal(err)
+	}
+	if revCount != 1 {
+		t.Fatalf("revocation tombstone for Key B was lost (count=%d)", revCount)
+	}
+}

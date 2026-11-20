@@ -151,7 +151,8 @@ func (g *Gateway) DeleteContact(ctx context.Context, kind, token string) (bool, 
 	if _, err := g.core.Consume(ctx, b, token, credential.ManageCredentials, DeleteContactResource(kind)); err != nil {
 		return false, err
 	}
-	deleted, err := accounts.RemoveCredentialContact(ctx, user, kind)
+	rpID, allowSynced, _ := passkeycredential.ActivePolicy()
+	deleted, err := accounts.RemoveCredentialContactWithPasskeyPolicy(ctx, user, kind, rpID, allowSynced)
 	if err != nil {
 		return false, contactError(err)
 	}

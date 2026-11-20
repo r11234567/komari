@@ -7,6 +7,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/pquerna/otp/totp"
+	"gorm.io/gorm"
 )
 
 var (
@@ -74,7 +75,17 @@ func Verify2Fa(uuid, code string) (bool, error) {
 
 func Disable2Fa(uuid string) error {
 	db := dbcore.GetDBInstance()
-	if err := db.Model(&models.User{}).Where("uuid = ?", uuid).Update("two_factor", "").Error; err != nil {
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var user models.User
+		if err := tx.Where("uuid = ?", uuid).First(&user).Error; err != nil {
+			return err
+		}
+		if err := RotateCredentialVersion(tx, user); err != nil {
+			return err
+		}
+		return tx.Model(&models.User{}).Where("uuid = ?", uuid).Update("two_factor", "").Error
+	})
+	if err != nil {
 		return err
 	}
 	return clearTOTPCounters(uuid)

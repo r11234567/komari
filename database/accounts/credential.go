@@ -59,6 +59,10 @@ func ChangeVerifiedContact(ctx context.Context, user models.User, contact models
 }
 
 func RemoveCredentialContact(ctx context.Context, user models.User, kind string) (bool, error) {
+	return RemoveCredentialContactWithPasskeyPolicy(ctx, user, kind, "", false)
+}
+
+func RemoveCredentialContactWithPasskeyPolicy(ctx context.Context, user models.User, kind, rpID string, allowSynced bool) (bool, error) {
 	deleted := false
 	err := dbcore.GetDBInstance().WithContext(ctx).Session(&gorm.Session{Logger: gormlogger.Discard}).Transaction(func(tx *gorm.DB) error {
 		if err := RotateCredentialVersion(tx, user); err != nil {
@@ -78,7 +82,21 @@ func RemoveCredentialContact(ctx context.Context, user models.User, kind string)
 			return gorm.ErrRecordNotFound
 		}
 		if len(contacts) == 1 && user.TwoFactor == "" {
-			return ErrLastCredential
+			hasPasskey := false
+			if rpID != "" && tx.Migrator().HasTable(&models.UserPasskey{}) {
+				q := tx.Model(&models.UserPasskey{}).Where("user_uuid = ? AND rp_id = ?", user.UUID, rpID)
+				if !allowSynced {
+					q = q.Where("device_type = ?", "singleDevice")
+				}
+				var passkeyCount int64
+				if err := q.Count(&passkeyCount).Error; err != nil {
+					return err
+				}
+				hasPasskey = passkeyCount > 0
+			}
+			if !hasPasskey {
+				return ErrLastCredential
+			}
 		}
 		result := tx.Where("user_uuid = ? AND kind = ?", user.UUID, kind).Delete(&models.CredentialContact{})
 		deleted = result.RowsAffected == 1

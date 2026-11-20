@@ -70,9 +70,9 @@ jobs:
         run: bash scripts/ci/run-audit-check.sh public-login-document bash scripts/ci/run-go-tests.sh ./web/public
       - name: Resolve fixed WebAuthn dependency metadata on the runner
         run: bash scripts/ci/run-audit-check.sh credential-dependencies go mod tidy
-      - name: Passkey public-record compatibility and independent signature verification
+      - name: Passkey public-record compatibility, native ceremonies, offline import and signature verification
         if: ${{ !cancelled() }}
-        run: bash scripts/ci/run-audit-check.sh credential-passkey bash scripts/ci/run-go-tests.sh -race ./internal/passkeycredential
+        run: bash scripts/ci/run-audit-check.sh credential-passkey bash scripts/ci/run-go-tests.sh -race ./internal/passkeycredential ./cmd
       - name: Challenge, scope, expiry, quotas and concurrent consumption
         run: bash scripts/ci/run-audit-check.sh credential-core bash scripts/ci/run-go-tests.sh -race ./internal/trustedcredential ./internal/credentialgateway
       - name: Eight-character OTP and consecutive successful workspace verifications (synthetic only)
@@ -81,7 +81,7 @@ jobs:
           ./internal/notificationotp ./internal/trustedcredential
       - name: Native TOTP adapter, session invalidation and typed Connect gateway
         if: ${{ !cancelled() }}
-        run: bash scripts/ci/run-audit-check.sh credential-connect bash scripts/ci/run-go-tests.sh ./web/connect ./database/accounts
+        run: bash scripts/ci/run-audit-check.sh credential-connect bash scripts/ci/run-go-tests.sh -race ./web/connect ./database/accounts
       - name: Password and second-factor login checkpoint (synthetic delivery only)
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh password-login bash scripts/ci/run-go-tests.sh -race -run TestPassword ./internal/credentialgateway
@@ -95,7 +95,7 @@ jobs:
         run: bash scripts/ci/run-audit-check.sh native-otp bash scripts/ci/run-go-tests.sh -race ./internal/notificationotp ./utils/messageSender/...
       - name: Internal RPC compatibility, public allowlist and existing login boundaries
         if: ${{ !cancelled() }}
-        run: bash scripts/ci/run-audit-check.sh credential-compat bash scripts/ci/run-go-tests.sh ./pkg/rpc ./web/rpc/jsonrpc ./web/api ./web/signonauth
+        run: bash scripts/ci/run-audit-check.sh credential-compat bash scripts/ci/run-go-tests.sh -race ./pkg/rpc ./web/rpc/jsonrpc ./web/api/... ./web/router ./web/signonauth
           ./web/workspace ./internal/plugingateway
       - name: Require committed dependency metadata
         if: ${{ !cancelled() }}

@@ -25,3 +25,12 @@ type PasskeyImport struct {
 	RPID      string
 	CreatedAt time.Time
 }
+
+// PasskeyRevocation records explicitly deleted passkeys so restoring an older
+// backup cannot resurrect revoked credentials or permit old exports to re-add them.
+type PasskeyRevocation struct {
+	CredentialHash string    `gorm:"type:char(64);primaryKey"`
+	UserUUID       string    `gorm:"type:varchar(36);not null;index"`
+	RPID           string    `gorm:"type:varchar(253);not null"`
+	RevokedAt      time.Time `gorm:"not null"`
+}
