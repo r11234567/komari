@@ -21,7 +21,7 @@ type APITokenPolicy struct {
 // never inferred from a token; future procedures remain denied by default.
 func (p *Principal) AllowsAPIProcedure(procedure string) bool {
 	if p == nil || p.APIToken == nil {
-		return true
+		return p != nil && p.Type != PrincipalAPIKey
 	}
 	if !time.Now().Before(p.APIToken.ExpiresAt) {
 		return false
@@ -39,6 +39,12 @@ func (p *Principal) AllowsAPIProcedure(procedure string) bool {
 }
 
 func (p *Principal) AllowsAgent(agentID string) bool {
-	return p == nil || p.APIToken == nil || time.Now().Before(p.APIToken.ExpiresAt) &&
+	if p == nil {
+		return true
+	}
+	if p.APIToken == nil {
+		return p.Type != PrincipalAPIKey
+	}
+	return time.Now().Before(p.APIToken.ExpiresAt) &&
 		(p.APIToken.AllAgents || slices.Contains(p.APIToken.AgentIDs, agentID))
 }

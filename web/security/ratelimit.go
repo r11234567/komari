@@ -227,8 +227,6 @@ func (ctrl *RateLimitController) keyAndBudget(c *gin.Context) (string, float64, 
 		identity = "client:" + client
 	} else if tokenID := c.GetString("api_token_id"); tokenID != "" {
 		identity = "token:" + tokenID
-	} else if c.GetBool("legacy_api_key") {
-		identity = "legacy-api-key"
 	} else if uuid := c.GetString("uuid"); uuid != "" && uuid != "00000000-0000-0000-0000-000000000000" {
 		identity = "user:" + uuid
 	} else {

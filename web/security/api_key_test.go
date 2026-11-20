@@ -9,21 +9,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func TestAPIKeyMatchesRejectsPartialMalformedAndEmptyCredentials(t *testing.T) {
-	key := "komari-synthetic-256-bit-secret"
-	for _, header := range []string{"", key, "Bearer ", "bearer " + key, "Bearer " + key[:len(key)-1], "Bearer " + key + "x", "Bearer " + key + "\x00"} {
-		if APIKeyMatches(header, key) {
-			t.Fatalf("invalid header accepted: %q", header)
-		}
-	}
-	if !APIKeyMatches("Bearer "+key, key) {
-		t.Fatal("valid credential rejected")
-	}
-	if APIKeyMatches("Bearer short", "short") || APIKeyMatches("Bearer ", "") {
-		t.Fatal("unconfigured/short legacy key accepted")
-	}
-}
-
 func TestAPIFailureBudgetDoesNotChargeSuccessfulTrafficAndRecovers(t *testing.T) {
 	limiter := NewAPIKeyAttemptLimiter()
 	now := time.Now()

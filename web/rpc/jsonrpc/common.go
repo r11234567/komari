@@ -456,10 +456,9 @@ func getMe(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) 
 	meta := rpc.MetaFromContext(ctx)
 
 	switch meta.Principal.Type {
-	case rpc.PrincipalUser, rpc.PrincipalAPIKey:
+	case rpc.PrincipalUser:
 		if meta.User == nil {
-			resp.LoggedIn = true
-			resp.Username = "api_key"
+			resp.LoggedIn = false
 			return resp, nil
 		}
 		resp.TwoFAEnabled = meta.User.TwoFactor != ""

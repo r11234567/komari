@@ -16,7 +16,7 @@ import (
 )
 
 func TestBackgroundExportRequiresInteractiveAdministrator(t *testing.T) {
-	for _, p := range []*rpc.Principal{rpc.NewAnonymousPrincipal(), rpc.NewAPIKeyPrincipal(), rpc.NewAgentPrincipal("node"), {Type: rpc.PrincipalUser, Roles: []string{rpc.RoleAdmin}}, {Type: rpc.PrincipalUser, UserUUID: "viewer"}} {
+	for _, p := range []*rpc.Principal{rpc.NewAnonymousPrincipal(), rpc.NewAPITokenPrincipal(rpc.APITokenPolicy{}), rpc.NewAgentPrincipal("node"), {Type: rpc.PrincipalUser, Roles: []string{rpc.RoleAdmin}}, {Type: rpc.PrincipalUser, UserUUID: "viewer"}} {
 		r := gin.New()
 		a := &backgroundExportAPI{}
 		r.GET("/exports", func(c *gin.Context) {

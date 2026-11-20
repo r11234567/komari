@@ -13,7 +13,7 @@ func TestPrincipalConstructors(t *testing.T) {
 		{"anonymous", NewAnonymousPrincipal(), PrincipalAnonymous, RoleGuest, false},
 		{"agent", NewAgentPrincipal("c-uuid"), PrincipalAgent, RoleClient, false},
 		{"user", NewUserPrincipal("u-uuid"), PrincipalUser, RoleAdmin, false},
-		{"apikey", NewAPIKeyPrincipal(), PrincipalAPIKey, RoleAdmin, true},
+		{"apikey", NewAPITokenPrincipal(APITokenPolicy{}), PrincipalAPIKey, RoleGuest, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -86,8 +86,8 @@ func TestCheckPrincipal(t *testing.T) {
 		{"user->common", NewUserPrincipal("u1"), "common:getNodes", true},
 		{"user->client", NewUserPrincipal("u1"), "client:report", false},
 		// api key 主体:等同 admin 能力
-		{"apikey->admin", NewAPIKeyPrincipal(), "admin:addClient", true},
-		{"apikey->client", NewAPIKeyPrincipal(), "client:report", false},
+		{"apikey->admin", NewAPITokenPrincipal(APITokenPolicy{}), "admin:addClient", false},
+		{"apikey->client", NewAPITokenPrincipal(APITokenPolicy{}), "client:report", false},
 		// 匿名主体:仅公共方法
 		{"anon->common", NewAnonymousPrincipal(), "common:getNodes", true},
 		{"anon->admin", NewAnonymousPrincipal(), "admin:addClient", false},

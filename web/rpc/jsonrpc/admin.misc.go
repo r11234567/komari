@@ -163,6 +163,9 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	if err := req.BindParams(&cfg); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid or missing request body: "+err.Error(), nil)
 	}
+	if _, found := cfg[config.RetiredAdminKey]; found {
+		return nil, rpc.MakeError(rpc.InvalidParams, "legacy administrator key is retired", nil)
+	}
 	if loginSettingsTouched(cfg) {
 		if err := signonauth.Require(ctx); err != nil {
 			return nil, rpc.MakeError(rpc.PermissionDenied, err.Error(), nil)
@@ -387,7 +390,7 @@ func adminOrderClients(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	return nil, nil
 }
 
-var loginSettingKeys = []string{config.ApiKeyKey, config.OAuthEnabledKey, config.OAuthProviderKey, config.DisablePasswordLoginKey}
+var loginSettingKeys = []string{config.OAuthEnabledKey, config.OAuthProviderKey, config.DisablePasswordLoginKey}
 
 func loginSettingsTouched(cfg map[string]any) bool {
 	for _, key := range loginSettingKeys {

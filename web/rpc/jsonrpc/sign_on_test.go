@@ -9,7 +9,7 @@ import (
 )
 
 func TestLoginSettingsRejectNonInteractiveRPCBeforeWrites(t *testing.T) {
-	for _, principal := range []*rpc.Principal{rpc.NewAPIKeyPrincipal(), rpc.NewAgentPrincipal("node"), rpc.NewUserPrincipal("plugin-internal")} {
+	for _, principal := range []*rpc.Principal{rpc.NewAPITokenPrincipal(rpc.APITokenPolicy{}), rpc.NewAgentPrincipal("node"), rpc.NewUserPrincipal("plugin-internal")} {
 		ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: principal})
 		for _, key := range loginSettingKeys {
 			_, err := adminEditSettings(ctx, &rpc.JsonRpcRequest{Params: map[string]any{key: "new-value"}})
@@ -30,7 +30,7 @@ func TestLoginSettingsOnlyProtectTheirOwnKeys(t *testing.T) {
 	if loginSettingsTouched(map[string]any{"sitename": "custom", config.NotificationDigestEnabledKey: true}) {
 		t.Fatal("unrelated settings require login-settings grant")
 	}
-	if !loginSettingsTouched(map[string]any{config.ApiKeyKey: ""}) {
-		t.Fatal("clearing API key must also require 2FA")
+	if !loginSettingsTouched(map[string]any{config.OAuthProviderKey: ""}) {
+		t.Fatal("changing OAuth provider must also require 2FA")
 	}
 }

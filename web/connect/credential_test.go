@@ -157,7 +157,7 @@ func TestCredentialServicePolicyAndHTTPAuthentication(t *testing.T) {
 		t.Fatal("provider metadata may be cached")
 	}
 	m := rpc.MetaFromContext(ctx)
-	for _, p := range []*rpc.Principal{rpc.NewAPIKeyPrincipal(), rpc.PrincipalFromRole(rpc.RoleAdmin)} {
+	for _, p := range []*rpc.Principal{rpc.NewAPITokenPrincipal(rpc.APITokenPolicy{}), rpc.PrincipalFromRole(rpc.RoleAdmin)} {
 		other := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: p, UserUUID: m.UserUUID, SessionToken: session})
 		if _, err := (&credentialService{}).ListTrustedCredentialProviders(other, connect.NewRequest(&credentialv1.ListTrustedCredentialProvidersRequest{})); connect.CodeOf(err) != connect.CodeUnauthenticated {
 			t.Fatalf("noninteractive context: %v", err)

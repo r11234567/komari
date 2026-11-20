@@ -1,11 +1,8 @@
 package api
 
-// principal.go
-// 统一身份识别。IdentifyPrincipal 是全局唯一的主体识别入口,替代此前散落在
-// IdentityMiddleware / transport.detectPermissionGroup / transport.buildContextMeta
-// 三处的重复逻辑。识别优先级:API Key > Session(用户) > Client Token(agent) > Install Token > 匿名。
-
 import (
+	"strings"
+
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/enrollment"
@@ -16,26 +13,40 @@ import (
 // principalContextKey 是 principal 在 gin.Context 中的存储键。
 const principalContextKey = "principal"
 
-// IdentifyPrincipal 识别当前请求的调用主体。不写入任何状态,可安全多次调用。
-// 识别优先级与历史 IdentityMiddleware 一致:API Key > Session > Client Token > Install Token > 匿名。
+// IdentifyPrincipal reuses verified API credentials and resolves browser and device identities.
 func IdentifyPrincipal(c *gin.Context) *rpc.Principal {
 	if p := GetPrincipal(c); p != nil {
 		return p
 	}
-	// 1. API Key(Authorization: Bearer <key>)
-	if isApiKeyValid(c.GetHeader("Authorization")) {
-		return rpc.NewAPIKeyPrincipal()
+	if token, bearer := requestBearer(c.GetHeader("Authorization")); bearer {
+		return agentPrincipal(token)
 	}
-
-	// 2. Session(管理员用户)
 	if session, err := c.Cookie(security.SessionCookieName); err == nil && session != "" {
 		if uuid, err := accounts.GetSession(session); err == nil && uuid != "" {
 			return rpc.NewUserPrincipal(uuid)
 		}
 	}
+	return agentPrincipal(extractClientToken(c))
+}
 
+func requestBearer(header string) (string, bool) {
+	trimmed := strings.TrimSpace(header)
+	if trimmed == "" {
+		return "", false
+	}
+	idx := strings.IndexAny(trimmed, " \t")
+	if idx < 0 {
+		return "", strings.EqualFold(trimmed, "Bearer")
+	}
+	if !strings.EqualFold(trimmed[:idx], "Bearer") {
+		return "", false
+	}
+	return strings.TrimSpace(trimmed[idx+1:]), true
+}
+
+func agentPrincipal(token string) *rpc.Principal {
 	// 3. Client Token(agent 客户端)
-	if token := extractClientToken(c); token != "" {
+	if token != "" {
 		// 3a. Single-use install token — redeemed on first presentation, giving
 		// the installer a one-shot RoleClient identity so the install script can
 		// connect the agent without the permanent token ever leaving the panel.

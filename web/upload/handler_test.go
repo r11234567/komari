@@ -11,7 +11,7 @@ import (
 )
 
 func TestArchiveEndpointsRequireInteractiveSession(t *testing.T) {
-	for _, principal := range []*rpc.Principal{nil, rpc.NewAnonymousPrincipal(), rpc.NewAgentPrincipal("node"), rpc.NewAPIKeyPrincipal(), rpc.NewUserPrincipal("user-without-session")} {
+	for _, principal := range []*rpc.Principal{nil, rpc.NewAnonymousPrincipal(), rpc.NewAgentPrincipal("node"), rpc.NewAPITokenPrincipal(rpc.APITokenPolicy{}), rpc.NewUserPrincipal("user-without-session")} {
 		h := NewHandler(NewStore(t.TempDir()), nil)
 		for _, handler := range []gin.HandlerFunc{h.Init, h.Chunk, h.Merge, h.Cancel} {
 			r := gin.New()

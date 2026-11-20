@@ -190,7 +190,7 @@ func CheckPermission(group, method string) bool {
 func CheckPrincipal(p *Principal, method string) bool {
 	// Scoped API tokens use the explicit typed Connect allowlist. Do not let
 	// legacy REST/RPC2 or plugin gateways promote them via namespace roles.
-	if p != nil && p.APIToken != nil {
+	if p != nil && (p.APIToken != nil || p.Type == PrincipalAPIKey) {
 		return false
 	}
 	if p == nil {

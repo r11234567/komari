@@ -20,15 +20,15 @@ type Settings struct {
 	WsAllowedOrigins       string `json:"ws_allowed_origins" default:""`                       // WebSocket Origin 允许列表
 	Theme                  string `json:"theme" default:"nezha"`                               // 新安装默认使用 Nezha 公共主题
 	PrivateSite            bool   `json:"private_site" default:"false"`                        // 是否为私有站点，默认 false
-	ApiKey                 string `json:"api_key" default:""`                                  // API 密钥，默认空字符串
-	AutoDiscoveryKey       string `json:"auto_discovery_key" default:""`                       // Deprecated: 自动发现已被移除，保留以防旧配置反序列化错误
-	ScriptDomain           string `json:"script_domain" default:""`                            // 自定义脚本域名
-	SendIpAddrToGuest      bool   `json:"send_ip_addr_to_guest" default:"false"`               // 是否向访客页面发送 IP 地址，默认 false
-	VisitorAuditEnabled    bool   `json:"visitor_audit_enabled" default:"false"`               // 是否允许公开访客事件写入审计日志，默认 false
-	RateLimitEnabled       bool   `json:"rate_limit_enabled" default:"false"`                  // 是否启用客户端与历史读取限流
-	SSRFProtectionEnabled  bool   `json:"ssrf_protection_enabled" default:"true"`              // 市场及主题远程下载的公网地址检查
-	EulaAccepted           bool   `json:"eula_accepted" default:"false"`
-	BaseScriptsURLKey      string `json:"base_scripts_url" default:""`
+
+	AutoDiscoveryKey      string `json:"auto_discovery_key" default:""`          // Deprecated: 自动发现已被移除，保留以防旧配置反序列化错误
+	ScriptDomain          string `json:"script_domain" default:""`               // 自定义脚本域名
+	SendIpAddrToGuest     bool   `json:"send_ip_addr_to_guest" default:"false"`  // 是否向访客页面发送 IP 地址，默认 false
+	VisitorAuditEnabled   bool   `json:"visitor_audit_enabled" default:"false"`  // 是否允许公开访客事件写入审计日志，默认 false
+	RateLimitEnabled      bool   `json:"rate_limit_enabled" default:"false"`     // 是否启用客户端与历史读取限流
+	SSRFProtectionEnabled bool   `json:"ssrf_protection_enabled" default:"true"` // 市场及主题远程下载的公网地址检查
+	EulaAccepted          bool   `json:"eula_accepted" default:"false"`
+	BaseScriptsURLKey     string `json:"base_scripts_url" default:""`
 	// GeoIP 配置
 	GeoIpEnabled  bool   `json:"geo_ip_enabled" default:"true"`
 	GeoIpProvider string `json:"geo_ip_provider" default:"ipinfo"` // empty, mmdb, ip-api, geojs
@@ -76,7 +76,7 @@ const (
 	WsAllowedOriginsKey       = "ws_allowed_origins"
 	ThemeKey                  = "theme"
 	PrivateSiteKey            = "private_site"
-	ApiKeyKey                 = "api_key"
+	RetiredAdminKey           = "api_key"
 	AutoDiscoveryKeyKey       = "auto_discovery_key"
 	ScriptDomainKey           = "script_domain"
 	SendIpAddrToGuestKey      = "send_ip_addr_to_guest"

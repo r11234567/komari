@@ -68,18 +68,12 @@ func (s *rescueService) CreateRescueSession(ctx context.Context, req *connect.Re
 	return connect.NewResponse(&rescuev1.CreateRescueSessionResponse{Session: session}), nil
 }
 
-// requireRescueAdministrator accepts the same principals the two-factor check
-// did: an administrator session, or an API key acting as one.
+// requireRescueAdministrator requires an interactive administrator session.
 func requireRescueAdministrator(meta *rpc.ContextMeta) error {
-	if meta == nil || meta.Principal == nil {
+	if meta == nil || meta.Principal == nil || meta.Principal.Type != rpc.PrincipalUser || !meta.Principal.HasRole(rpc.RoleAdmin) {
 		return connectError(connect.CodePermissionDenied, errors.New("administrator authentication is required"))
 	}
-	switch meta.Principal.Type {
-	case rpc.PrincipalUser, rpc.PrincipalAPIKey:
-		return nil
-	default:
-		return connectError(connect.CodePermissionDenied, errors.New("administrator authentication is required"))
-	}
+	return nil
 }
 
 func (s *rescueService) WatchRescueSession(ctx context.Context, req *connect.Request[rescuev1.WatchRescueSessionRequest], stream *connect.ServerStream[rescuev1.WatchRescueSessionResponse]) error {

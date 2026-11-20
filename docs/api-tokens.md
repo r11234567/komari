@@ -30,13 +30,9 @@ For example, send `POST /komari.browser.v1.BrowserService/ListAgents` with
 `Authorization: Bearer <token>` header, and body `{}`. Do not put the token in
 query strings, URLs or logs.
 
-Creation, rotation, revocation and legacy-key shutdown require a real human
-session plus a fresh single-use proof bound to the exact action. Creation binds
-the name, permissions, nodes, expiry, source restrictions and replaced token ID.
-No API token or plugin principal can supply that proof. Rotation atomically
-creates a new credential and revokes the old one; if validation or insertion
-fails, the old credential stays valid. For overlap during migration, create a
-separate token, update the caller, then revoke the old token.
+Creation and rotation require an interactive administrator session and fresh proof for the exact token policy. Revocation requires the owner's interactive session. Rotation creates the replacement and revokes the original in one transaction.
+
+The legacy global administrator key is retired. Startup clears its stored configuration, and settings APIs reject attempts to recreate it. Migrate automated reads to the scoped procedures above.
 
 Secrets have a `komari_pat_` prefix, public UUID, and 256 random bits. Only their
 SHA-256 verifier is persisted. Verification compares fixed-size digests in
@@ -64,13 +60,7 @@ budget: 10 requests/second with burst 30; history reads share 1 request/second
 with burst 4. Exhaustion returns 429 and Retry-After. Rotating source addresses
 does not reset that budget. Existing query concurrency limits still apply.
 
-The old global API key remains a separate compatibility credential with its
-old privileges until explicitly disabled after migration. Both old comparison
-sites use the same fixed-size constant-time comparison. The new UI shows its
-enabled status and requires fresh verification to disable it. Do not describe
-this compatibility credential as a scoped token. Plugin-owned routes retain
-their own foreign Bearer authentication; namespaced Komari tokens still obey
-Komari's restrictions there.
+The old global static `api_key` administrator credential is retired. Startup deletes any stored `api_key` row and logs migration status without printing secret values; settings endpoints reject writes to `api_key`. Retired Bearer headers do not authenticate and do not fall back to browser session cookies across REST, Connect, or RPC2. Plugin-owned routes retain their own foreign Bearer authentication; namespaced Komari tokens still obey Komari's restrictions there.
 
 The new token table is additive. No production credentials are rotated or
 revoked by the schema migration itself.

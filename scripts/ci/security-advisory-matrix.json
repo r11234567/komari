@@ -1,6 +1,6 @@
 {
   "GHSA-3hqg-6m62-cgxf": {
-    "web/security": ["TestAPIKeyMatchesRejectsPartialMalformedAndEmptyCredentials", "TestAPIFailureBudgetDoesNotChargeSuccessfulTrafficAndRecovers", "TestAPISourceIgnoresSpoofedForwardingWithoutExplicitProxyTrust"],
+    "web/security": ["TestCorsMiddlewareRejectsUnverifiedBearerFromForeignOrigin", "TestAPIFailureBudgetDoesNotChargeSuccessfulTrafficAndRecovers", "TestAPISourceIgnoresSpoofedForwardingWithoutExplicitProxyTrust"],
     "web/connect": ["TestApiKeyFailuresDoNotLockOutEnrolledDevice", "TestApiTokenHTTPResourceScopeAndRevocationCannotFallBackToCookie"]
   },
   "GHSA-74qc-gfcj-9273": {

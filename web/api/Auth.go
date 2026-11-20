@@ -25,7 +25,7 @@ const (
 // IdentityMiddleware 统一身份识别中间件，在路由栈最外层运行。
 // 负责识别当前请求者身份（Admin / Client / Guest），并写入 Context。
 // 身份识别统一委托给 IdentifyPrincipal;同时保留旧的 c.Set 键(role/uuid/
-// api_key/session/client_uuid)以兼容现有 handler 与中间件。
+// api_token_id/session/client_uuid)以兼容现有 handler 与中间件。
 func IdentityMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		p := IdentifyPrincipal(c)
@@ -42,12 +42,6 @@ func IdentityMiddleware() gin.HandlerFunc {
 			c.Set("api_token_id", p.APIToken.ID)
 		}
 		switch p.Type {
-		case rpc.PrincipalAPIKey:
-			c.Set("legacy_api_key", p.APIToken == nil)
-			// 旧逻辑:API Key 时记录裸 key 与固定占位 uuid。
-			apiKey := c.GetHeader("Authorization")
-			c.Set("api_key", strings.TrimPrefix(apiKey, "Bearer "))
-			c.Set("uuid", "00000000-0000-0000-0000-000000000000")
 		case rpc.PrincipalUser:
 			if session, err := c.Cookie(security.SessionCookieName); err == nil && session != "" {
 				c.Set("session", session)
@@ -213,12 +207,6 @@ func extractClientToken(c *gin.Context) string {
 	if token != "" {
 		return token
 	}
-	authorization := strings.TrimSpace(c.GetHeader("Authorization"))
-	if strings.HasPrefix(authorization, "Bearer ") && !isApiKeyValid(authorization) {
-		if token := strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")); token != "" {
-			return token
-		}
-	}
 	// rpc2 约定:agent 经 ?Authorization=<token> 传入 client token。
 	if token := c.Query("Authorization"); token != "" {
 		return token
@@ -256,16 +244,4 @@ func checkTokenAndGetUUID(token string) (string, error) {
 		return uuid, nil
 	}
 	return "", nil
-}
-
-func isApiKeyValid(apiKey string) bool {
-	apiKeyConfig, err := config.GetAs[string](config.ApiKeyKey, "")
-	if err != nil {
-		return false
-	}
-
-	if apiKeyConfig == "" || len(apiKeyConfig) < 12 {
-		return false
-	}
-	return security.APIKeyMatches(apiKey, apiKeyConfig)
 }

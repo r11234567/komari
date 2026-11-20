@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -48,7 +49,7 @@ func TestApiTokenCreationFreshProofCannotBeReplayedOrBroadened(t *testing.T) {
 			case "wrong-expiry":
 				req.ExpiresAt = timestamppb.New(time.Now().Add(2 * time.Hour))
 			case "api-key":
-				ctx = rpc.NewContextWithMeta(ctx, &rpc.ContextMeta{Principal: rpc.NewAPIKeyPrincipal()})
+				ctx = rpc.NewContextWithMeta(ctx, &rpc.ContextMeta{Principal: rpc.NewAPITokenPrincipal(rpc.APITokenPolicy{})})
 			}
 			service := &apiTokenService{}
 			result, err := service.CreateApiToken(ctx, connect.NewRequest(req))
@@ -72,7 +73,7 @@ func TestApiTokenCreationFreshProofCannotBeReplayedOrBroadened(t *testing.T) {
 }
 
 func TestApiTokenManagementRejectsNoninteractivePrincipals(t *testing.T) {
-	for _, principal := range []*rpc.Principal{rpc.NewAnonymousPrincipal(), rpc.NewAgentPrincipal("node"), rpc.NewAPIKeyPrincipal(), rpc.PrincipalFromRole(rpc.RoleAdmin), rpc.NewUserPrincipal("no-session")} {
+	for _, principal := range []*rpc.Principal{rpc.NewAnonymousPrincipal(), rpc.NewAgentPrincipal("node"), rpc.NewAPITokenPrincipal(rpc.APITokenPolicy{}), rpc.PrincipalFromRole(rpc.RoleAdmin), rpc.NewUserPrincipal("no-session")} {
 		ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: principal})
 		service := &apiTokenService{}
 		_, err := service.ListApiTokens(ctx, connect.NewRequest(&adminv1.ListApiTokensRequest{}))
@@ -163,33 +164,40 @@ func TestApiTokenReductionsNeedHumanSessionAndOwnershipButNoSecondFactor(t *test
 	require.NoError(t, err)
 	_, err = apitokens.Authenticate(ctx, secret, "192.0.2.8")
 	require.Error(t, err)
-	require.NoError(t, config.Set(config.ApiKeyKey, "synthetic-global-key-to-disable"))
-	t.Cleanup(func() { _ = config.Set(config.ApiKeyKey, "") })
+	require.Error(t, config.Set(config.RetiredAdminKey, "retired-test-value"))
+	require.Error(t, config.SetMany(map[string]any{config.RetiredAdminKey: "retired-test-value"}))
 	_, err = service.DisableLegacyApiKey(ctx, connect.NewRequest(&adminv1.DisableLegacyApiKeyRequest{}))
 	require.NoError(t, err)
-	key, err := config.GetAs[string](config.ApiKeyKey, "")
-	require.NoError(t, err)
-	require.Empty(t, key)
 }
 
 func TestApiKeyFailuresDoNotLockOutEnrolledDevice(t *testing.T) {
-	require.NoError(t, config.Set(config.ApiKeyKey, "synthetic-legacy-api-key-0123456789"))
-	t.Cleanup(func() { _ = config.Set(config.ApiKeyKey, "") })
+	_, _, session := actionFixture(t)
+	const retired = "synthetic-legacy-api-key-0123456789"
+	require.NoError(t, dbcore.GetDBInstance().Save(&config.ConfigItem{Key: config.RetiredAdminKey, Value: strconv.Quote(retired)}).Error)
+	t.Cleanup(func() { dbcore.GetDBInstance().Delete(&config.ConfigItem{}, "key = ?", config.RetiredAdminKey) })
 	router := gin.New()
 	router.Use(api.APIAuthenticationMiddleware(), api.IdentityMiddleware())
-	router.POST("/probe", func(c *gin.Context) { c.String(200, api.GetRole(c)) })
-	send := func(token string) *httptest.ResponseRecorder {
-		request := httptest.NewRequest("POST", "/probe", nil)
+	paths := []string{"/api/admin/settings", "/komari.browser.v1.BrowserService/ListAgents", "/api/rpc2"}
+	for _, path := range paths {
+		router.POST(path, func(c *gin.Context) { c.String(200, api.GetRole(c)) })
+	}
+	send := func(path, token string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest("POST", path, nil)
 		request.Header.Set("Authorization", "Bearer "+token)
+		request.AddCookie(&http.Cookie{Name: security.SessionCookieName, Value: session})
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, request)
 		return response
 	}
-	for i := 0; i < 10; i++ {
-		require.Equal(t, http.StatusUnauthorized, send("wrong-key").Code)
+	for _, path := range paths {
+		require.Equal(t, http.StatusUnauthorized, send(path, retired).Code)
 	}
-	require.Equal(t, http.StatusTooManyRequests, send("wrong-key").Code)
-	response := send(testAccessToken)
+	invalid := []string{retired[:len(retired)-1], retired + "x", "wrong-key"}
+	for i := 0; i < 10-len(paths); i++ {
+		require.Equal(t, http.StatusUnauthorized, send(paths[0], invalid[i%len(invalid)]).Code)
+	}
+	require.Equal(t, http.StatusTooManyRequests, send(paths[0], "wrong-key").Code)
+	response := send(paths[0], testAccessToken)
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 	require.Equal(t, api.RoleClient, response.Body.String())
 }

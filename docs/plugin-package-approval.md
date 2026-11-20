@@ -43,8 +43,7 @@ Revocation clears the grant, so enabling afterward requires approval again.
 Revocation and inactive-package discard reduce authority: an interactive human
 administrator can perform them without 2FA, including when no second factor is
 configured. They retain revision checks and auditing; optional old proof fields
-do not block them. API-token revocation and legacy-key shutdown follow the same
-rule, retaining owner/session checks and the existing Origin protection.
+do not block them. API-token revocation follows the same rule, retaining owner/session checks and the existing Origin protection.
 
 ## Transactions and compatibility
 

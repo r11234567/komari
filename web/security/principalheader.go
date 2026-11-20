@@ -26,7 +26,7 @@ const (
 	PrincipalHeaderAgent = "agent"
 	// PrincipalHeaderUser is a request bearing a valid admin session cookie.
 	PrincipalHeaderUser = "user"
-	// PrincipalHeaderAPIKey is a request bearing the configured API key.
+	// PrincipalHeaderAPIKey is a request authenticated with a scoped API token.
 	PrincipalHeaderAPIKey = "api-key"
 	// PrincipalHeaderAnonymous is a request that presented no accepted
 	// credential. Note this covers both a caller that offered none and one

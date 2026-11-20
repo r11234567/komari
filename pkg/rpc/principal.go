@@ -34,7 +34,8 @@ type Principal struct {
 	// Roles 角色/能力集。默认由 Type 推导:
 	//   - PrincipalAnonymous → [RoleGuest]
 	//   - PrincipalAgent → [RoleClient]
-	//   - PrincipalUser / PrincipalAPIKey → [RoleAdmin]
+	//   - PrincipalUser → [RoleAdmin]
+	//   - PrincipalAPIKey → [RoleGuest] with explicit token scopes
 	// 未来可扩展为多角色(只读 admin / API Key scope 等)。
 	Roles []string
 }
@@ -65,12 +66,13 @@ func NewUserPrincipal(userUUID string) *Principal {
 	}
 }
 
-// NewAPIKeyPrincipal 创建 API Key 调用主体
-func NewAPIKeyPrincipal() *Principal {
+// NewAPITokenPrincipal carries the scoped read permissions of a personal access token.
+func NewAPITokenPrincipal(policy APITokenPolicy) *Principal {
 	return &Principal{
 		Type:     PrincipalAPIKey,
 		IsAPIKey: true,
-		Roles:    []string{RoleAdmin},
+		APIToken: &policy,
+		Roles:    []string{RoleGuest},
 	}
 }
 

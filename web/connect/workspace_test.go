@@ -24,7 +24,7 @@ import (
 )
 
 func TestWorkspaceRejectsNonInteractivePrincipals(t *testing.T) {
-	for _, principal := range []*rpc.Principal{rpc.NewAnonymousPrincipal(), rpc.NewAPIKeyPrincipal(), rpc.NewAgentPrincipal("agent"), rpc.PrincipalFromRole(rpc.RoleAdmin)} {
+	for _, principal := range []*rpc.Principal{rpc.NewAnonymousPrincipal(), rpc.NewAPITokenPrincipal(rpc.APITokenPolicy{}), rpc.NewAgentPrincipal("agent"), rpc.PrincipalFromRole(rpc.RoleAdmin)} {
 		ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: principal})
 		_, err := (&workspaceService{}).UnlockWorkspace(ctx, connect.NewRequest(&workspacev1.UnlockWorkspaceRequest{AgentId: "agent", SystemUser: "root"}))
 		if connect.CodeOf(err) != connect.CodeUnauthenticated {
