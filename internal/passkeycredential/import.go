@@ -89,6 +89,8 @@ func Import(ctx context.Context, db *gorm.DB, input io.Reader, apply bool) (Impo
 		for _, record := range doc.Credentials {
 			frequency[record.ID]++
 		}
+		userCounts := make(map[string]int64)
+		hasRevocationTable := tx.Migrator().HasTable(&models.PasskeyRevocation{})
 		for _, r := range doc.Credentials {
 			pk, err := credentialKey(r.ID)
 			if err != nil {
@@ -113,6 +115,23 @@ func Import(ctx context.Context, db *gorm.DB, input io.Reader, apply bool) (Impo
 			if err != nil {
 				return err
 			}
+			if hasRevocationTable {
+				var revoked int64
+				if err := tx.Model(&models.PasskeyRevocation{}).Where("credential_hash = ?", pk).Count(&revoked).Error; err != nil {
+					return err
+				}
+				if revoked > 0 {
+					report.Conflicts++
+					continue
+				}
+			}
+			if _, ok := userCounts[r.UserUUID]; !ok {
+				var existing int64
+				if err := tx.Model(&models.UserPasskey{}).Where("user_uuid = ? AND rp_id = ?", r.UserUUID, rp).Count(&existing).Error; err != nil {
+					return err
+				}
+				userCounts[r.UserUUID] = existing
+			}
 			var row models.UserPasskey
 			err = tx.Where("credential_hash = ?", pk).Take(&row).Error
 			if err == nil {
@@ -122,10 +141,17 @@ func Import(ctx context.Context, db *gorm.DB, input io.Reader, apply bool) (Impo
 				}
 			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
-			} else if apply {
-				row = models.UserPasskey{CredentialHash: pk, UserUUID: r.UserUUID, RPID: rp, CredentialID: r.ID, PublicKey: r.PublicKey, Transports: r.Transports, DeviceType: r.DeviceType, BackedUp: r.BackedUp, Name: "Imported passkey"}
-				if err = tx.Omit("User").Create(&row).Error; err != nil {
-					return err
+			} else {
+				if userCounts[r.UserUUID] >= 64 {
+					report.Conflicts++
+					continue
+				}
+				userCounts[r.UserUUID]++
+				if apply {
+					row = models.UserPasskey{CredentialHash: pk, UserUUID: r.UserUUID, RPID: rp, CredentialID: r.ID, PublicKey: r.PublicKey, Transports: r.Transports, DeviceType: r.DeviceType, BackedUp: r.BackedUp, Name: "Imported passkey"}
+					if err = tx.Omit("User").Create(&row).Error; err != nil {
+						return err
+					}
 				}
 			}
 			if apply {

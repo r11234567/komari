@@ -35,7 +35,11 @@ func (passkeyService) GetPasskeyStatus(ctx context.Context, _ *connect.Request[v
 }
 func (passkeyService) BeginPasskeyLogin(ctx context.Context, r *connect.Request[v1.BeginPasskeyLoginRequest]) (*connect.Response[v1.BeginPasskeyLoginResponse], error) {
 	ip, _ := loginRequestMeta(ctx)
-	opt, token, err := passkeycredential.BeginLogin(ctx, r.Msg.Username, ip)
+	priorToken := ""
+	if existing, err := (&http.Request{Header: r.Header()}).Cookie(ceremonyCookie); err == nil {
+		priorToken = existing.Value
+	}
+	opt, token, err := passkeycredential.BeginLoginWithPrior(ctx, r.Msg.Username, ip, priorToken)
 	if err != nil {
 		return nil, credentialConnectError(err)
 	}
@@ -56,11 +60,11 @@ func (passkeyService) CompletePasskeyLogin(ctx context.Context, r *connect.Reque
 	if err != nil {
 		return nil, credentialConnectError(credential.ErrInvalidArgument)
 	}
-	user, err := passkeycredential.CompleteLogin(ctx, cookie.Value, raw)
+	ip, ua := loginRequestMeta(ctx)
+	user, err := passkeycredential.CompleteLoginWithIP(ctx, ip, cookie.Value, raw)
 	if err != nil {
 		return nil, credentialConnectError(err)
 	}
-	ip, ua := loginRequestMeta(ctx)
 	session, err := accounts.CreateSession(user, credentialgateway.LoginSessionLifetime, ua, ip, "passkey")
 	if err != nil {
 		return nil, credentialConnectError(err)

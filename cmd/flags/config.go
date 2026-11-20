@@ -40,5 +40,7 @@ func SupportedDatabaseTypes() string {
 
 // NativePasskeyConfigured selects the native store even if RP settings are incomplete.
 func NativePasskeyConfigured() bool {
-	return os.Getenv("KOMARI_PASSKEY_ORIGIN") != "" || os.Getenv("KOMARI_PASSKEY_RP_ID") != ""
+	return strings.TrimSpace(os.Getenv("KOMARI_PASSKEY_ORIGIN")) != "" ||
+		strings.TrimSpace(os.Getenv("KOMARI_PASSKEY_PANEL_ORIGIN")) != "" ||
+		strings.TrimSpace(os.Getenv("KOMARI_PASSKEY_RP_ID")) != ""
 }

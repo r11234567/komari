@@ -47,18 +47,38 @@ func (p Provider) Available(ctx context.Context, b credential.Binding) (bool, er
 	if !s.Running || len(s.Records) == 0 {
 		return false, nil
 	}
-	_, _, _, err = relyingParty(ctx, s.Config)
-	return err == nil, nil
+	_, _, allowSynced, err := relyingParty(ctx, s.Config)
+	if err != nil {
+		return false, nil
+	}
+	for _, record := range s.Records {
+		if record.DeviceType == "multiDevice" && !allowSynced {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 type account struct {
-	id      string
-	records []webauthn.Credential
+	id       string
+	username string
+	records  []webauthn.Credential
 }
 
-func (a account) WebAuthnID() []byte                         { return []byte(a.id) } // plugin uses UTF-8 UUID, not UUID binary
-func (a account) WebAuthnName() string                       { return a.id }
-func (a account) WebAuthnDisplayName() string                { return a.id }
+func (a account) WebAuthnID() []byte { return []byte(a.id) } // plugin uses UTF-8 UUID, not UUID binary
+func (a account) WebAuthnName() string {
+	if a.username != "" {
+		return a.username
+	}
+	return a.id
+}
+func (a account) WebAuthnDisplayName() string {
+	if a.username != "" {
+		return a.username
+	}
+	return a.id
+}
 func (a account) WebAuthnCredentials() []webauthn.Credential { return a.records }
 
 func (p Provider) Begin(ctx context.Context, attempt credential.Attempt) (credential.Prompt, credential.VerifyFunc, error) {
