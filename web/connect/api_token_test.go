@@ -192,8 +192,9 @@ func TestApiKeyFailuresDoNotLockOutEnrolledDevice(t *testing.T) {
 	for _, path := range paths {
 		require.Equal(t, http.StatusUnauthorized, send(path, retired).Code)
 	}
+	invalid := []string{retired[:len(retired)-1], retired + "x", "wrong-key"}
 	for i := 0; i < 10-len(paths); i++ {
-		require.Equal(t, http.StatusUnauthorized, send(paths[0], "wrong-key").Code)
+		require.Equal(t, http.StatusUnauthorized, send(paths[0], invalid[i%len(invalid)]).Code)
 	}
 	require.Equal(t, http.StatusTooManyRequests, send(paths[0], "wrong-key").Code)
 	response := send(paths[0], testAccessToken)
