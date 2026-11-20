@@ -38,7 +38,7 @@ func actionFixture(t *testing.T) (context.Context, string, string) {
 	if err := db.Create(&models.User{UUID: user, Username: user, Passwd: "synthetic-unused", TwoFactor: "JBSWY3DPEHPK3PXP"}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Create(&models.Session{UUID: user, Session: accounts.SessionIDForCookie(session), Expires: time.Now().Add(time.Hour)}).Error; err != nil {
+	if err := db.Create(&models.Session{UUID: user, Session: accounts.SessionIDForCookie(session), Expires: time.Now().UTC().Add(time.Hour)}).Error; err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {

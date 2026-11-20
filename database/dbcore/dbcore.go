@@ -922,8 +922,8 @@ func doInitialize() error {
 	); err != nil {
 		return fmt.Errorf("migrate session table: %w", err)
 	}
-	// Primary authentication storage is SQLite. Only exact lowercase v1 HMAC rows survive upgrades and restores.
-	if err := instance.Where("length(session) <> 67 OR substr(session,1,3) <> 'v1:' OR substr(session,4) GLOB '*[^0-9a-f]*'").Delete(&models.Session{}).Error; err != nil {
+	// Only exact lowercase v1 HMAC rows survive upgrades and restores.
+	if err := retireLegacySessionRows(instance); err != nil {
 		return fmt.Errorf("retire legacy session rows: %w", err)
 	}
 	if err := instance.AutoMigrate(
@@ -937,6 +937,48 @@ func doInitialize() error {
 	}
 
 	return nil
+}
+
+func isValidStoredSessionDigest(id string) bool {
+	if len(id) != 67 || !strings.HasPrefix(id, "v1:") {
+		return false
+	}
+	for i := 3; i < len(id); i++ {
+		c := id[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// retireLegacySessionRows removes plaintext or malformed session rows in a
+// dialect-portable, idempotent transaction while retaining valid lowercase v1
+// HMAC session digests.
+func retireLegacySessionRows(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		var rows []models.Session
+		if err := tx.Select("session").Find(&rows).Error; err != nil {
+			return err
+		}
+		invalid := make([]string, 0)
+		for _, row := range rows {
+			if !isValidStoredSessionDigest(row.Session) {
+				invalid = append(invalid, row.Session)
+			}
+		}
+		const batchSize = 200
+		for i := 0; i < len(invalid); i += batchSize {
+			end := i + batchSize
+			if end > len(invalid) {
+				end = len(invalid)
+			}
+			if err := tx.Where("session IN ?", invalid[i:end]).Delete(&models.Session{}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func cleanupOrphanedPingLossNotifications(db *gorm.DB) error {

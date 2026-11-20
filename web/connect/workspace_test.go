@@ -56,7 +56,7 @@ func TestWorkspaceFresh2FAToAssignmentsAndCapabilityRevocation(t *testing.T) {
 	if err := db.Create(&models.User{UUID: user, Username: "workspace-" + user, Passwd: "unused-synthetic-test", TwoFactor: secret}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Create(&models.Session{UUID: user, Session: accounts.SessionIDForCookie(login), Expires: time.Now().Add(time.Hour)}).Error; err != nil {
+	if err := db.Create(&models.Session{UUID: user, Session: accounts.SessionIDForCookie(login), Expires: time.Now().UTC().Add(time.Hour)}).Error; err != nil {
 		t.Fatal(err)
 	}
 	agent, _, err := clients.CreateClient()

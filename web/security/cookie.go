@@ -20,12 +20,15 @@ func SetSensitiveCookie(c *gin.Context, name, value string, maxAge int) {
 	})
 }
 
-const SessionCookieName = "__Host-komari_session"
+const (
+	SessionCookieName       = "__Host-komari_session"
+	LegacySessionCookieName = "session_token"
+)
 
 // Lax permits top-level OAuth GET callbacks to retain the signed-in session for account binding.
 func SetSessionCookie(headers http.Header, value string, maxAge int) {
 	cookie := http.Cookie{Name: SessionCookieName, Value: value, Path: "/", MaxAge: maxAge, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode}
 	headers.Add("Set-Cookie", cookie.String())
-	legacy := http.Cookie{Name: "session_token", Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode}
+	legacy := http.Cookie{Name: LegacySessionCookieName, Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode}
 	headers.Add("Set-Cookie", legacy.String())
 }

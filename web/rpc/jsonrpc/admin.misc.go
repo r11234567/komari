@@ -3,6 +3,7 @@ package jsonrpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"strconv"
 	"strings"
@@ -86,11 +87,12 @@ func adminDeleteSession(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		Session string `json:"session"`
 	}
 	req.BindParams(&params)
+	params.Session = strings.TrimSpace(params.Session)
 	if params.Session == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "session is required", nil)
 	}
 	if err := accounts.DeleteSessionByID(params.Session); err != nil {
-		if err == accounts.ErrInvalidSessionID {
+		if errors.Is(err, accounts.ErrInvalidSessionID) {
 			return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
 		}
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to delete session: "+err.Error(), nil)

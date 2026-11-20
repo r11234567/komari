@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/web/api"
@@ -15,7 +17,7 @@ func BindingExternalAccount(c *gin.Context) {
 	session, _ := c.Cookie(security.SessionCookieName)
 	user, err := accounts.GetUserBySession(session)
 	if err != nil {
-		api.RespondError(c, 500, "No user found: "+err.Error())
+		api.RespondError(c, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
 	security.SetSensitiveCookie(c, "binding_external_account", user.UUID, 300)
@@ -26,7 +28,7 @@ func UnbindExternalAccount(c *gin.Context) {
 	session, _ := c.Cookie(security.SessionCookieName)
 	user, err := accounts.GetUserBySession(session)
 	if err != nil {
-		api.RespondError(c, 500, "No user found: "+err.Error())
+		api.RespondError(c, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
 	if err := accounts.UnbindExternalAccount(user.UUID); err != nil {

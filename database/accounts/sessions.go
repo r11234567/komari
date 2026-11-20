@@ -1,7 +1,6 @@
 package accounts
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -17,12 +16,20 @@ import (
 	"gorm.io/gorm"
 )
 
-// GetAllSessions 获取所有会话
+// GetAllSessions 获取所有未过期会话
 func GetAllSessions() (sessions []models.Session, err error) {
 	db := dbcore.GetDBInstance()
-	err = db.Find(&sessions).Error
+	var all []models.Session
+	err = db.Find(&all).Error
 	if err != nil {
 		return nil, err
+	}
+	now := time.Now().UTC()
+	sessions = make([]models.Session, 0, len(all))
+	for _, s := range all {
+		if s.Expires.UTC().After(now) {
+			sessions = append(sessions, s)
+		}
 	}
 	return sessions, nil
 }
@@ -93,14 +100,32 @@ func GetUserBySession(session string) (models.User, error) {
 	return GetUserByUUID(sessionRecord.UUID)
 }
 
+func isLowercaseSessionDigest(id string) bool {
+	if len(id) != len(sessionDigestPrefix)+64 || !isSessionDigest(id) {
+		return false
+	}
+	for i := len(sessionDigestPrefix); i < len(id); i++ {
+		c := id[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 func findSessionRecord(cookie string) (models.Session, error) {
 	id := SessionIDForCookie(cookie)
 	if id == "" {
 		return models.Session{}, gorm.ErrRecordNotFound
 	}
 	var record models.Session
-	err := dbcore.GetDBInstance().Where("session = ? AND expires > ?", id, time.Now().UTC()).First(&record).Error
-	return record, err
+	if err := dbcore.GetDBInstance().Where("session = ?", id).First(&record).Error; err != nil {
+		return models.Session{}, err
+	}
+	if !record.Expires.UTC().After(time.Now().UTC()) {
+		return models.Session{}, gorm.ErrRecordNotFound
+	}
+	return record, nil
 }
 
 // DeleteSession revokes the session identified by a browser cookie at logout.
@@ -113,10 +138,7 @@ func DeleteSession(cookie string) error {
 }
 
 func DeleteSessionByID(id string) error {
-	if len(id) != len(sessionDigestPrefix)+64 || !isSessionDigest(id) {
-		return ErrInvalidSessionID
-	}
-	if _, err := hex.DecodeString(id[len(sessionDigestPrefix):]); err != nil {
+	if !isLowercaseSessionDigest(id) {
 		return ErrInvalidSessionID
 	}
 	return dbcore.GetDBInstance().Where("session = ?", id).Delete(&models.Session{}).Error
@@ -134,8 +156,15 @@ func DeleteAllSessions() error {
 }
 
 func UpdateLatest(session, useragent, ip string) error {
+	record, err := findSessionRecord(session)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
 	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ? AND expires > ?", SessionIDForCookie(session), time.Now().UTC()).Updates(map[string]interface{}{
+	return db.Model(&models.Session{}).Where("session = ?", record.Session).Updates(map[string]interface{}{
 		"latest_online":     time.Now().UTC(),
 		"latest_user_agent": useragent,
 		"latest_ip":         ip,
@@ -144,9 +173,19 @@ func UpdateLatest(session, useragent, ip string) error {
 
 func RemoveExpiredSessions() error {
 	db := dbcore.GetDBInstance()
-	result := db.Where("expires < ?", time.Now().UTC()).Delete(&models.Session{})
-	if result.Error != nil {
-		return result.Error
+	var rows []models.Session
+	if err := db.Select("session", "expires").Find(&rows).Error; err != nil {
+		return err
 	}
-	return nil
+	now := time.Now().UTC()
+	expired := make([]string, 0)
+	for _, r := range rows {
+		if !r.Expires.UTC().After(now) {
+			expired = append(expired, r.Session)
+		}
+	}
+	if len(expired) == 0 {
+		return nil
+	}
+	return db.Where("session IN ?", expired).Delete(&models.Session{}).Error
 }
