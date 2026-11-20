@@ -144,7 +144,7 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 				meta.SessionToken = session
 			}
 		}
-		secure := c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
+		secure := security.IsRequestSecure(c.Request)
 		ctx := passkeycredential.WithRequestOrigin(rpc.NewContextWithMeta(c.Request.Context(), meta), c.Request.Host, secure)
 		c.Request = c.Request.WithContext(workspace.WithSecure(workspace.WithToken(ctx, c.GetHeader(workspace.Header)), secure))
 		handler.ServeHTTP(c.Writer, c.Request)

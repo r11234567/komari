@@ -92,6 +92,25 @@ func normalizeOrigin(raw string) (string, string, bool) {
 	return strings.ToLower(parsed.Scheme) + "://" + host, host, true
 }
 
+// IsRequestSecure reports whether the request arrived over TLS directly or over
+// HTTPS terminated by a local or private reverse proxy.
+func IsRequestSecure(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.TLS != nil {
+		return true
+	}
+	if !isPrivateProxy(r.RemoteAddr) {
+		return false
+	}
+	proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if first, _, ok := strings.Cut(proto, ","); ok {
+		proto = strings.TrimSpace(first)
+	}
+	return strings.EqualFold(proto, "https")
+}
+
 func isPrivateProxy(remoteAddr string) bool {
 	host := strings.TrimSpace(remoteAddr)
 	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
