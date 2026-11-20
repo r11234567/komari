@@ -55,6 +55,8 @@ func Register(r *gin.Engine) {
 		handler http.Handler
 	}{
 		newHandler(credentialv1connect.NewPasswordLoginServiceHandler(&passwordLoginService{}, connect.WithInterceptors(diagnostics.OutcomeInterceptor{}, policy), connect.WithReadMaxBytes(128<<10))),
+		newHandler(credentialv1connect.NewPasskeyLoginServiceHandler(passkeyService{}, connect.WithInterceptors(diagnostics.OutcomeInterceptor{}, policy), connect.WithReadMaxBytes(128<<10))),
+		newHandler(credentialv1connect.NewPasskeyManagementServiceHandler(passkeyService{}, connect.WithInterceptors(diagnostics.OutcomeInterceptor{}, policy), connect.WithReadMaxBytes(128<<10))),
 		newHandler(credentialv1connect.NewTrustedCredentialServiceHandler(&credentialService{}, connect.WithInterceptors(diagnostics.OutcomeInterceptor{}, policy), connect.WithReadMaxBytes(128<<10))),
 		newHandler(browserv1connect.NewBrowserServiceHandler(&browserService{}, opts...)),
 		newHandler(adminv1connect.NewDashboardServiceHandler(&dashboardService{}, opts...)),
@@ -142,7 +144,7 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 				meta.SessionToken = session
 			}
 		}
-		secure := c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
+		secure := security.IsRequestSecure(c.Request)
 		ctx := passkeycredential.WithRequestOrigin(rpc.NewContextWithMeta(c.Request.Context(), meta), c.Request.Host, secure)
 		c.Request = c.Request.WithContext(workspace.WithSecure(workspace.WithToken(ctx, c.GetHeader(workspace.Header)), secure))
 		handler.ServeHTTP(c.Writer, c.Request)

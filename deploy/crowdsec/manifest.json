@@ -1,6 +1,6 @@
 {
-  "policy_sha256": "3855a164e629da57fcebcc540df02b4b16130f101358b0cc933c31f2f9cc3dec",
-  "registered_procedures": 141,
+  "policy_sha256": "7f10f01bdc3d777b1c4c371c3c777091d3a76c42c7dbba6cb414baa552b08e1f",
+  "registered_procedures": 148,
   "machine_procedures": 34,
   "machine_routes": [
     "/komari.agent.v1.AgentEventService/AcknowledgeEvent",

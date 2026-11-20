@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -158,12 +159,29 @@ func (g *Gateway) BeginPassword(ctx context.Context, username, password, remoteI
 		result.Preauthentication = ""
 		return result, err
 	}
-	result.Providers, err = g.core.List(pctx, b, credential.PasswordLogin)
+	result.Providers, err = g.passwordProviders(pctx, b)
 	if err != nil || len(result.Providers) == 0 {
 		g.CancelPassword(token)
 		return PasswordStart{}, credential.ErrProviderUnavailable
 	}
 	return result, nil
+}
+
+// Preserve existing password recovery choices when an account gains a native passkey.
+func (g *Gateway) passwordProviders(ctx context.Context, b credential.Binding) ([]credential.Descriptor, error) {
+	providers, err := g.core.List(ctx, b, credential.PasswordLogin)
+	priority := func(id string) int {
+		switch id {
+		case "native:email_otp":
+			return -1
+		case "native:passkey":
+			return 1
+		default:
+			return 0
+		}
+	}
+	slices.SortStableFunc(providers, func(a, b credential.Descriptor) int { return priority(a.ID) - priority(b.ID) })
+	return providers, err
 }
 
 func (g *Gateway) BeginPasswordVerification(ctx context.Context, token, provider string) (credential.Challenge, error) {
@@ -191,7 +209,7 @@ func (g *Gateway) BeginPasswordVerification(ctx context.Context, token, provider
 		if v.challenge.ID != "" && time.Now().Before(v.challenge.ExpiresAt) {
 			return v.challenge, nil
 		}
-		providers, err := g.core.List(ctx, b, credential.PasswordLogin)
+		providers, err := g.passwordProviders(ctx, b)
 		if err != nil {
 			return credential.Challenge{}, err
 		}
@@ -199,12 +217,6 @@ func (g *Gateway) BeginPasswordVerification(ctx context.Context, token, provider
 			return credential.Challenge{}, credential.ErrProviderUnavailable
 		}
 		provider = providers[0].ID
-		for _, item := range providers {
-			if item.ID == "native:email_otp" {
-				provider = item.ID
-				break
-			}
-		}
 	}
 	// Explicit factor switching retains its previous semantics and budgets.
 	g.core.RevokeBinding(b)

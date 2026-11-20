@@ -235,7 +235,7 @@ func (ctrl *RateLimitController) keyAndBudget(c *gin.Context) (string, float64, 
 		authenticated = false
 	}
 	path := c.Request.URL.Path
-	if path == "/api/login" || path == "/komari.credential.v1.PasswordLoginService/BeginPasswordLogin" {
+	if path == "/komari.credential.v1.PasskeyLoginService/BeginPasskeyLogin" || path == "/komari.credential.v1.PasskeyLoginService/CompletePasskeyLogin" || path == "/api/login" || path == "/komari.credential.v1.PasswordLoginService/BeginPasswordLogin" {
 		return "login:" + AuthSourceIP(c), 0.2, 5
 	}
 	// Classify history before Agent ingestion so expensive reads cannot spend

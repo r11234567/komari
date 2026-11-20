@@ -51,6 +51,8 @@ func newPolicyInterceptor() *policyInterceptor {
 	add("/komari.workspace.v1.WorkspaceService/", rpc.RoleAdmin, 30*time.Second, "UnlockWorkspace", "GetWorkspace", "TouchWorkspace", "LockWorkspace")
 	add(apiToken, rpc.RoleAdmin, 30*time.Second, "ListApiTokens", "CreateApiToken", "RevokeApiToken", "DisableLegacyApiKey")
 	add("/komari.credential.v1.TrustedCredentialService/", rpc.RoleAdmin, 30*time.Second, "ListTrustedCredentialProviders", "BeginVerification", "CompleteVerification", "CancelVerification", "GetCredentialContacts", "BeginContactBinding", "SaveCredentialContact", "DeleteCredentialContact")
+	add("/komari.credential.v1.PasskeyLoginService/", rpc.RoleGuest, 30*time.Second, "GetPasskeyStatus", "BeginPasskeyLogin", "CompletePasskeyLogin")
+	add("/komari.credential.v1.PasskeyManagementService/", rpc.RoleAdmin, 30*time.Second, "ListPasskeys", "BeginPasskeyRegistration", "CompletePasskeyRegistration", "DeletePasskey")
 	add("/komari.credential.v1.PasswordLoginService/", rpc.RoleGuest, 30*time.Second, "BeginPasswordLogin", "BeginLoginVerification", "CompletePasswordLogin", "CancelPasswordLogin")
 	add(dashboard, rpc.RoleAdmin, 30*time.Second, "GetDashboardSummary", "GetDashboardCharts", "ListDashboardAlertItems")
 	add(maintenance, rpc.RoleAdmin, 30*time.Second, "ListSessions", "DeleteSession", "DeleteAllSessions", "ListAuditLogs",

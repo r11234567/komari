@@ -311,6 +311,9 @@ func restoreStagedBackup(dataDir string) error {
 	if err := validateRestoredSQLite(filepath.Join(stageDir, "komari.db"), "komari.db"); err != nil {
 		return err
 	}
+	if err := preservePasskeySecurityState(filepath.Join(dataDir, "komari.db"), filepath.Join(stageDir, "komari.db")); err != nil {
+		return fmt.Errorf("preserve passkey security state across restore: %w", err)
+	}
 	metricsPath := filepath.Join(stageDir, "metrics.db")
 	if _, err := os.Stat(metricsPath); err == nil {
 		if err := validateRestoredSQLite(metricsPath, "metrics.db"); err != nil {
@@ -388,6 +391,191 @@ func restoreStagedBackup(dataDir string) error {
 	}
 	logger.Infof("dbcore", "[restore] backup restored atomically; previous data saved to %s", preRestorePath)
 	return nil
+}
+
+func sqliteTableExists(db *sql.DB, name string) (bool, error) {
+	var found string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&found)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return found == name, nil
+}
+
+// preservePasskeySecurityState carries forward passkey counter high-water marks
+// and explicit passkey revocations from the current primary SQLite database into
+// the staged restored database before the directory swap occurs.
+func preservePasskeySecurityState(currentPath, stagedPath string) error {
+	if _, err := os.Stat(currentPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if err := validateRestoredSQLite(currentPath, "current komari.db"); err != nil {
+		return nil
+	}
+
+	curDB, err := sql.Open("sqlite3", currentPath)
+	if err != nil {
+		return err
+	}
+	defer curDB.Close()
+
+	type counterRow struct {
+		userUUID  string
+		keyDigest string
+		counter   uint32
+	}
+	type revocationRow struct {
+		credentialHash string
+		userUUID       string
+		rpID           string
+		revokedAt      string
+	}
+
+	var counters []counterRow
+	hasCounters, err := sqliteTableExists(curDB, "passkey_counters")
+	if err != nil {
+		return err
+	}
+	if hasCounters {
+		rows, err := curDB.Query(`SELECT user_uuid, key_digest, counter FROM passkey_counters`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var r counterRow
+			if err := rows.Scan(&r.userUUID, &r.keyDigest, &r.counter); err != nil {
+				rows.Close()
+				return err
+			}
+			counters = append(counters, r)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
+
+	var revocations []revocationRow
+	hasRevocations, err := sqliteTableExists(curDB, "passkey_revocations")
+	if err != nil {
+		return err
+	}
+	if hasRevocations {
+		rows, err := curDB.Query(`SELECT credential_hash, user_uuid, rp_id, COALESCE(CAST(revoked_at AS TEXT), '') FROM passkey_revocations`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var r revocationRow
+			if err := rows.Scan(&r.credentialHash, &r.userUUID, &r.rpID, &r.revokedAt); err != nil {
+				rows.Close()
+				return err
+			}
+			if r.revokedAt == "" {
+				r.revokedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			}
+			revocations = append(revocations, r)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
+
+	if len(counters) == 0 && len(revocations) == 0 {
+		return nil
+	}
+
+	stagedDB, err := sql.Open("sqlite3", stagedPath)
+	if err != nil {
+		return err
+	}
+	defer stagedDB.Close()
+
+	stagedHasUsers, err := sqliteTableExists(stagedDB, "users")
+	if err != nil {
+		return err
+	}
+	stagedHasPasskeys, err := sqliteTableExists(stagedDB, "user_passkeys")
+	if err != nil {
+		return err
+	}
+	stagedHasCounters, err := sqliteTableExists(stagedDB, "passkey_counters")
+	if err != nil {
+		return err
+	}
+	stagedHasRevocations, err := sqliteTableExists(stagedDB, "passkey_revocations")
+	if err != nil {
+		return err
+	}
+
+	tx, err := stagedDB.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if len(counters) > 0 {
+		if !stagedHasCounters {
+			if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS passkey_counters (
+				user_uuid varchar(36),
+				key_digest varchar(64),
+				counter integer,
+				PRIMARY KEY (user_uuid, key_digest)
+			)`); err != nil {
+				return err
+			}
+		}
+		for _, c := range counters {
+			if stagedHasUsers {
+				var exists int
+				if err := tx.QueryRow(`SELECT 1 FROM users WHERE uuid = ? LIMIT 1`, c.userUUID).Scan(&exists); err == sql.ErrNoRows {
+					continue
+				} else if err != nil {
+					return err
+				}
+			}
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO passkey_counters (user_uuid, key_digest, counter) VALUES (?, ?, ?)`, c.userUUID, c.keyDigest, c.counter); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`UPDATE passkey_counters SET counter = ? WHERE user_uuid = ? AND key_digest = ? AND counter < ?`, c.counter, c.userUUID, c.keyDigest, c.counter); err != nil {
+				return err
+			}
+		}
+	}
+
+	if len(revocations) > 0 {
+		if !stagedHasRevocations {
+			if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS passkey_revocations (
+				credential_hash char(64) PRIMARY KEY,
+				user_uuid varchar(36) NOT NULL,
+				rp_id varchar(253) NOT NULL,
+				revoked_at datetime NOT NULL
+			)`); err != nil {
+				return err
+			}
+		}
+		for _, rev := range revocations {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO passkey_revocations (credential_hash, user_uuid, rp_id, revoked_at) VALUES (?, ?, ?, ?)`, rev.credentialHash, rev.userUUID, rev.rpID, rev.revokedAt); err != nil {
+				return err
+			}
+			if stagedHasPasskeys {
+				if _, err := tx.Exec(`DELETE FROM user_passkeys WHERE credential_hash = ?`, rev.credentialHash); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return tx.Commit()
 }
 
 var (
@@ -658,6 +846,9 @@ func doInitialize() error {
 		&models.APIToken{},
 		&models.CredentialContact{},
 		&models.PasskeyCounter{},
+		&models.UserPasskey{},
+		&models.PasskeyImport{},
+		&models.PasskeyRevocation{},
 		&models.Client{},
 		&models.ClientDeploymentProfile{},
 		&models.Log{},

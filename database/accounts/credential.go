@@ -18,7 +18,7 @@ import (
 )
 
 var ErrCredentialStateChanged = errors.New("account credential state changed; verify again")
-var ErrLastCredential = errors.New("bind another contact or enable TOTP before removing the last OTP contact")
+var ErrLastCredential = errors.New("enroll another recovery factor before removing the last credential")
 
 func ListCredentialContacts(ctx context.Context, id string) ([]models.CredentialContact, error) {
 	contacts := []models.CredentialContact{}
@@ -51,7 +51,7 @@ func ChangeVerifiedContact(ctx context.Context, user models.User, contact models
 	contact.VerifiedAt = time.Now().UTC()
 	contact.User = models.User{}
 	return dbcore.GetDBInstance().WithContext(ctx).Session(&gorm.Session{Logger: gormlogger.Discard}).Transaction(func(tx *gorm.DB) error {
-		if err := rotateCredentialVersion(tx, user); err != nil {
+		if err := RotateCredentialVersion(tx, user); err != nil {
 			return err
 		}
 		return tx.Omit("User").Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "user_uuid"}, {Name: "kind"}}, DoUpdates: clause.AssignmentColumns([]string{"address", "transport", "verified_at"})}).Create(&contact).Error
@@ -59,9 +59,13 @@ func ChangeVerifiedContact(ctx context.Context, user models.User, contact models
 }
 
 func RemoveCredentialContact(ctx context.Context, user models.User, kind string) (bool, error) {
+	return RemoveCredentialContactWithPasskeyPolicy(ctx, user, kind, "", false)
+}
+
+func RemoveCredentialContactWithPasskeyPolicy(ctx context.Context, user models.User, kind, rpID string, allowSynced bool) (bool, error) {
 	deleted := false
 	err := dbcore.GetDBInstance().WithContext(ctx).Session(&gorm.Session{Logger: gormlogger.Discard}).Transaction(func(tx *gorm.DB) error {
-		if err := rotateCredentialVersion(tx, user); err != nil {
+		if err := RotateCredentialVersion(tx, user); err != nil {
 			return err
 		}
 		var contacts []models.CredentialContact
@@ -78,7 +82,21 @@ func RemoveCredentialContact(ctx context.Context, user models.User, kind string)
 			return gorm.ErrRecordNotFound
 		}
 		if len(contacts) == 1 && user.TwoFactor == "" {
-			return ErrLastCredential
+			hasPasskey := false
+			if rpID != "" && tx.Migrator().HasTable(&models.UserPasskey{}) {
+				q := tx.Model(&models.UserPasskey{}).Where("user_uuid = ? AND rp_id = ?", user.UUID, rpID)
+				if !allowSynced {
+					q = q.Where("device_type = ?", "singleDevice")
+				}
+				var passkeyCount int64
+				if err := q.Count(&passkeyCount).Error; err != nil {
+					return err
+				}
+				hasPasskey = passkeyCount > 0
+			}
+			if !hasPasskey {
+				return ErrLastCredential
+			}
 		}
 		result := tx.Where("user_uuid = ? AND kind = ?", user.UUID, kind).Delete(&models.CredentialContact{})
 		deleted = result.RowsAffected == 1
@@ -87,7 +105,8 @@ func RemoveCredentialContact(ctx context.Context, user models.User, kind string)
 	return deleted, err
 }
 
-func rotateCredentialVersion(tx *gorm.DB, user models.User) error {
+// RotateCredentialVersion serializes changes to trusted factors within their write transaction.
+func RotateCredentialVersion(tx *gorm.DB, user models.User) error {
 	result := tx.Model(&models.User{}).Where("uuid = ? AND passwd = ? AND credential_version = ?", user.UUID, user.Passwd, user.CredentialVersion).
 		Where("(two_factor = ? OR (two_factor IS NULL AND ? = ''))", user.TwoFactor, user.TwoFactor).
 		Updates(map[string]any{"credential_version": uuid.NewString(), "updated_at": time.Now().UTC()})

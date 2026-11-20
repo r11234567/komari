@@ -1,6 +1,9 @@
 package flags
 
-import "strings"
+import (
+	"os"
+	"strings"
+)
 
 const (
 	DatabaseTypeSQLite = "sqlite"
@@ -33,4 +36,11 @@ func IsSQLite() bool {
 
 func SupportedDatabaseTypes() string {
 	return DatabaseTypeSQLite
+}
+
+// NativePasskeyConfigured selects the native store even if RP settings are incomplete.
+func NativePasskeyConfigured() bool {
+	return strings.TrimSpace(os.Getenv("KOMARI_PASSKEY_ORIGIN")) != "" ||
+		strings.TrimSpace(os.Getenv("KOMARI_PASSKEY_PANEL_ORIGIN")) != "" ||
+		strings.TrimSpace(os.Getenv("KOMARI_PASSKEY_RP_ID")) != ""
 }

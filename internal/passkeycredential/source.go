@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/komari-monitor/komari/cmd/flags"
 	"io"
 	"net/url"
 	"os"
@@ -44,6 +45,9 @@ type Snapshot struct {
 func Read(ctx context.Context, user string) (Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
+	}
+	if flags.NativePasskeyConfigured() {
+		return nativeSnapshot(ctx, user)
 	}
 	var found bool
 	var running bool
@@ -136,7 +140,7 @@ func WithRequestOrigin(ctx context.Context, host string, secure bool) context.Co
 	if secure {
 		scheme = "https"
 	}
-	return context.WithValue(ctx, originKey{}, scheme+"://"+host)
+	return context.WithValue(ctx, originKey{}, scheme+"://"+strings.ToLower(strings.TrimSpace(host)))
 }
 
 func relyingParty(ctx context.Context, config map[string]any) (string, string, bool, error) {
@@ -145,19 +149,21 @@ func relyingParty(ctx context.Context, config map[string]any) (string, string, b
 	if err != nil || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return "", "", false, credential.ErrProviderUnavailable
 	}
+	origin = strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+	hostname := strings.ToLower(u.Hostname())
 	allowHTTP, _ := config["allow_http_origins"].(bool)
-	if u.Scheme != "https" && !(u.Scheme == "http" && allowHTTP && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "::1")) {
+	if !strings.EqualFold(u.Scheme, "https") && !(strings.EqualFold(u.Scheme, "http") && allowHTTP && (hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1")) {
 		return "", "", false, credential.ErrProviderUnavailable
 	}
 	rp, _ := config["rp_id"].(string)
-	rp = strings.TrimSpace(rp)
+	rp = strings.ToLower(strings.TrimSpace(rp))
 	origins, _ := config["origins"].(string)
 	if rp == "" || strings.TrimSpace(origins) == "" {
-		rp = u.Hostname()
+		rp = hostname
 	} else {
 		matched := false
 		for _, candidate := range strings.FieldsFunc(origins, func(r rune) bool { return r == ',' || r == '\r' || r == '\n' }) {
-			if strings.TrimSpace(candidate) == origin {
+			if strings.EqualFold(strings.TrimSpace(candidate), origin) {
 				matched = true
 			}
 		}
@@ -165,7 +171,7 @@ func relyingParty(ctx context.Context, config map[string]any) (string, string, b
 			return "", "", false, credential.ErrProviderUnavailable
 		}
 	}
-	if u.Hostname() != rp && !strings.HasSuffix(u.Hostname(), "."+rp) {
+	if hostname != rp && !strings.HasSuffix(hostname, "."+rp) {
 		return "", "", false, credential.ErrProviderUnavailable
 	}
 	allowSynced, _ := config["allow_synced_credentials"].(bool)

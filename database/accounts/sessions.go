@@ -40,6 +40,10 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 		LoginMethod:  login_method,
 		LatestOnline: time.Now().UTC(),
 	}
+	err := db.Create(&sessionRecord).Error
+	if err != nil {
+		return "", err
+	}
 	go func() {
 		LoginNotification, _ := config.GetAs[bool](config.LoginNotificationKey, false)
 		if LoginNotification {
@@ -59,10 +63,6 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 		}
 	}()
 
-	err := db.Create(&sessionRecord).Error
-	if err != nil {
-		return "", err
-	}
 	return session, nil
 }
 

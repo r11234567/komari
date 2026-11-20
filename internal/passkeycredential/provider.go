@@ -7,12 +7,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	credential "github.com/komari-monitor/komari/internal/trustedcredential"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -29,7 +32,11 @@ func (p Provider) snapshot(ctx context.Context, user string) (Snapshot, error) {
 }
 
 func (Provider) Descriptor() credential.Descriptor {
-	return credential.Descriptor{ID: "plugin:komari-passkey", DisplayName: "Passkey", Kind: "plugin", Purposes: []credential.Purpose{credential.ManageCredentials, credential.UnlockWorkspace, credential.LoginSettings, credential.SensitiveOperation, credential.PasswordLogin}}
+	id, kind := "plugin:komari-passkey", "plugin"
+	if flags.NativePasskeyConfigured() {
+		id, kind = "native:passkey", "native_passkey"
+	}
+	return credential.Descriptor{ID: id, DisplayName: "Passkey", Kind: kind, Purposes: []credential.Purpose{credential.ManageCredentials, credential.UnlockWorkspace, credential.LoginSettings, credential.SensitiveOperation, credential.PasswordLogin}}
 }
 
 func (p Provider) Available(ctx context.Context, b credential.Binding) (bool, error) {
@@ -40,18 +47,38 @@ func (p Provider) Available(ctx context.Context, b credential.Binding) (bool, er
 	if !s.Running || len(s.Records) == 0 {
 		return false, nil
 	}
-	_, _, _, err = relyingParty(ctx, s.Config)
-	return err == nil, nil
+	_, _, allowSynced, err := relyingParty(ctx, s.Config)
+	if err != nil {
+		return false, nil
+	}
+	for _, record := range s.Records {
+		if record.DeviceType == "multiDevice" && !allowSynced {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 type account struct {
-	id      string
-	records []webauthn.Credential
+	id       string
+	username string
+	records  []webauthn.Credential
 }
 
-func (a account) WebAuthnID() []byte                         { return []byte(a.id) } // plugin uses UTF-8 UUID, not UUID binary
-func (a account) WebAuthnName() string                       { return a.id }
-func (a account) WebAuthnDisplayName() string                { return a.id }
+func (a account) WebAuthnID() []byte { return []byte(a.id) } // plugin uses UTF-8 UUID, not UUID binary
+func (a account) WebAuthnName() string {
+	if a.username != "" {
+		return a.username
+	}
+	return a.id
+}
+func (a account) WebAuthnDisplayName() string {
+	if a.username != "" {
+		return a.username
+	}
+	return a.id
+}
 func (a account) WebAuthnCredentials() []webauthn.Credential { return a.records }
 
 func (p Provider) Begin(ctx context.Context, attempt credential.Attempt) (credential.Prompt, credential.VerifyFunc, error) {
@@ -134,8 +161,10 @@ func loadAccount(ctx context.Context, user string, records []Record, allowSynced
 		key, _ := base64.RawURLEncoding.DecodeString(record.PublicKey)
 		row := models.PasskeyCounter{UserUUID: user, KeyDigest: keyDigest(id, key)}
 		db := dbcore.GetDBInstance().WithContext(ctx)
-		if err := db.Omit("User").Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
-			return account{}, credential.ErrProviderUnavailable
+		if !flags.NativePasskeyConfigured() {
+			if err := db.Omit("User").Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
+				return account{}, credential.ErrProviderUnavailable
+			}
 		}
 		if err := db.Where("user_uuid = ? AND key_digest = ?", row.UserUUID, row.KeyDigest).First(&row).Error; err != nil {
 			return account{}, credential.ErrProviderUnavailable
@@ -151,9 +180,29 @@ func loadAccount(ctx context.Context, user string, records []Record, allowSynced
 }
 
 func claimCounter(ctx context.Context, user account, verified webauthn.Credential) error {
+	db := dbcore.GetDBInstance().WithContext(ctx)
+	if !flags.NativePasskeyConfigured() {
+		return advanceCounter(db, user, verified)
+	}
+	config, err := nativePolicy()
+	if err != nil {
+		return err
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&models.UserPasskey{}).Where("credential_hash = ? AND user_uuid = ? AND rp_id = ? AND public_key = ?", idDigest(verified.ID), user.id, config["rp_id"], base64.RawURLEncoding.EncodeToString(verified.PublicKey)).Updates(map[string]any{"last_used_at": time.Now().UTC(), "backed_up": verified.Flags.BackupState})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return credential.ErrVerificationFailed
+		}
+		return advanceCounter(tx, user, verified)
+	})
+}
+
+func advanceCounter(db *gorm.DB, user account, verified webauthn.Credential) error {
 	digest := keyDigest(verified.ID, verified.PublicKey)
 	count := verified.Authenticator.SignCount
-	db := dbcore.GetDBInstance().WithContext(ctx)
 	// A nonzero authenticator counter must advance the database high-water
 	// mark. Zero-counter authenticators still have challenge replay protection.
 	query := db.Model(&models.PasskeyCounter{}).Where("user_uuid = ? AND key_digest = ?", user.id, digest)

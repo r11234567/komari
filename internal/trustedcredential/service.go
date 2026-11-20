@@ -101,7 +101,7 @@ func (s *Service) Register(provider Provider) error {
 		return ErrInvalidArgument
 	}
 	switch d.Kind {
-	case "legacy_totp", "email_otp", "telegram_otp", "plugin":
+	case "legacy_totp", "email_otp", "telegram_otp", "native_passkey", "plugin":
 	default:
 		return ErrInvalidArgument
 	}
