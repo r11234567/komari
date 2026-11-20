@@ -158,21 +158,27 @@ func TestNativeImportAndDiscoverableLogin(t *testing.T) {
 		}
 		return bytes.NewReader(b)
 	}
-	if _, err := Import(ctx, db, input(record, record), true); err == nil {
-		t.Fatal("duplicate import committed")
+	unowned := record
+	unowned.ID = enc([]byte("unowned"))
+	unowned.UserUUID = "unknown"
+	if report, err := Import(ctx, db, input(record, record, unowned), false); err != nil || report.Conflicts != 2 || report.Rebind != 1 || report.Eligible != 0 {
+		t.Fatalf("reconciliation totals: %+v %v", report, err)
 	}
-	if n, err := Import(ctx, db, input(record), false); err != nil || n != 1 {
-		t.Fatalf("preview: %d %v", n, err)
+	if _, err := Import(ctx, db, input(record, unowned), true); err == nil {
+		t.Fatal("partly valid import committed")
+	}
+	if n, err := Import(ctx, db, input(record), false); err != nil || n.Eligible != 1 {
+		t.Fatalf("preview: %+v %v", n, err)
 	}
 	keys, err := List(ctx, user.UUID)
 	if err != nil || len(keys) != 0 {
 		t.Fatalf("rollback/preview persisted records: %v", err)
 	}
-	if n, err := Import(ctx, db, input(record), true); err != nil || n != 1 {
-		t.Fatalf("apply: %d %v", n, err)
+	if n, err := Import(ctx, db, input(record), true); err != nil || n.Eligible != 1 {
+		t.Fatalf("apply: %+v %v", n, err)
 	}
-	if n, err := Import(ctx, db, input(record), true); err != nil || n != 0 {
-		t.Fatalf("retry: %d %v", n, err)
+	if n, err := Import(ctx, db, input(record), true); err != nil || !n.AlreadyApplied {
+		t.Fatalf("retry: %+v %v", n, err)
 	}
 	a, err := currentAccount(ctx, user.UUID, false)
 	if err != nil || len(a.records) != 1 || a.records[0].Authenticator.SignCount != 8 {
