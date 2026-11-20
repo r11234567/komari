@@ -44,7 +44,7 @@ func TestRetiredAdminKeyFullTransportStackAndDefenseInDepth(t *testing.T) {
 		// REST admin endpoint with retired Bearer + valid session cookie must return 401.
 		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/admin/whoami", nil)
 		req.Header.Set("Authorization", authHeader)
-		req.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+		req.AddCookie(&http.Cookie{Name: security.SessionCookieName, Value: session})
 		resp, err := srv.Client().Do(req)
 		require.NoError(t, err)
 		_ = resp.Body.Close()
@@ -55,7 +55,7 @@ func TestRetiredAdminKeyFullTransportStackAndDefenseInDepth(t *testing.T) {
 		rpcReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/rpc2", bytes.NewReader(rpcBody))
 		rpcReq.Header.Set("Content-Type", "application/json")
 		rpcReq.Header.Set("Authorization", authHeader)
-		rpcReq.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+		rpcReq.AddCookie(&http.Cookie{Name: security.SessionCookieName, Value: session})
 		rpcResp, err := srv.Client().Do(rpcReq)
 		require.NoError(t, err)
 		_ = rpcResp.Body.Close()
@@ -65,7 +65,7 @@ func TestRetiredAdminKeyFullTransportStackAndDefenseInDepth(t *testing.T) {
 		client := browserv1connect.NewBrowserServiceClient(srv.Client(), srv.URL)
 		connectReq := connect.NewRequest(&browserv1.ListAgentsRequest{})
 		connectReq.Header().Set("Authorization", authHeader)
-		connectReq.Header().Set("Cookie", "session_token="+session)
+		connectReq.Header().Set("Cookie", security.SessionCookieName+"="+session)
 		_, err = client.ListAgents(t.Context(), connectReq)
 		require.Error(t, err, "Connect fell back to cookie for %q", authHeader)
 	}
@@ -80,7 +80,7 @@ func TestRetiredAdminKeyFullTransportStackAndDefenseInDepth(t *testing.T) {
 	for _, header := range []string{"Bearer foreign-plugin-token", "Bearer\tforeign-plugin-token", "Bearer  retired-legacy-key"} {
 		req := httptest.NewRequest(http.MethodGet, "/identify", nil)
 		req.Header.Set("Authorization", header)
-		req.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+		req.AddCookie(&http.Cookie{Name: security.SessionCookieName, Value: session})
 		rec := httptest.NewRecorder()
 		direct.ServeHTTP(rec, req)
 		var out struct {

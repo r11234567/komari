@@ -3,6 +3,7 @@ package connectapi
 import (
 	"archive/zip"
 	"context"
+	"github.com/komari-monitor/komari/database/accounts"
 	"os"
 	"path/filepath"
 	"testing"
@@ -76,7 +77,7 @@ func TestPluginPackageApprovalRequiresFreshScoped2FA(t *testing.T) {
 			if scenario == "wrong-session" {
 				meta := *rpc.MetaFromContext(ctx)
 				meta.SessionToken = "other-session-" + uuid.NewString()
-				require.NoError(t, dbcore.GetDBInstance().Create(&models.Session{UUID: owner, Session: meta.SessionToken, Expires: time.Now().Add(time.Hour)}).Error)
+				require.NoError(t, dbcore.GetDBInstance().Create(&models.Session{UUID: owner, Session: accounts.SessionIDForCookie(meta.SessionToken), Expires: time.Now().UTC().Add(time.Hour)}).Error)
 				ctx = rpc.NewContextWithMeta(ctx, &meta)
 			}
 			if scenario == "not-configured" {

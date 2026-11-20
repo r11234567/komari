@@ -2,6 +2,7 @@ package filemanager
 
 import (
 	"context"
+	"github.com/komari-monitor/komari/web/security"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -11,7 +12,7 @@ import (
 )
 
 func authorizeFileRequest(c *gin.Context) (context.CancelFunc, bool) {
-	session, err := c.Cookie("session_token")
+	session, err := c.Cookie(security.SessionCookieName)
 	if err != nil || session == "" {
 		api.RespondError(c, http.StatusUnauthorized, workspace.ErrLocked.Error())
 		return func() {}, false

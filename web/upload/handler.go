@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/web/security"
 	"net/http"
 	"strconv"
 
@@ -158,7 +159,7 @@ func (h *Handler) respondUploadError(c *gin.Context, err error) {
 
 func interactiveOwner(c *gin.Context) (string, bool) {
 	p := api.GetPrincipal(c)
-	session, _ := c.Cookie("session_token")
+	session, _ := c.Cookie(security.SessionCookieName)
 	if p == nil || p.Type != rpc.PrincipalUser || p.IsAPIKey || !p.HasRole(rpc.RoleAdmin) || session == "" {
 		api.RespondError(c, http.StatusUnauthorized, "interactive admin session required")
 		return "", false

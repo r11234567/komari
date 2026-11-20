@@ -21,24 +21,24 @@ func TestSessionDigestIsNotAcceptedAsAToken(t *testing.T) {
 }
 
 func TestHashSessionTokenIsStableAndDistinct(t *testing.T) {
-	first := hashSessionToken("token-a")
+	first := SessionIDForCookie("token-a")
 	if first == "" || !strings.HasPrefix(first, sessionDigestPrefix) {
 		t.Fatalf("digest %q must carry the version prefix", first)
 	}
 	if first == "token-a" || strings.Contains(first, "token-a") {
 		t.Fatal("the digest must not embed the token")
 	}
-	if again := hashSessionToken("token-a"); again != first {
+	if again := SessionIDForCookie("token-a"); again != first {
 		t.Fatalf("digest is not stable: %q vs %q", again, first)
 	}
-	if other := hashSessionToken("token-b"); other == first {
+	if other := SessionIDForCookie("token-b"); other == first {
 		t.Fatal("different tokens must not collide")
 	}
-	// Already-hashed input passes through, so callers may hand over either form.
-	if rehashed := hashSessionToken(first); rehashed != first {
-		t.Fatalf("re-hashing a digest changed it: %q -> %q", first, rehashed)
+	// Storage IDs and browser credentials are separate input domains.
+	if rehashed := SessionIDForCookie(first); rehashed != "" {
+		t.Fatalf("a digest produced a usable lookup key: %q -> %q", first, rehashed)
 	}
-	if hashSessionToken("") != "" {
+	if SessionIDForCookie("") != "" {
 		t.Fatal("an empty token must hash to empty, not to a valid digest")
 	}
 }

@@ -24,7 +24,7 @@ type LoginRequest struct {
 const sessionCookieMaxAge = 86400 // 24 hours
 
 func setSessionCookie(c *gin.Context, value string, maxAge int) {
-	security.SetSensitiveCookie(c, "session_token", value, maxAge)
+	security.SetSessionCookie(c.Writer.Header(), value, maxAge)
 }
 
 func Login(c *gin.Context) {
@@ -89,8 +89,11 @@ func Login(c *gin.Context) {
 	api.RespondSuccess(c, gin.H{"authenticated": true})
 }
 func Logout(c *gin.Context) {
-	session, _ := c.Cookie("session_token")
+	session, _ := c.Cookie(security.SessionCookieName)
 	accounts.DeleteSession(session)
+	if legacy, err := c.Cookie(security.LegacySessionCookieName); err == nil && legacy != "" && legacy != session {
+		accounts.DeleteSession(legacy)
+	}
 	setSessionCookie(c, "", -1)
 	auditlog.Log(c.ClientIP(), "", "logged out", "logout")
 	c.Redirect(302, "/")

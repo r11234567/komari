@@ -238,7 +238,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       });
       await expect.poll(async () => (await http.get('/api/version')).status(), { timeout: 60_000 }).toBe(200);
       await request('/api/login', { username: 'e2e-user', password, '2fa_code': '' });
-      const cookie = (await context.cookies()).find(c => c.name === 'session_token');
+      const cookie = (await context.cookies()).find(c => c.name === '__Host-komari_session');
       expect(cookie?.secure).toBe(true);
       expect(cookie?.httpOnly).toBe(true);
       const ticket = (await (await request('/api/bind/ticket', {})).json()).data.ticket;

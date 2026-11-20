@@ -105,7 +105,7 @@ func TestApiTokenHTTPResourceScopeAndRevocationCannotFallBackToCookie(t *testing
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Connect-Protocol-Version", "1")
 		request.Header.Set("Authorization", "Bearer "+secret)
-		request.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+		request.AddCookie(&http.Cookie{Name: "__Host-komari_session", Value: session})
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, request)
 		return response
@@ -154,7 +154,7 @@ func TestApiTokenReductionsNeedHumanSessionAndOwnershipButNoSecondFactor(t *test
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Connect-Protocol-Version", "1")
 	request.Header.Set("Origin", "https://foreign.example")
-	request.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+	request.AddCookie(&http.Cookie{Name: "__Host-komari_session", Value: session})
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	require.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
@@ -184,7 +184,7 @@ func TestApiKeyFailuresDoNotLockOutEnrolledDevice(t *testing.T) {
 	send := func(path, token string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest("POST", path, nil)
 		request.Header.Set("Authorization", "Bearer "+token)
-		request.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+		request.AddCookie(&http.Cookie{Name: security.SessionCookieName, Value: session})
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, request)
 		return response

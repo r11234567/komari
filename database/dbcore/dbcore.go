@@ -920,7 +920,11 @@ func doInitialize() error {
 	if err := instance.AutoMigrate(
 		&models.Session{},
 	); err != nil {
-		logger.Errorf("dbcore", "Failed to create Session table, it may already exist: %v", err)
+		return fmt.Errorf("migrate session table: %w", err)
+	}
+	// Only exact lowercase v1 HMAC rows survive upgrades and restores.
+	if err := retireLegacySessionRows(instance); err != nil {
+		return fmt.Errorf("retire legacy session rows: %w", err)
 	}
 	if err := instance.AutoMigrate(
 		&models.Task{},
@@ -933,6 +937,48 @@ func doInitialize() error {
 	}
 
 	return nil
+}
+
+func isValidStoredSessionDigest(id string) bool {
+	if len(id) != 67 || !strings.HasPrefix(id, "v1:") {
+		return false
+	}
+	for i := 3; i < len(id); i++ {
+		c := id[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// retireLegacySessionRows removes plaintext or malformed session rows in a
+// dialect-portable, idempotent transaction while retaining valid lowercase v1
+// HMAC session digests.
+func retireLegacySessionRows(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		var rows []models.Session
+		if err := tx.Select("session").Find(&rows).Error; err != nil {
+			return err
+		}
+		invalid := make([]string, 0)
+		for _, row := range rows {
+			if !isValidStoredSessionDigest(row.Session) {
+				invalid = append(invalid, row.Session)
+			}
+		}
+		const batchSize = 200
+		for i := 0; i < len(invalid); i += batchSize {
+			end := i + batchSize
+			if end > len(invalid) {
+				end = len(invalid)
+			}
+			if err := tx.Where("session IN ?", invalid[i:end]).Delete(&models.Session{}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func cleanupOrphanedPingLossNotifications(db *gorm.DB) error {

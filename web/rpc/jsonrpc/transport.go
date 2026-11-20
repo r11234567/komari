@@ -245,7 +245,7 @@ func buildContextMeta(c *gin.Context) *rpc.ContextMeta {
 	switch p.Type {
 	case rpc.PrincipalUser:
 		meta.UserUUID = p.UserUUID
-		if session, err := c.Cookie("session_token"); err == nil && session != "" {
+		if session, err := c.Cookie(security.SessionCookieName); err == nil && session != "" {
 			meta.SessionToken = session
 			if user, err := accounts.GetUserBySession(session); err == nil {
 				meta.User = &user

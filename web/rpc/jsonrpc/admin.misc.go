@@ -3,6 +3,7 @@ package jsonrpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"strconv"
 	"strings"
@@ -76,7 +77,7 @@ func adminGetSessions(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.Jso
 	if meta := rpc.MetaFromContext(ctx); meta != nil {
 		// Match the stored form the list carries; a raw cookie never equals a
 		// digest, and the client uses this to mark its own row.
-		current = accounts.StoredSessionKey(meta.SessionToken)
+		current = accounts.SessionIDForCookie(meta.SessionToken)
 	}
 	return map[string]any{"current": current, "data": ss}, nil
 }
@@ -86,10 +87,14 @@ func adminDeleteSession(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		Session string `json:"session"`
 	}
 	req.BindParams(&params)
+	params.Session = strings.TrimSpace(params.Session)
 	if params.Session == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "session is required", nil)
 	}
-	if err := accounts.DeleteSession(params.Session); err != nil {
+	if err := accounts.DeleteSessionByID(params.Session); err != nil {
+		if errors.Is(err, accounts.ErrInvalidSessionID) {
+			return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
+		}
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to delete session: "+err.Error(), nil)
 	}
 	actor, ip := auditActor(ctx)
