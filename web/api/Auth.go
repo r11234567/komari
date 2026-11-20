@@ -123,7 +123,14 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 			// Public site metadata must remain reachable so the browser can render
 			// the login/private-site state before it has a session.
 			if path == "/komari.browser.v1.BrowserService/GetPublicInfo" ||
-				path == "/komari.browser.v1.BrowserService/GetThemeContract" {
+				path == "/komari.browser.v1.BrowserService/GetThemeContract" ||
+				path == "/komari.credential.v1.PasskeyLoginService/GetPasskeyStatus" ||
+				path == "/komari.credential.v1.PasskeyLoginService/BeginPasskeyLogin" ||
+				path == "/komari.credential.v1.PasskeyLoginService/CompletePasskeyLogin" ||
+				path == "/komari.credential.v1.PasswordLoginService/BeginPasswordLogin" ||
+				path == "/komari.credential.v1.PasswordLoginService/BeginLoginVerification" ||
+				path == "/komari.credential.v1.PasswordLoginService/CompletePasswordLogin" ||
+				path == "/komari.credential.v1.PasswordLoginService/CancelPasswordLogin" {
 				c.Next()
 				return
 			}

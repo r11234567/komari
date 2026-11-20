@@ -27,6 +27,14 @@ var credentialPurposes = map[credentialv1.CredentialPurpose]credential.Purpose{
 	credentialv1.CredentialPurpose_CREDENTIAL_PURPOSE_PASSWORD_LOGIN:      credential.PasswordLogin,
 }
 
+var providerKinds = map[string]credentialv1.CredentialProviderKind{
+	"legacy_totp":    credentialv1.CredentialProviderKind_CREDENTIAL_PROVIDER_KIND_LEGACY_TOTP,
+	"email_otp":      credentialv1.CredentialProviderKind_CREDENTIAL_PROVIDER_KIND_EMAIL_OTP,
+	"telegram_otp":   credentialv1.CredentialProviderKind_CREDENTIAL_PROVIDER_KIND_TELEGRAM_OTP,
+	"native_passkey": credentialv1.CredentialProviderKind_CREDENTIAL_PROVIDER_KIND_NATIVE_PASSKEY,
+	"plugin":         credentialv1.CredentialProviderKind_CREDENTIAL_PROVIDER_KIND_PLUGIN,
+}
+
 func protoCredentialPurpose(p credential.Purpose) credentialv1.CredentialPurpose {
 	for key, value := range credentialPurposes {
 		if value == p {
@@ -46,14 +54,8 @@ func (s *credentialService) ListTrustedCredentialProviders(ctx context.Context, 
 		return nil, credentialConnectError(err)
 	}
 	result := &credentialv1.ListTrustedCredentialProvidersResponse{}
-	kinds := map[string]credentialv1.CredentialProviderKind{
-		"legacy_totp":  credentialv1.CredentialProviderKind_CREDENTIAL_PROVIDER_KIND_LEGACY_TOTP,
-		"email_otp":    credentialv1.CredentialProviderKind_CREDENTIAL_PROVIDER_KIND_EMAIL_OTP,
-		"telegram_otp": credentialv1.CredentialProviderKind_CREDENTIAL_PROVIDER_KIND_TELEGRAM_OTP,
-		"plugin":       credentialv1.CredentialProviderKind_CREDENTIAL_PROVIDER_KIND_PLUGIN,
-	}
 	for _, item := range items {
-		provider := &credentialv1.TrustedCredentialProvider{Id: item.ID, DisplayName: item.DisplayName, Kind: kinds[item.Kind]}
+		provider := &credentialv1.TrustedCredentialProvider{Id: item.ID, DisplayName: item.DisplayName, Kind: providerKinds[item.Kind]}
 		for _, p := range item.Purposes {
 			provider.Purposes = append(provider.Purposes, protoCredentialPurpose(p))
 		}
@@ -132,7 +134,7 @@ func credentialConnectError(err error) error {
 		code = connect.CodeFailedPrecondition
 	case errors.Is(err, credential.ErrNotFound):
 		code = connect.CodeNotFound
-	case errors.Is(err, credential.ErrBusy):
+	case errors.Is(err, credential.ErrBusy), errors.Is(err, accounts.ErrCredentialStateChanged):
 		code = connect.CodeAborted
 	case errors.Is(err, credential.ErrLimit):
 		code = connect.CodeResourceExhausted

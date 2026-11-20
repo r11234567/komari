@@ -658,6 +658,8 @@ func doInitialize() error {
 		&models.APIToken{},
 		&models.CredentialContact{},
 		&models.PasskeyCounter{},
+		&models.UserPasskey{},
+		&models.PasskeyImport{},
 		&models.Client{},
 		&models.ClientDeploymentProfile{},
 		&models.Log{},

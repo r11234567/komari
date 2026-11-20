@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/komari-monitor/komari/cmd/flags"
 	"io"
 	"net/url"
 	"os"
@@ -44,6 +45,9 @@ type Snapshot struct {
 func Read(ctx context.Context, user string) (Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
+	}
+	if flags.NativePasskeyConfigured() {
+		return nativeSnapshot(ctx, user)
 	}
 	var found bool
 	var running bool

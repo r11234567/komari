@@ -98,28 +98,8 @@ func (g *Gateway) BeginContactBinding(ctx context.Context, d notificationotp.Des
 	if err != nil {
 		return credential.Challenge{}, err
 	}
-	if authorization != "" {
-		if _, err := g.core.Consume(ctx, b, authorization, credential.ManageCredentials, ContactResource(d)); err != nil {
-			return credential.Challenge{}, err
-		}
-	} else {
-		contacts, err := accounts.ListCredentialContacts(ctx, user.UUID)
-		if err != nil {
-			return credential.Challenge{}, credential.ErrProviderUnavailable
-		}
-		passkey, err := passkeycredential.Read(ctx, user.UUID)
-		if err != nil {
-			return credential.Challenge{}, credential.ErrProviderUnavailable
-		}
-		if user.TwoFactor != "" || len(contacts) != 0 || len(passkey.Records) != 0 {
-			return credential.Challenge{}, credential.ErrUnauthenticated
-		}
-		if err := g.core.ChargeAttempt(ctx, b); err != nil {
-			return credential.Challenge{}, err
-		}
-		if !accounts.VerifyCurrentPassword(user, password) {
-			return credential.Challenge{}, credential.ErrVerificationFailed
-		}
+	if err := g.authorizeEnrollment(ctx, b, user, ContactResource(d), authorization, password); err != nil {
+		return credential.Challenge{}, err
 	}
 	// Only this Go action sets the intent. Generic BeginVerification requests
 	// cannot enroll a destination or substitute their own proof of ownership.
@@ -207,4 +187,31 @@ func (p *contactBindingProvider) Begin(ctx context.Context, a credential.Attempt
 		return credential.Prompt{}, nil, credential.ErrProviderUnavailable
 	}
 	return p.gateway.otp.Prepare(ctx, a, intent.destination)
+}
+
+func (g *Gateway) authorizeEnrollment(ctx context.Context, b credential.Binding, user models.User, resource, authorization, password string) error {
+	if authorization != "" {
+		if _, err := g.core.Consume(ctx, b, authorization, credential.ManageCredentials, resource); err != nil {
+			return err
+		}
+	} else {
+		contacts, err := accounts.ListCredentialContacts(ctx, user.UUID)
+		if err != nil {
+			return credential.ErrProviderUnavailable
+		}
+		passkey, err := passkeycredential.Read(ctx, user.UUID)
+		if err != nil {
+			return credential.ErrProviderUnavailable
+		}
+		if user.TwoFactor != "" || len(contacts) != 0 || len(passkey.Records) != 0 {
+			return credential.ErrUnauthenticated
+		}
+		if err := g.core.ChargeAttempt(ctx, b); err != nil {
+			return err
+		}
+		if !accounts.VerifyCurrentPassword(user, password) {
+			return credential.ErrVerificationFailed
+		}
+	}
+	return nil
 }

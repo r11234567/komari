@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/komari-monitor/komari/cmd/flags"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -290,6 +291,9 @@ func (m *Manager) instanceFor(short string) *Instance {
 // a manager read lock through rpcHandler) without deadlocking. On failure the
 // instance is dropped and its hooks and RPC methods are cleaned up.
 func (m *Manager) load(short string) error {
+	if short == legacyPasskeyPluginShort && flags.NativePasskeyConfigured() {
+		return fmt.Errorf("legacy Passkey plugin is disabled while native Passkey is configured")
+	}
 	dir := filepath.Join(DataDir, short)
 	info, err := readManifest(short)
 	if err != nil {

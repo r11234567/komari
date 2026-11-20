@@ -41,7 +41,7 @@ func loginRequestMeta(ctx context.Context) (string, string) {
 }
 
 func loginSessionCookie[T any](ctx context.Context, response *connect.Response[T], session, user string) {
-	response.Header().Add("Set-Cookie", (&http.Cookie{Name: "session_token", Value: session, Path: "/", MaxAge: credentialgateway.LoginSessionLifetime, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode}).String())
+	setLoginSession(response, session)
 	passwordCookie(response, "", -1)
 	ip, _ := loginRequestMeta(ctx)
 	auditlog.Log(ip, user, "logged in (trusted password flow)", "login")
@@ -72,8 +72,7 @@ func (s *passwordLoginService) BeginPasswordLogin(ctx context.Context, req *conn
 }
 
 func loginProvider(item credential.Descriptor) *credentialv1.TrustedCredentialProvider {
-	kinds := map[string]credentialv1.CredentialProviderKind{"legacy_totp": credentialv1.CredentialProviderKind_CREDENTIAL_PROVIDER_KIND_LEGACY_TOTP, "email_otp": credentialv1.CredentialProviderKind_CREDENTIAL_PROVIDER_KIND_EMAIL_OTP, "telegram_otp": credentialv1.CredentialProviderKind_CREDENTIAL_PROVIDER_KIND_TELEGRAM_OTP, "plugin": credentialv1.CredentialProviderKind_CREDENTIAL_PROVIDER_KIND_PLUGIN}
-	return &credentialv1.TrustedCredentialProvider{Id: item.ID, DisplayName: item.DisplayName, Kind: kinds[item.Kind], Purposes: []credentialv1.CredentialPurpose{credentialv1.CredentialPurpose_CREDENTIAL_PURPOSE_PASSWORD_LOGIN}}
+	return &credentialv1.TrustedCredentialProvider{Id: item.ID, DisplayName: item.DisplayName, Kind: providerKinds[item.Kind], Purposes: []credentialv1.CredentialPurpose{credentialv1.CredentialPurpose_CREDENTIAL_PURPOSE_PASSWORD_LOGIN}}
 }
 
 func (s *passwordLoginService) BeginLoginVerification(ctx context.Context, req *connect.Request[credentialv1.BeginLoginVerificationRequest]) (*connect.Response[credentialv1.BeginLoginVerificationResponse], error) {
@@ -110,4 +109,8 @@ func (s *passwordLoginService) CancelPasswordLogin(_ context.Context, req *conne
 	response := credentialResponse(&credentialv1.CancelPasswordLoginResponse{Cancelled: credentialgateway.Default.CancelPassword(passwordToken(req.Header()))})
 	passwordCookie(response, "", -1)
 	return response, nil
+}
+
+func setLoginSession[T any](response *connect.Response[T], session string) {
+	response.Header().Add("Set-Cookie", (&http.Cookie{Name: "session_token", Value: session, Path: "/", MaxAge: credentialgateway.LoginSessionLifetime, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode}).String())
 }

@@ -7,12 +7,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	credential "github.com/komari-monitor/komari/internal/trustedcredential"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -29,7 +32,11 @@ func (p Provider) snapshot(ctx context.Context, user string) (Snapshot, error) {
 }
 
 func (Provider) Descriptor() credential.Descriptor {
-	return credential.Descriptor{ID: "plugin:komari-passkey", DisplayName: "Passkey", Kind: "plugin", Purposes: []credential.Purpose{credential.ManageCredentials, credential.UnlockWorkspace, credential.LoginSettings, credential.SensitiveOperation, credential.PasswordLogin}}
+	id, kind := "plugin:komari-passkey", "plugin"
+	if flags.NativePasskeyConfigured() {
+		id, kind = "native:passkey", "native_passkey"
+	}
+	return credential.Descriptor{ID: id, DisplayName: "Passkey", Kind: kind, Purposes: []credential.Purpose{credential.ManageCredentials, credential.UnlockWorkspace, credential.LoginSettings, credential.SensitiveOperation, credential.PasswordLogin}}
 }
 
 func (p Provider) Available(ctx context.Context, b credential.Binding) (bool, error) {
@@ -134,8 +141,10 @@ func loadAccount(ctx context.Context, user string, records []Record, allowSynced
 		key, _ := base64.RawURLEncoding.DecodeString(record.PublicKey)
 		row := models.PasskeyCounter{UserUUID: user, KeyDigest: keyDigest(id, key)}
 		db := dbcore.GetDBInstance().WithContext(ctx)
-		if err := db.Omit("User").Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
-			return account{}, credential.ErrProviderUnavailable
+		if !flags.NativePasskeyConfigured() {
+			if err := db.Omit("User").Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
+				return account{}, credential.ErrProviderUnavailable
+			}
 		}
 		if err := db.Where("user_uuid = ? AND key_digest = ?", row.UserUUID, row.KeyDigest).First(&row).Error; err != nil {
 			return account{}, credential.ErrProviderUnavailable
@@ -151,9 +160,29 @@ func loadAccount(ctx context.Context, user string, records []Record, allowSynced
 }
 
 func claimCounter(ctx context.Context, user account, verified webauthn.Credential) error {
+	db := dbcore.GetDBInstance().WithContext(ctx)
+	if !flags.NativePasskeyConfigured() {
+		return advanceCounter(db, user, verified)
+	}
+	config, err := nativePolicy()
+	if err != nil {
+		return err
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&models.UserPasskey{}).Where("credential_hash = ? AND user_uuid = ? AND rp_id = ? AND public_key = ?", idDigest(verified.ID), user.id, config["rp_id"], base64.RawURLEncoding.EncodeToString(verified.PublicKey)).Updates(map[string]any{"last_used_at": time.Now().UTC(), "backed_up": verified.Flags.BackupState})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return credential.ErrVerificationFailed
+		}
+		return advanceCounter(tx, user, verified)
+	})
+}
+
+func advanceCounter(db *gorm.DB, user account, verified webauthn.Credential) error {
 	digest := keyDigest(verified.ID, verified.PublicKey)
 	count := verified.Authenticator.SignCount
-	db := dbcore.GetDBInstance().WithContext(ctx)
 	// A nonzero authenticator counter must advance the database high-water
 	// mark. Zero-counter authenticators still have challenge replay protection.
 	query := db.Model(&models.PasskeyCounter{}).Where("user_uuid = ? AND key_digest = ?", user.id, digest)
