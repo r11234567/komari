@@ -140,7 +140,7 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 		// The session list marks the caller's own credential, so the token has to
 		// reach Connect handlers the same way it reaches the legacy transport.
 		if principal.Type == rpc.PrincipalUser {
-			if session, err := c.Cookie("session_token"); err == nil {
+			if session, err := c.Cookie(security.SessionCookieName); err == nil {
 				meta.SessionToken = session
 			}
 		}

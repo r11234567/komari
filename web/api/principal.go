@@ -10,6 +10,7 @@ import (
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/web/security"
 )
 
 // principalContextKey 是 principal 在 gin.Context 中的存储键。
@@ -27,7 +28,7 @@ func IdentifyPrincipal(c *gin.Context) *rpc.Principal {
 	}
 
 	// 2. Session(管理员用户)
-	if session, err := c.Cookie("session_token"); err == nil && session != "" {
+	if session, err := c.Cookie(security.SessionCookieName); err == nil && session != "" {
 		if uuid, err := accounts.GetSession(session); err == nil && uuid != "" {
 			return rpc.NewUserPrincipal(uuid)
 		}

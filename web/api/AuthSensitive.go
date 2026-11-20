@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/komari-monitor/komari/web/security"
 	"io"
 	"net/http"
 	"sync"
@@ -89,7 +90,7 @@ func VerifySensitive2FA(c *gin.Context) error {
 		if p == nil || p.Type != rpc.PrincipalUser || p.IsAPIKey {
 			return err2FARequired()
 		}
-		session, _ := c.Cookie("session_token")
+		session, _ := c.Cookie(security.SessionCookieName)
 		ctx := rpc.NewContextWithMeta(c.Request.Context(), &rpc.ContextMeta{Principal: p, UserUUID: p.UserUUID, SessionToken: session})
 		purpose := credential.SensitiveOperation
 		resource := credentialaction.RESTResource(c.Request.Method, c.Request.URL.Path)

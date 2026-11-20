@@ -66,7 +66,7 @@ func TestCredentialLifecycleAdminFreshScopeReplayAndPrincipalBoundaries(t *testi
 				request := httptest.NewRequest(method, path, bytes.NewReader(body))
 				request.Header.Set("Content-Type", "application/json")
 				request.Header.Set(credentialaction.Header, token)
-				request.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+				request.AddCookie(&http.Cookie{Name: "__Host-komari_session", Value: session})
 				response := httptest.NewRecorder()
 				router.ServeHTTP(response, request)
 				return response

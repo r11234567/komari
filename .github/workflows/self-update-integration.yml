@@ -140,14 +140,16 @@ jobs:
           }
 
           create_case success "$SUCCESS_SERVICE" 28774
-          COOKIE_JAR=/tmp/komari-self-update-success.cookies
+          LOGIN_HEADERS=/tmp/komari-self-update-success.headers
           curl -fsS \
-            -c "$COOKIE_JAR" \
+            -D "$LOGIN_HEADERS" \
             -H 'Content-Type: application/json' \
             --data '{"username":"integration","password":"Integration-test1","twofa_code":""}' \
             http://127.0.0.1:28774/api/login >/dev/null
+          SESSION_COOKIE="$(awk 'BEGIN{IGNORECASE=1} /^set-cookie:[[:space:]]*__Host-komari_session=/{sub(/^[^:]*:[[:space:]]*/, ""); sub(/;.*/, ""); tr=gsub(/\r/, ""); print; exit}' "$LOGIN_HEADERS")"
+          test -n "$SESSION_COOKIE"
           capability="$(curl -fsS \
-            -b "$COOKIE_JAR" \
+            -H "Cookie: $SESSION_COOKIE" \
             -H 'Content-Type: application/json' \
             --data '{"jsonrpc":"2.0","id":1,"method":"admin:getSelfUpdateStatus","params":{}}' \
             http://127.0.0.1:28774/api/rpc2)"

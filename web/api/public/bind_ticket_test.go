@@ -28,7 +28,7 @@ func TestRequestBindTicket(t *testing.T) {
 		session, err := accounts.CreateSession(user.UUID, 3600, "test", "127.0.0.1", "password")
 		assert.NoError(t, err)
 		req, _ := http.NewRequest(http.MethodPost, "/api/bind/ticket", nil)
-		req.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+		req.AddCookie(&http.Cookie{Name: "__Host-komari_session", Value: session})
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 
@@ -51,7 +51,7 @@ func TestRequestBindTicket(t *testing.T) {
 
 		// Exchanging a session for a bind ticket must not rotate that session.
 		for _, cookie := range w.Result().Cookies() {
-			assert.NotEqual(t, "session_token", cookie.Name)
+			assert.NotEqual(t, "__Host-komari_session", cookie.Name)
 		}
 
 		// Verify ticket signature and claims
@@ -82,7 +82,7 @@ func TestRequestBindTicket(t *testing.T) {
 		session, err := accounts.CreateSession(user.UUID, -1, "test", "127.0.0.1", "password")
 		assert.NoError(t, err)
 		req, _ := http.NewRequest(http.MethodPost, "/api/bind/ticket", nil)
-		req.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+		req.AddCookie(&http.Cookie{Name: "__Host-komari_session", Value: session})
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 
@@ -102,7 +102,7 @@ func TestRequestBindTicket(t *testing.T) {
 		assert.NoError(t, err)
 
 		req, _ := http.NewRequest(http.MethodPost, "/api/bind/ticket", nil)
-		req.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+		req.AddCookie(&http.Cookie{Name: "__Host-komari_session", Value: session})
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 

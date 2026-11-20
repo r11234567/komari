@@ -49,7 +49,7 @@ func IdentityMiddleware() gin.HandlerFunc {
 			c.Set("api_key", strings.TrimPrefix(apiKey, "Bearer "))
 			c.Set("uuid", "00000000-0000-0000-0000-000000000000")
 		case rpc.PrincipalUser:
-			if session, err := c.Cookie("session_token"); err == nil && session != "" {
+			if session, err := c.Cookie(security.SessionCookieName); err == nil && session != "" {
 				c.Set("session", session)
 				accounts.UpdateLatest(session, c.Request.UserAgent(), c.ClientIP())
 			}

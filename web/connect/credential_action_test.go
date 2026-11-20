@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/komari-monitor/komari/database/accounts"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -37,7 +38,7 @@ func actionFixture(t *testing.T) (context.Context, string, string) {
 	if err := db.Create(&models.User{UUID: user, Username: user, Passwd: "synthetic-unused", TwoFactor: "JBSWY3DPEHPK3PXP"}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Create(&models.Session{UUID: user, Session: session, Expires: time.Now().Add(time.Hour)}).Error; err != nil {
+	if err := db.Create(&models.Session{UUID: user, Session: accounts.SessionIDForCookie(session), Expires: time.Now().UTC().Add(time.Hour)}).Error; err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -93,7 +94,7 @@ func TestTrustedActionRESTConsumers(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set(credentialaction.Header, token)
-			req.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+			req.AddCookie(&http.Cookie{Name: "__Host-komari_session", Value: session})
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
 			if rec.Code != http.StatusOK {

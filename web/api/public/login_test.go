@@ -37,7 +37,7 @@ func TestLegacyLoginTOTPFailureAndReplayNeverIssueCookie(t *testing.T) {
 		if w.Code != want {
 			t.Fatalf("login status=%d want=%d", w.Code, want)
 		}
-		if want != 200 && (len(w.Result().Cookies()) != 0 || strings.Contains(w.Body.String(), "session_token")) {
+		if want != 200 && (len(w.Result().Cookies()) != 0 || strings.Contains(w.Body.String(), "__Host-komari_session")) {
 			t.Fatal("failed factor issued a session")
 		}
 	}
@@ -133,7 +133,7 @@ func TestLogin(t *testing.T) {
 				assert.True(t, ok)
 				assert.Equal(t, true, data["authenticated"])
 				assert.NotContains(t, data, "set-cookie")
-				assert.Contains(t, strings.Join(w.Header().Values("Set-Cookie"), "\n"), "session_token=")
+				assert.Contains(t, strings.Join(w.Header().Values("Set-Cookie"), "\n"), "__Host-komari_session=")
 			} else {
 				assert.Equal(t, tt.expectedBody, response)
 			}
@@ -188,8 +188,18 @@ func TestSessionCookieIsAlwaysSecure(t *testing.T) {
 
 			setSessionCookie(c, "test-session", sessionCookieMaxAge)
 
-			setCookie := strings.Join(w.Header().Values("Set-Cookie"), "\n")
-			assert.Contains(t, setCookie, "Secure")
+			cookies := w.Result().Cookies()
+			if !assert.Len(t, cookies, 2) {
+				return
+			}
+			session, legacy := cookies[0], cookies[1]
+			assert.Equal(t, "__Host-komari_session", session.Name)
+			assert.Equal(t, "/", session.Path)
+			assert.Empty(t, session.Domain)
+			assert.True(t, session.HttpOnly && session.Secure)
+			assert.Equal(t, http.SameSiteLaxMode, session.SameSite)
+			assert.Equal(t, "session_token", legacy.Name)
+			assert.Less(t, legacy.MaxAge, 0)
 		})
 	}
 }

@@ -1,6 +1,7 @@
 package signonauth_test
 
 import (
+	"github.com/komari-monitor/komari/database/accounts"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -25,7 +26,7 @@ func TestFresh2FAUnlocksOnlySameLoginSettingsSession(t *testing.T) {
 	if err := db.Create(&models.User{UUID: user, Username: user, Passwd: "synthetic-test", TwoFactor: secret}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Create(&models.Session{UUID: user, Session: session, Expires: time.Now().Add(time.Hour)}).Error; err != nil {
+	if err := db.Create(&models.Session{UUID: user, Session: accounts.SessionIDForCookie(session), Expires: time.Now().UTC().Add(time.Hour)}).Error; err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -49,7 +50,7 @@ func TestFresh2FAUnlocksOnlySameLoginSettingsSession(t *testing.T) {
 			method = http.MethodPost
 		}
 		req := httptest.NewRequest(method, path, nil)
-		req.AddCookie(&http.Cookie{Name: "session_token", Value: login})
+		req.AddCookie(&http.Cookie{Name: "__Host-komari_session", Value: login})
 		if grant != nil {
 			req.AddCookie(grant)
 		}

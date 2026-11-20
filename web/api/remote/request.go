@@ -2,6 +2,7 @@ package remote
 
 import (
 	"errors"
+	"github.com/komari-monitor/komari/web/security"
 	"net/http"
 	"time"
 
@@ -62,7 +63,7 @@ func CreateSession(c *gin.Context) {
 		api.RespondError(c, http.StatusConflict, "Client is offline")
 		return
 	}
-	loginSession, _ := c.Cookie("session_token")
+	loginSession, _ := c.Cookie(security.SessionCookieName)
 	c.Set("credential_action_resource", credentialaction.ScopedResource("remote:create", uuid))
 	if err := verifyRemoteAccess(c, loginSession); err != nil {
 		api.RespondError(c, http.StatusUnauthorized, err.Error())
@@ -119,7 +120,7 @@ func Authorize(c *gin.Context) {
 		api.RespondError(c, http.StatusForbidden, "Remote control requires an administrator session")
 		return
 	}
-	loginSession, _ := c.Cookie("session_token")
+	loginSession, _ := c.Cookie(security.SessionCookieName)
 	if err := verifyRemoteAccess(c, loginSession); err != nil {
 		api.RespondError(c, http.StatusUnauthorized, err.Error())
 		return
@@ -140,7 +141,7 @@ func CancelSession(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "Remote session ID is required")
 		return
 	}
-	loginSession, _ := c.Cookie("session_token")
+	loginSession, _ := c.Cookie(security.SessionCookieName)
 	if loginSession == "" || !deleteOwnedSession(request.SessionID, principal.UserUUID, loginSession) {
 		api.RespondError(c, http.StatusNotFound, "Remote session not found")
 		return
@@ -154,7 +155,7 @@ func verifyRemoteAccess(c *gin.Context, loginSession string) error {
 
 func ConnectBrowser(c *gin.Context) {
 	principal := api.GetPrincipal(c)
-	loginSession, _ := c.Cookie("session_token")
+	loginSession, _ := c.Cookie(security.SessionCookieName)
 	if principal == nil || principal.Type != rpc.PrincipalUser || loginSession == "" {
 		api.RespondError(c, http.StatusNotFound, "Remote session not found")
 		return
