@@ -60,13 +60,7 @@ budget: 10 requests/second with burst 30; history reads share 1 request/second
 with burst 4. Exhaustion returns 429 and Retry-After. Rotating source addresses
 does not reset that budget. Existing query concurrency limits still apply.
 
-The old global API key remains a separate compatibility credential with its
-old privileges until explicitly disabled after migration. Both old comparison
-sites use the same fixed-size constant-time comparison. The new UI shows its
-enabled status and requires fresh verification to disable it. Do not describe
-this compatibility credential as a scoped token. Plugin-owned routes retain
-their own foreign Bearer authentication; namespaced Komari tokens still obey
-Komari's restrictions there.
+The old global static `api_key` administrator credential is retired. Startup deletes any stored `api_key` row and logs migration status without printing secret values; settings endpoints reject writes to `api_key`. Retired Bearer headers do not authenticate and do not fall back to browser session cookies across REST, Connect, or RPC2. Plugin-owned routes retain their own foreign Bearer authentication; namespaced Komari tokens still obey Komari's restrictions there.
 
 The new token table is additive. No production credentials are rotated or
 revoked by the schema migration itself.

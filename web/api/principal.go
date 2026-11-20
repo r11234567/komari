@@ -29,8 +29,18 @@ func IdentifyPrincipal(c *gin.Context) *rpc.Principal {
 }
 
 func requestBearer(header string) (string, bool) {
-	scheme, value, _ := strings.Cut(strings.TrimSpace(header), " ")
-	return value, strings.EqualFold(scheme, "Bearer")
+	trimmed := strings.TrimSpace(header)
+	if trimmed == "" {
+		return "", false
+	}
+	idx := strings.IndexAny(trimmed, " \t")
+	if idx < 0 {
+		return "", strings.EqualFold(trimmed, "Bearer")
+	}
+	if !strings.EqualFold(trimmed[:idx], "Bearer") {
+		return "", false
+	}
+	return strings.TrimSpace(trimmed[idx+1:]), true
 }
 
 func agentPrincipal(token string) *rpc.Principal {

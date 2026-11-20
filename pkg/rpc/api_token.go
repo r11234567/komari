@@ -39,6 +39,12 @@ func (p *Principal) AllowsAPIProcedure(procedure string) bool {
 }
 
 func (p *Principal) AllowsAgent(agentID string) bool {
-	return p == nil || p.APIToken == nil || time.Now().Before(p.APIToken.ExpiresAt) &&
+	if p == nil {
+		return true
+	}
+	if p.APIToken == nil {
+		return p.Type != PrincipalAPIKey
+	}
+	return time.Now().Before(p.APIToken.ExpiresAt) &&
 		(p.APIToken.AllAgents || slices.Contains(p.APIToken.AgentIDs, agentID))
 }

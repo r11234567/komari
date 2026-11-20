@@ -68,10 +68,14 @@ func (ctrl *CorsController) Middleware() gin.HandlerFunc {
 
 		origin := c.GetHeader("Origin")
 		allowOrigin := ""
-		if origin != "" && (IsAPIKeyRequest(c.Request) ||
-			OriginMatchesRequest(origin, c.Request) ||
-			OriginInAllowlist(origin, corsAllowedOrigins)) {
-			allowOrigin = origin
+		allowCredentials := false
+		if origin != "" {
+			if OriginMatchesRequest(origin, c.Request) || OriginInAllowlist(origin, corsAllowedOrigins) {
+				allowOrigin = origin
+				allowCredentials = true
+			} else if IsAPIKeyRequest(c.Request) {
+				allowOrigin = origin
+			}
 		}
 
 		authorizationPreflight := origin != "" && allowOrigin == "" && IsAuthorizationPreflight(c.Request)
@@ -85,7 +89,7 @@ func (ctrl *CorsController) Middleware() gin.HandlerFunc {
 			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
 			c.Header("Access-Control-Allow-Headers", "Origin, Content-Length, Content-Type, Authorization, Accept, X-CSRF-Token, X-Requested-With, Set-Cookie, X-2FA-Code, X-Two-Factor-Code")
 			c.Header("Access-Control-Expose-Headers", "Content-Length, Authorization, Set-Cookie")
-			if !authorizationPreflight {
+			if allowCredentials && !authorizationPreflight {
 				c.Header("Access-Control-Allow-Credentials", "true")
 			}
 			c.Header("Access-Control-Max-Age", "43200") // 12 hours

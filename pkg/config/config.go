@@ -28,8 +28,12 @@ var (
 		if err := db.AutoMigrate(&ConfigItem{}); err != nil {
 			panic("failed to migrate config item table: " + err.Error())
 		}
-		if err := db.Where("key = ?", RetiredAdminKey).Delete(&ConfigItem{}).Error; err != nil {
-			panic("failed to retire legacy administrator key: " + err.Error())
+		res := db.Where("key = ?", RetiredAdminKey).Delete(&ConfigItem{})
+		if res.Error != nil {
+			panic("failed to retire legacy administrator key: " + res.Error.Error())
+		}
+		if res.RowsAffected > 0 {
+			logger.Info("config", "retired legacy static administrator API key from configuration store", "removed_rows", res.RowsAffected)
 		}
 	}
 )
@@ -81,6 +85,9 @@ func GetMany(keys map[string]any) (map[string]any, error) {
 	result := make(map[string]any)
 	keyList := make([]string, 0, len(keys))
 	for k := range keys {
+		if k == RetiredAdminKey {
+			continue
+		}
 		keyList = append(keyList, k)
 	}
 	if len(keyList) == 0 {
@@ -102,6 +109,9 @@ func GetMany(keys map[string]any) (map[string]any, error) {
 	// 收集需要写入数据库的默认值
 	var toInsert []ConfigItem
 	for k, def := range keys {
+		if k == RetiredAdminKey {
+			continue
+		}
 		if _, found := foundKeys[k]; !found {
 			if def != nil {
 				result[k] = def

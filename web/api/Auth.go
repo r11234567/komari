@@ -207,12 +207,6 @@ func extractClientToken(c *gin.Context) string {
 	if token != "" {
 		return token
 	}
-	authorization := strings.TrimSpace(c.GetHeader("Authorization"))
-	if strings.HasPrefix(authorization, "Bearer ") {
-		if token := strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")); token != "" {
-			return token
-		}
-	}
 	// rpc2 约定:agent 经 ?Authorization=<token> 传入 client token。
 	if token := c.Query("Authorization"); token != "" {
 		return token

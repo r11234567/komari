@@ -104,9 +104,6 @@ func CheckWebSocketOrigin(r *http.Request) bool {
 	if strings.EqualFold(os.Getenv("KOMARI_WS_DISABLE_ORIGIN"), "true") {
 		return true
 	}
-	if security.IsAPIKeyRequest(r) {
-		return true
-	}
 	if origin == "" && r.URL.Query().Get("token") != "" {
 		return true
 	}
