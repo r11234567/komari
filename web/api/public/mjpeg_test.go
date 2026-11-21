@@ -31,6 +31,8 @@ func TestMJPEGConcurrentDrawingAndStreamLimit(t *testing.T) {
 			for j := 0; j < 20; j++ {
 				drawString(img, "Komari Node 01", 10, 20, color.White, basicfont.Face7x13)
 				drawCenteredString(img, "Online 99.9%", 160, 50, color.White, basicfont.Face7x13)
+				drawProgressBar(img, 10, 60, 100, 14, 42.5, basicfont.Face7x13)
+				_ = renderDownloadProgress(DownloadProgress{Total: 1000, Downloaded: 425, Speed: 100})
 			}
 		}()
 	}

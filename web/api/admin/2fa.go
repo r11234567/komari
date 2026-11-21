@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/security"
 	"github.com/pquerna/otp/totp"
@@ -38,15 +39,20 @@ func Enable2FA(c *gin.Context) {
 		api.RespondError(c, http.StatusUnauthorized, "Invalid user")
 		return
 	}
-	if user.TwoFactor != "" {
+	if !totp.Validate(code, secret) {
+		api.RespondError(c, 400, "Invalid 2FA code")
+		return
+	}
+	hasFactor, err := credentialaction.HasSecondFactor(c.Request.Context(), userUUID)
+	if err != nil {
+		api.RespondError(c, http.StatusServiceUnavailable, "Failed to verify second factor state")
+		return
+	}
+	if user.TwoFactor != "" || hasFactor {
 		if err := api.VerifySensitive2FA(c); err != nil {
 			api.RespondError(c, http.StatusUnauthorized, err.Error())
 			return
 		}
-	}
-	if !totp.Validate(code, secret) {
-		api.RespondError(c, 400, "Invalid 2FA code")
-		return
 	}
 	err = accounts.Enable2Fa(userUUID, secret)
 	if err != nil {

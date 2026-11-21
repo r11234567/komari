@@ -296,13 +296,16 @@ func (m *Manager) instanceFor(short string) *Instance {
 // a manager read lock through rpcHandler) without deadlocking. On failure the
 // instance is dropped and its hooks and RPC methods are cleaned up.
 func (m *Manager) load(short string) error {
-	if short == legacyPasskeyPluginShort {
+	if isLegacyPasskeyPlugin(short) {
 		return fmt.Errorf("legacy Passkey plugin is retired; configure native Passkey instead")
 	}
 	dir := filepath.Join(DataDir, short)
 	info, err := readManifest(short)
 	if err != nil {
 		return err
+	}
+	if isLegacyPasskeyPlugin(short, info.Short) {
+		return fmt.Errorf("legacy Passkey plugin is retired; configure native Passkey instead")
 	}
 	if err := CheckKomariVersion(info.Komari); err != nil {
 		return err
@@ -502,7 +505,7 @@ func (m *Manager) setEnabled(short string, enabled, approved bool) error {
 	if !enabled {
 		st := m.stateStore().get(short)
 		st.Enabled = false
-		if short == legacyPasskeyPluginShort {
+		if isLegacyPasskeyPlugin(short, info.Short) {
 			st.ApprovedPermissionsHash = ""
 			st.ApprovedPackageDigest = ""
 		}
@@ -511,7 +514,7 @@ func (m *Manager) setEnabled(short string, enabled, approved bool) error {
 		}
 		return m.stateStore().set(short, st)
 	}
-	if short == legacyPasskeyPluginShort {
+	if isLegacyPasskeyPlugin(short, info.Short) {
 		err := fmt.Errorf("legacy Passkey plugin is retired; configure native Passkey instead")
 		st := m.stateStore().get(short)
 		st.Enabled = false
@@ -800,7 +803,7 @@ func validatePublicFile(short, name string) error {
 		return fmt.Errorf("plugin manifest %q is not public", name)
 	}
 	entry := filepath.Clean(strings.TrimPrefix(info.Entry, "/"))
-	if entry != "" && entry != "." && filepath.ToSlash(entry) == slashName {
+	if entry != "" && entry != "." && strings.EqualFold(filepath.ToSlash(entry), slashName) {
 		return fmt.Errorf("plugin entrypoint %q is not public", name)
 	}
 	ext := strings.ToLower(filepath.Ext(name))
@@ -817,8 +820,10 @@ func validatePublicFile(short, name string) error {
 		}
 		dir := filepath.Dir(pageFile)
 		if dir == "." {
-			if _, ok := allowedRootPublicAssetExtensions[ext]; ok {
-				return nil
+			if filepath.Dir(name) == "." {
+				if _, ok := allowedRootPublicAssetExtensions[ext]; ok {
+					return nil
+				}
 			}
 			continue
 		}

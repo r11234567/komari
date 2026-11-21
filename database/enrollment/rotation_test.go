@@ -265,3 +265,17 @@ func TestCredentialRotationLegacyRecoveryDoesNotRotateAgain(t *testing.T) {
 	require.NoError(t, db.First(&current, "client = ?", record.Client).Error)
 	require.Equal(t, uint64(1), current.Generation)
 }
+
+func TestCredentialRotationV2DifferentRequestInsideRecoveryRevokesChain(t *testing.T) {
+	db, token, record, now := rotationFixture(t)
+	_, err := rotateVerifiedDB(context.Background(), db, record, token, "req-original", nil, 2, func() time.Time { return now })
+	require.NoError(t, err)
+
+	// Replaying the consumed previous refresh token with a different request ID
+	// inside the 24h recovery window must revoke the active v2 chain.
+	_, err = rotateVerifiedDB(context.Background(), db, record, token, "req-stolen-replay", nil, 2, func() time.Time { return now.Add(time.Minute) })
+	require.ErrorIs(t, err, ErrRefreshReuse)
+	var current models.AgentCredential
+	require.NoError(t, db.First(&current, "client = ?", record.Client).Error)
+	require.NotNil(t, current.RevokedAt)
+}

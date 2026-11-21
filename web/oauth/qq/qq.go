@@ -190,12 +190,19 @@ func (q *QQ) OnCallback(ctx *gin.Context, state string, query map[string]string,
 }
 
 func (q *QQ) Init() error {
+	q.stateMu.Lock()
+	defer q.stateMu.Unlock()
 	q.stateCache = cache.New(time.Minute*5, time.Minute*10)
 	return nil
 }
 
 func (q *QQ) Destroy() error {
-	q.stateCache.Flush()
+	q.stateMu.Lock()
+	defer q.stateMu.Unlock()
+	if q.stateCache != nil {
+		q.stateCache.Flush()
+		q.stateCache = nil
+	}
 	return nil
 }
 

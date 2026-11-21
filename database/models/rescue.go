@@ -31,6 +31,7 @@ type RescueSession struct {
 	OutputBytes      uint64     `json:"-" gorm:"not null;default:0"`
 	HelperInstanceID string     `json:"-" gorm:"type:varchar(128);index"`
 	IdempotencyKey   string     `json:"-" gorm:"type:varchar(128);index"`
+	SpecDigest       string     `json:"-" gorm:"type:varchar(64)"`
 	ErrorCode        string     `json:"-" gorm:"type:varchar(64)"`
 	ErrorMessage     string     `json:"-" gorm:"type:varchar(512)"`
 	SSHPort          uint32     `json:"-" gorm:"not null;default:0"`

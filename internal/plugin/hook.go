@@ -296,6 +296,7 @@ func (m *Manager) runResponseHook(r *http.Request, bw *bufferedResponseWriter, h
 				header = normalizeHeader(raw)
 			}
 		}
+		stripReservedSetCookies(header)
 		responseBody := bw.bodyBytes()
 		if value := native.Get(vm, resObj, "body"); !value.IsUndefined() {
 			responseBody = []byte(native.String(vm, value))
@@ -347,10 +348,14 @@ func (m *Manager) logHookError(h *hookEntry, err error) {
 
 // hookRequestObject builds the mutable JS request object.
 func hookRequestObject(vm *moejs.Runtime, r *http.Request, body []byte) *engine.Object {
+	return hookRequestObjectWithHeaders(vm, r, body, sanitizedPluginHeaders(r.Header, false))
+}
+
+func hookRequestObjectWithHeaders(vm *moejs.Runtime, r *http.Request, body []byte, headers http.Header) *engine.Object {
 	req := vm.Realm().NewObject()
 	_ = native.Set(vm, req, "method", r.Method)
 	_ = native.Set(vm, req, "url", r.URL.RequestURI())
-	_ = native.Set(vm, req, "headers", headerToMap(r.Header))
+	_ = native.Set(vm, req, "headers", headerToMap(headers))
 	query := make(map[string]string, len(r.URL.Query()))
 	for name, values := range r.URL.Query() {
 		query[name] = strings.Join(values, ",")

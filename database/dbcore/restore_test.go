@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -444,5 +445,113 @@ func TestRestoreStagedBackupPreservesPasskeyCountersAndRevocations(t *testing.T)
 	}
 	if err := innerRestored.QueryRow(`SELECT COUNT(*) FROM user_passkeys WHERE credential_hash = 'hash-b'`).Scan(&keyBCount); err != nil || keyBCount != 0 {
 		t.Fatalf("data/custom.db revoked Key B resurrected (count=%d err=%v)", keyBCount, err)
+	}
+}
+
+func TestRestoreStagedBackupRetiresCaseVariantPasskeyAndSnapshotsExternalDB(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	extDir := filepath.Join(root, "external")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(extDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	extDBPath := filepath.Join(extDir, "custom.db")
+	extDB, err := sql.Open("sqlite3", extDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extDB.Exec(`CREATE TABLE marker (v text); INSERT INTO marker VALUES ('live-ext');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := extDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	backupDBPath := filepath.Join(root, "backup-src.db")
+	backupDB, err := sql.Open("sqlite3", backupDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backupDB.Exec(`CREATE TABLE marker (v text); INSERT INTO marker VALUES ('restored-backup');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := backupDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	archivePath := filepath.Join(dataDir, "backup.zip")
+	f, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	addBytes := func(name string, payload []byte) {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rawDB, err := os.ReadFile(backupDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addBytes("komari.db", rawDB)
+	addBytes("plugin/Komari-Passkey/komari-plugin.json", []byte(`{"short":"komari-passkey","name":"Legacy Passkey"}`))
+	addBytes("plugin/Komari-Passkey/.komari-package.json", []byte(`{"digest":"abc"}`))
+	addBytes("plugin/.packages/deadbeef.json", []byte(`{"short":"Komari-Passkey","digest":"deadbeef"}`))
+	addBytes("plugin/.packages/deadbeef.zip", []byte("zipdata"))
+	addBytes("plugin/state.json", []byte(`{"plugins":{"Komari-Passkey":{"enabled":true,"approved_permissions_hash":"h1","approved_package_digest":"deadbeef"}}}`))
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	prevDBFile := flags.DatabaseFile
+	flags.DatabaseFile = extDBPath
+	defer func() { flags.DatabaseFile = prevDBFile }()
+
+	if err := restoreStagedBackup(dataDir); err != nil {
+		t.Fatalf("restoreStagedBackup failed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dataDir, "plugin", "Komari-Passkey", ".komari-package.json")); !os.IsNotExist(err) {
+		t.Fatalf("legacy passkey receipt was not removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "plugin", ".packages", "deadbeef.json")); !os.IsNotExist(err) {
+		t.Fatalf("staged legacy passkey package metadata was not removed: %v", err)
+	}
+	stateRaw, err := os.ReadFile(filepath.Join(dataDir, "plugin", "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stateRaw), `"enabled": true`) {
+		t.Fatalf("case-variant Komari-Passkey remained enabled in state.json: %s", stateRaw)
+	}
+
+	preZips, err := filepath.Glob(filepath.Join(root, "backup", "pre-restore-*.zip"))
+	if err != nil || len(preZips) != 1 {
+		t.Fatalf("expected 1 pre-restore zip, got %v (err=%v)", preZips, err)
+	}
+	zr, err := zip.OpenReader(preZips[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	foundExt := false
+	for _, entry := range zr.File {
+		if entry.Name == "external-database/custom.db" {
+			foundExt = true
+			break
+		}
+	}
+	if !foundExt {
+		t.Fatalf("external --database file was not archived in pre-restore zip")
 	}
 }

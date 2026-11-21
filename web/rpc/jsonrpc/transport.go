@@ -6,13 +6,11 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/internal/credentialaction"
 	credential "github.com/komari-monitor/komari/internal/trustedcredential"
-	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/security"
@@ -194,15 +192,30 @@ func serveWebSocket(c *gin.Context) {
 	}
 }
 
+const (
+	maxJSONRPCPostBytes = 256 << 10
+	maxJSONRPCBatchSize = 32
+)
+
 func servePost(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONRPCPostBytes)
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, rpc.ErrorResponse(nil, rpc.InvalidRequest, "request body too large", nil))
+			return
+		}
 		c.JSON(http.StatusBadRequest, rpc.ErrorResponse(nil, rpc.ParseError, "read body error", err.Error()))
 		return
 	}
 	requests, jerr := rpc.ParseRequests(body)
 	if jerr != nil {
 		c.JSON(http.StatusBadRequest, jerr.Response())
+		return
+	}
+	if len(requests) > maxJSONRPCBatchSize {
+		c.JSON(http.StatusBadRequest, rpc.ErrorResponse(nil, rpc.InvalidRequest, "batch size exceeds limit", nil))
 		return
 	}
 	meta := buildContextMeta(c)
@@ -276,19 +289,8 @@ func buildContextMeta(c *gin.Context) *rpc.ContextMeta {
 	return meta
 }
 
-// hasTempShareAccess 校验 temp_key cookie 是否为有效的临时分享访问许可。
+// hasTempShareAccess delegates temporary share validation to web/api.HasTempAccess
+// so redeemed temp shares and cookie checks share a single implementation.
 func hasTempShareAccess(c *gin.Context) bool {
-	tempKey, err := c.Cookie("temp_key")
-	if err != nil || tempKey == "" {
-		return false
-	}
-	expireAt, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
-	if err != nil {
-		return false
-	}
-	allowKey, err := config.GetAs[string]("tempory_share_token", "")
-	if err != nil || allowKey == "" || tempKey != allowKey {
-		return false
-	}
-	return expireAt >= time.Now().Unix()
+	return api.HasTempAccess(c)
 }

@@ -425,6 +425,7 @@ func TestHTTPOriginOnlyForDirectTLS(t *testing.T) {
 	if origin := manager.HTTPOrigin(forwarded); origin != "" {
 		t.Fatalf("reverse-proxied HTTPS received unsafe HTTP origin %q", origin)
 	}
+	t.Setenv("KOMARI_TRUSTED_PROXIES", "127.0.0.1,172.18.0.0/16")
 	forwardedOverTLS := httptest.NewRequest(http.MethodPost, "https://example.test/api/admin/settings/https", nil)
 	forwardedOverTLS.RemoteAddr = "172.18.0.3:43000"
 	forwardedOverTLS.Header.Set("X-Forwarded-Proto", "https")

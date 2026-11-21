@@ -155,13 +155,11 @@ func TestPublicViewerProjectionIgnoresAdminPrincipal(t *testing.T) {
 	if _, rpcErr := getNodeRecentStatus(adminCtx, &rpc.JsonRpcRequest{Params: map[string]any{"uuid": hiddenID}}); rpcErr == nil {
 		t.Fatal("common:getNodeRecentStatus allowed querying Hidden node with admin principal")
 	}
-	entityIDs, rpcErr := publicMetricEntityIDs(adminCtx, []string{visibleID, hiddenID})
+	entityIDs, rpcErr := publicMetricEntityIDs(adminCtx, []string{visibleID, hiddenID, "nonexistent-node-id"})
 	if rpcErr != nil {
 		t.Fatalf("publicMetricEntityIDs failed: %v", rpcErr)
 	}
-	for _, id := range entityIDs {
-		if id == hiddenID {
-			t.Fatal("publicMetricEntityIDs included Hidden node under admin principal")
-		}
+	if len(entityIDs) != 1 || entityIDs[0] != visibleID {
+		t.Fatalf("publicMetricEntityIDs = %v, want only [%s]", entityIDs, visibleID)
 	}
 }

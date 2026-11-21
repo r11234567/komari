@@ -16,10 +16,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -57,7 +59,15 @@ const (
 	// to slow down rather than being failed, so a buggy client degrades
 	// instead of losing its enrollment.
 	minimumPollGap = 2 * time.Second
+	// Bound stored anonymous work separately from transient HTTP admission.
+	maxEnrollmentAttempts       = 4096
+	maxEnrollmentAttemptsPerIP  = 64
+	maxEnrollmentAttemptsPerKey = 4
 )
+
+var ErrEnrollmentCapacity = errors.New("enrollment request capacity exceeded; wait for pending requests to expire")
+
+var enrollmentAdmissionMu sync.Mutex
 
 // State mirrors the proto enrollment states without importing the generated
 // package into the database layer.
@@ -106,10 +116,13 @@ type Issued struct {
 
 // Begin records a new attempt.
 func Begin(publicKey []byte, keyID string, algorithm int32, device Attempt) (Attempt, error) {
+	return beginDB(dbcore.GetDBInstance(), publicKey, keyID, algorithm, device, time.Now().UTC())
+}
+
+func beginDB(db *gorm.DB, publicKey []byte, keyID string, algorithm int32, device Attempt, now time.Time) (Attempt, error) {
 	if len(publicKey) == 0 {
 		return Attempt{}, errors.New("an agent public key is required")
 	}
-	now := time.Now().UTC()
 	row := models.AgentEnrollment{
 		DeviceCode:      utils.GenerateRandomString(deviceCodeLength),
 		UserCode:        formatUserCode(utils.GenerateRandomString(userCodeLength)),
@@ -130,7 +143,32 @@ func Begin(publicKey []byte, keyID string, algorithm int32, device Attempt) (Att
 	if row.DeviceCode == "" || row.UserCode == "" {
 		return Attempt{}, errors.New("failed to generate enrollment codes")
 	}
-	if err := dbcore.GetDBInstance().Create(&row).Error; err != nil {
+	enrollmentAdmissionMu.Lock()
+	defer enrollmentAdmissionMu.Unlock()
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("expires_at <= ?", now).Delete(&models.AgentEnrollment{}).Error; err != nil {
+			return err
+		}
+		for _, limit := range []struct {
+			query string
+			args  []any
+			max   int64
+		}{
+			{"1 = 1", nil, maxEnrollmentAttempts},
+			{"remote_ip = ?", []any{row.RemoteIP}, maxEnrollmentAttemptsPerIP},
+			{"agent_public_key = ?", []any{row.AgentPublicKey}, maxEnrollmentAttemptsPerKey},
+		} {
+			var count int64
+			if err := tx.Model(&models.AgentEnrollment{}).Where(limit.query, limit.args...).Count(&count).Error; err != nil {
+				return err
+			}
+			if count >= limit.max {
+				return ErrEnrollmentCapacity
+			}
+		}
+		return tx.Create(&row).Error
+	}, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
 		return Attempt{}, err
 	}
 	return toAttempt(row), nil
@@ -346,19 +384,22 @@ func ListPending() ([]Attempt, error) {
 func ValidateRefreshToken(refreshToken string) (models.AgentCredential, error) {
 	digest := hashToken(refreshToken)
 	if digest == "" {
-		return models.AgentCredential{}, errors.New("a refresh token is required")
+		return models.AgentCredential{}, fmt.Errorf("%w: a refresh token is required", ErrCredentialRejected)
 	}
 	var row models.AgentCredential
 	if err := dbcore.GetDBInstance().Where("refresh_token_hash = ? OR (previous_refresh_hash = ? AND previous_refresh_expires > ?)",
 		digest, digest, time.Now().UTC()).First(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return models.AgentCredential{}, fmt.Errorf("%w: unrecognized refresh credential", ErrCredentialRejected)
+		}
 		return models.AgentCredential{}, err
 	}
 	if row.RevokedAt != nil {
-		return models.AgentCredential{}, errors.New("these credentials were revoked")
+		return models.AgentCredential{}, fmt.Errorf("%w: these credentials were revoked", ErrCredentialRejected)
 	}
 	now := time.Now().UTC()
 	if now.After(row.RefreshExpiresAt) {
-		return models.AgentCredential{}, errors.New("the sign-in has expired; enroll the machine again")
+		return models.AgentCredential{}, fmt.Errorf("%w: the sign-in has expired; enroll the machine again", ErrCredentialRejected)
 	}
 	return row, nil
 }
@@ -415,6 +456,24 @@ func ResolveAccessToken(accessToken string) (string, error) {
 		return "", errors.New("the access token has expired")
 	}
 	return row.Client, nil
+}
+
+// HasAccessTokenRecord reports whether accessToken matches a stored (possibly
+// expired or revoked) Agent access token digest so NAT rate-limit lanes can
+// separate legitimate expired Agents from PATs and unknown brute-force guesses.
+func HasAccessTokenRecord(accessToken string) bool {
+	digest := hashToken(accessToken)
+	if digest == "" {
+		return false
+	}
+	var count int64
+	if err := dbcore.GetDBInstance().Model(&models.AgentCredential{}).
+		Where("access_token_hash = ? OR previous_access_hash = ?", digest, digest).
+		Limit(1).
+		Count(&count).Error; err != nil {
+		return false
+	}
+	return count > 0
 }
 
 // GetCredential returns the stored credential record for a machine, which is

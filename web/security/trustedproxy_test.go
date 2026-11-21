@@ -13,13 +13,17 @@ import (
 func clientIPUnder(t *testing.T, trusted, peer, forwarded string) string {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
+	t.Setenv(TrustedProxyEnv, trusted)
 	engine := gin.New()
-	if err := ConfigureTrustedProxies(engine, trusted); err != nil {
-		t.Fatalf("ConfigureTrustedProxies(%q): %v", trusted, err)
+	if err := ConfigureRequestMetadata(engine); err != nil {
+		t.Fatalf("ConfigureRequestMetadata(%q): %v", trusted, err)
 	}
 	var resolved string
 	engine.GET("/api/probe", func(c *gin.Context) {
-		resolved = c.ClientIP()
+		resolved = AuthSourceIP(c)
+		if got := c.ClientIP(); got != resolved {
+			t.Fatalf("gin ClientIP %q != requestmeta ClientIP %q", got, resolved)
+		}
 		c.Status(http.StatusNoContent)
 	})
 	request := httptest.NewRequest(http.MethodGet, "/api/probe", nil)
@@ -31,27 +35,21 @@ func clientIPUnder(t *testing.T, trusted, peer, forwarded string) string {
 	return resolved
 }
 
-func TestDefaultConfigurationLeavesClientIPSpoofable(t *testing.T) {
-	// This documents the hazard the option exists to close: with gin's default
-	// every proxy is trusted, so the header walk runs to the leftmost entry -
-	// a value the caller chose. Left unaddressed it lets a caller mint a fresh
-	// rate limit bucket per request, or drain someone else's.
+func TestDefaultConfigurationTrustsOnlyLoopback(t *testing.T) {
 	got := clientIPUnder(t, "", "203.0.113.9:5555", "198.51.100.7")
-	if got != "198.51.100.7" {
-		t.Fatalf("client IP = %q, want the spoofed header value under the permissive default", got)
+	if got != "203.0.113.9" {
+		t.Fatalf("client IP = %q, want transport peer under safe loopback default", got)
 	}
-	if !ClientIPIsSpoofable("") {
-		t.Fatal("the default configuration was not reported as spoofable")
+	got = clientIPUnder(t, "", "127.0.0.1:5555", "198.51.100.7")
+	if got != "198.51.100.7" {
+		t.Fatalf("client IP = %q, want forwarded client from loopback proxy", got)
 	}
 }
 
 func TestNoneIgnoresForwardingHeaders(t *testing.T) {
-	got := clientIPUnder(t, "none", "203.0.113.9:5555", "198.51.100.7")
-	if got != "203.0.113.9" {
+	got := clientIPUnder(t, "none", "127.0.0.1:5555", "198.51.100.7")
+	if got != "127.0.0.1" {
 		t.Fatalf("client IP = %q, want the transport peer", got)
-	}
-	if ClientIPIsSpoofable("none") {
-		t.Fatal(`"none" was reported as spoofable`)
 	}
 }
 
@@ -83,18 +81,18 @@ func TestCIDRAndWhitespaceHandling(t *testing.T) {
 	if got != "198.51.100.7" {
 		t.Fatalf("client IP = %q, want the forwarded address for a CIDR-trusted peer", got)
 	}
-	if ClientIPIsSpoofable(" 10.0.0.0/8 ") {
-		t.Fatal("an explicit list was reported as spoofable")
-	}
 }
 
-func TestEmptyListFallsBackToDefault(t *testing.T) {
+func TestEmptyListFallsBackToDefaultAndSeparatorsFail(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	// A value of only separators carries no instruction; it must not be read as
-	// "trust nothing", which would silently change every client address.
-	if err := ConfigureTrustedProxies(engine, " , , "); err != nil {
-		t.Fatalf("ConfigureTrustedProxies: %v", err)
+	if err := ConfigureTrustedProxies(engine, "   "); err != nil {
+		t.Fatalf("ConfigureTrustedProxies whitespace default: %v", err)
+	}
+	// A list containing empty separator entries must error loudly rather than
+	// silently dropping items.
+	if err := ConfigureTrustedProxies(engine, " , , "); err == nil {
+		t.Fatal("ConfigureTrustedProxies accepted empty comma entries")
 	}
 }
 

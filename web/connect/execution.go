@@ -146,11 +146,14 @@ func (s *executionService) CancelExecution(ctx context.Context, req *connect.Req
 	if err != nil {
 		return nil, err
 	}
-	if err := verifyConnectCredential(ctx, req.Msg.TwoFactor, "execution:cancel", req.Msg.ExecutionId); err != nil {
-		return nil, err
+	if strings.TrimSpace(req.Msg.ExecutionId) == "" {
+		return nil, connectError(connect.CodeInvalidArgument, errors.New("execution ID is required"))
 	}
 	if _, err := executionapp.GetOwned(req.Msg.ExecutionId, ownerID); err != nil {
 		return nil, executionError(err)
+	}
+	if err := verifyConnectCredential(ctx, req.Msg.TwoFactor, "execution:cancel", req.Msg.ExecutionId); err != nil {
+		return nil, err
 	}
 	execution, err := executionapp.Cancel(req.Msg.ExecutionId, req.Msg.Reason)
 	if err != nil {

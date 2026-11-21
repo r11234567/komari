@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/internal/diagnostics"
 	"github.com/komari-monitor/komari/internal/passkeycredential"
+	"github.com/komari-monitor/komari/pkg/requestmeta"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/security"
@@ -173,10 +174,7 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 		}
 		if err := verifyDPoP(c, principal); err != nil {
 			security.SetPrincipalHeader(c, rpc.NewAnonymousPrincipal())
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"code":    "UNAUTHENTICATED",
-				"message": err.Error(),
-			})
+			security.AbortRequest(c, http.StatusUnauthorized, err.Error())
 			return
 		}
 		meta := &rpc.ContextMeta{
@@ -195,8 +193,14 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 				meta.SessionToken = session
 			}
 		}
-		secure := security.IsRequestSecure(c.Request)
-		ctx := passkeycredential.WithRequestOrigin(rpc.NewContextWithMeta(c.Request.Context(), meta), c.Request.Host, secure)
+		origin, err := requestmeta.Origin(c.Request)
+		if err != nil {
+			security.AbortRequest(c, http.StatusBadRequest, "invalid request origin")
+			return
+		}
+		scheme, host, _ := strings.Cut(origin, "://")
+		secure := scheme == "https"
+		ctx := passkeycredential.WithRequestOrigin(rpc.NewContextWithMeta(c.Request.Context(), meta), host, secure)
 		c.Request = c.Request.WithContext(workspace.WithSecure(workspace.WithToken(ctx, c.GetHeader(workspace.Header)), secure))
 		handler.ServeHTTP(c.Writer, c.Request)
 	}

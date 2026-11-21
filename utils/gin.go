@@ -1,8 +1,11 @@
 package utils
 
 import (
+	"context"
+
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/pkg/requestmeta"
 	"github.com/komari-monitor/komari/utils/requestscheme"
 )
 
@@ -14,11 +17,18 @@ func GetScheme(c *gin.Context) string {
 	return "http"
 }
 
-func GetCallbackURL(c *gin.Context) string {
-	if panelOrigin := flags.EffectivePanelOrigin(); panelOrigin != "" {
-		return panelOrigin + "/api/oauth_callback"
+func PublicPanelURL(ctx context.Context) (string, error) {
+	configured, err := config.GetAs[string](config.ScriptDomainKey, "")
+	if err != nil {
+		return "", err
 	}
-	scheme := GetScheme(c)
-	host := c.Request.Host
-	return scheme + "://" + host + "/api/oauth_callback"
+	return requestmeta.PublicURL(ctx, configured)
+}
+
+func GetCallbackURL(c *gin.Context) (string, error) {
+	base, err := PublicPanelURL(c.Request.Context())
+	if err != nil {
+		return "", err
+	}
+	return base + "/api/oauth_callback", nil
 }

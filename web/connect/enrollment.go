@@ -23,11 +23,11 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/utils"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	enrollmentv1 "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1"
 	"github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1/enrollmentv1connect"
@@ -35,6 +35,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"gorm.io/gorm"
 )
 
 type enrollmentService struct {
@@ -44,6 +45,17 @@ type enrollmentService struct {
 // verificationPath is where an operator approves a machine. It is rendered by
 // the panel UI, which is also what forces a panel login before approving.
 const verificationPath = "/bind"
+
+func refreshCredentialRejected(err error) error {
+	ce := connect.NewError(connect.CodeUnauthenticated, err)
+	if detail, derr := connect.NewErrorDetail(&commonv1.ErrorDetail{
+		Code:    "REFRESH_CREDENTIAL_REJECTED",
+		Message: err.Error(),
+	}); derr == nil {
+		ce.AddDetail(detail)
+	}
+	return ce
+}
 
 func (s *enrollmentService) BeginEnrollment(ctx context.Context, req *connect.Request[enrollmentv1.BeginEnrollmentRequest]) (*connect.Response[enrollmentv1.BeginEnrollmentResponse], error) {
 	key := req.Msg.GetAgentPublicKey()
@@ -59,6 +71,11 @@ func (s *enrollmentService) BeginEnrollment(ctx context.Context, req *connect.Re
 	}
 	if len(key.GetValue()) != ed25519.PublicKeySize {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("agent public key has an unexpected size"))
+	}
+
+	base, err := utils.PublicPanelURL(ctx)
+	if err != nil {
+		return nil, connectError(connect.CodeFailedPrecondition, err)
 	}
 
 	device := req.Msg.GetDevice()
@@ -77,6 +94,9 @@ func (s *enrollmentService) BeginEnrollment(ctx context.Context, req *connect.Re
 		RemoteIP:        remoteIP,
 	})
 	if err != nil {
+		if errors.Is(err, enrollment.ErrEnrollmentCapacity) {
+			return nil, connectError(connect.CodeResourceExhausted, err)
+		}
 		return nil, connectError(connect.CodeInternal, err)
 	}
 
@@ -85,7 +105,6 @@ func (s *enrollmentService) BeginEnrollment(ctx context.Context, req *connect.Re
 	auditlog.Log(remoteIP, "", fmt.Sprintf("agent enrollment requested: host=%s code=%s",
 		attempt.Hostname, attempt.UserCode), "info")
 
-	base := panelBaseURL(req)
 	return connect.NewResponse(&enrollmentv1.BeginEnrollmentResponse{
 		DeviceCode:              attempt.DeviceCode,
 		UserCode:                attempt.UserCode,
@@ -144,25 +163,31 @@ func (s *enrollmentService) RefreshCredentials(ctx context.Context, req *connect
 	requestID := "legacy:" + refreshToken
 	var expected *uint64
 	var record models.AgentCredential
-	var err error
+	var lookupErr, err error
 	version, versionErr := refreshProtocolVersion(req.Msg.GetProof())
 	if versionErr != nil {
 		return nil, connectError(connect.CodeUnauthenticated, errors.New("unsupported refresh proof protocol"))
 	}
 	if version == 2 {
 		protocol = 2
-		record, err = enrollment.LookupRefresh(ctx, refreshToken)
-		if err == nil {
+		record, lookupErr = enrollment.LookupRefresh(ctx, refreshToken)
+		if lookupErr == nil {
 			requestID, expected, err = verifyRefreshV2(req.Msg.Proof, record, refreshToken)
 		}
 	} else {
-		record, err = enrollment.ValidateRefreshToken(refreshToken)
-		if err == nil {
+		record, lookupErr = enrollment.ValidateRefreshToken(refreshToken)
+		if lookupErr == nil {
 			err = verifyRefreshProof(req.Msg.GetProof(), record.AgentPublicKey, record.Client, refreshToken)
 		}
 	}
+	if lookupErr != nil {
+		if errors.Is(lookupErr, enrollment.ErrCredentialRejected) || errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+			return nil, refreshCredentialRejected(errors.New("refresh credential rejected"))
+		}
+		return nil, connectError(connect.CodeUnavailable, errors.New("credential lookup unavailable"))
+	}
 	if err != nil {
-		return nil, connectError(connect.CodeUnauthenticated, errors.New("invalid refresh proof or credential"))
+		return nil, connectError(connect.CodeUnauthenticated, errors.New("invalid refresh proof"))
 	}
 	// Resolve the active signing key before opening the rotation DB transaction
 	// so signing inside the transaction never contends on SQLite's single-conn
@@ -225,7 +250,7 @@ func (s *enrollmentService) RefreshCredentials(ctx context.Context, req *connect
 			auditlog.Log("", "", "agent credential chain revoked after authenticated refresh reuse: client="+record.Client, "warn")
 		}
 		if errors.Is(err, enrollment.ErrCredentialRejected) || errors.Is(err, enrollment.ErrRefreshReuse) {
-			return nil, connectError(connect.CodeUnauthenticated, err)
+			return nil, refreshCredentialRejected(err)
 		}
 		return nil, connectError(connect.CodeInternal, errors.New("credential rotation failed"))
 	}
@@ -247,11 +272,11 @@ func (s *enrollmentService) RefreshCredentials(ctx context.Context, req *connect
 
 func (s *enrollmentService) RevokeCredentials(ctx context.Context, req *connect.Request[enrollmentv1.RevokeCredentialsRequest]) (*connect.Response[enrollmentv1.RevokeCredentialsResponse], error) {
 	meta := rpc.MetaFromContext(ctx)
-	if err := verifyConnectCredential(ctx, req.Msg.GetTwoFactor(), "enrollment:revoke", req.Msg.GetAgentId()); err != nil {
-		return nil, err
-	}
 	if strings.TrimSpace(req.Msg.GetAgentId()) == "" {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("an agent ID is required"))
+	}
+	if err := verifyConnectCredential(ctx, req.Msg.GetTwoFactor(), "enrollment:revoke", req.Msg.GetAgentId()); err != nil {
+		return nil, err
 	}
 	if err := enrollment.Revoke(req.Msg.GetAgentId(), req.Msg.GetReason()); err != nil {
 		return nil, connectError(connect.CodeInternal, err)
@@ -383,30 +408,4 @@ func enrollmentStateToProto(state int32) enrollmentv1.EnrollmentState {
 	default:
 		return enrollmentv1.EnrollmentState_ENROLLMENT_STATE_UNSPECIFIED
 	}
-}
-
-// panelBaseURL reconstructs the address the Agent used.
-//
-// Echoing back what the caller reached is what keeps the printed link usable
-// behind a reverse proxy or on a non-default port, where a configured value
-// would be wrong for exactly the deployments that need it most.
-func panelBaseURL(req connect.AnyRequest) string {
-	if panelOrigin := flags.EffectivePanelOrigin(); panelOrigin != "" {
-		return panelOrigin
-	}
-	header := req.Header()
-	scheme := "https"
-	if forwarded := header.Get("X-Forwarded-Proto"); forwarded != "" {
-		scheme = strings.Split(forwarded, ",")[0]
-	}
-	host := header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = header.Get("Host")
-	}
-	if host == "" {
-		if parsed := req.Peer().Addr; parsed != "" {
-			host = parsed
-		}
-	}
-	return strings.TrimSuffix(scheme+"://"+strings.TrimSpace(host), "/")
 }

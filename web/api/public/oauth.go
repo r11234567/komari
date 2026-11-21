@@ -40,7 +40,16 @@ func OAuth(c *gin.Context) {
 		return
 	}
 
-	authURL, state := oauth.CurrentProvider().GetAuthorizationURL(utils.GetCallbackURL(c))
+	callbackURL, err := utils.GetCallbackURL(c)
+	if err != nil {
+		c.JSON(400, gin.H{"status": "error", "error": "Failed to resolve OAuth callback URL: " + err.Error()})
+		return
+	}
+	authURL, state := oauth.CurrentProvider().GetAuthorizationURL(callbackURL)
+	if strings.TrimSpace(authURL) == "" {
+		c.JSON(500, gin.H{"status": "error", "error": "OAuth provider returned empty authorization URL"})
+		return
+	}
 
 	security.SetSensitiveCookie(c, "oauth_state", state, 3600)
 	security.SetSensitiveCookie(c, oauthReturnToCookie, safeOAuthReturnTo(c.Query("returnTo")), 3600)
@@ -73,7 +82,12 @@ func OAuthCallback(c *gin.Context) {
 			queries[key] = values[0]
 		}
 	}
-	oidcUser, err := oauth.CurrentProvider().OnCallback(c, state, queries, utils.GetCallbackURL(c))
+	callbackURL, err := utils.GetCallbackURL(c)
+	if err != nil {
+		c.JSON(400, gin.H{"status": "error", "error": "Failed to resolve OAuth callback URL: " + err.Error()})
+		return
+	}
+	oidcUser, err := oauth.CurrentProvider().OnCallback(c, state, queries, callbackURL)
 	if err != nil {
 		c.JSON(500, gin.H{"status": "error", "error": "Failed to get user info: " + err.Error()})
 		return
