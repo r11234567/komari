@@ -35,6 +35,7 @@ func resetNativeTestState() {
 	loginLimiter.mu.Lock()
 	loginLimiter.buckets = make(map[string]rateBucket)
 	loginLimiter.mu.Unlock()
+	InvalidateAccountFirstEnvelopeCache()
 }
 
 func signedAssertionFor(t *testing.T, private *ecdsa.PrivateKey, id []byte, owner, rpID, origin, challenge string, counter uint32, flags byte) []byte {
@@ -756,5 +757,203 @@ func TestNativeAccountFirstLoginPrivacyEnvelopeAndLegacyNonDiscoverable(t *testi
 		if !slices.Equal(got, wantSyncedLengths) {
 			t.Fatalf("allow_synced=true BeginLogin(%q) length multiset = %v, want %v", username, got, wantSyncedLengths)
 		}
+	}
+}
+
+func TestNativeAccountFirstEnvelopeOver64CacheMultiOriginAndRestartStability(t *testing.T) {
+	resetNativeTestState()
+	const rpID = "over64-rp.example.test"
+	const adminHost = "admin.over64-rp.example.test"
+	const panelHost = "panel.over64-rp.example.test"
+	const adminOrigin = "https://" + adminHost
+	const panelOrigin = "https://" + panelHost
+
+	t.Setenv("KOMARI_PASSKEY_RP_ID", rpID)
+	t.Setenv("KOMARI_PASSKEY_ORIGIN", adminOrigin+","+panelOrigin)
+	t.Setenv("KOMARI_PASSKEY_ALLOW_SYNCED", "false")
+
+	adminCtx := WithRequestOrigin(t.Context(), adminHost, true)
+	panelCtx := WithRequestOrigin(t.Context(), panelHost, true)
+	db := dbcore.GetDBInstance()
+	enc := base64.RawURLEncoding.EncodeToString
+
+	createUser := func(prefix string) models.User {
+		u, err := accounts.CreateAccount(prefix+"-"+uuid.NewString(), "Synthetic-password-123")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			db.Where("user_uuid = ?", u.UUID).Delete(&models.UserPasskey{})
+			db.Where("user_uuid = ?", u.UUID).Delete(&models.PasskeyCounter{})
+			db.Where("uuid = ?", u.UUID).Delete(&models.User{})
+		})
+		return u
+	}
+
+	priv, pub := syntheticPublicKey(t)
+	enrollKeyOfLen := func(u models.User, idLen int) []byte {
+		id := make([]byte, idLen)
+		if _, err := rand.Read(id); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Omit("User").Create(&models.UserPasskey{
+			CredentialHash: idDigest(id),
+			CredentialID:   enc(id),
+			UserUUID:       u.UUID,
+			RPID:           rpID,
+			Name:           fmt.Sprintf("Key-%d", idLen),
+			PublicKey:      enc(pub),
+			DeviceType:     "singleDevice",
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Omit("User").Create(&models.PasskeyCounter{
+			UserUUID:  u.UUID,
+			KeyDigest: keyDigest(id, pub),
+			Counter:   0,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+
+	userA := createUser("over64-a")
+	userB := createUser("over64-b")
+	zeroUser := createUser("over64-zero")
+	missingUser := "over64-missing-" + uuid.NewString()
+
+	// Each user stays within the 64-passkey per-account limit, while the RP-wide
+	// length envelope sums to 40 (20B) + 10 (32B) + 40 (64B) = 90 > 64.
+	var keyA20 []byte
+	for i := 0; i < 40; i++ {
+		id := enrollKeyOfLen(userA, 20)
+		if i == 0 {
+			keyA20 = id
+		}
+	}
+	for i := 0; i < 10; i++ {
+		_ = enrollKeyOfLen(userA, 32)
+	}
+	var keyB64 []byte
+	for i := 0; i < 40; i++ {
+		id := enrollKeyOfLen(userB, 64)
+		if i == 0 {
+			keyB64 = id
+		}
+	}
+
+	wantLengths := make([]int, 0, 90)
+	for i := 0; i < 40; i++ {
+		wantLengths = append(wantLengths, 20)
+	}
+	for i := 0; i < 10; i++ {
+		wantLengths = append(wantLengths, 32)
+	}
+	for i := 0; i < 40; i++ {
+		wantLengths = append(wantLengths, 64)
+	}
+
+	loadsBefore := envelopeCacheLoads()
+
+	// 1. All accounts (userA, userB, zeroUser, missingUser) receive the full 90-item
+	// length multiset without truncation at 64.
+	for i, username := range []string{userA.Username, userB.Username, zeroUser.Username, missingUser} {
+		opt, tok, err := BeginLogin(adminCtx, username, fmt.Sprintf("198.51.100.%d", 10+i))
+		if err != nil {
+			t.Fatalf("BeginLogin(%q) failed: %v", username, err)
+		}
+		req := opt.(*protocol.CredentialAssertion).Response
+		gotLengths := descriptorLengthMultiset(req.AllowedCredentials)
+		if len(gotLengths) != 90 || !slices.Equal(gotLengths, wantLengths) {
+			t.Fatalf("BeginLogin(%q) length multiset len=%d, want 90 matching envelope", username, len(gotLengths))
+		}
+		if username == userA.Username {
+			proofA := signedLegacyNonDiscoverableAssertionFor(t, priv, keyA20, rpID, adminOrigin, req.Challenge.String(), 1, 0x05)
+			if uid, err := CompleteLogin(adminCtx, tok, proofA); err != nil || uid != userA.UUID {
+				t.Fatalf("userA CompleteLogin on 90-item envelope failed: uid=%q err=%v", uid, err)
+			}
+		}
+		if username == userB.Username {
+			proofB := signedLegacyNonDiscoverableAssertionFor(t, priv, keyB64, rpID, adminOrigin, req.Challenge.String(), 1, 0x05)
+			if uid, err := CompleteLogin(adminCtx, tok, proofB); err != nil || uid != userB.UUID {
+				t.Fatalf("userB CompleteLogin on 90-item envelope failed: uid=%q err=%v", uid, err)
+			}
+		}
+	}
+
+	// 2. Envelope cache served all 4 logins (and a synced-policy toggle) from a single DB load.
+	t.Setenv("KOMARI_PASSKEY_ALLOW_SYNCED", "true")
+	if _, _, err := BeginLogin(adminCtx, missingUser, "198.51.100.20"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KOMARI_PASSKEY_ALLOW_SYNCED", "false")
+	loadsAfterSteady := envelopeCacheLoads()
+	if loadsAfterSteady != loadsBefore+1 {
+		t.Fatalf("expected exactly 1 envelope DB load across 5 BeginLogin calls, got %d -> %d", loadsBefore, loadsAfterSteady)
+	}
+
+	// 3. Same-RP cross-origin stability & simulated process-restart stability:
+	// Both real+decoy (userA) and all-decoy (missingUser) descriptor IDs and order
+	// must be identical across adminOrigin and panelOrigin, and after clearing
+	// in-memory caches to simulate a server restart.
+	optAdminA, _, err := BeginLogin(adminCtx, userA.Username, "198.51.100.30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	optPanelA, _, err := BeginLogin(panelCtx, userA.Username, "198.51.100.31")
+	if err != nil {
+		t.Fatal(err)
+	}
+	idsAdminA := descriptorIDStrings(optAdminA.(*protocol.CredentialAssertion).Response.AllowedCredentials)
+	idsPanelA := descriptorIDStrings(optPanelA.(*protocol.CredentialAssertion).Response.AllowedCredentials)
+	if !slices.Equal(idsAdminA, idsPanelA) {
+		t.Fatal("real+decoy allowCredentials differed across allowed origins of the same RP")
+	}
+
+	optAdminMissing, _, err := BeginLogin(adminCtx, missingUser, "198.51.100.32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	optPanelMissing, _, err := BeginLogin(panelCtx, missingUser, "198.51.100.33")
+	if err != nil {
+		t.Fatal(err)
+	}
+	idsAdminMissing := descriptorIDStrings(optAdminMissing.(*protocol.CredentialAssertion).Response.AllowedCredentials)
+	idsPanelMissing := descriptorIDStrings(optPanelMissing.(*protocol.CredentialAssertion).Response.AllowedCredentials)
+	if !slices.Equal(idsAdminMissing, idsPanelMissing) {
+		t.Fatal("decoy allowCredentials differed across allowed origins of the same RP")
+	}
+
+	// Simulate process restart: wipe in-memory mask key cache and envelope cache, keeping DB.
+	resetAccountMaskMemoryCache()
+	InvalidateAccountFirstEnvelopeCache()
+
+	optRestartA, _, err := BeginLogin(panelCtx, userA.Username, "198.51.100.34")
+	if err != nil {
+		t.Fatal(err)
+	}
+	optRestartMissing, _, err := BeginLogin(panelCtx, missingUser, "198.51.100.35")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(descriptorIDStrings(optRestartA.(*protocol.CredentialAssertion).Response.AllowedCredentials), idsAdminA) {
+		t.Fatal("real+decoy allowCredentials changed across simulated process restart")
+	}
+	if !slices.Equal(descriptorIDStrings(optRestartMissing.(*protocol.CredentialAssertion).Response.AllowedCredentials), idsAdminMissing) {
+		t.Fatal("decoy allowCredentials changed across simulated process restart")
+	}
+
+	// 4. Mutating user_passkeys automatically invalidates the envelope cache via GORM hook.
+	loadsBeforeMutation := envelopeCacheLoads()
+	_ = enrollKeyOfLen(userB, 48)
+	optAfterMutation, _, err := BeginLogin(adminCtx, missingUser, "198.51.100.36")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envelopeCacheLoads() != loadsBeforeMutation+1 {
+		t.Fatalf("expected credential mutation to trigger 1 cache reload, got %d -> %d", loadsBeforeMutation, envelopeCacheLoads())
+	}
+	if got := len(optAfterMutation.(*protocol.CredentialAssertion).Response.AllowedCredentials); got != 91 {
+		t.Fatalf("expected 91 descriptors after adding 48B key, got %d", got)
 	}
 }

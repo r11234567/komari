@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"sort"
 	"strings"
@@ -35,7 +36,7 @@ const (
 	maxPendingPerSource              = 8
 	maxBudgetBuckets                 = 4096
 	accountFirstDefaultCredentialLen = 32
-	maxAccountFirstDescriptors       = 64
+	accountMaskSource                = "native:account-mask-v1"
 )
 
 type ceremony struct {
@@ -201,44 +202,121 @@ func currentAccount(ctx context.Context, id string, synced bool) (account, error
 	return loadAccount(ctx, id, s.Records, synced)
 }
 
-var accountMaskKey = func() []byte {
-	var secret [32]byte
-	if _, err := rand.Read(secret[:]); err != nil {
-		panic(err)
-	}
-	return secret[:]
-}()
+type lengthSlot struct {
+	length int
+	count  int
+}
 
-func accountFirstLengthEnvelope(ctx context.Context, rpID string, synced bool) (map[int]int, error) {
-	type passkeyShapeRow struct {
-		UserUUID     string
-		CredentialID string
-		DeviceType   string
+type cachedRPEnvelope struct {
+	unsynced []lengthSlot
+	synced   []lengthSlot
+}
+
+var accountMaskState struct {
+	mu     sync.Mutex
+	db     *gorm.DB
+	secret []byte
+}
+
+var envelopeCacheState struct {
+	mu         sync.Mutex
+	db         *gorm.DB
+	hooked     map[*gorm.DB]bool
+	byRP       map[string]cachedRPEnvelope
+	generation uint64
+	loads      uint64
+}
+
+func resetAccountMaskMemoryCache() {
+	accountMaskState.mu.Lock()
+	accountMaskState.db = nil
+	accountMaskState.secret = nil
+	accountMaskState.mu.Unlock()
+}
+
+func accountMaskSecret(ctx context.Context) ([]byte, error) {
+	db := dbcore.GetDBInstance()
+	accountMaskState.mu.Lock()
+	defer accountMaskState.mu.Unlock()
+	if len(accountMaskState.secret) == 32 && accountMaskState.db == db {
+		return accountMaskState.secret, nil
 	}
-	var rows []passkeyShapeRow
-	if err := dbcore.GetDBInstance().WithContext(ctx).
-		Model(&models.UserPasskey{}).
-		Select("user_uuid", "credential_id", "device_type").
-		Where("rp_id = ?", rpID).
-		Find(&rows).Error; err != nil {
+	var row models.PasskeyImport
+	err := db.WithContext(ctx).Where("source = ?", accountMaskSource).Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		var generated [32]byte
+		if _, rerr := rand.Read(generated[:]); rerr != nil {
+			return nil, rerr
+		}
+		candidate := models.PasskeyImport{
+			Source: accountMaskSource,
+			Digest: hex.EncodeToString(generated[:]),
+			RPID:   "_internal",
+		}
+		if cerr := db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&candidate).Error; cerr != nil {
+			return nil, cerr
+		}
+		err = db.WithContext(ctx).Where("source = ?", accountMaskSource).Take(&row).Error
+	}
+	if err != nil {
 		return nil, err
 	}
-	perUser := make(map[string]map[int]int)
-	for _, row := range rows {
-		if !synced && row.DeviceType == "multiDevice" {
-			continue
-		}
-		raw, err := base64.RawURLEncoding.DecodeString(row.CredentialID)
-		if err != nil || len(raw) == 0 {
-			continue
-		}
-		counts := perUser[row.UserUUID]
-		if counts == nil {
-			counts = make(map[int]int)
-			perUser[row.UserUUID] = counts
-		}
-		counts[len(raw)]++
+	raw, decErr := hex.DecodeString(strings.TrimSpace(row.Digest))
+	if decErr != nil || len(raw) != 32 {
+		sum := sha256.Sum256([]byte(row.Digest))
+		raw = sum[:]
 	}
+	accountMaskState.db = db
+	accountMaskState.secret = append([]byte(nil), raw...)
+	return accountMaskState.secret, nil
+}
+
+// InvalidateAccountFirstEnvelopeCache clears the cached RP credential length
+// distributions so subsequent account-first login ceremonies recompute them.
+func InvalidateAccountFirstEnvelopeCache() {
+	envelopeCacheState.mu.Lock()
+	envelopeCacheState.generation++
+	clear(envelopeCacheState.byRP)
+	envelopeCacheState.mu.Unlock()
+}
+
+func envelopeCacheLoads() uint64 {
+	envelopeCacheState.mu.Lock()
+	defer envelopeCacheState.mu.Unlock()
+	return envelopeCacheState.loads
+}
+
+func ensureEnvelopeInvalidationHooksLocked(db *gorm.DB) {
+	if db == nil || envelopeCacheState.hooked[db] {
+		return
+	}
+	if envelopeCacheState.hooked == nil {
+		envelopeCacheState.hooked = make(map[*gorm.DB]bool)
+	}
+	invalidateIfPasskey := func(tx *gorm.DB) {
+		if tx == nil || tx.Statement == nil {
+			return
+		}
+		if tx.Statement.Table == "user_passkeys" {
+			InvalidateAccountFirstEnvelopeCache()
+			return
+		}
+		switch tx.Statement.Model.(type) {
+		case *models.UserPasskey, models.UserPasskey, *[]models.UserPasskey, []models.UserPasskey:
+			InvalidateAccountFirstEnvelopeCache()
+			return
+		}
+		switch tx.Statement.Dest.(type) {
+		case *models.UserPasskey, models.UserPasskey, *[]models.UserPasskey, []models.UserPasskey:
+			InvalidateAccountFirstEnvelopeCache()
+		}
+	}
+	_ = db.Callback().Create().After("gorm:create").Register("passkeycredential:envelope_create", invalidateIfPasskey)
+	_ = db.Callback().Delete().After("gorm:delete").Register("passkeycredential:envelope_delete", invalidateIfPasskey)
+	envelopeCacheState.hooked[db] = true
+}
+
+func buildSortedEnvelopeSlots(perUser map[string]map[int]int) []lengthSlot {
 	envelope := make(map[int]int)
 	for _, counts := range perUser {
 		for length, count := range counts {
@@ -248,22 +326,109 @@ func accountFirstLengthEnvelope(ctx context.Context, rpID string, synced bool) (
 		}
 	}
 	if len(envelope) == 0 {
-		envelope[accountFirstDefaultCredentialLen] = 1
+		return []lengthSlot{{length: accountFirstDefaultCredentialLen, count: 1}}
 	}
-	return envelope, nil
+	lengths := make([]int, 0, len(envelope))
+	for length := range envelope {
+		if length > 0 {
+			lengths = append(lengths, length)
+		}
+	}
+	sort.Ints(lengths)
+	slots := make([]lengthSlot, len(lengths))
+	for i, length := range lengths {
+		slots[i] = lengthSlot{length: length, count: envelope[length]}
+	}
+	return slots
 }
 
-func syntheticCredentialID(origin, username string, length, slot int) []byte {
+func accountFirstLengthEnvelope(ctx context.Context, rpID string, synced bool) ([]lengthSlot, error) {
+	db := dbcore.GetDBInstance()
+	envelopeCacheState.mu.Lock()
+	if envelopeCacheState.db != db {
+		envelopeCacheState.db = db
+		envelopeCacheState.byRP = make(map[string]cachedRPEnvelope)
+		envelopeCacheState.generation++
+	}
+	if envelopeCacheState.byRP == nil {
+		envelopeCacheState.byRP = make(map[string]cachedRPEnvelope)
+	}
+	ensureEnvelopeInvalidationHooksLocked(db)
+	if cached, ok := envelopeCacheState.byRP[rpID]; ok {
+		envelopeCacheState.mu.Unlock()
+		if synced {
+			return cached.synced, nil
+		}
+		return cached.unsynced, nil
+	}
+	gen := envelopeCacheState.generation
+	envelopeCacheState.mu.Unlock()
+
+	type passkeyShapeRow struct {
+		UserUUID     string
+		CredentialID string
+		DeviceType   string
+	}
+	var rows []passkeyShapeRow
+	if err := db.WithContext(ctx).
+		Model(&models.UserPasskey{}).
+		Select("user_uuid", "credential_id", "device_type").
+		Where("rp_id = ?", rpID).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	perUserUnsynced := make(map[string]map[int]int)
+	perUserSynced := make(map[string]map[int]int)
+	for _, row := range rows {
+		raw, err := base64.RawURLEncoding.DecodeString(row.CredentialID)
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		allCounts := perUserSynced[row.UserUUID]
+		if allCounts == nil {
+			allCounts = make(map[int]int)
+			perUserSynced[row.UserUUID] = allCounts
+		}
+		allCounts[len(raw)]++
+
+		if row.DeviceType != "multiDevice" {
+			singleCounts := perUserUnsynced[row.UserUUID]
+			if singleCounts == nil {
+				singleCounts = make(map[int]int)
+				perUserUnsynced[row.UserUUID] = singleCounts
+			}
+			singleCounts[len(raw)]++
+		}
+	}
+	entry := cachedRPEnvelope{
+		unsynced: buildSortedEnvelopeSlots(perUserUnsynced),
+		synced:   buildSortedEnvelopeSlots(perUserSynced),
+	}
+
+	envelopeCacheState.mu.Lock()
+	envelopeCacheState.loads++
+	if envelopeCacheState.db == db && envelopeCacheState.generation == gen {
+		envelopeCacheState.byRP[rpID] = entry
+	}
+	envelopeCacheState.mu.Unlock()
+
+	if synced {
+		return entry.synced, nil
+	}
+	return entry.unsynced, nil
+}
+
+func syntheticCredentialID(secret []byte, rpID, username string, length, slot int) []byte {
 	out := make([]byte, 0, length)
 	for block := uint32(0); len(out) < length; block++ {
-		mac := hmac.New(sha256.New, accountMaskKey)
+		mac := hmac.New(sha256.New, secret)
 		var meta [12]byte
 		binary.BigEndian.PutUint32(meta[0:4], uint32(length))
 		binary.BigEndian.PutUint32(meta[4:8], uint32(slot))
 		binary.BigEndian.PutUint32(meta[8:12], block)
-		mac.Write([]byte("komari:passkey:decoy:v1\x00"))
+		mac.Write([]byte("komari:passkey:decoy:v2\x00"))
 		mac.Write(meta[:])
-		mac.Write([]byte(origin))
+		mac.Write([]byte(rpID))
 		mac.Write([]byte{0})
 		mac.Write([]byte(username))
 		sum := mac.Sum(nil)
@@ -277,10 +442,10 @@ func syntheticCredentialID(origin, username string, length, slot int) []byte {
 	return out
 }
 
-func descriptorSortKey(origin, username string, id []byte) [32]byte {
-	mac := hmac.New(sha256.New, accountMaskKey)
-	mac.Write([]byte("komari:passkey:order:v1\x00"))
-	mac.Write([]byte(origin))
+func descriptorSortKey(secret []byte, rpID, username string, id []byte) [32]byte {
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte("komari:passkey:order:v2\x00"))
+	mac.Write([]byte(rpID))
 	mac.Write([]byte{0})
 	mac.Write([]byte(username))
 	mac.Write([]byte{0})
@@ -292,11 +457,18 @@ func descriptorSortKey(origin, username string, id []byte) [32]byte {
 
 // padAccountFirstRecords pads and deterministically orders allowCredentials so
 // unknown accounts, zero-passkey accounts, single-key accounts, and multi-key
-// accounts with varying credential ID lengths expose the same descriptor count,
-// length multiset, empty transports, and stable order within an RP.
-func padAccountFirstRecords(real []webauthn.Credential, envelope map[int]int, origin, username string) []webauthn.Credential {
-	out := make([]webauthn.Credential, 0, max(len(real), 1))
-	seen := make(map[string]struct{}, len(real))
+// accounts with varying credential ID lengths expose the exact same descriptor
+// count, length multiset (even when the RP-wide envelope exceeds the 64-per-user
+// cap), empty transports, and stable order across restarts and origins within an RP.
+func padAccountFirstRecords(real []webauthn.Credential, envelope []lengthSlot, secret []byte, rpID, username string) []webauthn.Credential {
+	totalSlots := 0
+	for _, slotSpec := range envelope {
+		if slotSpec.length > 0 && slotSpec.count > 0 {
+			totalSlots += slotSpec.count
+		}
+	}
+	out := make([]webauthn.Credential, 0, max(totalSlots, max(len(real), 1)))
+	seen := make(map[string]struct{}, max(totalSlots, len(real)))
 	have := make(map[int]int)
 	for _, rec := range real {
 		if len(rec.ID) == 0 {
@@ -310,22 +482,16 @@ func padAccountFirstRecords(real []webauthn.Credential, envelope map[int]int, or
 		have[len(rec.ID)]++
 	}
 
-	lengths := make([]int, 0, len(envelope))
-	for length := range envelope {
-		if length > 0 {
-			lengths = append(lengths, length)
+	for _, slotSpec := range envelope {
+		if slotSpec.length <= 0 || slotSpec.count <= 0 {
+			continue
 		}
-	}
-	sort.Ints(lengths)
-
-	remaining := maxAccountFirstDescriptors - len(out)
-	for _, length := range lengths {
-		need := envelope[length] - have[length]
-		for i := 0; i < need && remaining > 0; i++ {
+		need := slotSpec.count - have[slotSpec.length]
+		for i := 0; i < need; i++ {
 			slot := i
 			var decoy []byte
 			for {
-				decoy = syntheticCredentialID(origin, username, length, slot)
+				decoy = syntheticCredentialID(secret, rpID, username, slotSpec.length, slot)
 				if _, exists := seen[string(decoy)]; !exists {
 					break
 				}
@@ -333,11 +499,10 @@ func padAccountFirstRecords(real []webauthn.Credential, envelope map[int]int, or
 			}
 			seen[string(decoy)] = struct{}{}
 			out = append(out, webauthn.Credential{ID: decoy})
-			remaining--
 		}
 	}
 	if len(out) == 0 {
-		out = append(out, webauthn.Credential{ID: syntheticCredentialID(origin, username, accountFirstDefaultCredentialLen, 0)})
+		out = append(out, webauthn.Credential{ID: syntheticCredentialID(secret, rpID, username, accountFirstDefaultCredentialLen, 0)})
 	}
 
 	type keyedCredential struct {
@@ -348,7 +513,7 @@ func padAccountFirstRecords(real []webauthn.Credential, envelope map[int]int, or
 	for i, rec := range out {
 		keyed[i] = keyedCredential{
 			cred: rec,
-			key:  descriptorSortKey(origin, username, rec.ID),
+			key:  descriptorSortKey(secret, rpID, username, rec.ID),
 		}
 	}
 	sort.Slice(keyed, func(i, j int) bool {
@@ -380,6 +545,10 @@ func BeginLoginWithPrior(ctx context.Context, username, ip, priorToken string) (
 	if username == "" {
 		options, session, err = w.BeginDiscoverableLogin()
 	} else {
+		secret, secretErr := accountMaskSecret(ctx)
+		if secretErr != nil {
+			return nil, "", secretErr
+		}
 		envelope, envErr := accountFirstLengthEnvelope(ctx, w.Config.RPID, synced)
 		if envErr != nil {
 			return nil, "", envErr
@@ -404,7 +573,7 @@ func BeginLoginWithPrior(ctx context.Context, username, ip, priorToken string) (
 		}
 		a := account{
 			id:      accountID,
-			records: padAccountFirstRecords(realRecords, envelope, origin, username),
+			records: padAccountFirstRecords(realRecords, envelope, secret, w.Config.RPID, username),
 		}
 		options, session, err = w.BeginLogin(a)
 		if err == nil && accountID != "unavailable" {
@@ -553,6 +722,9 @@ func CompleteRegistration(ctx context.Context, b credential.Binding, user models
 		}
 		return tx.Omit("User").Create(&models.PasskeyCounter{UserUUID: b.UserID, KeyDigest: keyDigest(key.ID, key.PublicKey), Counter: key.Authenticator.SignCount}).Error
 	})
+	if err == nil {
+		InvalidateAccountFirstEnvelopeCache()
+	}
 	return row, err
 }
 func List(ctx context.Context, user string) ([]models.UserPasskey, error) {
@@ -576,7 +748,7 @@ func Delete(ctx context.Context, u models.User, id string, hasContact bool) erro
 	disablePasswordLogin, _ := config.GetAs[bool](config.DisablePasswordLoginKey, false)
 	oauthEnabled, _ := config.GetAs[bool](config.OAuthEnabledKey, false)
 	hasAlternateSignIn := !disablePasswordLogin || (oauthEnabled && strings.TrimSpace(u.SSOID) != "")
-	return dbcore.GetDBInstance().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = dbcore.GetDBInstance().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		user := u.UUID
 		if err := accounts.RotateCredentialVersion(tx, u); err != nil {
 			return err
@@ -607,4 +779,8 @@ func Delete(ctx context.Context, u models.User, id string, hasContact bool) erro
 		}
 		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&revocation).Error
 	})
+	if err == nil {
+		InvalidateAccountFirstEnvelopeCache()
+	}
+	return err
 }
