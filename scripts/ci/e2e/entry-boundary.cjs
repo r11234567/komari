@@ -97,9 +97,16 @@ async function run() {
   assert.equal((await rpc(guest, 'enrollment.v1.EnrollmentService', 'GetTrustBundle')).status, 200);
   checks.push('guest-cannot-approve-revoke-or-use-trusted-credential-service', 'invalid-bearer-does-not-fall-back', 'refresh-and-key-discovery-reach-their-own-validators');
 
-  // Verify RPC2 body and batch limits under live Nginx + server.
+  // Verify PrivateSiteMiddleware blocks guest /api/rpc2, and RPC2 enforces body/batch caps for authenticated callers.
+  const guestRpcBlocked = await guest.post('/api/rpc2', {
+    data: { jsonrpc: '2.0', id: 1, method: 'rpc.ping' },
+    headers: { Origin: base },
+  });
+  assert.equal(guestRpcBlocked.status(), 401, 'guest /api/rpc2 was not blocked under private_site');
+  await guestRpcBlocked.dispose();
+
   const hugeBody = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'rpc.ping', params: { pad: 'x'.repeat(270 * 1024) } });
-  const rpcTooLarge = await guest.fetch('/api/rpc2', {
+  const rpcTooLarge = await admin.fetch('/api/rpc2', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: base },
     data: hugeBody,
@@ -108,13 +115,13 @@ async function run() {
   await rpcTooLarge.dispose();
 
   const hugeBatch = Array.from({ length: 33 }, (_, i) => ({ jsonrpc: '2.0', id: i + 1, method: 'rpc.ping' }));
-  const rpcBatchRejected = await guest.post('/api/rpc2', {
+  const rpcBatchRejected = await admin.post('/api/rpc2', {
     data: hugeBatch,
     headers: { Origin: base },
   });
   assert.equal(rpcBatchRejected.status(), 400, 'oversized /api/rpc2 batch was not rejected with 400');
   await rpcBatchRejected.dispose();
-  checks.push('rpc2-post-enforces-256kib-body-and-32-batch-limits');
+  checks.push('rpc2-private-site-blocks-guest-and-enforces-256kib-body-and-32-batch-limits');
 
   const ticket = (await post(admin, '/api/bind/ticket', {})).data.ticket;
   assert(ticket);
