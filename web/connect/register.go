@@ -193,15 +193,20 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 				meta.SessionToken = session
 			}
 		}
-		origin, err := requestmeta.Origin(c.Request)
+		req, err := requestmeta.EnsureBound(c.Request)
+		if err != nil {
+			security.AbortRequest(c, http.StatusBadRequest, "invalid request origin")
+			return
+		}
+		origin, err := requestmeta.Origin(req)
 		if err != nil {
 			security.AbortRequest(c, http.StatusBadRequest, "invalid request origin")
 			return
 		}
 		scheme, host, _ := strings.Cut(origin, "://")
 		secure := scheme == "https"
-		ctx := passkeycredential.WithRequestOrigin(rpc.NewContextWithMeta(c.Request.Context(), meta), host, secure)
-		c.Request = c.Request.WithContext(workspace.WithSecure(workspace.WithToken(ctx, c.GetHeader(workspace.Header)), secure))
+		ctx := passkeycredential.WithRequestOrigin(rpc.NewContextWithMeta(req.Context(), meta), host, secure)
+		c.Request = req.WithContext(workspace.WithSecure(workspace.WithToken(ctx, c.GetHeader(workspace.Header)), secure))
 		handler.ServeHTTP(c.Writer, c.Request)
 	}
 }

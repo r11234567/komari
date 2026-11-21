@@ -269,6 +269,24 @@ func (p *Policy) BindRequest(r *http.Request) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), metadataKey{}, m))
 }
 
+// EnsureBound binds environment-derived request metadata to r when no listener
+// policy has bound it yet, preserving any already-bound listener metadata.
+func EnsureBound(r *http.Request) (*http.Request, error) {
+	if r == nil {
+		return nil, errors.New("request is required")
+	}
+	if m, ok := r.Context().Value(metadataKey{}).(*metadata); ok {
+		return r, m.err
+	}
+	p, err := FromEnvironment()
+	if err != nil {
+		return nil, err
+	}
+	bound := p.BindRequest(r)
+	m := bound.Context().Value(metadataKey{}).(*metadata)
+	return bound, m.err
+}
+
 func (p *Policy) resolve(r *http.Request) *metadata {
 	scheme := "http"
 	if r.TLS != nil {

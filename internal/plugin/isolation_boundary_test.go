@@ -101,7 +101,7 @@ func TestPluginBoundaryHeadersCookiesRoutesAndLegacyPasskey(t *testing.T) {
 			"short":"assets",
 			"version":"1.0.0",
 			"entry":"App.js",
-			"pages":[{"type":"iframe","visibility":"public","file":"index.html"}]
+			"pages":[{"type":"iframe","visibility":"public","title":"Home","file":"index.html"}]
 		}`,
 		"App.js":           "function load() {}",
 		"index.html":       "<html>ok</html>",

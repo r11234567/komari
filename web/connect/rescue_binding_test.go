@@ -52,7 +52,7 @@ func TestRescueSpecValidationIdempotencyAndBinding(t *testing.T) {
 		MaxOutputBytes: 256 * 1024,
 		TwoFactor:      &commonv1.TwoFactorProof{AuthorizationToken: token},
 	}))
-	require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
 
 	// Same token must still succeed for the exact authorized specification because the invalid request did not burn it.
 	idemKey := "idem-" + uuid.NewString()

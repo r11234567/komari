@@ -96,7 +96,7 @@ func TestHasAccessTokenRecordDistinguishesKnownFromUnknown(t *testing.T) {
 		AgentPublicKey:   "pub-1",
 	}).Error)
 
-	require.True(t, HasAccessTokenRecord(knownToken))
-	require.False(t, HasAccessTokenRecord("random-unknown-token"))
-	require.False(t, HasAccessTokenRecord(""))
+	require.True(t, hasAccessTokenRecordDB(db, knownToken))
+	require.False(t, hasAccessTokenRecordDB(db, "random-unknown-token"))
+	require.False(t, hasAccessTokenRecordDB(db, ""))
 }

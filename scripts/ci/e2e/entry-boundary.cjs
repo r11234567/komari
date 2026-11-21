@@ -114,14 +114,14 @@ async function run() {
   assert.equal(rpcTooLarge.status(), 413, 'oversized /api/rpc2 body was not rejected with 413');
   await rpcTooLarge.dispose();
 
-  const hugeBatch = Array.from({ length: 33 }, (_, i) => ({ jsonrpc: '2.0', id: i + 1, method: 'rpc.ping' }));
+  const hugeBatch = Array.from({ length: 257 }, (_, i) => ({ jsonrpc: '2.0', id: i + 1, method: 'rpc.ping' }));
   const rpcBatchRejected = await admin.post('/api/rpc2', {
     data: hugeBatch,
     headers: { Origin: base },
   });
   assert.equal(rpcBatchRejected.status(), 400, 'oversized /api/rpc2 batch was not rejected with 400');
   await rpcBatchRejected.dispose();
-  checks.push('rpc2-private-site-blocks-guest-and-enforces-256kib-body-and-32-batch-limits');
+  checks.push('rpc2-private-site-blocks-guest-and-enforces-256kib-body-and-256-batch-limits');
 
   const ticket = (await post(admin, '/api/bind/ticket', {})).data.ticket;
   assert(ticket);

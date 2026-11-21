@@ -194,7 +194,7 @@ func serveWebSocket(c *gin.Context) {
 
 const (
 	maxJSONRPCPostBytes = 256 << 10
-	maxJSONRPCBatchSize = 32
+	maxJSONRPCBatchSize = 256
 )
 
 func servePost(c *gin.Context) {

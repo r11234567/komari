@@ -462,12 +462,19 @@ func ResolveAccessToken(accessToken string) (string, error) {
 // expired or revoked) Agent access token digest so NAT rate-limit lanes can
 // separate legitimate expired Agents from PATs and unknown brute-force guesses.
 func HasAccessTokenRecord(accessToken string) bool {
+	return hasAccessTokenRecordDB(dbcore.GetDBInstance(), accessToken)
+}
+
+func hasAccessTokenRecordDB(db *gorm.DB, accessToken string) bool {
+	if db == nil {
+		return false
+	}
 	digest := hashToken(accessToken)
 	if digest == "" {
 		return false
 	}
 	var count int64
-	if err := dbcore.GetDBInstance().Model(&models.AgentCredential{}).
+	if err := db.Model(&models.AgentCredential{}).
 		Where("access_token_hash = ? OR previous_access_hash = ?", digest, digest).
 		Limit(1).
 		Count(&count).Error; err != nil {
