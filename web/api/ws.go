@@ -29,15 +29,17 @@ func GetClients(c *gin.Context) {
 
 	// PublicViewer invariant: /api/clients always filters Hidden nodes and
 	// ignores session cookies.
-	loadHiddenSet := func() map[string]bool {
+	loadHiddenSet := func() (map[string]bool, error) {
 		hiddenMap := map[string]bool{}
 		var hiddenClients []models.Client
 		db := dbcore.GetDBInstance()
-		_ = db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error
+		if err := db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error; err != nil {
+			return nil, err
+		}
 		for _, cli := range hiddenClients {
 			hiddenMap[cli.UUID] = true
 		}
-		return hiddenMap
+		return hiddenMap, nil
 	}
 
 	// 请求
@@ -66,7 +68,11 @@ func GetClients(c *gin.Context) {
 			}
 		}
 
-		hiddenMap := loadHiddenSet()
+		hiddenMap, err := loadHiddenSet()
+		if err != nil {
+			conn.WriteJSON(gin.H{"status": "error", "error": "Failed to load client visibility"})
+			continue
+		}
 
 		// 在线客户端uuid列表（WebSocket 与非 WebSocket）
 		for _, key := range agent_runtime.GetAllOnlineUUIDs() {

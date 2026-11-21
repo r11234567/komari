@@ -391,7 +391,9 @@ func TestRestoreStagedBackupPreservesPasskeyCountersAndRevocations(t *testing.T)
 	if err := restoreStagedBackup(customDataDir); err != nil {
 		t.Fatalf("restoreStagedBackup with custom --database failed: %v", err)
 	}
-	customRestored, err := sql.Open("sqlite3", filepath.Join(customDataDir, "komari.db"))
+	// Open along the actual startup DSN path (buildSQLiteDSN(flags.DatabaseFile))
+	// rather than data/komari.db to prove the service opens the restored+merged DB.
+	customRestored, err := sql.Open("sqlite3", buildSQLiteDSN(flags.DatabaseFile))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,5 +403,46 @@ func TestRestoreStagedBackupPreservesPasskeyCountersAndRevocations(t *testing.T)
 	}
 	if err := customRestored.QueryRow(`SELECT COUNT(*) FROM user_passkeys WHERE credential_hash = 'hash-b'`).Scan(&keyBCount); err != nil || keyBCount != 0 {
 		t.Fatalf("custom --database revoked Key B resurrected (count=%d err=%v)", keyBCount, err)
+	}
+	customRestored.Close()
+
+	// Also verify custom --database inside data/ (e.g. data/custom.db) when the
+	// backup archive only contains canonical komari.db: startup must open the
+	// restored database at data/custom.db rather than creating a blank SQLite file.
+	innerRoot := t.TempDir()
+	innerDataDir := filepath.Join(innerRoot, "data")
+	if err := os.MkdirAll(innerDataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	innerCustomPath := filepath.Join(innerDataDir, "custom.db")
+	innerLiveDB := initPasskeyDB(innerCustomPath)
+	if _, err := innerLiveDB.Exec(`UPDATE passkey_counters SET counter = 77 WHERE user_uuid = 'u1' AND key_digest = 'digest-a'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := innerLiveDB.Exec(`DELETE FROM user_passkeys WHERE credential_hash = 'hash-b'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := innerLiveDB.Exec(`INSERT INTO passkey_revocations VALUES ('hash-b', 'u1', 'panel.example.test', '2026-11-20T02:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := innerLiveDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writeRestoreArchive(t, filepath.Join(innerDataDir, "backup.zip"), backupDBPath)
+
+	flags.DatabaseFile = innerCustomPath
+	if err := restoreStagedBackup(innerDataDir); err != nil {
+		t.Fatalf("restoreStagedBackup with data/custom.db failed: %v", err)
+	}
+	innerRestored, err := sql.Open("sqlite3", buildSQLiteDSN(flags.DatabaseFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer innerRestored.Close()
+	if err := innerRestored.QueryRow(`SELECT counter FROM passkey_counters WHERE user_uuid = 'u1' AND key_digest = 'digest-a'`).Scan(&counterA); err != nil || counterA != 77 {
+		t.Fatalf("data/custom.db counterA = %d (err=%v), want 77", counterA, err)
+	}
+	if err := innerRestored.QueryRow(`SELECT COUNT(*) FROM user_passkeys WHERE credential_hash = 'hash-b'`).Scan(&keyBCount); err != nil || keyBCount != 0 {
+		t.Fatalf("data/custom.db revoked Key B resurrected (count=%d err=%v)", keyBCount, err)
 	}
 }

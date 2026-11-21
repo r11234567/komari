@@ -933,6 +933,34 @@ func TestGetPingRecordsMaxPointsBoundsMultiSeriesReadAndReturn(t *testing.T) {
 		storeMu.Unlock()
 	}()
 
+	// Verify estimatePingSeriesCount discovers all 12 (4 nodes x 3 task_id tags)
+	// series even when activePingTaskCount is 0, and s.Series() at the computed
+	// interval reads at most 36 points directly from storage before cropping.
+	SetActivePingTaskCount(0)
+	seriesCount := estimatePingSeriesCount(ctx, s, "", -1, start, now)
+	if seriesCount != 12 {
+		t.Fatalf("estimatePingSeriesCount = %d, want 12 (4 entities x 3 tasks)", seriesCount)
+	}
+	perSeries := pingPerSeriesMaxPoints(36, seriesCount)
+	interval := pingQueryInterval(now.Sub(start), perSeries)
+	rawSeriesPoints, err := s.Series(ctx, metric.AggregateQuery{
+		Query: metric.Query{
+			MetricName: MetricPingLatency,
+			Start:      start,
+			End:        now,
+			Order:      metric.OrderAsc,
+		},
+		Aggregation:    metric.AggLast,
+		Interval:       interval,
+		PreserveSeries: true,
+	}, now)
+	if err != nil {
+		t.Fatalf("s.Series failed: %v", err)
+	}
+	if len(rawSeriesPoints) > 36 || len(rawSeriesPoints) == 0 {
+		t.Fatalf("s.Series direct read count = %d at interval %v, want in (0, 36]", len(rawSeriesPoints), interval)
+	}
+
 	recs, err := GetPingRecordsMaxPoints(ctx, "", -1, start, now, 36)
 	if err != nil {
 		t.Fatalf("GetPingRecordsMaxPoints failed: %v", err)

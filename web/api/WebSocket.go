@@ -54,6 +54,11 @@ func UpgradeWebSocket(c *gin.Context, options ...WebSocketUpgradeOption) (*webso
 	if !IsWebSocketUpgrade(c) {
 		return nil, fmt.Errorf("require websocket upgrade")
 	}
+	if c.Request != nil {
+		if err := c.Request.Context().Err(); err != nil {
+			return nil, err
+		}
+	}
 	upgrader := websocket.Upgrader{
 		CheckOrigin: CheckWebSocketOrigin,
 	}
@@ -72,11 +77,11 @@ func UpgradeSafeConn(c *gin.Context, options ...WebSocketUpgradeOption) (*connec
 	if err != nil {
 		return nil, err
 	}
+	sc := connection.NewSafeConn(unsafeConn)
 	interceptor := connection.Interceptor()
 	if interceptor == nil {
-		return connection.NewSafeConn(unsafeConn), nil
+		return sc, nil
 	}
-	sc := connection.NewSafeConn(unsafeConn)
 	info := &connection.ConnInfo{
 		ID:        sc.ID,
 		Path:      c.Request.URL.Path,
@@ -92,7 +97,7 @@ func UpgradeSafeConn(c *gin.Context, options ...WebSocketUpgradeOption) (*connec
 		_ = unsafeConn.WriteControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, reason),
 			time.Now().Add(time.Second))
-		_ = unsafeConn.Close()
+		_ = sc.Close()
 		return nil, errors.New("websocket connection denied by plugin")
 	}
 	sc.SetInterceptor(info, interceptor)

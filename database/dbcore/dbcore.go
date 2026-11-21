@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -389,6 +390,16 @@ func restoreStagedBackup(dataDir string) error {
 		}
 		return fmt.Errorf("publish restored data: %w", err)
 	}
+	if err := publishRestoredCustomDatabase(dataDir); err != nil {
+		rollbackErr := errors.Join(
+			os.RemoveAll(dataDir),
+			fsmove.Directory(oldDir, dataDir),
+		)
+		if rollbackErr != nil {
+			return fmt.Errorf("publish restored custom database: %v; restore previous data: %w", err, rollbackErr)
+		}
+		return fmt.Errorf("publish restored custom database: %w", err)
+	}
 	stagePublished = true
 	if err := os.RemoveAll(oldDir); err != nil {
 		logger.Errorf("dbcore", "[restore] restored data is active, but old staging directory could not be removed: %v", err)
@@ -465,9 +476,85 @@ func configuredSQLiteFilePath() string {
 	return filepath.Clean(raw)
 }
 
+func isCustomConfiguredSQLitePath(dataDir, custom string) bool {
+	if custom == "" {
+		return false
+	}
+	defaultRel := filepath.Clean("./data/komari.db")
+	defaultInData := filepath.Clean(filepath.Join(dataDir, "komari.db"))
+	if custom == defaultInData {
+		return false
+	}
+	if custom == defaultRel {
+		absData, err1 := filepath.Abs(dataDir)
+		absDefaultData, err2 := filepath.Abs("./data")
+		if err1 == nil && err2 == nil && absData != absDefaultData {
+			// A test passed an isolated dataDir without overriding the default
+			// flags.DatabaseFile ("./data/komari.db").
+			return false
+		}
+		return false
+	}
+	return true
+}
+
+func publishRestoredCustomDatabase(dataDir string) error {
+	custom := configuredSQLiteFilePath()
+	if !isCustomConfiguredSQLitePath(dataDir, custom) {
+		return nil
+	}
+	restoredKomari := filepath.Join(dataDir, "komari.db")
+	absRestored, err1 := filepath.Abs(restoredKomari)
+	absCustom, err2 := filepath.Abs(custom)
+	if err1 == nil && err2 == nil && absRestored == absCustom {
+		return nil
+	}
+	return atomicCopySQLiteFile(restoredKomari, custom)
+}
+
+func atomicCopySQLiteFile(srcPath, dstPath string) error {
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dstPath), ".komari-db-restore-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	removeTmp := true
+	defer func() {
+		_ = tmp.Close()
+		if removeTmp {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := io.Copy(tmp, src); err != nil {
+		return err
+	}
+	_ = tmp.Chmod(0o600)
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	_ = os.Remove(dstPath + "-wal")
+	_ = os.Remove(dstPath + "-shm")
+	if err := os.Rename(tmpName, dstPath); err != nil {
+		return err
+	}
+	removeTmp = false
+	return nil
+}
+
 func preservePasskeySecurityStateForRestore(dataDir, stageDir string) error {
 	sources := []string{filepath.Join(dataDir, "komari.db")}
-	if custom := configuredSQLiteFilePath(); custom != "" {
+	if custom := configuredSQLiteFilePath(); isCustomConfiguredSQLitePath(dataDir, custom) {
 		sources = append(sources, custom)
 		if base := filepath.Base(custom); base != "" && base != "komari.db" {
 			sources = append(sources, filepath.Join(dataDir, base))
@@ -477,7 +564,7 @@ func preservePasskeySecurityStateForRestore(dataDir, stageDir string) error {
 	if err := preservePasskeySecurityStateFromSources(sources, stagedKomari); err != nil {
 		return err
 	}
-	if custom := configuredSQLiteFilePath(); custom != "" {
+	if custom := configuredSQLiteFilePath(); isCustomConfiguredSQLitePath(dataDir, custom) {
 		if base := filepath.Base(custom); base != "" && base != "komari.db" {
 			stagedCustom := filepath.Join(stageDir, base)
 			if _, err := os.Stat(stagedCustom); err == nil {
@@ -707,10 +794,23 @@ func preservePasskeySecurityStateFromSources(currentPaths []string, stagedPath s
 }
 
 var (
-	instance *gorm.DB
-	once     sync.Once
-	initErr  error
+	instance          *gorm.DB
+	once              sync.Once
+	initErr           error
+	onInitHooksMu     sync.Mutex
+	onInitializeHooks []func(*gorm.DB)
 )
+
+// RegisterOnInitialize registers a callback invoked once inside doInitialize
+// while the primary *gorm.DB is still single-threaded before Initialize returns.
+func RegisterOnInitialize(fn func(*gorm.DB)) {
+	if fn == nil {
+		return
+	}
+	onInitHooksMu.Lock()
+	onInitializeHooks = append(onInitializeHooks, fn)
+	onInitHooksMu.Unlock()
+}
 
 // SystemVersionKey 是记录“上次启动所用版本标识”的配置键（存于 configs 表）。
 // 取代旧的 ./data/.komari-version 文件：版本标识随配置库一起备份/恢复，
@@ -948,6 +1048,13 @@ func doInitialize() error {
 		instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 	default:
 		return fmt.Errorf("unsupported database type: %s (supported: %s)", flags.DatabaseType, flags.SupportedDatabaseTypes())
+	}
+	onInitHooksMu.Lock()
+	hooks := make([]func(*gorm.DB), len(onInitializeHooks))
+	copy(hooks, onInitializeHooks)
+	onInitHooksMu.Unlock()
+	for _, hook := range hooks {
+		hook(instance)
 	}
 	if err := migrations.Run(migrations.Context{DB: instance}); err != nil {
 		return fmt.Errorf("failed to run startup migrations: %w", err)

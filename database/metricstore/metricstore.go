@@ -1826,6 +1826,9 @@ func estimatePingSeriesCount(ctx context.Context, s *metric.Store, clientUUID st
 		if n := int(activePingTaskCount.Load()); n > 1 {
 			taskCount = n
 		}
+		if tags, err := s.MetricTagValues(ctx, MetricPingLatency, "task_id"); err == nil && len(tags) > taskCount {
+			taskCount = len(tags)
+		}
 	}
 	return max(entityCount*taskCount, 1)
 }
@@ -1837,15 +1840,9 @@ func pingPerSeriesMaxPoints(maxPoints, seriesCount int) int {
 	if seriesCount <= 1 {
 		return maxPoints
 	}
-	budget := (maxPoints * 2) / seriesCount
-	if (maxPoints*2)%seriesCount != 0 {
-		budget++
-	}
-	if budget < 16 {
-		return 16
-	}
-	if budget > maxPoints {
-		return maxPoints
+	budget := maxPoints / seriesCount
+	if budget < 1 {
+		return 1
 	}
 	return budget
 }
@@ -1934,11 +1931,15 @@ func pingQueryInterval(rangeDuration time.Duration, maxPoints int) time.Duration
 	if rangeDuration <= 0 {
 		return time.Second
 	}
-	interval := time.Duration((rangeDuration.Nanoseconds() + int64(maxPoints) - 1) / int64(maxPoints))
-	if interval < time.Second {
-		return time.Second
+	if maxPoints == 1 {
+		return metric.CeilStandardInterval(rangeDuration + time.Second)
 	}
-	return metric.FloorStandardInterval(interval)
+	denom := int64(maxPoints - 1)
+	interval := time.Duration((rangeDuration.Nanoseconds() + denom - 1) / denom)
+	if interval < time.Second {
+		interval = time.Second
+	}
+	return metric.CeilStandardInterval(interval)
 }
 
 // farFuture 返回一个足够远的未来时间，用于以 DeleteBefore 语义清空某指标的全部数据。
