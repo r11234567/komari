@@ -888,3 +888,56 @@ func TestRecordMetricNamesForLoadType(t *testing.T) {
 		}
 	}
 }
+
+func TestGetPingRecordsMaxPointsBoundsMultiSeriesReadAndReturn(t *testing.T) {
+	ctx := context.Background()
+	s, err := metric.Open(ctx, metric.SQLite(":memory:", metric.WithMaxOpenConns(1)))
+	if err != nil {
+		t.Fatalf("open metric store: %v", err)
+	}
+	defer s.Close()
+	if err := createMetricDefinitions(ctx, s); err != nil {
+		t.Fatalf("create definitions: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Minute)
+	start := now.Add(-10 * time.Minute)
+	var batch []metric.Point
+	// 4 nodes x 3 tasks x 20 timestamps = 240 points across 12 series.
+	for n := 0; n < 4; n++ {
+		entity := fmt.Sprintf("node-%d", n)
+		for task := 1; task <= 3; task++ {
+			tags := map[string]string{"task_id": fmt.Sprintf("%d", task)}
+			for step := 0; step < 20; step++ {
+				batch = append(batch, metric.Point{
+					MetricName: MetricPingLatency,
+					EntityID:   entity,
+					Timestamp:  start.Add(time.Duration(step) * 30 * time.Second),
+					Value:      float64(10 + task + step),
+					Tags:       tags,
+				})
+			}
+		}
+	}
+	if err := s.WriteBatch(ctx, batch); err != nil {
+		t.Fatalf("write ping batch: %v", err)
+	}
+
+	storeMu.Lock()
+	oldStore := store
+	store = s
+	storeMu.Unlock()
+	defer func() {
+		storeMu.Lock()
+		store = oldStore
+		storeMu.Unlock()
+	}()
+
+	recs, err := GetPingRecordsMaxPoints(ctx, "", -1, start, now, 36)
+	if err != nil {
+		t.Fatalf("GetPingRecordsMaxPoints failed: %v", err)
+	}
+	if len(recs) > 36 || len(recs) == 0 {
+		t.Fatalf("GetPingRecordsMaxPoints count = %d, want in (0, 36]", len(recs))
+	}
+}

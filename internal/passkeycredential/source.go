@@ -1,21 +1,16 @@
-// Package passkeycredential adapts the existing Akizon77 plugin's public-key
-// records. It never invokes the plugin's login handler or writes its storage.
+// Package passkeycredential provides the native WebAuthn / Passkey credential
+// provider and v1 record migration helpers. The legacy komari-passkey plugin
+// runtime is retired and never consulted at runtime.
 package passkeycredential
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
-	"github.com/komari-monitor/komari/cmd/flags"
-	"io"
 	"net/url"
-	"os"
 	"sort"
 	"strings"
 
-	"github.com/komari-monitor/komari/internal/plugin"
 	credential "github.com/komari-monitor/komari/internal/trustedcredential"
 )
 
@@ -39,70 +34,14 @@ type Snapshot struct {
 	Config   map[string]any
 }
 
-// Read returns only the requested user's public credentials. The fingerprint
-// omits counters and timestamps: ordinary login activity must not revoke a
-// parallel ceremony. Keys, ownership, policy and runtime changes do revoke it.
+// Read returns only the requested user's native public credentials. The
+// fingerprint omits counters and timestamps: ordinary login activity must not
+// revoke a parallel ceremony. Keys, ownership, policy and runtime changes do.
 func Read(ctx context.Context, user string) (Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
 	}
-	if flags.NativePasskeyConfigured() {
-		return nativeSnapshot(ctx, user)
-	}
-	var found bool
-	var running bool
-	var version string
-	for _, item := range plugin.List() {
-		if item.Short == pluginID {
-			found = true
-			running = item.Enabled && item.Running
-			version = item.Version
-			break
-		}
-	}
-	if !found {
-		return Snapshot{Revision: "absent"}, nil
-	}
-	config, err := plugin.GetConfiguration(pluginID)
-	if err != nil {
-		return Snapshot{}, credential.ErrProviderUnavailable
-	}
-	root, err := os.OpenRoot(plugin.StorageDir)
-	if err != nil {
-		return Snapshot{}, credential.ErrProviderUnavailable
-	}
-	defer root.Close()
-	file, err := root.Open(pluginID + "/passkeys.json")
-	var records []Record
-	if err == nil {
-		defer file.Close()
-		info, e := file.Stat()
-		if e != nil || !info.Mode().IsRegular() || info.Size() > maxStoreBytes {
-			return Snapshot{}, credential.ErrProviderUnavailable
-		}
-		raw, e := io.ReadAll(io.LimitReader(file, maxStoreBytes+1))
-		if e != nil || len(raw) > maxStoreBytes {
-			return Snapshot{}, credential.ErrProviderUnavailable
-		}
-		records, err = decodeStore(raw, user)
-		if err != nil {
-			return Snapshot{}, err
-		}
-	} else if !os.IsNotExist(err) {
-		return Snapshot{}, credential.ErrProviderUnavailable
-	}
-	stable := make([]Record, len(records))
-	copy(stable, records)
-	for i := range stable {
-		stable[i].Counter = 0
-		stable[i].BackedUp = false
-	}
-	raw, err := json.Marshal([]any{version, running, plugin.RuntimeGeneration(pluginID), config, stable})
-	if err != nil {
-		return Snapshot{}, credential.ErrProviderUnavailable
-	}
-	digest := sha256.Sum256(raw)
-	return Snapshot{Revision: hex.EncodeToString(digest[:]), Running: running, Records: records, Config: config}, nil
+	return nativeSnapshot(ctx, user)
 }
 
 func decodeStore(raw []byte, user string) ([]Record, error) {

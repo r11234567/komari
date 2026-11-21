@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/pkg/config"
@@ -219,9 +220,48 @@ func TestSplitListenersStartServeAndShutdownWithoutPortLeak(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 
-	// Graceful Shutdown releases both sockets and exits Run cleanly.
+	// Establish live upgraded WebSocket connections on /api/rpc2 and /api/clients
+	// to prove Shutdown actively closes hijacked WebSocket connections too.
+	wsHeaders := http.Header{"Origin": []string{"http://" + pubAddr}}
+	rpcWS, _, err := websocket.DefaultDialer.Dial("ws://"+pubAddr+"/api/rpc2", wsHeaders)
+	if err != nil {
+		_ = app.Shutdown()
+		t.Fatalf("dial /api/rpc2 websocket: %v", err)
+	}
+	defer rpcWS.Close()
+	if err := rpcWS.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","id":1,"method":"rpc.ping"}`)); err != nil {
+		_ = app.Shutdown()
+		t.Fatalf("write /api/rpc2 websocket: %v", err)
+	}
+	if _, _, err := rpcWS.ReadMessage(); err != nil {
+		_ = app.Shutdown()
+		t.Fatalf("read /api/rpc2 websocket: %v", err)
+	}
+
+	clientsWS, _, err := websocket.DefaultDialer.Dial("ws://"+pubAddr+"/api/clients", wsHeaders)
+	if err != nil {
+		_ = app.Shutdown()
+		t.Fatalf("dial /api/clients websocket: %v", err)
+	}
+	defer clientsWS.Close()
+	if err := clientsWS.WriteMessage(websocket.TextMessage, []byte("get")); err != nil {
+		_ = app.Shutdown()
+		t.Fatalf("write /api/clients websocket: %v", err)
+	}
+	if _, _, err := clientsWS.ReadMessage(); err != nil {
+		_ = app.Shutdown()
+		t.Fatalf("read /api/clients websocket: %v", err)
+	}
+
+	// Graceful Shutdown closes active WebSocket connections, releases both sockets, and exits Run cleanly.
 	if err := app.Shutdown(); err != nil {
 		t.Fatalf("Shutdown: %v", err)
+	}
+	for name, ws := range map[string]*websocket.Conn{"/api/rpc2": rpcWS, "/api/clients": clientsWS} {
+		_ = ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, _, err := ws.ReadMessage(); err == nil {
+			t.Fatalf("upgraded websocket %s remained open after Shutdown", name)
+		}
 	}
 	select {
 	case err := <-runErr:

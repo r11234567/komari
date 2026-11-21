@@ -114,11 +114,16 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 		}
 
 		path := c.Request.URL.Path
+		if c.FullPath() == "" && (strings.HasPrefix(path, "/api") || strings.HasPrefix(path, "/komari.")) {
+			c.Next()
+			return
+		}
 		if strings.HasPrefix(path, "/komari.") {
 			// Public site metadata must remain reachable so the browser can render
 			// the login/private-site state before it has a session.
 			if path == "/komari.browser.v1.BrowserService/GetPublicInfo" ||
 				path == "/komari.browser.v1.BrowserService/GetThemeContract" ||
+				path == "/komari.browser.v1.BrowserService/GetSession" ||
 				path == "/komari.credential.v1.PasskeyLoginService/GetPasskeyStatus" ||
 				path == "/komari.credential.v1.PasskeyLoginService/BeginPasskeyLogin" ||
 				path == "/komari.credential.v1.PasskeyLoginService/CompletePasskeyLogin" ||
@@ -232,6 +237,13 @@ func RedeemTempShareQuery(c *gin.Context) bool {
 func PublicPrivateSiteMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		RedeemTempShareQuery(c)
+		// Unmounted routes (such as /api/login, /api/admin/*, and control-plane
+		// Connect RPCs) have an empty matched pattern and must proceed to NoRoute
+		// so the Public Listener always returns a hard 404 even under private_site.
+		if c.FullPath() == "" {
+			c.Next()
+			return
+		}
 		path := c.Request.URL.Path
 		switch path {
 		case "/ping", "/favicon.ico", "/api/public", "/api/version", "/api/me", "/api/rpc2",

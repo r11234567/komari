@@ -46,6 +46,7 @@ import (
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/connection"
 	installweb "github.com/komari-monitor/komari/web/install"
 	"github.com/komari-monitor/komari/web/oauth"
 	frontendpublic "github.com/komari-monitor/komari/web/public"
@@ -85,6 +86,8 @@ type App struct {
 	panelEngine  *gin.Engine
 	server       *http.Server
 	panelServer  *http.Server
+	serverCtx    context.Context
+	serverCancel context.CancelFunc
 	addrMu       sync.RWMutex
 	publicAddr   string
 	panelAddr    string
@@ -115,8 +118,11 @@ func (a *App) PanelAddr() string {
 
 // NewApp 构造一个空的 App。真正的初始化在各阶段方法中完成。
 func NewApp() *App {
+	serverCtx, serverCancel := context.WithCancel(context.Background())
 	return &App{
 		reload:       NewReloadManager(),
+		serverCtx:    serverCtx,
+		serverCancel: serverCancel,
 		stopCh:       make(chan struct{}),
 		shutdownDone: make(chan struct{}),
 	}
@@ -861,17 +867,25 @@ func (a *App) Run() error {
 	}
 	a.addrMu.Unlock()
 
+	baseCtx := a.serverCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	baseContextFn := func(net.Listener) context.Context { return baseCtx }
+
 	rootHandler := httpsserver.Default.HTTPRedirectHandler(plugin.HTMLInjectHandler(plugin.WrapHandler(a.engine)))
 	a.server = &http.Server{
-		Addr:    a.PublicAddr(),
-		Handler: h2c.NewHandler(rootHandler, &http2.Server{}),
+		Addr:        a.PublicAddr(),
+		Handler:     h2c.NewHandler(rootHandler, &http2.Server{}),
+		BaseContext: baseContextFn,
 	}
 
 	serverErr := make(chan error, 2)
 	if panelLn != nil {
 		a.panelServer = &http.Server{
-			Addr:    a.PanelAddr(),
-			Handler: h2c.NewHandler(a.panelEngine, &http2.Server{}),
+			Addr:        a.PanelAddr(),
+			Handler:     h2c.NewHandler(a.panelEngine, &http2.Server{}),
+			BaseContext: baseContextFn,
 		}
 		logger.Infof("server", "Starting split listeners: public=%s panel=%s ...", a.PublicAddr(), a.PanelAddr())
 		go func() {
@@ -908,7 +922,7 @@ func (a *App) Run() error {
 	}
 }
 
-// Shutdown 优雅关闭：先停止接收新请求，再反序执行已登记的清理函数。
+// Shutdown 优雅关闭：先停止接收新请求，主动关闭已升级的 WebSocket 连接与流上下文，再反序执行已登记的清理函数。
 func (a *App) Shutdown() error {
 	if a.stopCh != nil {
 		a.stopOnce.Do(func() {
@@ -924,6 +938,10 @@ func (a *App) Shutdown() error {
 		if a.dbReady {
 			auditlog.Log("", "", "server is shutting down", "info")
 		}
+		if a.serverCancel != nil {
+			a.serverCancel()
+		}
+		connection.CloseAll()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -959,6 +977,10 @@ func (a *App) onFatal(err error) {
 	if a.dbReady {
 		auditlog.Log("", "", "server encountered a fatal error: "+err.Error(), "error")
 	}
+	if a.serverCancel != nil {
+		a.serverCancel()
+	}
+	connection.CloseAll()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if a.panelServer != nil {

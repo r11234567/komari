@@ -220,6 +220,7 @@ func ReloadPingSchedule() error {
 	if err := db.Find(&pingTasks).Error; err != nil {
 		return err
 	}
+	metricstore.SetActivePingTaskCount(len(pingTasks))
 	return utils.ReloadPingSchedule(pingTasks)
 }
 
@@ -267,4 +268,14 @@ func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.Pin
 
 func GetPingRecordsContext(ctx context.Context, uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
 	return metricstore.GetPingRecords(ctx, uuid, taskId, start, end)
+}
+
+func GetPingRecordsMaxPointsContext(ctx context.Context, uuid string, taskId int, start, end time.Time, maxPoints int) ([]models.PingRecord, error) {
+	if taskId < 0 {
+		var count int64
+		if err := dbcore.GetDBInstance().WithContext(ctx).Model(&models.PingTask{}).Count(&count).Error; err == nil {
+			metricstore.SetActivePingTaskCount(int(count))
+		}
+	}
+	return metricstore.GetPingRecordsMaxPoints(ctx, uuid, taskId, start, end, maxPoints)
 }

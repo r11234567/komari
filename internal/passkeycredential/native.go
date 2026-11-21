@@ -119,13 +119,32 @@ func rowRecord(row models.UserPasskey) Record {
 }
 func nativeSnapshot(ctx context.Context, user string) (Snapshot, error) {
 	config, policyErr := nativePolicy()
+	db := dbcore.GetDBInstance().WithContext(ctx)
 	var rows []models.UserPasskey
-	query := dbcore.GetDBInstance().WithContext(ctx).Where("user_uuid = ?", user)
+	query := db.Where("user_uuid = ?", user)
 	if policyErr == nil {
 		query = query.Where("rp_id = ?", config["rp_id"])
 	}
 	if err := query.Order("credential_hash").Find(&rows).Error; err != nil {
 		return Snapshot{}, err
+	}
+	if len(rows) > 0 {
+		var revokedHashes []string
+		if err := db.Model(&models.PasskeyRevocation{}).
+			Where("user_uuid = ?", user).
+			Pluck("credential_hash", &revokedHashes).Error; err == nil && len(revokedHashes) > 0 {
+			revokedSet := make(map[string]bool, len(revokedHashes))
+			for _, h := range revokedHashes {
+				revokedSet[h] = true
+			}
+			filtered := rows[:0]
+			for _, row := range rows {
+				if !revokedSet[row.CredentialHash] {
+					filtered = append(filtered, row)
+				}
+			}
+			rows = filtered
+		}
 	}
 	records := make([]Record, len(rows))
 	for i, row := range rows {

@@ -169,11 +169,12 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		}{Count: total, Records: grouped, From: startTime.UTC(), To: endTime.UTC()}, nil
 
 	case "ping":
+		maxCount := clampCompatibilityRecordMaxCount(params.MaxCount)
 		taskId := params.TaskID
 		if taskId == 0 {
 			taskId = -1
 		}
-		recs, err := tasks.GetPingRecordsContext(ctx, params.UUID, taskId, startTime, endTime)
+		recs, err := tasks.GetPingRecordsMaxPointsContext(ctx, params.UUID, taskId, startTime, endTime, maxCount)
 		if err != nil {
 			return nil, metricQueryError(err, "Failed to fetch ping records")
 		}
@@ -372,13 +373,11 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 				"p99_p50_ratio": ratio,
 			}
 			if params.UUID == "" && taskId != -1 { // retain existing behavior of exposing clients only when filtering by task
-				info["clients"] = t.Clients
+				info["clients"] = filterVisiblePingTaskClients(t.Clients, hidden)
 			}
 			toList = append(toList, info)
 		}
 		response.Tasks = toList
-		// apply hard-bounded maxCount for ping
-		maxCount := clampCompatibilityRecordMaxCount(params.MaxCount)
 		if len(response.Records) > maxCount {
 			// group records by TaskId for proportional downsampling
 			taskGroups := make(map[uint][]RecordsResp)

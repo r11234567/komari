@@ -221,11 +221,33 @@ func publicGetRecordsByUUID(ctx context.Context, req *rpc.JsonRpcRequest) (any, 
 	return response, nil
 }
 
+func filterVisiblePingTaskClients(clientIDs []string, hidden map[string]bool) []string {
+	out := make([]string, 0, len(clientIDs))
+	for _, id := range clientIDs {
+		if id != "" && !hidden[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func loadHiddenClientMap() map[string]bool {
+	hidden := map[string]bool{}
+	var hiddenClients []models.Client
+	db := dbcore.GetDBInstance()
+	_ = db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error
+	for _, cli := range hiddenClients {
+		hidden[cli.UUID] = true
+	}
+	return hidden
+}
+
 func publicGetPublicPingTasks(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	pingTasks, err := tasks.GetAllPingTasks()
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
+	hiddenMap := loadHiddenClientMap()
 	type publicPingTask struct {
 		Id        uint     `json:"id"`
 		Name      string   `json:"name"`
@@ -240,7 +262,7 @@ func publicGetPublicPingTasks(_ context.Context, _ *rpc.JsonRpcRequest) (any, *r
 		out[i] = publicPingTask{
 			Id:        task.Id,
 			Name:      task.Name,
-			Clients:   task.Clients,
+			Clients:   filterVisiblePingTaskClients(task.Clients, hiddenMap),
 			DefaultOn: task.DefaultOn,
 			Type:      task.Type,
 			Interval:  task.Interval,
@@ -421,6 +443,9 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 			}
 			totalCount, lossCount, minLatency, maxLatency, sumLatency, validCount := 0, 0, 0, 0, 0, 0
 			for _, r := range recs {
+				if r.Client != "" && hiddenMap[r.Client] {
+					continue
+				}
 				if r.TaskId != t.Id {
 					continue
 				}
@@ -455,7 +480,7 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 				"max": maxLatency, "avg": avgLatency, "total": totalCount,
 			}
 			if params.UUID == "" && taskId != -1 {
-				taskInfo["clients"] = t.Clients
+				taskInfo["clients"] = filterVisiblePingTaskClients(t.Clients, hiddenMap)
 			}
 			tasksList = append(tasksList, taskInfo)
 		}
