@@ -7,7 +7,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,14 +26,16 @@ import (
 )
 
 const (
-	CeremonyLifetime     = 2 * time.Minute
-	loginBudgetWindow    = 5 * time.Minute
-	loginIPBudgetLimit   = 30
-	loginUserBudgetLimit = 15
-	maxLoginPending      = 256
-	maxRegisterPending   = 128
-	maxPendingPerSource  = 8
-	maxBudgetBuckets     = 4096
+	CeremonyLifetime                 = 2 * time.Minute
+	loginBudgetWindow                = 5 * time.Minute
+	loginIPBudgetLimit               = 30
+	loginUserBudgetLimit             = 15
+	maxLoginPending                  = 256
+	maxRegisterPending               = 128
+	maxPendingPerSource              = 8
+	maxBudgetBuckets                 = 4096
+	accountFirstDefaultCredentialLen = 32
+	maxAccountFirstDescriptors       = 64
 )
 
 type ceremony struct {
@@ -205,6 +209,157 @@ var accountMaskKey = func() []byte {
 	return secret[:]
 }()
 
+func accountFirstLengthEnvelope(ctx context.Context, rpID string, synced bool) (map[int]int, error) {
+	type passkeyShapeRow struct {
+		UserUUID     string
+		CredentialID string
+		DeviceType   string
+	}
+	var rows []passkeyShapeRow
+	if err := dbcore.GetDBInstance().WithContext(ctx).
+		Model(&models.UserPasskey{}).
+		Select("user_uuid", "credential_id", "device_type").
+		Where("rp_id = ?", rpID).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	perUser := make(map[string]map[int]int)
+	for _, row := range rows {
+		if !synced && row.DeviceType == "multiDevice" {
+			continue
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(row.CredentialID)
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		counts := perUser[row.UserUUID]
+		if counts == nil {
+			counts = make(map[int]int)
+			perUser[row.UserUUID] = counts
+		}
+		counts[len(raw)]++
+	}
+	envelope := make(map[int]int)
+	for _, counts := range perUser {
+		for length, count := range counts {
+			if count > envelope[length] {
+				envelope[length] = count
+			}
+		}
+	}
+	if len(envelope) == 0 {
+		envelope[accountFirstDefaultCredentialLen] = 1
+	}
+	return envelope, nil
+}
+
+func syntheticCredentialID(origin, username string, length, slot int) []byte {
+	out := make([]byte, 0, length)
+	for block := uint32(0); len(out) < length; block++ {
+		mac := hmac.New(sha256.New, accountMaskKey)
+		var meta [12]byte
+		binary.BigEndian.PutUint32(meta[0:4], uint32(length))
+		binary.BigEndian.PutUint32(meta[4:8], uint32(slot))
+		binary.BigEndian.PutUint32(meta[8:12], block)
+		mac.Write([]byte("komari:passkey:decoy:v1\x00"))
+		mac.Write(meta[:])
+		mac.Write([]byte(origin))
+		mac.Write([]byte{0})
+		mac.Write([]byte(username))
+		sum := mac.Sum(nil)
+		need := length - len(out)
+		if need < len(sum) {
+			out = append(out, sum[:need]...)
+		} else {
+			out = append(out, sum...)
+		}
+	}
+	return out
+}
+
+func descriptorSortKey(origin, username string, id []byte) [32]byte {
+	mac := hmac.New(sha256.New, accountMaskKey)
+	mac.Write([]byte("komari:passkey:order:v1\x00"))
+	mac.Write([]byte(origin))
+	mac.Write([]byte{0})
+	mac.Write([]byte(username))
+	mac.Write([]byte{0})
+	mac.Write(id)
+	var out [32]byte
+	copy(out[:], mac.Sum(nil))
+	return out
+}
+
+// padAccountFirstRecords pads and deterministically orders allowCredentials so
+// unknown accounts, zero-passkey accounts, single-key accounts, and multi-key
+// accounts with varying credential ID lengths expose the same descriptor count,
+// length multiset, empty transports, and stable order within an RP.
+func padAccountFirstRecords(real []webauthn.Credential, envelope map[int]int, origin, username string) []webauthn.Credential {
+	out := make([]webauthn.Credential, 0, max(len(real), 1))
+	seen := make(map[string]struct{}, len(real))
+	have := make(map[int]int)
+	for _, rec := range real {
+		if len(rec.ID) == 0 {
+			continue
+		}
+		// Omit optional transports hints on anonymous account-first login so
+		// real and synthetic descriptors share the same response shape.
+		rec.Transport = nil
+		out = append(out, rec)
+		seen[string(rec.ID)] = struct{}{}
+		have[len(rec.ID)]++
+	}
+
+	lengths := make([]int, 0, len(envelope))
+	for length := range envelope {
+		if length > 0 {
+			lengths = append(lengths, length)
+		}
+	}
+	sort.Ints(lengths)
+
+	remaining := maxAccountFirstDescriptors - len(out)
+	for _, length := range lengths {
+		need := envelope[length] - have[length]
+		for i := 0; i < need && remaining > 0; i++ {
+			slot := i
+			var decoy []byte
+			for {
+				decoy = syntheticCredentialID(origin, username, length, slot)
+				if _, exists := seen[string(decoy)]; !exists {
+					break
+				}
+				slot++
+			}
+			seen[string(decoy)] = struct{}{}
+			out = append(out, webauthn.Credential{ID: decoy})
+			remaining--
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, webauthn.Credential{ID: syntheticCredentialID(origin, username, accountFirstDefaultCredentialLen, 0)})
+	}
+
+	type keyedCredential struct {
+		cred webauthn.Credential
+		key  [32]byte
+	}
+	keyed := make([]keyedCredential, len(out))
+	for i, rec := range out {
+		keyed[i] = keyedCredential{
+			cred: rec,
+			key:  descriptorSortKey(origin, username, rec.ID),
+		}
+	}
+	sort.Slice(keyed, func(i, j int) bool {
+		return bytes.Compare(keyed[i].key[:], keyed[j].key[:]) < 0
+	})
+	for i := range keyed {
+		out[i] = keyed[i].cred
+	}
+	return out
+}
+
 func BeginLogin(ctx context.Context, username, ip string) (any, string, error) {
 	return BeginLoginWithPrior(ctx, username, ip, "")
 }
@@ -225,31 +380,45 @@ func BeginLoginWithPrior(ctx context.Context, username, ip, priorToken string) (
 	if username == "" {
 		options, session, err = w.BeginDiscoverableLogin()
 	} else {
+		envelope, envErr := accountFirstLengthEnvelope(ctx, w.Config.RPID, synced)
+		if envErr != nil {
+			return nil, "", envErr
+		}
 		var u models.User
 		err = dbcore.GetDBInstance().WithContext(ctx).Select("uuid").Where("username = ?", username).Take(&u).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, "", err
 		}
-		a := account{id: u.UUID}
+		var realRecords []webauthn.Credential
 		if u.UUID != "" {
-			a, err = currentAccount(ctx, u.UUID, synced)
-			if err != nil {
-				return nil, "", err
+			loaded, loadErr := currentAccount(ctx, u.UUID, synced)
+			if loadErr != nil {
+				return nil, "", loadErr
 			}
-			// Omit optional transports hints on anonymous account-first login so
-			// real and synthetic descriptors share the same response shape.
-			for i := range a.records {
-				a.records[i].Transport = nil
-			}
+			realRecords = loaded.records
 		}
-		if len(a.records) == 0 {
-			// Return a normal ceremony for unknown accounts. No stored key will verify it.
-			mask := hmac.New(sha256.New, accountMaskKey)
-			mask.Write([]byte(username + "\x00" + origin))
-			dummy := mask.Sum(nil)
-			a = account{id: "unavailable", records: []webauthn.Credential{{ID: dummy}}}
+		accountID := u.UUID
+		if accountID == "" || len(realRecords) == 0 {
+			// Unknown or zero-eligible-passkey accounts cannot verify any credential.
+			accountID = "unavailable"
+		}
+		a := account{
+			id:      accountID,
+			records: padAccountFirstRecords(realRecords, envelope, origin, username),
 		}
 		options, session, err = w.BeginLogin(a)
+		if err == nil && accountID != "unavailable" {
+			// Keep server-side session.AllowedCredentialIDs restricted strictly
+			// to the account's real eligible credentials; decoys exist only in
+			// the browser-facing allowCredentials list to hide count/length shape.
+			realAllowed := make([][]byte, 0, len(realRecords))
+			for _, rec := range realRecords {
+				if len(rec.ID) > 0 {
+					realAllowed = append(realAllowed, rec.ID)
+				}
+			}
+			session.AllowedCredentialIDs = realAllowed
+		}
 	}
 	if err != nil {
 		return nil, "", err
