@@ -174,5 +174,8 @@ func Import(ctx context.Context, db *gorm.DB, input io.Reader, apply bool) (Impo
 		}
 		return nil
 	})
+	if err == nil && apply {
+		InvalidateAccountFirstEnvelopeCache()
+	}
 	return report, err
 }
