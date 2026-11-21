@@ -69,9 +69,10 @@ func TestRescueSpecValidationIdempotencyAndBinding(t *testing.T) {
 	require.Equal(t, uint32(2222), created.Msg.Session.GetSshPort())
 
 	// Reusing the same idempotency key with different parameters must abort.
+	otherCtx, _, _ := actionFixture(t)
 	otherTargets := credentialaction.RescueTargets(id, int32(rescuev1.RescueAction_RESCUE_ACTION_TEMPORARY_SSH_ACCESS), nil, 300, 256*1024, 2200)
-	otherToken := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("rescue:create", otherTargets...))
-	_, err = svc.CreateRescueSession(ctx, connect.NewRequest(&rescuev1.CreateRescueSessionRequest{
+	otherToken := actionAuthorization(t, otherCtx, credential.SensitiveOperation, credentialaction.ScopedResource("rescue:create", otherTargets...))
+	_, err = svc.CreateRescueSession(otherCtx, connect.NewRequest(&rescuev1.CreateRescueSessionRequest{
 		AgentId:        id,
 		Action:         rescuev1.RescueAction_RESCUE_ACTION_TEMPORARY_SSH_ACCESS,
 		SshPort:        proto.Uint32(2200),
@@ -84,9 +85,10 @@ func TestRescueSpecValidationIdempotencyAndBinding(t *testing.T) {
 	require.ErrorIs(t, err, rescueapp.ErrIdempotencyConflict)
 
 	// CancelExecution must reject unknown execution IDs before consuming the proof.
+	cancelCtx, _, _ := actionFixture(t)
 	cancelExec := &executionService{}
-	cancelToken := actionAuthorization(t, ctx, credential.SensitiveOperation, credentialaction.ScopedResource("execution:cancel", "missing-exec"))
-	_, err = cancelExec.CancelExecution(ctx, connect.NewRequest(&execv1.CancelExecutionRequest{
+	cancelToken := actionAuthorization(t, cancelCtx, credential.SensitiveOperation, credentialaction.ScopedResource("execution:cancel", "missing-exec"))
+	_, err = cancelExec.CancelExecution(cancelCtx, connect.NewRequest(&execv1.CancelExecutionRequest{
 		ExecutionId: "missing-exec",
 		TwoFactor:   &commonv1.TwoFactorProof{AuthorizationToken: cancelToken},
 	}))

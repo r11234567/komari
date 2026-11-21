@@ -42,7 +42,7 @@ func TestTerminalWebSocketHandshakeRejectsCrossSiteOrigin(t *testing.T) {
 	}
 }
 
-func TestRemoteBrowserOriginRequiresAnIdentifiableBrowserOrigin(t *testing.T) {
+func TestRemoteBrowserOriginSupportsInstalledMobileWebApps(t *testing.T) {
 	tests := []struct {
 		name   string
 		origin string
