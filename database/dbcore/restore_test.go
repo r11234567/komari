@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/pkg/historyexport"
 	"github.com/komari-monitor/komari/pkg/metric"
 )
@@ -356,5 +357,49 @@ func TestRestoreStagedBackupPreservesPasskeyCountersAndRevocations(t *testing.T)
 	}
 	if revCount != 1 {
 		t.Fatalf("revocation tombstone for Key B was lost (count=%d)", revCount)
+	}
+	restored.Close()
+
+	// Also verify custom --database (flags.DatabaseFile) outside dataDir/komari.db
+	// is consulted when preserving high-water counters and revocations across restore.
+	customRoot := t.TempDir()
+	customDataDir := filepath.Join(customRoot, "data")
+	if err := os.MkdirAll(customDataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRestoreArchive(t, filepath.Join(customDataDir, "backup.zip"), backupDBPath)
+
+	customLivePath := filepath.Join(customRoot, "custom-primary.db")
+	customLiveDB := initPasskeyDB(customLivePath)
+	if _, err := customLiveDB.Exec(`UPDATE passkey_counters SET counter = 42 WHERE user_uuid = 'u1' AND key_digest = 'digest-a'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := customLiveDB.Exec(`DELETE FROM user_passkeys WHERE credential_hash = 'hash-b'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := customLiveDB.Exec(`INSERT INTO passkey_revocations VALUES ('hash-b', 'u1', 'panel.example.test', '2026-11-20T01:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := customLiveDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	origDBFile := flags.DatabaseFile
+	flags.DatabaseFile = customLivePath
+	t.Cleanup(func() { flags.DatabaseFile = origDBFile })
+
+	if err := restoreStagedBackup(customDataDir); err != nil {
+		t.Fatalf("restoreStagedBackup with custom --database failed: %v", err)
+	}
+	customRestored, err := sql.Open("sqlite3", filepath.Join(customDataDir, "komari.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer customRestored.Close()
+	if err := customRestored.QueryRow(`SELECT counter FROM passkey_counters WHERE user_uuid = 'u1' AND key_digest = 'digest-a'`).Scan(&counterA); err != nil || counterA != 42 {
+		t.Fatalf("custom --database counterA = %d (err=%v), want 42", counterA, err)
+	}
+	if err := customRestored.QueryRow(`SELECT COUNT(*) FROM user_passkeys WHERE credential_hash = 'hash-b'`).Scan(&keyBCount); err != nil || keyBCount != 0 {
+		t.Fatalf("custom --database revoked Key B resurrected (count=%d err=%v)", keyBCount, err)
 	}
 }

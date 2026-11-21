@@ -50,3 +50,19 @@ func TestClampCompatibilityRecordMaxCountEnforcesCeiling(t *testing.T) {
 		}
 	}
 }
+
+func TestFilterVisiblePingTaskClientsStripsHiddenUUIDs(t *testing.T) {
+	hidden := map[string]bool{
+		"node-hidden-1": true,
+		"node-hidden-2": true,
+	}
+	got := filterVisiblePingTaskClients([]string{"node-visible-a", "node-hidden-1", "", "node-visible-b", "node-hidden-2"}, hidden)
+	want := []string{"node-visible-a", "node-visible-b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("filterVisiblePingTaskClients() = %v, want %v", got, want)
+	}
+	empty := filterVisiblePingTaskClients([]string{"node-hidden-1"}, hidden)
+	if empty == nil || len(empty) != 0 {
+		t.Fatalf("expected non-nil empty slice when all clients are hidden, got %#v", empty)
+	}
+}

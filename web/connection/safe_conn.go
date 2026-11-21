@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -59,19 +60,48 @@ const maxConsecutiveDroppedFrames = 16
 // cannot interleave frames, and funnels every frame through the optional
 // plugin interceptor when one is attached.
 type SafeConn struct {
-	conn *websocket.Conn
-	mu   sync.Mutex
-	ID   int64
+	conn   *websocket.Conn
+	mu     sync.Mutex
+	closed bool
+	ID     int64
 
 	interceptor FrameInterceptor
 	info        *ConnInfo
 }
 
+var (
+	nextConnID  atomic.Int64
+	activeMu    sync.Mutex
+	activeConns = make(map[*SafeConn]struct{})
+)
+
 func NewSafeConn(conn *websocket.Conn) *SafeConn {
-	return &SafeConn{
+	sc := &SafeConn{
 		conn: conn,
 		mu:   sync.Mutex{},
-		ID:   time.Now().UnixNano(),
+		ID:   time.Now().UnixNano() + nextConnID.Add(1),
+	}
+	activeMu.Lock()
+	activeConns[sc] = struct{}{}
+	activeMu.Unlock()
+	return sc
+}
+
+// CloseAll actively closes all live upgraded WebSocket connections so server
+// shutdown does not leave hijacked connections open indefinitely.
+func CloseAll() {
+	activeMu.Lock()
+	conns := make([]*SafeConn, 0, len(activeConns))
+	for sc := range activeConns {
+		conns = append(conns, sc)
+	}
+	activeMu.Unlock()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	closeMsg := websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down")
+	for _, sc := range conns {
+		_ = sc.WriteControl(websocket.CloseMessage, closeMsg, deadline)
+		_ = sc.Close()
 	}
 }
 
@@ -139,7 +169,16 @@ func (sc *SafeConn) WriteJSON(v interface{}) error {
 }
 
 func (sc *SafeConn) Close() error {
+	activeMu.Lock()
+	delete(activeConns, sc)
+	activeMu.Unlock()
+
 	sc.mu.Lock()
+	if sc.closed {
+		sc.mu.Unlock()
+		return nil
+	}
+	sc.closed = true
 	interceptor, info := sc.interceptor, sc.info
 	sc.interceptor = nil // run OnClose exactly once
 	err := sc.conn.Close()

@@ -32,11 +32,7 @@ func (p Provider) snapshot(ctx context.Context, user string) (Snapshot, error) {
 }
 
 func (Provider) Descriptor() credential.Descriptor {
-	id, kind := "plugin:komari-passkey", "plugin"
-	if flags.NativePasskeyConfigured() {
-		id, kind = "native:passkey", "native_passkey"
-	}
-	return credential.Descriptor{ID: id, DisplayName: "Passkey", Kind: kind, Purposes: []credential.Purpose{credential.ManageCredentials, credential.UnlockWorkspace, credential.LoginSettings, credential.SensitiveOperation, credential.PasswordLogin}}
+	return credential.Descriptor{ID: "native:passkey", DisplayName: "Passkey", Kind: "native_passkey", Purposes: []credential.Purpose{credential.ManageCredentials, credential.UnlockWorkspace, credential.LoginSettings, credential.SensitiveOperation, credential.PasswordLogin}}
 }
 
 func (p Provider) Available(ctx context.Context, b credential.Binding) (bool, error) {
@@ -153,14 +149,18 @@ func keyDigest(id, key []byte) string {
 
 func loadAccount(ctx context.Context, user string, records []Record, allowSynced bool) (account, error) {
 	result := account{id: user}
+	db := dbcore.GetDBInstance().WithContext(ctx)
 	for _, record := range records {
 		if record.DeviceType == "multiDevice" && !allowSynced {
 			continue
 		}
 		id, _ := base64.RawURLEncoding.DecodeString(record.ID)
 		key, _ := base64.RawURLEncoding.DecodeString(record.PublicKey)
+		var revoked int64
+		if err := db.Model(&models.PasskeyRevocation{}).Where("credential_hash = ?", idDigest(id)).Count(&revoked).Error; err == nil && revoked > 0 {
+			continue
+		}
 		row := models.PasskeyCounter{UserUUID: user, KeyDigest: keyDigest(id, key)}
-		db := dbcore.GetDBInstance().WithContext(ctx)
 		if !flags.NativePasskeyConfigured() {
 			if err := db.Omit("User").Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
 				return account{}, credential.ErrProviderUnavailable

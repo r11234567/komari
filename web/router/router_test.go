@@ -15,6 +15,7 @@ import (
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/web/api"
@@ -152,6 +153,12 @@ func TestSplitPublicAndPanelListenersEnforceHardBoundaries(t *testing.T) {
 	flags.PublicOrigin = ""
 
 	db := dbcore.GetDBInstance()
+	if err := metricstore.InitializeStore(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = metricstore.CloseStoreContext(t.Context())
+	})
 	user, err := accounts.CreateAccount("split-admin-"+uuid.NewString()[:8], "Strong-Password-123")
 	if err != nil {
 		t.Fatal(err)
@@ -181,6 +188,17 @@ func TestSplitPublicAndPanelListenersEnforceHardBoundaries(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
+	pingTask := models.PingTask{
+		Name:      "Mixed Ping Task",
+		Type:      "icmp",
+		Target:    "198.51.100.1",
+		Interval:  60,
+		Clients:   models.StringArray{visibleID, hiddenID},
+		DefaultOn: false,
+	}
+	if err := db.Create(&pingTask).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	themeShort := "testtheme_" + uuid.NewString()[:6]
 	themeDir := filepath.Join("./data/theme", themeShort)
@@ -200,6 +218,7 @@ func TestSplitPublicAndPanelListenersEnforceHardBoundaries(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_ = os.RemoveAll(themeDir)
+		db.Where("id = ?", pingTask.Id).Delete(&models.PingTask{})
 		db.Where("uuid IN ?", []string{visibleID, hiddenID}).Delete(&models.Client{})
 		db.Where("uuid = ?", user.UUID).Delete(&models.Session{})
 		db.Where("uuid = ?", user.UUID).Delete(&models.User{})
@@ -275,7 +294,43 @@ func TestSplitPublicAndPanelListenersEnforceHardBoundaries(t *testing.T) {
 		t.Fatalf("Public BrowserService/ListAgents leaked hidden node or real IP with admin cookie: %s", listAgentsRec.Body.String())
 	}
 
-	// 3. Private site on Public Listener directs to KOMARI_PANEL_ORIGIN without honoring admin cookie.
+	// 2b. Public Ping task list (/api/task/ping) and common:getRecords(type=ping)
+	//     must strip Hidden node UUIDs from task client lists even with an admin cookie.
+	pingTasksReq := httptest.NewRequest(http.MethodGet, "/api/task/ping", nil)
+	pingTasksReq.AddCookie(&http.Cookie{Name: security.SessionCookieName, Value: session})
+	pingTasksRec := httptest.NewRecorder()
+	publicEngine.ServeHTTP(pingTasksRec, pingTasksReq)
+	if pingTasksRec.Code != http.StatusOK {
+		t.Fatalf("Public /api/task/ping status = %d", pingTasksRec.Code)
+	}
+	if !strings.Contains(pingTasksRec.Body.String(), visibleID) || strings.Contains(pingTasksRec.Body.String(), hiddenID) {
+		t.Fatalf("Public /api/task/ping projection error (must include visible and exclude hidden): %s", pingTasksRec.Body.String())
+	}
+
+	pingRecordsBody, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "common:getRecords",
+		"params": map[string]any{
+			"type":    "ping",
+			"task_id": pingTask.Id,
+			"hours":   1,
+		},
+	})
+	pingRecordsReq := httptest.NewRequest(http.MethodPost, "/api/rpc2", bytes.NewReader(pingRecordsBody))
+	pingRecordsReq.Header.Set("Content-Type", "application/json")
+	pingRecordsReq.AddCookie(&http.Cookie{Name: security.SessionCookieName, Value: session})
+	pingRecordsRec := httptest.NewRecorder()
+	publicEngine.ServeHTTP(pingRecordsRec, pingRecordsReq)
+	if pingRecordsRec.Code != http.StatusOK {
+		t.Fatalf("Public common:getRecords(type=ping) status = %d", pingRecordsRec.Code)
+	}
+	if !strings.Contains(pingRecordsRec.Body.String(), visibleID) || strings.Contains(pingRecordsRec.Body.String(), hiddenID) {
+		t.Fatalf("Public common:getRecords(type=ping) leaked hidden client UUID in task summary: %s", pingRecordsRec.Body.String())
+	}
+
+	// 3. Private site on Public Listener directs to KOMARI_PANEL_ORIGIN without honoring admin cookie,
+	//    while unmounted management/control-plane routes STILL return hard 404 (never 401).
 	if err := config.Set(config.PrivateSiteKey, true); err != nil {
 		t.Fatal(err)
 	}
@@ -292,6 +347,29 @@ func TestSplitPublicAndPanelListenersEnforceHardBoundaries(t *testing.T) {
 	publicEngine.ServeHTTP(privNodesRec, privNodesReq)
 	if privNodesRec.Code != http.StatusUnauthorized {
 		t.Fatalf("Public /api/nodes under private_site with admin cookie = %d, want 401", privNodesRec.Code)
+	}
+	for _, item := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/admin"},
+		{http.MethodGet, "/login"},
+		{http.MethodGet, "/terminal"},
+		{http.MethodGet, "/bind"},
+		{http.MethodPost, "/api/login"},
+		{http.MethodGet, "/api/admin/settings/"},
+		{http.MethodPost, "/komari.exec.v1.ExecutionService/CreateExecution"},
+		{http.MethodPost, "/komari.enrollment.v1.EnrollmentAdminService/ListPendingEnrollments"},
+		{http.MethodPost, "/komari.metrics.v1.MetricsService/SubmitMetrics"},
+		{http.MethodPost, "/komari.browser.v1.BrowserService/GetTrafficTrend"},
+	} {
+		req := httptest.NewRequest(item.method, item.path, nil)
+		req.AddCookie(&http.Cookie{Name: security.SessionCookieName, Value: session})
+		rec := httptest.NewRecorder()
+		publicEngine.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("Public listener under private_site %s %s = %d, want hard 404", item.method, item.path, rec.Code)
+		}
 	}
 	_ = config.Set(config.PrivateSiteKey, false)
 

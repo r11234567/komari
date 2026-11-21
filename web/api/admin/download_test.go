@@ -203,8 +203,11 @@ func TestFullBackupIncludesPluginsAndRestoresPasskeyCredentials(t *testing.T) {
 		_ = os.Chmod(full, perm)
 	}
 
-	// Install and approve komari-passkey through the real plugin lifecycle so
-	// state.json (enabled + approved hash) and package receipts are generated.
+	// Install and approve an active ordinary plugin through the real plugin
+	// lifecycle, and also stage a pre-retirement komari-passkey package + approval
+	// in state.json to verify that restore keeps ordinary plugins running while
+	// preventing the retired komari-passkey package and its legacy approval from
+	// auto-enabling after restore.
 	_ = plugin.CloseAll()
 	oldDir, oldStorage := plugin.DataDir, plugin.StorageDir
 	plugin.DataDir = filepath.Join(srcData, "plugin")
@@ -217,18 +220,41 @@ func TestFullBackupIncludesPluginsAndRestoresPasskeyCredentials(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	plugin.Init(gin.New())
 
-	pluginZip := filepath.Join(t.TempDir(), "komari-passkey.zip")
-	if err := os.WriteFile(pluginZip, admissionArchiveDetails(t, "komari-passkey", "0.1.14", `{"node":true,"timeout":5}`, `function load() {}`), 0o600); err != nil {
+	helloZip := filepath.Join(t.TempDir(), "hello-backup.zip")
+	if err := os.WriteFile(helloZip, admissionArchiveDetails(t, "hello-backup", "0.1.0", `{"node":true,"timeout":5}`, `function load() {}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := plugin.InstallZip(pluginZip); err != nil {
-		t.Fatalf("install komari-passkey fixture: %v", err)
+	if _, err := plugin.InstallZip(helloZip); err != nil {
+		t.Fatalf("install hello-backup fixture: %v", err)
 	}
-	if err := plugin.SetEnabled("komari-passkey", true, true); err != nil {
-		t.Fatalf("enable komari-passkey fixture: %v", err)
+	if err := plugin.SetEnabled("hello-backup", true, true); err != nil {
+		t.Fatalf("enable hello-backup fixture: %v", err)
 	}
 	if err := plugin.CloseAll(); err != nil {
 		t.Fatalf("close source plugins before backup: %v", err)
+	}
+
+	// Simulate an old backup archive that still had komari-passkey installed,
+	// enabled, and approved in plugin/state.json.
+	mustWrite("plugin/komari-passkey/komari-plugin.json", `{"name":"Legacy Passkey","short":"komari-passkey","version":"0.1.14","komari":">=0.0.1","entry":"script.js","permissions":{"node":true,"timeout":5}}`, 0o644)
+	mustWrite("plugin/komari-passkey/script.js", `function load() {}`, 0o644)
+	mustWrite("plugin/komari-passkey/.komari-package.json", `{"digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`, 0o600)
+	statePath := filepath.Join(srcData, "plugin", "state.json")
+	var stateDoc map[string]map[string]map[string]any
+	if rawState, err := os.ReadFile(statePath); err != nil || json.Unmarshal(rawState, &stateDoc) != nil {
+		t.Fatalf("read source plugin state.json: %v", err)
+	}
+	stateDoc["plugins"]["komari-passkey"] = map[string]any{
+		"enabled":                   true,
+		"approved_permissions_hash": "legacy-approved-hash",
+		"approved_package_digest":   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	}
+	mergedState, err := json.MarshalIndent(stateDoc, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, mergedState, 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	userUUID := "user-backup-passkey-1"
@@ -311,7 +337,8 @@ func TestFullBackupIncludesPluginsAndRestoresPasskeyCredentials(t *testing.T) {
 	}
 
 	// Boot plugins from the restored directory using plugin.LoadAll() ONLY (no
-	// SetEnabled bypass) to prove persisted enabled state and approvals survive restore.
+	// SetEnabled bypass) to prove persisted enabled state and approvals survive
+	// restore for active plugins while retired komari-passkey remains disabled.
 	plugin.DataDir = filepath.Join(restoredData, "plugin")
 	plugin.StorageDir = filepath.Join(restoredData, "plugin-data")
 	plugin.Init(gin.New())
@@ -319,14 +346,31 @@ func TestFullBackupIncludesPluginsAndRestoresPasskeyCredentials(t *testing.T) {
 		t.Fatalf("plugin.LoadAll after restore failed: %v", err)
 	}
 
+	var helloRunning, legacyRunning, legacyEnabled bool
+	for _, item := range plugin.List() {
+		switch item.Short {
+		case "hello-backup":
+			helloRunning = item.Enabled && item.Running
+		case "komari-passkey":
+			legacyEnabled = item.Enabled
+			legacyRunning = item.Running
+		}
+	}
+	if !helloRunning {
+		t.Fatal("restored hello-backup plugin is not running after plugin.LoadAll()")
+	}
+	if legacyEnabled || legacyRunning {
+		t.Fatalf("retired komari-passkey plugin was re-enabled after restore (enabled=%v running=%v)", legacyEnabled, legacyRunning)
+	}
+	if err := plugin.SetEnabled("komari-passkey", true, true); err == nil {
+		t.Fatal("expected enabling retired komari-passkey plugin to fail")
+	}
+
 	snapshot, err := passkeycredential.Read(context.Background(), userUUID)
 	if err != nil {
 		t.Fatalf("passkeycredential.Read after restore failed: %v", err)
 	}
-	if !snapshot.Running {
-		t.Fatal("restored komari-passkey plugin is not running after plugin.LoadAll()")
-	}
-	if len(snapshot.Records) != 1 || snapshot.Records[0].ID != credID || snapshot.Records[0].PublicKey != pubKey {
-		t.Fatalf("restored passkey records mismatch: %+v", snapshot.Records)
+	if snapshot.Running {
+		t.Fatal("passkeycredential.Read must not report retired legacy plugin as running")
 	}
 }

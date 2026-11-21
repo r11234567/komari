@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
@@ -1718,12 +1719,23 @@ func GetGPURecordsByClientAndTime(ctx context.Context, clientUUID string, start,
 	return records, nil
 }
 
+const maxCompatibilityPingPoints = 4000
+
 // GetPingRecords 从 metric store 查询兼容旧接口的 ping 记录。
 //
 // 旧接口过去直接读取 ping_records 的原始点。启用 metric rollup 后，较旧
 // 的 raw 点会被压入 rollup 并删除，因此这里使用 Series 走与 queryMetrics
 // 相同的 raw/rollup 混合读取路径，并保留 task_id 标签。
 func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, end time.Time) ([]models.PingRecord, error) {
+	return GetPingRecordsMaxPoints(ctx, clientUUID, taskID, start, end, maxCompatibilityPingPoints)
+}
+
+// GetPingRecordsMaxPoints bounds both storage bucket resolution and the
+// returned slice across all matched (client, task_id) series.
+func GetPingRecordsMaxPoints(ctx context.Context, clientUUID string, taskID int, start, end time.Time, maxPoints int) ([]models.PingRecord, error) {
+	if maxPoints <= 0 || maxPoints > maxCompatibilityPingPoints {
+		maxPoints = maxCompatibilityPingPoints
+	}
 	s, release, err := AcquireStore(ctx)
 	if err != nil {
 		return nil, err
@@ -1745,16 +1757,23 @@ func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, e
 		query.Tags = map[string]string{"task_id": fmt.Sprintf("%d", taskID)}
 	}
 
-	interval := pingQueryInterval(end.Sub(start), 4000)
-	interval = s.CompatibleSeriesIntervalForMetric(ctx, MetricPingLatency, start, time.Now().UTC(), interval)
+	seriesCount := estimatePingSeriesCount(ctx, s, clientUUID, taskID, start, end)
+	perSeriesBudget := pingPerSeriesMaxPoints(maxPoints, seriesCount)
+	now := time.Now().UTC()
+	interval := pingQueryInterval(end.Sub(start), perSeriesBudget)
+	interval = s.CompatibleSeriesIntervalForMetric(ctx, MetricPingLatency, start, now, interval)
 	points, err := s.Series(ctx, metric.AggregateQuery{
 		Query:          query,
 		Aggregation:    metric.AggLast,
 		Interval:       interval,
 		PreserveSeries: true,
-	}, time.Now().UTC())
+	}, now)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(points) > maxPoints {
+		points = capPingAggregatePoints(points, maxPoints)
 	}
 
 	records := make([]models.PingRecord, 0, len(points))
@@ -1778,6 +1797,134 @@ func GetPingRecords(ctx context.Context, clientUUID string, taskID int, start, e
 	})
 
 	return records, nil
+}
+
+var activePingTaskCount atomic.Int64
+
+// SetActivePingTaskCount updates the known active ping task count used to scale
+// multi-series ping history read budgets.
+func SetActivePingTaskCount(n int) {
+	if n < 0 {
+		n = 0
+	}
+	activePingTaskCount.Store(int64(n))
+}
+
+func estimatePingSeriesCount(ctx context.Context, s *metric.Store, clientUUID string, taskID int, start, end time.Time) int {
+	entityCount := 1
+	if clientUUID == "" {
+		if ids, err := s.EntityIDs(ctx, metric.Query{
+			MetricName: MetricPingLatency,
+			Start:      start,
+			End:        end,
+		}); err == nil && len(ids) > 1 {
+			entityCount = len(ids)
+		}
+	}
+	taskCount := 1
+	if taskID < 0 {
+		if n := int(activePingTaskCount.Load()); n > 1 {
+			taskCount = n
+		}
+	}
+	return max(entityCount*taskCount, 1)
+}
+
+func pingPerSeriesMaxPoints(maxPoints, seriesCount int) int {
+	if maxPoints <= 0 {
+		maxPoints = maxCompatibilityPingPoints
+	}
+	if seriesCount <= 1 {
+		return maxPoints
+	}
+	budget := (maxPoints * 2) / seriesCount
+	if (maxPoints*2)%seriesCount != 0 {
+		budget++
+	}
+	if budget < 16 {
+		return 16
+	}
+	if budget > maxPoints {
+		return maxPoints
+	}
+	return budget
+}
+
+func capPingAggregatePoints(points []metric.AggregatePoint, maxPoints int) []metric.AggregatePoint {
+	if maxPoints <= 0 || len(points) <= maxPoints {
+		return points
+	}
+	type seriesKey struct {
+		entity string
+		taskID string
+	}
+	grouped := make(map[seriesKey][]metric.AggregatePoint)
+	keys := make([]seriesKey, 0)
+	for _, p := range points {
+		k := seriesKey{entity: p.EntityID, taskID: p.Tags["task_id"]}
+		if _, exists := grouped[k]; !exists {
+			keys = append(keys, k)
+		}
+		grouped[k] = append(grouped[k], p)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].entity != keys[j].entity {
+			return keys[i].entity < keys[j].entity
+		}
+		return keys[i].taskID < keys[j].taskID
+	})
+	total := len(points)
+	targets := make(map[seriesKey]int, len(keys))
+	allocated := 0
+	for _, k := range keys {
+		n := len(grouped[k])
+		t := (n * maxPoints) / total
+		if t == 0 && n > 0 && allocated < maxPoints {
+			t = 1
+		}
+		if allocated+t > maxPoints {
+			t = maxPoints - allocated
+		}
+		targets[k] = t
+		allocated += t
+	}
+	for allocated < maxPoints {
+		progressed := false
+		for _, k := range keys {
+			if allocated >= maxPoints {
+				break
+			}
+			if targets[k] < len(grouped[k]) {
+				targets[k]++
+				allocated++
+				progressed = true
+			}
+		}
+		if !progressed {
+			break
+		}
+	}
+	out := make([]metric.AggregatePoint, 0, maxPoints)
+	for _, k := range keys {
+		in := grouped[k]
+		target := targets[k]
+		if target <= 0 || len(in) == 0 {
+			continue
+		}
+		if target >= len(in) {
+			out = append(out, in...)
+			continue
+		}
+		if target == 1 {
+			out = append(out, in[len(in)-1])
+			continue
+		}
+		for i := 0; i < target; i++ {
+			idx := (i * (len(in) - 1)) / (target - 1)
+			out = append(out, in[idx])
+		}
+	}
+	return out
 }
 
 func pingQueryInterval(rangeDuration time.Duration, maxPoints int) time.Duration {

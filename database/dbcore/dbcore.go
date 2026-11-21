@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -311,7 +312,10 @@ func restoreStagedBackup(dataDir string) error {
 	if err := validateRestoredSQLite(filepath.Join(stageDir, "komari.db"), "komari.db"); err != nil {
 		return err
 	}
-	if err := preservePasskeySecurityState(filepath.Join(dataDir, "komari.db"), filepath.Join(stageDir, "komari.db")); err != nil {
+	if err := retireRestoredLegacyPasskeyPlugin(stageDir); err != nil {
+		return fmt.Errorf("retire legacy passkey plugin state in backup: %w", err)
+	}
+	if err := preservePasskeySecurityStateForRestore(dataDir, stageDir); err != nil {
 		return fmt.Errorf("preserve passkey security state across restore: %w", err)
 	}
 	metricsPath := filepath.Join(stageDir, "metrics.db")
@@ -405,26 +409,99 @@ func sqliteTableExists(db *sql.DB, name string) (bool, error) {
 	return found == name, nil
 }
 
-// preservePasskeySecurityState carries forward passkey counter high-water marks
-// and explicit passkey revocations from the current primary SQLite database into
-// the staged restored database before the directory swap occurs.
-func preservePasskeySecurityState(currentPath, stagedPath string) error {
-	if _, err := os.Stat(currentPath); err != nil {
+// retireRestoredLegacyPasskeyPlugin strips any persisted enabled/approval state
+// and package receipt for the retired komari-passkey plugin when extracting an
+// older backup archive, so restoring a backup containing plugins/plugin-data
+// never automatically re-enables the retired package or its legacy approvals.
+func retireRestoredLegacyPasskeyPlugin(stageDir string) error {
+	const legacyShort = "komari-passkey"
+	receiptPath := filepath.Join(stageDir, "plugin", legacyShort, ".komari-package.json")
+	if err := os.Remove(receiptPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	statePath := filepath.Join(stageDir, "plugin", "state.json")
+	data, err := os.ReadFile(statePath)
+	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return err
 	}
-	if err := validateRestoredSQLite(currentPath, "current komari.db"); err != nil {
+	var doc struct {
+		Plugins map[string]map[string]any `json:"plugins"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil || doc.Plugins == nil {
 		return nil
 	}
-
-	curDB, err := sql.Open("sqlite3", currentPath)
+	entry, ok := doc.Plugins[legacyShort]
+	if !ok || entry == nil {
+		return nil
+	}
+	entry["enabled"] = false
+	entry["approved_permissions_hash"] = ""
+	delete(entry, "approved_package_digest")
+	entry["last_error"] = "legacy Passkey plugin is retired; configure native Passkey instead"
+	doc.Plugins[legacyShort] = entry
+	updated, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
 	}
-	defer curDB.Close()
+	return os.WriteFile(statePath, updated, 0o600)
+}
 
+func configuredSQLiteFilePath() string {
+	raw := strings.TrimSpace(flags.DatabaseFile)
+	if raw == "" || raw == ":memory:" || strings.HasPrefix(raw, "file::memory:") {
+		return ""
+	}
+	raw = strings.TrimPrefix(raw, "file:")
+	if idx := strings.IndexByte(raw, '?'); idx >= 0 {
+		raw = raw[:idx]
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == ":memory:" {
+		return ""
+	}
+	return filepath.Clean(raw)
+}
+
+func preservePasskeySecurityStateForRestore(dataDir, stageDir string) error {
+	sources := []string{filepath.Join(dataDir, "komari.db")}
+	if custom := configuredSQLiteFilePath(); custom != "" {
+		sources = append(sources, custom)
+		if base := filepath.Base(custom); base != "" && base != "komari.db" {
+			sources = append(sources, filepath.Join(dataDir, base))
+		}
+	}
+	stagedKomari := filepath.Join(stageDir, "komari.db")
+	if err := preservePasskeySecurityStateFromSources(sources, stagedKomari); err != nil {
+		return err
+	}
+	if custom := configuredSQLiteFilePath(); custom != "" {
+		if base := filepath.Base(custom); base != "" && base != "komari.db" {
+			stagedCustom := filepath.Join(stageDir, base)
+			if _, err := os.Stat(stagedCustom); err == nil {
+				if err := preservePasskeySecurityStateFromSources(sources, stagedCustom); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// preservePasskeySecurityState carries forward passkey counter high-water marks
+// and explicit passkey revocations from the current primary SQLite database into
+// the staged restored database before the directory swap occurs.
+func preservePasskeySecurityState(currentPath, stagedPath string) error {
+	return preservePasskeySecurityStateFromSources([]string{currentPath}, stagedPath)
+}
+
+func preservePasskeySecurityStateFromSources(currentPaths []string, stagedPath string) error {
+	type counterKey struct {
+		userUUID  string
+		keyDigest string
+	}
 	type counterRow struct {
 		userUUID  string
 		keyDigest string
@@ -437,57 +514,108 @@ func preservePasskeySecurityState(currentPath, stagedPath string) error {
 		revokedAt      string
 	}
 
-	var counters []counterRow
-	hasCounters, err := sqliteTableExists(curDB, "passkey_counters")
-	if err != nil {
-		return err
-	}
-	if hasCounters {
-		rows, err := curDB.Query(`SELECT user_uuid, key_digest, counter FROM passkey_counters`)
+	counterMap := make(map[counterKey]uint32)
+	revocationMap := make(map[string]revocationRow)
+	seenPaths := make(map[string]bool, len(currentPaths))
+
+	for _, currentPath := range currentPaths {
+		if strings.TrimSpace(currentPath) == "" {
+			continue
+		}
+		absPath, err := filepath.Abs(currentPath)
+		if err != nil {
+			absPath = filepath.Clean(currentPath)
+		}
+		if seenPaths[absPath] {
+			continue
+		}
+		seenPaths[absPath] = true
+
+		if _, err := os.Stat(currentPath); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if err := validateRestoredSQLite(currentPath, "current komari.db"); err != nil {
+			continue
+		}
+
+		curDB, err := sql.Open("sqlite3", currentPath)
 		if err != nil {
 			return err
 		}
-		for rows.Next() {
-			var r counterRow
-			if err := rows.Scan(&r.userUUID, &r.keyDigest, &r.counter); err != nil {
-				rows.Close()
-				return err
-			}
-			counters = append(counters, r)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
+		hasCounters, err := sqliteTableExists(curDB, "passkey_counters")
+		if err != nil {
+			curDB.Close()
 			return err
 		}
-		rows.Close()
+		if hasCounters {
+			rows, err := curDB.Query(`SELECT user_uuid, key_digest, counter FROM passkey_counters`)
+			if err != nil {
+				curDB.Close()
+				return err
+			}
+			for rows.Next() {
+				var r counterRow
+				if err := rows.Scan(&r.userUUID, &r.keyDigest, &r.counter); err != nil {
+					rows.Close()
+					curDB.Close()
+					return err
+				}
+				k := counterKey{userUUID: r.userUUID, keyDigest: r.keyDigest}
+				if r.counter > counterMap[k] {
+					counterMap[k] = r.counter
+				}
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				curDB.Close()
+				return err
+			}
+			rows.Close()
+		}
+
+		hasRevocations, err := sqliteTableExists(curDB, "passkey_revocations")
+		if err != nil {
+			curDB.Close()
+			return err
+		}
+		if hasRevocations {
+			rows, err := curDB.Query(`SELECT credential_hash, user_uuid, rp_id, COALESCE(CAST(revoked_at AS TEXT), '') FROM passkey_revocations`)
+			if err != nil {
+				curDB.Close()
+				return err
+			}
+			for rows.Next() {
+				var r revocationRow
+				if err := rows.Scan(&r.credentialHash, &r.userUUID, &r.rpID, &r.revokedAt); err != nil {
+					rows.Close()
+					curDB.Close()
+					return err
+				}
+				if r.revokedAt == "" {
+					r.revokedAt = time.Now().UTC().Format(time.RFC3339Nano)
+				}
+				revocationMap[r.credentialHash] = r
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				curDB.Close()
+				return err
+			}
+			rows.Close()
+		}
+		curDB.Close()
 	}
 
-	var revocations []revocationRow
-	hasRevocations, err := sqliteTableExists(curDB, "passkey_revocations")
-	if err != nil {
-		return err
+	counters := make([]counterRow, 0, len(counterMap))
+	for k, c := range counterMap {
+		counters = append(counters, counterRow{userUUID: k.userUUID, keyDigest: k.keyDigest, counter: c})
 	}
-	if hasRevocations {
-		rows, err := curDB.Query(`SELECT credential_hash, user_uuid, rp_id, COALESCE(CAST(revoked_at AS TEXT), '') FROM passkey_revocations`)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			var r revocationRow
-			if err := rows.Scan(&r.credentialHash, &r.userUUID, &r.rpID, &r.revokedAt); err != nil {
-				rows.Close()
-				return err
-			}
-			if r.revokedAt == "" {
-				r.revokedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			}
-			revocations = append(revocations, r)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return err
-		}
-		rows.Close()
+	revocations := make([]revocationRow, 0, len(revocationMap))
+	for _, r := range revocationMap {
+		revocations = append(revocations, r)
 	}
 
 	if len(counters) == 0 && len(revocations) == 0 {

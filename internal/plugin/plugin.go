@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/komari-monitor/komari/cmd/flags"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -297,8 +296,8 @@ func (m *Manager) instanceFor(short string) *Instance {
 // a manager read lock through rpcHandler) without deadlocking. On failure the
 // instance is dropped and its hooks and RPC methods are cleaned up.
 func (m *Manager) load(short string) error {
-	if short == legacyPasskeyPluginShort && flags.NativePasskeyConfigured() {
-		return fmt.Errorf("legacy Passkey plugin is disabled while native Passkey is configured")
+	if short == legacyPasskeyPluginShort {
+		return fmt.Errorf("legacy Passkey plugin is retired; configure native Passkey instead")
 	}
 	dir := filepath.Join(DataDir, short)
 	info, err := readManifest(short)
@@ -503,10 +502,24 @@ func (m *Manager) setEnabled(short string, enabled, approved bool) error {
 	if !enabled {
 		st := m.stateStore().get(short)
 		st.Enabled = false
+		if short == legacyPasskeyPluginShort {
+			st.ApprovedPermissionsHash = ""
+			st.ApprovedPackageDigest = ""
+		}
 		if err := m.unload(short); err != nil && !errors.Is(err, errNotLoaded) {
 			st.LastError = err.Error()
 		}
 		return m.stateStore().set(short, st)
+	}
+	if short == legacyPasskeyPluginShort {
+		err := fmt.Errorf("legacy Passkey plugin is retired; configure native Passkey instead")
+		st := m.stateStore().get(short)
+		st.Enabled = false
+		st.ApprovedPermissionsHash = ""
+		st.ApprovedPackageDigest = ""
+		st.LastError = err.Error()
+		_ = m.stateStore().set(short, st)
+		return err
 	}
 	st := m.stateStore().get(short)
 	if !packageApproved(short, st) {
@@ -634,6 +647,10 @@ func (m *Manager) reload(short string) error {
 // the load failure for the startup error summary.
 func (m *Manager) disableWithError(short string, st PluginState, err error) error {
 	st.Enabled = false
+	if short == legacyPasskeyPluginShort {
+		st.ApprovedPermissionsHash = ""
+		st.ApprovedPackageDigest = ""
+	}
 	st.LastError = err.Error()
 	m.stateStore().set(short, st)
 	return fmt.Errorf("plugin %q: %w", short, err)
