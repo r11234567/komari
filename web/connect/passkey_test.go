@@ -23,6 +23,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/credentialgateway"
 	"github.com/komari-monitor/komari/internal/passkeycredential"
+	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/security"
 	"github.com/pquerna/otp/totp"
@@ -341,4 +342,136 @@ func TestIsRequestSecureTrustsOnlyPrivateProxies(t *testing.T) {
 	if !security.IsRequestSecure(proxyReq) {
 		t.Fatal("local reverse proxy X-Forwarded-Proto=https was rejected")
 	}
+}
+
+func connectLegacyNonDiscoverableAssertionStruct(t *testing.T, priv *ecdsa.PrivateKey, id []byte, rpID, origin, challenge string, counter uint32) *structpb.Struct {
+	t.Helper()
+	enc := base64.RawURLEncoding.EncodeToString
+	client, _ := json.Marshal(map[string]any{
+		"type":        "webauthn.get",
+		"challenge":   challenge,
+		"origin":      origin,
+		"crossOrigin": false,
+	})
+	rpHash := sha256.Sum256([]byte(rpID))
+	authData := append([]byte{}, rpHash[:]...)
+	authData = append(authData, 0x05) // UP | UV
+	authData = binary.BigEndian.AppendUint32(authData, counter)
+	clientHash := sha256.Sum256(client)
+	msg := append(append([]byte{}, authData...), clientHash[:]...)
+	digest := sha256.Sum256(msg)
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"id":    enc(id),
+		"rawId": enc(id),
+		"type":  "public-key",
+		"response": map[string]any{
+			"clientDataJSON":    enc(client),
+			"authenticatorData": enc(authData),
+			"signature":         enc(sig),
+		},
+		"clientExtensionResults": map[string]any{},
+	})
+	out := &structpb.Struct{}
+	if err := out.UnmarshalJSON(raw); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestConnectPasskeyLegacyNonDiscoverableLoginWhenPasswordDisabled(t *testing.T) {
+	const rpID = "connect-legacy.example.test"
+	const origin = "https://" + rpID
+	t.Setenv("KOMARI_PASSKEY_RP_ID", rpID)
+	t.Setenv("KOMARI_PASSKEY_ORIGIN", origin)
+	t.Setenv("KOMARI_PASSKEY_ALLOW_SYNCED", "false")
+
+	user, err := accounts.CreateAccount("pk-legacy-"+uuid.NewString(), "Bootstrap-Password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv, pubCOSE := syntheticCOSEKey(t)
+	credID := make([]byte, 48)
+	if _, err := rand.Read(credID); err != nil {
+		t.Fatal(err)
+	}
+	enc := base64.RawURLEncoding.EncodeToString
+	idHash := sha256.Sum256(credID)
+	keyDigestRaw, _ := json.Marshal([][]byte{credID, pubCOSE})
+	keyDigestHash := sha256.Sum256(keyDigestRaw)
+
+	db := dbcore.GetDBInstance()
+	if err := db.Omit("User").Create(&models.UserPasskey{
+		CredentialHash: hexEncode(idHash[:]),
+		CredentialID:   enc(credID),
+		UserUUID:       user.UUID,
+		RPID:           rpID,
+		Name:           "Legacy USB Key",
+		PublicKey:      enc(pubCOSE),
+		Transports:     []string{"usb"},
+		DeviceType:     "singleDevice",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Omit("User").Create(&models.PasskeyCounter{
+		UserUUID:  user.UUID,
+		KeyDigest: hexEncode(keyDigestHash[:]),
+		Counter:   0,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Set(config.DisablePasswordLoginKey, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = config.Set(config.DisablePasswordLoginKey, false)
+		credentialgateway.Default.RevokeUser(user.UUID)
+		db.Where("user_uuid = ?", user.UUID).Delete(&models.UserPasskey{})
+		db.Where("user_uuid = ?", user.UUID).Delete(&models.PasskeyCounter{})
+		db.Where("uuid = ?", user.UUID).Delete(&models.Session{})
+		db.Where("uuid = ?", user.UUID).Delete(&models.User{})
+	})
+
+	svc := passkeyService{}
+	anonCtx := passkeycredential.WithRequestOrigin(
+		rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{
+			Principal: rpc.NewAnonymousPrincipal(),
+			RemoteIP:  "198.51.100.91",
+			UserAgent: "test-browser",
+		}),
+		rpID,
+		true,
+	)
+
+	beginRes, err := svc.BeginPasskeyLogin(anonCtx, connect.NewRequest(&credentialv1.BeginPasskeyLoginRequest{
+		Username: user.Username,
+	}))
+	if err != nil {
+		t.Fatalf("BeginPasskeyLogin with password login disabled failed: %v", err)
+	}
+	setCookie := beginRes.Header().Get("Set-Cookie")
+	preauthVal := strings.SplitN(strings.TrimPrefix(setCookie, ceremonyCookie+"="), ";", 2)[0]
+	challenge := beginRes.Msg.Options.AsMap()["publicKey"].(map[string]any)["challenge"].(string)
+
+	compReq := connect.NewRequest(&credentialv1.CompletePasskeyLoginRequest{
+		Assertion: connectLegacyNonDiscoverableAssertionStruct(t, priv, credID, rpID, origin, challenge, 1),
+	})
+	compReq.Header().Set("Cookie", ceremonyCookie+"="+preauthVal)
+	compRes, err := svc.CompletePasskeyLogin(anonCtx, compReq)
+	if err != nil || !compRes.Msg.Authenticated {
+		t.Fatalf("CompletePasskeyLogin for legacy non-discoverable credential with password disabled failed: %v", err)
+	}
+}
+
+func hexEncode(b []byte) string {
+	const hextable = "0123456789abcdef"
+	dst := make([]byte, len(b)*2)
+	for i, v := range b {
+		dst[i*2] = hextable[v>>4]
+		dst[i*2+1] = hextable[v&0x0f]
+	}
+	return string(dst)
 }

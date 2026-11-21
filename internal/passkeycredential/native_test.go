@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"sort"
 	"sync"
 	"testing"
 
@@ -484,5 +486,275 @@ func TestNativeRegistrationDeleteRevocationAndImportConstraints(t *testing.T) {
 	capReport, err := Import(ctx, dbcore.GetDBInstance(), bytes.NewReader(bulkPayload), false)
 	if err != nil || capReport.Eligible != 64 || capReport.Conflicts != 1 {
 		t.Fatalf("expected 64 eligible + 1 conflict for per-user cap, got %+v err=%v", capReport, err)
+	}
+}
+
+func signedLegacyNonDiscoverableAssertionFor(t *testing.T, private *ecdsa.PrivateKey, id []byte, rpID, origin, challenge string, counter uint32, flags byte) []byte {
+	t.Helper()
+	enc := base64.RawURLEncoding.EncodeToString
+	client, _ := json.Marshal(map[string]any{
+		"type":        "webauthn.get",
+		"challenge":   challenge,
+		"origin":      origin,
+		"crossOrigin": false,
+	})
+	rpHash := sha256.Sum256([]byte(rpID))
+	authData := append([]byte{}, rpHash[:]...)
+	authData = append(authData, flags)
+	authData = binary.BigEndian.AppendUint32(authData, counter)
+	clientHash := sha256.Sum256(client)
+	message := append(append([]byte{}, authData...), clientHash[:]...)
+	digest := sha256.Sum256(message)
+	signature, err := ecdsa.SignASN1(rand.Reader, private, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, _ := json.Marshal(map[string]any{
+		"id":    enc(id),
+		"rawId": enc(id),
+		"type":  "public-key",
+		"response": map[string]any{
+			"clientDataJSON":    enc(client),
+			"authenticatorData": enc(authData),
+			"signature":         enc(signature),
+			// Legacy non-discoverable credentials omit userHandle.
+		},
+		"clientExtensionResults": map[string]any{},
+	})
+	return proof
+}
+
+func descriptorLengthMultiset(descs []protocol.CredentialDescriptor) []int {
+	lengths := make([]int, len(descs))
+	for i, d := range descs {
+		lengths[i] = len(d.CredentialID)
+	}
+	sort.Ints(lengths)
+	return lengths
+}
+
+func descriptorIDStrings(descs []protocol.CredentialDescriptor) []string {
+	ids := make([]string, len(descs))
+	for i, d := range descs {
+		ids[i] = base64.RawURLEncoding.EncodeToString(d.CredentialID)
+	}
+	return ids
+}
+
+func TestNativeAccountFirstLoginPrivacyEnvelopeAndLegacyNonDiscoverable(t *testing.T) {
+	resetNativeTestState()
+	const rpID = "privacy-envelope.example.test"
+	const origin = "https://" + rpID
+	t.Setenv("KOMARI_PASSKEY_RP_ID", rpID)
+	t.Setenv("KOMARI_PASSKEY_ORIGIN", origin)
+	t.Setenv("KOMARI_PASSKEY_ALLOW_SYNCED", "false")
+
+	ctx := WithRequestOrigin(t.Context(), rpID, true)
+	db := dbcore.GetDBInstance()
+	enc := base64.RawURLEncoding.EncodeToString
+
+	createUser := func(prefix string) models.User {
+		u, err := accounts.CreateAccount(prefix+"-"+uuid.NewString(), "Synthetic-password-123")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			db.Where("user_uuid = ?", u.UUID).Delete(&models.UserPasskey{})
+			db.Where("user_uuid = ?", u.UUID).Delete(&models.PasskeyCounter{})
+			db.Where("uuid = ?", u.UUID).Delete(&models.User{})
+		})
+		return u
+	}
+
+	enrollKey := func(u models.User, idLen int, deviceType string, transports []string) (*ecdsa.PrivateKey, []byte) {
+		priv, pub := syntheticPublicKey(t)
+		id := make([]byte, idLen)
+		if _, err := rand.Read(id); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Omit("User").Create(&models.UserPasskey{
+			CredentialHash: idDigest(id),
+			CredentialID:   enc(id),
+			UserUUID:       u.UUID,
+			RPID:           rpID,
+			Name:           fmt.Sprintf("Key-%d", idLen),
+			PublicKey:      enc(pub),
+			Transports:     transports,
+			DeviceType:     deviceType,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Omit("User").Create(&models.PasskeyCounter{
+			UserUUID:  u.UUID,
+			KeyDigest: keyDigest(id, pub),
+			Counter:   0,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+		return priv, id
+	}
+
+	multiUser := createUser("priv-multi")
+	tripleUser := createUser("priv-triple")
+	singleUser := createUser("priv-single")
+	syncedOnlyUser := createUser("priv-synced-only")
+	zeroUser := createUser("priv-zero")
+	nonexistentA := "priv-missing-a-" + uuid.NewString()
+	nonexistentB := "priv-missing-b-" + uuid.NewString()
+
+	// Multi-key user with two non-32-byte eligible keys (20B, 64B) plus one ineligible synced key (48B).
+	multiPriv20, multiID20 := enrollKey(multiUser, 20, "singleDevice", []string{"usb"})
+	multiPriv64, multiID64 := enrollKey(multiUser, 64, "singleDevice", []string{"nfc", "usb"})
+	_, _ = enrollKey(multiUser, 48, "multiDevice", []string{"internal", "hybrid"})
+
+	// Triple-key user with 16B + two 32B keys.
+	_, _ = enrollKey(tripleUser, 16, "singleDevice", []string{"usb"})
+	_, _ = enrollKey(tripleUser, 32, "singleDevice", []string{"internal"})
+	_, _ = enrollKey(tripleUser, 32, "singleDevice", []string{"ble"})
+
+	// Single-key user with 64B key.
+	singlePriv64, singleID64 := enrollKey(singleUser, 64, "singleDevice", []string{"usb"})
+
+	// Existing account with only an ineligible multiDevice key (80B) while allow_synced=false.
+	_, _ = enrollKey(syncedOnlyUser, 80, "multiDevice", []string{"hybrid"})
+
+	// Expected envelope while allow_synced=false: {16:1, 20:1, 32:2, 64:1} -> [16, 20, 32, 32, 64].
+	wantLengths := []int{16, 20, 32, 32, 64}
+	targets := []struct {
+		label    string
+		username string
+		mustHave [][]byte
+	}{
+		{"multi-key", multiUser.Username, [][]byte{multiID20, multiID64}},
+		{"triple-key", tripleUser.Username, nil},
+		{"single-key-64b", singleUser.Username, [][]byte{singleID64}},
+		{"synced-only-ineligible", syncedOnlyUser.Username, nil},
+		{"zero-passkeys", zeroUser.Username, nil},
+		{"nonexistent-a", nonexistentA, nil},
+		{"nonexistent-b", nonexistentB, nil},
+	}
+
+	firstIDs := make(map[string][]string, len(targets))
+	tokens := make(map[string]string, len(targets))
+	challenges := make(map[string]string, len(targets))
+
+	for i, target := range targets {
+		ip := fmt.Sprintf("203.0.113.%d", 40+i)
+		opt, tok, err := BeginLogin(ctx, target.username, ip)
+		if err != nil {
+			t.Fatalf("%s BeginLogin failed: %v", target.label, err)
+		}
+		req := opt.(*protocol.CredentialAssertion).Response
+		gotLengths := descriptorLengthMultiset(req.AllowedCredentials)
+		if !slices.Equal(gotLengths, wantLengths) {
+			t.Fatalf("%s allowCredentials length multiset = %v, want %v", target.label, gotLengths, wantLengths)
+		}
+		for j, desc := range req.AllowedCredentials {
+			if desc.Type != protocol.PublicKeyCredentialType {
+				t.Fatalf("%s descriptor %d type = %q, want public-key", target.label, j, desc.Type)
+			}
+			if len(desc.Transport) != 0 {
+				t.Fatalf("%s descriptor %d leaked transports: %v", target.label, j, desc.Transport)
+			}
+		}
+		ids := descriptorIDStrings(req.AllowedCredentials)
+		firstIDs[target.label] = ids
+		tokens[target.label] = tok
+		challenges[target.label] = req.Challenge.String()
+
+		for _, mustID := range target.mustHave {
+			if !slices.Contains(ids, enc(mustID)) {
+				t.Fatalf("%s allowCredentials missing real credential ID (len %d)", target.label, len(mustID))
+			}
+		}
+	}
+
+	// Repeat BeginLogin for known, zero-passkey, and nonexistent targets: order & IDs must be stable.
+	for i, label := range []string{"multi-key", "zero-passkeys", "nonexistent-a"} {
+		var username string
+		for _, target := range targets {
+			if target.label == label {
+				username = target.username
+				break
+			}
+		}
+		opt2, _, err := BeginLogin(ctx, username, fmt.Sprintf("203.0.113.%d", 80+i))
+		if err != nil {
+			t.Fatalf("%s repeat BeginLogin failed: %v", label, err)
+		}
+		gotIDs2 := descriptorIDStrings(opt2.(*protocol.CredentialAssertion).Response.AllowedCredentials)
+		if !slices.Equal(gotIDs2, firstIDs[label]) {
+			t.Fatalf("%s repeat BeginLogin changed allowCredentials order/IDs: %v vs %v", label, gotIDs2, firstIDs[label])
+		}
+	}
+
+	// Distinct unknown usernames must not share decoy IDs.
+	for _, idA := range firstIDs["nonexistent-a"] {
+		if slices.Contains(firstIDs["nonexistent-b"], idA) {
+			t.Fatalf("distinct unknown usernames shared a decoy credential ID: %s", idA)
+		}
+	}
+
+	// Disable password login and verify legacy non-discoverable credentials (no userHandle) still complete login.
+	if err := config.Set(config.DisablePasswordLoginKey, true); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = config.Set(config.DisablePasswordLoginKey, false)
+	}()
+
+	// 1. Multi-key user signs with 20-byte legacy non-discoverable key.
+	proof20 := signedLegacyNonDiscoverableAssertionFor(t, multiPriv20, multiID20, rpID, origin, challenges["multi-key"], 1, 0x05)
+	if uid, err := CompleteLogin(ctx, tokens["multi-key"], proof20); err != nil || uid != multiUser.UUID {
+		t.Fatalf("multi-key 20B legacy non-discoverable login with password disabled failed: uid=%q err=%v", uid, err)
+	}
+
+	// 2. Multi-key user signs with 64-byte legacy non-discoverable key on a fresh ceremony.
+	opt64, tok64, err := BeginLogin(ctx, multiUser.Username, "203.0.113.91")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chal64 := opt64.(*protocol.CredentialAssertion).Response.Challenge.String()
+	proof64 := signedLegacyNonDiscoverableAssertionFor(t, multiPriv64, multiID64, rpID, origin, chal64, 1, 0x05)
+	if uid, err := CompleteLogin(ctx, tok64, proof64); err != nil || uid != multiUser.UUID {
+		t.Fatalf("multi-key 64B legacy non-discoverable login with password disabled failed: uid=%q err=%v", uid, err)
+	}
+
+	// 3. Single-key user (padded with 4 decoys) signs with its 64-byte legacy non-discoverable key.
+	singleProof := signedLegacyNonDiscoverableAssertionFor(t, singlePriv64, singleID64, rpID, origin, challenges["single-key-64b"], 1, 0x05)
+	if uid, err := CompleteLogin(ctx, tokens["single-key-64b"], singleProof); err != nil || uid != singleUser.UUID {
+		t.Fatalf("single-key 64B legacy non-discoverable login with password disabled failed: uid=%q err=%v", uid, err)
+	}
+
+	// 4. Zero-key, synced-only-ineligible, and nonexistent ceremonies reject real credentials.
+	for _, label := range []string{"synced-only-ineligible", "zero-passkeys", "nonexistent-a"} {
+		badProof := signedLegacyNonDiscoverableAssertionFor(t, singlePriv64, singleID64, rpID, origin, challenges[label], 2, 0x05)
+		if _, err := CompleteLogin(ctx, tokens[label], badProof); !errors.Is(err, credential.ErrVerificationFailed) {
+			t.Fatalf("%s ceremony accepted real credential: err=%v", label, err)
+		}
+	}
+
+	// 5. Cross-account assertion on padded ceremony is still rejected.
+	optCross, tokCross, err := BeginLogin(ctx, multiUser.Username, "203.0.113.92")
+	if err != nil {
+		t.Fatal(err)
+	}
+	crossProof := signedLegacyNonDiscoverableAssertionFor(t, singlePriv64, singleID64, rpID, origin, optCross.(*protocol.CredentialAssertion).Response.Challenge.String(), 2, 0x05)
+	if _, err := CompleteLogin(ctx, tokCross, crossProof); !errors.Is(err, credential.ErrVerificationFailed) {
+		t.Fatalf("cross-account legacy assertion succeeded: err=%v", err)
+	}
+
+	// 6. When allow_synced=true, synced keys enter the envelope uniformly for every username.
+	t.Setenv("KOMARI_PASSKEY_ALLOW_SYNCED", "true")
+	wantSyncedLengths := []int{16, 20, 32, 32, 48, 64, 80}
+	for i, username := range []string{multiUser.Username, zeroUser.Username, nonexistentA} {
+		optSynced, _, err := BeginLogin(ctx, username, fmt.Sprintf("203.0.113.%d", 100+i))
+		if err != nil {
+			t.Fatalf("allow_synced=true BeginLogin(%q) failed: %v", username, err)
+		}
+		got := descriptorLengthMultiset(optSynced.(*protocol.CredentialAssertion).Response.AllowedCredentials)
+		if !slices.Equal(got, wantSyncedLengths) {
+			t.Fatalf("allow_synced=true BeginLogin(%q) length multiset = %v, want %v", username, got, wantSyncedLengths)
+		}
 	}
 }
