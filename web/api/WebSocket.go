@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -54,13 +55,24 @@ func UpgradeWebSocket(c *gin.Context, options ...WebSocketUpgradeOption) (*webso
 	if !IsWebSocketUpgrade(c) {
 		return nil, fmt.Errorf("require websocket upgrade")
 	}
+	reqCtx := c.Request.Context()
+	if err := reqCtx.Err(); err != nil {
+		return nil, err
+	}
 	upgrader := websocket.Upgrader{
 		CheckOrigin: CheckWebSocketOrigin,
 	}
 	for _, option := range options {
 		option(&upgrader)
 	}
-	return upgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		return nil, err
+	}
+	_ = context.AfterFunc(reqCtx, func() {
+		_ = conn.Close()
+	})
+	return conn, nil
 }
 
 // UpgradeSafeConn attaches the process-wide plugin WebSocket hook chain to a
@@ -72,11 +84,14 @@ func UpgradeSafeConn(c *gin.Context, options ...WebSocketUpgradeOption) (*connec
 	if err != nil {
 		return nil, err
 	}
+	sc := connection.NewSafeConn(unsafeConn)
+	_ = context.AfterFunc(c.Request.Context(), func() {
+		_ = sc.Close()
+	})
 	interceptor := connection.Interceptor()
 	if interceptor == nil {
-		return connection.NewSafeConn(unsafeConn), nil
+		return sc, nil
 	}
-	sc := connection.NewSafeConn(unsafeConn)
 	info := &connection.ConnInfo{
 		ID:        sc.ID,
 		Path:      c.Request.URL.Path,
@@ -92,7 +107,7 @@ func UpgradeSafeConn(c *gin.Context, options ...WebSocketUpgradeOption) (*connec
 		_ = unsafeConn.WriteControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, reason),
 			time.Now().Add(time.Second))
-		_ = unsafeConn.Close()
+		_ = sc.Close()
 		return nil, errors.New("websocket connection denied by plugin")
 	}
 	sc.SetInterceptor(info, interceptor)

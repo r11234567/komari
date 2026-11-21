@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -253,23 +254,30 @@ func TestSplitListenersStartServeAndShutdownWithoutPortLeak(t *testing.T) {
 		t.Fatalf("read /api/clients websocket: %v", err)
 	}
 
-	// Graceful Shutdown closes active WebSocket connections, releases both sockets, and exits Run cleanly.
-	if err := app.Shutdown(); err != nil {
-		t.Fatalf("Shutdown: %v", err)
+	// Deliver SIGTERM to trigger Run's signal-driven graceful Shutdown path,
+	// and assert active WebSocket connections receive an explicit close/EOF
+	// rather than a read deadline timeout.
+	if proc, err := os.FindProcess(os.Getpid()); err != nil || proc.Signal(syscall.SIGTERM) != nil {
+		app.sigCh <- syscall.SIGTERM
 	}
 	for name, ws := range map[string]*websocket.Conn{"/api/rpc2": rpcWS, "/api/clients": clientsWS} {
 		_ = ws.SetReadDeadline(time.Now().Add(2 * time.Second))
-		if _, _, err := ws.ReadMessage(); err == nil {
-			t.Fatalf("upgraded websocket %s remained open after Shutdown", name)
+		_, _, err := ws.ReadMessage()
+		if err == nil {
+			t.Fatalf("upgraded websocket %s remained open after SIGTERM Shutdown", name)
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			t.Fatalf("upgraded websocket %s timed out instead of closing on SIGTERM Shutdown: %v", name, err)
 		}
 	}
 	select {
 	case err := <-runErr:
 		if err != nil {
-			t.Fatalf("Run returned error after Shutdown: %v", err)
+			t.Fatalf("Run returned error after SIGTERM Shutdown: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Run did not exit after Shutdown")
+		t.Fatal("Run did not exit after SIGTERM Shutdown")
 	}
 
 	for _, addr := range []string{pubAddr, panAddr} {

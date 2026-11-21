@@ -957,3 +957,26 @@ func TestNativeAccountFirstEnvelopeOver64CacheMultiOriginAndRestartStability(t *
 		t.Fatalf("expected 91 descriptors after adding 48B key, got %d", got)
 	}
 }
+
+func TestAccountFirstEnvelopeEnforcesCountAndByteBudgets(t *testing.T) {
+	perUser := make(map[string]map[int]int)
+	for bucket := 0; bucket < 20; bucket++ {
+		userKey := fmt.Sprintf("user-%d", bucket)
+		perUser[userKey] = map[int]int{
+			32 + bucket*16: 64,
+		}
+	}
+	slots := buildSortedEnvelopeSlots(perUser)
+	totalDesc := 0
+	totalBytes := 0
+	for _, s := range slots {
+		totalDesc += s.count
+		totalBytes += s.count * s.length
+	}
+	if totalDesc > maxAccountFirstEnvelopeDescriptors {
+		t.Fatalf("expected envelope descriptor count <= %d, got %d", maxAccountFirstEnvelopeDescriptors, totalDesc)
+	}
+	if totalBytes > maxAccountFirstEnvelopeBytes {
+		t.Fatalf("expected envelope byte budget <= %d, got %d", maxAccountFirstEnvelopeBytes, totalBytes)
+	}
+}

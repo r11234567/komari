@@ -1,8 +1,18 @@
 package jsonrpc
 
 import (
+	"context"
+	"encoding/json"
+	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
+
+	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
 func TestSampleEvenly(t *testing.T) {
@@ -64,5 +74,99 @@ func TestFilterVisiblePingTaskClientsStripsHiddenUUIDs(t *testing.T) {
 	empty := filterVisiblePingTaskClients([]string{"node-hidden-1"}, hidden)
 	if empty == nil || len(empty) != 0 {
 		t.Fatalf("expected non-nil empty slice when all clients are hidden, got %#v", empty)
+	}
+}
+
+func TestCommonGetRecordsPingStatisticsInvariantToMaxCount(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	db := dbcore.GetDBInstance()
+	if err := config.Set(metricstore.MetricDBDSNKey, filepath.Join(tmpDir, "metrics.db")); err != nil {
+		t.Fatalf("set metric_db_dsn: %v", err)
+	}
+	if err := metricstore.Reload(ctx); err != nil {
+		t.Fatalf("metricstore.Reload: %v", err)
+	}
+
+	clientUUID := "node-ping-stats-1"
+	_ = db.Where("uuid = ?", clientUUID).Delete(&models.Client{}).Error
+	if err := db.Create(&models.Client{UUID: clientUUID, Name: "Ping Node", Hidden: false}).Error; err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Where("uuid = ?", clientUUID).Delete(&models.Client{}).Error
+	})
+	task := models.PingTask{
+		Name:     "ICMP Test",
+		Clients:  models.StringArray{clientUUID},
+		Type:     "icmp",
+		Target:   "198.51.100.1",
+		Interval: 60,
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create ping task: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Where("id = ?", task.Id).Delete(&models.PingTask{}).Error
+	})
+
+	end := time.Now().UTC().Truncate(time.Minute)
+	start := end.Add(-60 * time.Minute)
+	for i := 0; i < 60; i++ {
+		val := 20 + (i*7)%80
+		if i%10 == 3 {
+			val = -1 // packet loss
+		}
+		if err := metricstore.WritePingRecord(ctx, models.PingRecord{
+			Client: clientUUID,
+			TaskId: task.Id,
+			Time:   start.Add(time.Duration(i+1) * time.Minute),
+			Value:  val,
+		}); err != nil {
+			t.Fatalf("WritePingRecord(%d): %v", i, err)
+		}
+	}
+
+	callPingRecords := func(maxCount int) map[string]any {
+		t.Helper()
+		req := rpc.NewRequest(1, "common:getRecords", map[string]any{
+			"type":     "ping",
+			"uuid":     clientUUID,
+			"task_id":  int(task.Id),
+			"start":    start.Format(time.RFC3339),
+			"end":      end.Format(time.RFC3339),
+			"maxCount": maxCount,
+		})
+		res, rpcErr := getRecords(ctx, req)
+		if rpcErr != nil {
+			t.Fatalf("getRecords(maxCount=%d) rpcErr: %+v", maxCount, rpcErr)
+		}
+		raw, err := json.Marshal(res)
+		if err != nil {
+			t.Fatalf("marshal response: %v", err)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		return out
+	}
+
+	small := callPingRecords(10)
+	large := callPingRecords(500)
+
+	smallRecs := small["records"].([]any)
+	largeRecs := large["records"].([]any)
+	if len(smallRecs) != 10 {
+		t.Fatalf("small maxCount=10 returned %d records, want 10", len(smallRecs))
+	}
+	if len(largeRecs) != 60 {
+		t.Fatalf("large maxCount=500 returned %d records, want 60", len(largeRecs))
+	}
+	if !reflect.DeepEqual(small["basic_info"], large["basic_info"]) {
+		t.Fatalf("BasicInfo changed with maxCount:\nsmall=%#v\nlarge=%#v", small["basic_info"], large["basic_info"])
+	}
+	if !reflect.DeepEqual(small["tasks"], large["tasks"]) {
+		t.Fatalf("Tasks summary statistics changed with maxCount:\nsmall=%#v\nlarge=%#v", small["tasks"], large["tasks"])
 	}
 }

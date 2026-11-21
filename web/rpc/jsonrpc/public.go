@@ -130,17 +130,13 @@ func publicGetClientRecentRecords(ctx context.Context, req *rpc.JsonRpcRequest) 
 	return reports, nil
 }
 
-// isHiddenClient 查询指定 uuid 是否为隐藏节点。
+// isHiddenClient 查询指定 uuid 是否为隐藏节点（查询失败时默认按隐藏处理以防止泄露）。
 func isHiddenClient(uuid string) bool {
-	var hiddenClients []models.Client
-	db := dbcore.GetDBInstance()
-	_ = db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error
-	for _, cli := range hiddenClients {
-		if cli.UUID == uuid {
-			return true
-		}
+	hiddenMap, err := loadHiddenClientMap()
+	if err != nil {
+		return true
 	}
-	return false
+	return hiddenMap[uuid]
 }
 
 func publicGetRecordsByUUID(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -231,15 +227,17 @@ func filterVisiblePingTaskClients(clientIDs []string, hidden map[string]bool) []
 	return out
 }
 
-func loadHiddenClientMap() map[string]bool {
+func loadHiddenClientMap() (map[string]bool, error) {
 	hidden := map[string]bool{}
 	var hiddenClients []models.Client
 	db := dbcore.GetDBInstance()
-	_ = db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error
+	if err := db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error; err != nil {
+		return nil, err
+	}
 	for _, cli := range hiddenClients {
 		hidden[cli.UUID] = true
 	}
-	return hidden
+	return hidden, nil
 }
 
 func publicGetPublicPingTasks(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -247,7 +245,10 @@ func publicGetPublicPingTasks(_ context.Context, _ *rpc.JsonRpcRequest) (any, *r
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
-	hiddenMap := loadHiddenClientMap()
+	hiddenMap, err := loadHiddenClientMap()
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
+	}
 	type publicPingTask struct {
 		Id        uint     `json:"id"`
 		Name      string   `json:"name"`
@@ -353,14 +354,11 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 		Tasks     []map[string]any  `json:"tasks,omitempty"`
 	}
 
-	hiddenMap := map[string]bool{}
 	response := &resp{Count: 0, Records: []recordsResp{}}
 
-	var hiddenClients []models.Client
-	db := dbcore.GetDBInstance()
-	_ = db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error
-	for _, cli := range hiddenClients {
-		hiddenMap[cli.UUID] = true
+	hiddenMap, err := loadHiddenClientMap()
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to load client visibility: "+err.Error(), nil)
 	}
 	if params.UUID != "" && hiddenMap[params.UUID] {
 		return response, nil

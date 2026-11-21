@@ -27,16 +27,19 @@ import (
 )
 
 const (
-	CeremonyLifetime                 = 2 * time.Minute
-	loginBudgetWindow                = 5 * time.Minute
-	loginIPBudgetLimit               = 30
-	loginUserBudgetLimit             = 15
-	maxLoginPending                  = 256
-	maxRegisterPending               = 128
-	maxPendingPerSource              = 8
-	maxBudgetBuckets                 = 4096
-	accountFirstDefaultCredentialLen = 32
-	accountMaskSource                = "native:account-mask-v1"
+	CeremonyLifetime                   = 2 * time.Minute
+	loginBudgetWindow                  = 5 * time.Minute
+	loginIPBudgetLimit                 = 30
+	loginUserBudgetLimit               = 15
+	maxLoginPending                    = 256
+	maxRegisterPending                 = 128
+	maxPendingPerSource                = 8
+	maxBudgetBuckets                   = 4096
+	accountFirstDefaultCredentialLen   = 32
+	maxAccountFirstCredentialIDBytes   = 1024
+	maxAccountFirstEnvelopeDescriptors = 256
+	maxAccountFirstEnvelopeBytes       = 64 << 10
+	accountMaskSource                  = "native:account-mask-v1"
 )
 
 type ceremony struct {
@@ -221,10 +224,13 @@ var accountMaskState struct {
 var envelopeCacheState struct {
 	mu         sync.Mutex
 	db         *gorm.DB
-	hooked     map[*gorm.DB]bool
 	byRP       map[string]cachedRPEnvelope
 	generation uint64
 	loads      uint64
+}
+
+func init() {
+	dbcore.RegisterOnInitialize(registerEnvelopeInvalidationCallbacks)
 }
 
 func resetAccountMaskMemoryCache() {
@@ -286,12 +292,9 @@ func envelopeCacheLoads() uint64 {
 	return envelopeCacheState.loads
 }
 
-func ensureEnvelopeInvalidationHooksLocked(db *gorm.DB) {
-	if db == nil || envelopeCacheState.hooked[db] {
+func registerEnvelopeInvalidationCallbacks(db *gorm.DB) {
+	if db == nil {
 		return
-	}
-	if envelopeCacheState.hooked == nil {
-		envelopeCacheState.hooked = make(map[*gorm.DB]bool)
 	}
 	invalidateIfPasskey := func(tx *gorm.DB) {
 		if tx == nil || tx.Statement == nil {
@@ -313,13 +316,16 @@ func ensureEnvelopeInvalidationHooksLocked(db *gorm.DB) {
 	}
 	_ = db.Callback().Create().After("gorm:create").Register("passkeycredential:envelope_create", invalidateIfPasskey)
 	_ = db.Callback().Delete().After("gorm:delete").Register("passkeycredential:envelope_delete", invalidateIfPasskey)
-	envelopeCacheState.hooked[db] = true
+	InvalidateAccountFirstEnvelopeCache()
 }
 
 func buildSortedEnvelopeSlots(perUser map[string]map[int]int) []lengthSlot {
 	envelope := make(map[int]int)
 	for _, counts := range perUser {
 		for length, count := range counts {
+			if length <= 0 || length > maxAccountFirstCredentialIDBytes {
+				continue
+			}
 			if count > envelope[length] {
 				envelope[length] = count
 			}
@@ -330,14 +336,28 @@ func buildSortedEnvelopeSlots(perUser map[string]map[int]int) []lengthSlot {
 	}
 	lengths := make([]int, 0, len(envelope))
 	for length := range envelope {
-		if length > 0 {
-			lengths = append(lengths, length)
-		}
+		lengths = append(lengths, length)
 	}
 	sort.Ints(lengths)
-	slots := make([]lengthSlot, len(lengths))
-	for i, length := range lengths {
-		slots[i] = lengthSlot{length: length, count: envelope[length]}
+	slots := make([]lengthSlot, 0, len(lengths))
+	totalDescriptors := 0
+	totalBytes := 0
+	for _, length := range lengths {
+		remDesc := maxAccountFirstEnvelopeDescriptors - totalDescriptors
+		remBytes := maxAccountFirstEnvelopeBytes - totalBytes
+		if remDesc <= 0 || remBytes < length {
+			break
+		}
+		allowed := min(envelope[length], min(remDesc, remBytes/length))
+		if allowed <= 0 {
+			continue
+		}
+		slots = append(slots, lengthSlot{length: length, count: allowed})
+		totalDescriptors += allowed
+		totalBytes += allowed * length
+	}
+	if len(slots) == 0 {
+		return []lengthSlot{{length: accountFirstDefaultCredentialLen, count: 1}}
 	}
 	return slots
 }
@@ -353,7 +373,6 @@ func accountFirstLengthEnvelope(ctx context.Context, rpID string, synced bool) (
 	if envelopeCacheState.byRP == nil {
 		envelopeCacheState.byRP = make(map[string]cachedRPEnvelope)
 	}
-	ensureEnvelopeInvalidationHooksLocked(db)
 	if cached, ok := envelopeCacheState.byRP[rpID]; ok {
 		envelopeCacheState.mu.Unlock()
 		if synced {
@@ -467,12 +486,17 @@ func padAccountFirstRecords(real []webauthn.Credential, envelope []lengthSlot, s
 			totalSlots += slotSpec.count
 		}
 	}
-	out := make([]webauthn.Credential, 0, max(totalSlots, max(len(real), 1)))
-	seen := make(map[string]struct{}, max(totalSlots, len(real)))
+	targetCount := min(maxAccountFirstEnvelopeDescriptors, max(totalSlots, 1))
+	out := make([]webauthn.Credential, 0, targetCount)
+	seen := make(map[string]struct{}, targetCount)
 	have := make(map[int]int)
+	totalBytes := 0
 	for _, rec := range real {
-		if len(rec.ID) == 0 {
+		if len(rec.ID) == 0 || len(rec.ID) > maxAccountFirstCredentialIDBytes {
 			continue
+		}
+		if len(out) >= targetCount || totalBytes+len(rec.ID) > maxAccountFirstEnvelopeBytes {
+			break
 		}
 		// Omit optional transports hints on anonymous account-first login so
 		// real and synthetic descriptors share the same response shape.
@@ -480,14 +504,18 @@ func padAccountFirstRecords(real []webauthn.Credential, envelope []lengthSlot, s
 		out = append(out, rec)
 		seen[string(rec.ID)] = struct{}{}
 		have[len(rec.ID)]++
+		totalBytes += len(rec.ID)
 	}
 
 	for _, slotSpec := range envelope {
-		if slotSpec.length <= 0 || slotSpec.count <= 0 {
+		if slotSpec.length <= 0 || slotSpec.length > maxAccountFirstCredentialIDBytes || slotSpec.count <= 0 {
 			continue
 		}
 		need := slotSpec.count - have[slotSpec.length]
 		for i := 0; i < need; i++ {
+			if len(out) >= targetCount || totalBytes+slotSpec.length > maxAccountFirstEnvelopeBytes {
+				break
+			}
 			slot := i
 			var decoy []byte
 			for {
@@ -499,6 +527,7 @@ func padAccountFirstRecords(real []webauthn.Credential, envelope []lengthSlot, s
 			}
 			seen[string(decoy)] = struct{}{}
 			out = append(out, webauthn.Credential{ID: decoy})
+			totalBytes += slotSpec.length
 		}
 	}
 	if len(out) == 0 {

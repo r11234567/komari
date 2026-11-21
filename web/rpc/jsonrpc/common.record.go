@@ -174,7 +174,10 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		if taskId == 0 {
 			taskId = -1
 		}
-		recs, err := tasks.GetPingRecordsMaxPointsContext(ctx, params.UUID, taskId, startTime, endTime, maxCount)
+		// Always read the canonical window up to maxCompatibilityRecordPoints (4000)
+		// before computing BasicInfo/Tasks summary statistics so caller-supplied
+		// chart maxCount only downsamples response.Records and never alters loss/min/max/avg/p50/p99.
+		recs, err := tasks.GetPingRecordsMaxPointsContext(ctx, params.UUID, taskId, startTime, endTime, maxCompatibilityRecordPoints)
 		if err != nil {
 			return nil, metricQueryError(err, "Failed to fetch ping records")
 		}

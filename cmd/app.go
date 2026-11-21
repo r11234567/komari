@@ -96,6 +96,7 @@ type App struct {
 	oauthReady   bool
 	stopOnce     sync.Once
 	stopCh       chan struct{}
+	sigCh        chan os.Signal
 	shutdownOnce sync.Once
 	shutdownDone chan struct{}
 
@@ -124,6 +125,7 @@ func NewApp() *App {
 		serverCtx:    serverCtx,
 		serverCancel: serverCancel,
 		stopCh:       make(chan struct{}),
+		sigCh:        make(chan os.Signal, 1),
 		shutdownDone: make(chan struct{}),
 	}
 }
@@ -904,7 +906,10 @@ func (a *App) Run() error {
 		}
 	}()
 
-	quit := make(chan os.Signal, 1)
+	quit := a.sigCh
+	if quit == nil {
+		quit = make(chan os.Signal, 1)
+	}
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(quit)
 
@@ -957,6 +962,8 @@ func (a *App) Shutdown() error {
 				logger.Infof("server", "HTTP server forced to shutdown: %v", err)
 			}
 		}
+		// 再次排空可能正处于升级临界区的 WebSocket 连接。
+		connection.CloseAll()
 
 		// 反序释放资源（后进先出）。
 		for i := len(a.cleanups) - 1; i >= 0; i-- {
