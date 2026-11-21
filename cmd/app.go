@@ -376,6 +376,9 @@ func (a *App) RunInstallGuide() (bool, error) {
 	defer controller.Deactivate()
 
 	r := gin.New()
+	if err := security.ConfigureRequestMetadataForOrigin(r, flags.EffectivePanelOrigin()); err != nil {
+		return false, fmt.Errorf("invalid request metadata policy: %w", err)
+	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
 	r.Use(func(c *gin.Context) {
@@ -443,12 +446,15 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 	defer controller.Deactivate()
 
 	r := gin.New()
+	if err := security.ConfigureRequestMetadataForOrigin(r, flags.EffectivePanelOrigin()); err != nil {
+		return false, fmt.Errorf("invalid request metadata policy: %w", err)
+	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
 		WithTrustedOrigins(flags.EffectivePanelOrigin())
-	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 	r.Use(cors.Middleware())
+	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 	r.Use(api.IdentityMiddleware())
 	r.Use(func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, "/api") {
@@ -520,8 +526,8 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 	defer controller.Deactivate()
 
 	r := gin.New()
-	if err := security.ConfigureTrustedProxies(r, security.TrustedProxiesFromEnv()); err != nil {
-		return false, fmt.Errorf("invalid %s: %w", security.TrustedProxyEnv, err)
+	if err := security.ConfigureRequestMetadataForOrigin(r, flags.EffectivePanelOrigin()); err != nil {
+		return false, fmt.Errorf("invalid request metadata policy: %w", err)
 	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
@@ -696,12 +702,12 @@ func (a *App) registerReloadHandlers(corsControllers ...*security.CorsController
 	})
 }
 
-func configureBaseEngine(r *gin.Engine, trustedProxies string) error {
+func configureBaseEngine(r *gin.Engine, canonicalOrigin string) error {
 	r.Use(diagnostics.Default.Middleware())
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
-	if err := security.ConfigureTrustedProxies(r, trustedProxies); err != nil {
-		return fmt.Errorf("invalid %s: %w", security.TrustedProxyEnv, err)
+	if err := security.ConfigureRequestMetadataForOrigin(r, canonicalOrigin); err != nil {
+		return fmt.Errorf("invalid request metadata policy: %w", err)
 	}
 	return nil
 }
@@ -738,22 +744,19 @@ func (a *App) BuildRouter() error {
 		return err
 	}
 
-	trustedProxies := security.TrustedProxiesFromEnv()
-	if security.ClientIPIsSpoofable(trustedProxies) {
-		logger.Warnf("server",
-			"%s is not set: X-Forwarded-For is honoured from any peer, so client addresses in rate limiting and audit logs are caller-controlled. Set it to %q behind a local reverse proxy, or to \"none\" when exposed directly.",
-			security.TrustedProxyEnv, security.LoopbackProxies)
-	}
-
 	if !flags.SplitPanelEnabled() {
 		r := gin.New()
-		if err := configureBaseEngine(r, trustedProxies); err != nil {
+		origin := flags.EffectivePublicOrigin()
+		if origin == "" {
+			origin = flags.EffectivePanelOrigin()
+		}
+		if err := configureBaseEngine(r, origin); err != nil {
 			return err
 		}
-		r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 		cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
 			WithTrustedOrigins(flags.EffectivePublicOrigin(), flags.EffectivePanelOrigin())
 		r.Use(cors.Middleware())
+		r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 		r.Use(api.IdentityMiddleware())
 		rateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)
 		r.Use(rateLimiter.Middleware())
@@ -781,13 +784,13 @@ func (a *App) BuildRouter() error {
 	}
 
 	publicEngine := gin.New()
-	if err := configureBaseEngine(publicEngine, trustedProxies); err != nil {
+	if err := configureBaseEngine(publicEngine, flags.EffectivePublicOrigin()); err != nil {
 		return err
 	}
-	publicEngine.Use(api.PublicViewerMiddleware())
 	publicCors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
 		WithTrustedOrigins(flags.EffectivePublicOrigin())
 	publicEngine.Use(publicCors.Middleware())
+	publicEngine.Use(api.PublicViewerMiddleware())
 	publicRateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)
 	publicEngine.Use(publicRateLimiter.Middleware())
 	publicEngine.Use(foregroundHistoryObserverMiddleware())
@@ -801,13 +804,17 @@ func (a *App) BuildRouter() error {
 	a.addCleanup("plugins", func(context.Context) error { return plugin.CloseAll() })
 
 	panelEngine := gin.New()
-	if err := configureBaseEngine(panelEngine, trustedProxies); err != nil {
+	if err := configureBaseEngine(panelEngine, flags.EffectivePanelOrigin()); err != nil {
 		return err
 	}
-	panelEngine.Use(api.APIAuthenticationMiddleware())
+	panelEngine.Use(func(c *gin.Context) {
+		c.Set("panel_listener", true)
+		c.Next()
+	})
 	panelCors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
 		WithTrustedOrigins(flags.EffectivePanelOrigin())
 	panelEngine.Use(panelCors.Middleware())
+	panelEngine.Use(api.APIAuthenticationMiddleware())
 	panelEngine.Use(api.IdentityMiddleware())
 	panelRateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)
 	panelEngine.Use(panelRateLimiter.Middleware())

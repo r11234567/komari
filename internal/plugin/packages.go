@@ -601,6 +601,9 @@ func decidePackage(short, digest, current, action, actor string, verify func(Pac
 	if p.Plugin.Short != short {
 		return errors.New("package identity mismatch")
 	}
+	if action == "activate" && isLegacyPasskeyPlugin(short, p.Plugin.Short) {
+		return errors.New("legacy Passkey plugin is retired; configure native Passkey instead")
+	}
 	p.CurrentDigest = receiptDigest(short)
 	if current != p.CurrentDigest {
 		return errors.New("active package changed; review again")
@@ -626,6 +629,9 @@ func decidePackage(short, digest, current, action, actor string, verify func(Pac
 		p.PermissionsHash = packagePermissions(info.Permissions)
 		if info.Short != short {
 			return errors.New("archive identity mismatch")
+		}
+		if isLegacyPasskeyPlugin(short, info.Short) {
+			return errors.New("legacy Passkey plugin is retired; configure native Passkey instead")
 		}
 	}
 	if action == "discard" && p.CurrentDigest == digest {

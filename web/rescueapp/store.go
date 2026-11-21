@@ -14,6 +14,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 	"github.com/komari-monitor/komari/utils"
 	deploymentapp "github.com/komari-monitor/komari/web/deployment"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
@@ -43,6 +44,77 @@ var signals = struct {
 }{byKey: make(map[string]chan struct{})}
 
 var createMu sync.Mutex
+
+var ErrIdempotencyConflict = errors.New("idempotency key already used with different rescue parameters")
+
+type CreateSpec struct {
+	Arguments      []string
+	TimeoutSeconds int64
+	MaxOutputBytes uint64
+	SSHPort        uint32
+	SpecDigest     string
+}
+
+func ValidateTarget(agentID string) error {
+	profile, saved, err := clients.GetDeploymentProfile(agentID)
+	if err != nil {
+		return err
+	}
+	allowed, err := clients.PrivilegedCapabilityAllowed(agentID, "rescue")
+	if err != nil {
+		return err
+	}
+	if !saved || !allowed || !profile.RescueEnabled {
+		return errors.New("rescue helper requires an applied rescue authorization")
+	}
+	return nil
+}
+
+func NormalizeCreateSpec(action rescuev1.RescueAction, arguments []string, timeout *durationpb.Duration, maxOutput uint64, sshPort uint32) (CreateSpec, error) {
+	if !allowedAction(action) {
+		return CreateSpec{}, errors.New("unsupported rescue action")
+	}
+	resolvedPort, err := resolveSSHPort(action, sshPort)
+	if err != nil {
+		return CreateSpec{}, err
+	}
+	if len(arguments) > maxArgumentCount {
+		return CreateSpec{}, errors.New("too many rescue arguments")
+	}
+	normalizedArgs := make([]string, len(arguments))
+	total := 0
+	for i := range arguments {
+		normalizedArgs[i] = sanitize(arguments[i], maxArgumentBytes)
+		total += len(normalizedArgs[i])
+	}
+	if total > maxArgumentBytes {
+		return CreateSpec{}, errors.New("rescue arguments are too large")
+	}
+	duration := defaultTimeout
+	if timeout != nil {
+		if err := timeout.CheckValid(); err != nil {
+			return CreateSpec{}, err
+		}
+		duration = timeout.AsDuration()
+	}
+	if duration <= 0 || duration > maxTimeout {
+		return CreateSpec{}, fmt.Errorf("rescue timeout must be between 1s and %s", maxTimeout)
+	}
+	if maxOutput == 0 {
+		maxOutput = defaultOutput
+	}
+	if maxOutput > maximumOutput {
+		return CreateSpec{}, fmt.Errorf("rescue output exceeds %d bytes", maximumOutput)
+	}
+	timeoutSeconds := int64(duration / time.Second)
+	return CreateSpec{
+		Arguments:      normalizedArgs,
+		TimeoutSeconds: timeoutSeconds,
+		MaxOutputBytes: maxOutput,
+		SSHPort:        resolvedPort,
+		SpecDigest:     credentialaction.RescueSpecDigest(normalizedArgs, timeoutSeconds, maxOutput, resolvedPort),
+	}, nil
+}
 
 func signalKey(key string) {
 	signals.Lock()
@@ -168,72 +240,40 @@ func ClearConnectionError(agentID, helperInstanceID string) error {
 func Create(agentID string, action rescuev1.RescueAction, arguments []string, timeout *durationpb.Duration, maxOutput uint64, idempotencyKey string, sshPort uint32) (*rescuev1.RescueSession, error) {
 	createMu.Lock()
 	defer createMu.Unlock()
-	profile, saved, err := clients.GetDeploymentProfile(agentID)
-	if err != nil {
+	if err := ValidateTarget(agentID); err != nil {
 		return nil, err
 	}
-	allowed, err := clients.PrivilegedCapabilityAllowed(agentID, "rescue")
+	spec, err := NormalizeCreateSpec(action, arguments, timeout, maxOutput, sshPort)
 	if err != nil {
 		return nil, err
-	}
-	if !saved || !allowed || !profile.RescueEnabled {
-		return nil, errors.New("rescue helper requires an applied rescue authorization")
-	}
-	if !allowedAction(action) {
-		return nil, errors.New("unsupported rescue action")
-	}
-	// The port is validated here rather than in the helper so that the value
-	// reaching a privileged process has already been bounded, and so a bad
-	// request fails immediately instead of after a lease round trip.
-	resolvedPort, err := resolveSSHPort(action, sshPort)
-	if err != nil {
-		return nil, err
-	}
-	if len(arguments) > maxArgumentCount {
-		return nil, errors.New("too many rescue arguments")
-	}
-	total := 0
-	for i := range arguments {
-		arguments[i] = sanitize(arguments[i], maxArgumentBytes)
-		total += len(arguments[i])
-	}
-	if total > maxArgumentBytes {
-		return nil, errors.New("rescue arguments are too large")
-	}
-	duration := defaultTimeout
-	if timeout != nil {
-		if err := timeout.CheckValid(); err != nil {
-			return nil, err
-		}
-		duration = timeout.AsDuration()
-	}
-	if duration <= 0 || duration > maxTimeout {
-		return nil, fmt.Errorf("rescue timeout must be between 1s and %s", maxTimeout)
-	}
-	if maxOutput == 0 {
-		maxOutput = defaultOutput
-	}
-	if maxOutput > maximumOutput {
-		return nil, fmt.Errorf("rescue output exceeds %d bytes", maximumOutput)
 	}
 	idempotencyKey = sanitize(idempotencyKey, 128)
 	if idempotencyKey != "" {
 		var existing models.RescueSession
 		if err := dbcore.GetDBInstance().Where("client = ? AND idempotency_key = ?", agentID, idempotencyKey).First(&existing).Error; err == nil {
+			existingDigest := existing.SpecDigest
+			if existingDigest == "" {
+				var existingArgs []string
+				_ = json.Unmarshal([]byte(existing.Arguments), &existingArgs)
+				existingDigest = credentialaction.RescueSpecDigest(existingArgs, existing.TimeoutSeconds, existing.MaxOutputBytes, existing.SSHPort)
+			}
+			if existingDigest != spec.SpecDigest {
+				return nil, ErrIdempotencyConflict
+			}
 			return sessionToProto(existing), nil
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
 		}
 	}
-	encodedArguments, err := json.Marshal(arguments)
+	encodedArguments, err := json.Marshal(spec.Arguments)
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
 	row := models.RescueSession{
 		ID: utils.GenerateRandomString(32), Client: agentID, Action: int32(action), Arguments: string(encodedArguments),
-		State: int32(commonv1.OperationState_OPERATION_STATE_QUEUED), TimeoutSeconds: int64(duration / time.Second),
-		MaxOutputBytes: maxOutput, IdempotencyKey: idempotencyKey, SSHPort: resolvedPort, CreatedAt: now,
+		State: int32(commonv1.OperationState_OPERATION_STATE_QUEUED), TimeoutSeconds: spec.TimeoutSeconds,
+		MaxOutputBytes: spec.MaxOutputBytes, IdempotencyKey: idempotencyKey, SpecDigest: spec.SpecDigest, SSHPort: spec.SSHPort, CreatedAt: now,
 	}
 	if row.ID == "" {
 		return nil, errors.New("failed to create rescue session ID")

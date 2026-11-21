@@ -51,10 +51,15 @@ type RateLimitController struct {
 	lastSweep     time.Time
 	historyActive map[string]int
 	historyTotal  int
+	ceremonies    *RateLimitController
 }
 
 func NewRateLimitController(enabled bool) *RateLimitController {
-	return &RateLimitController{enabled: enabled, buckets: make(map[string]rateLimitBucket)}
+	return &RateLimitController{
+		enabled:    enabled,
+		buckets:    make(map[string]rateLimitBucket),
+		ceremonies: &RateLimitController{enabled: true, buckets: make(map[string]rateLimitBucket)},
+	}
 }
 
 func (ctrl *RateLimitController) Update(event config.ConfigEvent) bool {
@@ -167,13 +172,18 @@ func (ctrl *RateLimitController) snapshotEnabled() bool {
 func (ctrl *RateLimitController) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Set("komari_request_limiter", ctrl)
-		if !ctrl.snapshotEnabled() || !isAPIRequestPath(c.Request.URL.Path) ||
+		_, _, ceremony := ceremonyBudget(c.Request.URL.Path)
+		if (!ctrl.snapshotEnabled() && !ceremony) || !isAPIRequestPath(c.Request.URL.Path) ||
 			c.Request.Method == http.MethodOptions {
 			c.Next()
 			return
 		}
 		key, rate, burst := ctrl.keyAndBudget(c)
-		allowed, retryAfter := ctrl.allow(key, rate, burst, time.Now())
+		budget := ctrl
+		if ceremony && ctrl.ceremonies != nil {
+			budget = ctrl.ceremonies
+		}
+		allowed, retryAfter := budget.allow(key, rate, burst, time.Now())
 		if allowed && isHistoricalReadPath(c.Request.URL.Path) {
 			allowed = ctrl.acquireHistory(key)
 			if allowed {
@@ -187,6 +197,10 @@ func (ctrl *RateLimitController) Middleware() gin.HandlerFunc {
 			return
 		}
 		c.Header("Retry-After", strconv.Itoa(int(math.Ceil(retryAfter.Seconds()))))
+		if strings.HasPrefix(c.Request.URL.Path, "/komari.") {
+			AbortRequest(c, http.StatusTooManyRequests, "request rate limit exceeded")
+			return
+		}
 		c.Header("Cache-Control", "no-store")
 		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
 			"code": "resource_exhausted", "message": "request rate limit exceeded", "error": "request rate limit exceeded",
@@ -220,6 +234,9 @@ func AcquireCompatibilityHistoryRead(c *gin.Context) (func(), time.Duration) {
 }
 
 func (ctrl *RateLimitController) keyAndBudget(c *gin.Context) (string, float64, float64) {
+	if lane, budget, ok := ceremonyBudget(c.Request.URL.Path); ok {
+		return lane + ":" + AuthSourceIP(c), budget[0], budget[1]
+	}
 	role := c.GetString("role")
 	identity := AuthSourceIP(c)
 	authenticated := true
@@ -233,9 +250,6 @@ func (ctrl *RateLimitController) keyAndBudget(c *gin.Context) (string, float64, 
 		authenticated = false
 	}
 	path := c.Request.URL.Path
-	if path == "/komari.credential.v1.PasskeyLoginService/BeginPasskeyLogin" || path == "/komari.credential.v1.PasskeyLoginService/CompletePasskeyLogin" || path == "/api/login" || path == "/komari.credential.v1.PasswordLoginService/BeginPasswordLogin" {
-		return "login:" + AuthSourceIP(c), 0.2, 5
-	}
 	// Classify history before Agent ingestion so expensive reads cannot spend
 	// or inherit the higher-priority reporting budget.
 	if isHistoricalReadPath(path) {
@@ -262,6 +276,27 @@ func (ctrl *RateLimitController) keyAndBudget(c *gin.Context) (string, float64, 
 		return "read:" + identity, 10, 60
 	}
 	return "read:" + identity, 40, 160
+}
+
+// Exact anonymous procedures have independent, always-on admission lanes.
+// A visitor dashboard never pays for enrollment, login or refresh attempts.
+func ceremonyBudget(path string) (string, [2]float64, bool) {
+	switch path {
+	case "/api/login", "/komari.credential.v1.PasswordLoginService/BeginPasswordLogin", "/komari.credential.v1.PasskeyLoginService/BeginPasskeyLogin", "/komari.credential.v1.PasskeyLoginService/CompletePasskeyLogin":
+		return "login", [2]float64{0.2, 5}, true
+	case "/komari.credential.v1.PasswordLoginService/BeginLoginVerification", "/komari.credential.v1.PasswordLoginService/CompletePasswordLogin", "/komari.credential.v1.PasswordLoginService/CancelPasswordLogin":
+		return "login-ceremony", [2]float64{2, 10}, true
+	case "/komari.enrollment.v1.EnrollmentService/BeginEnrollment":
+		return "enrollment-begin", [2]float64{2, 20}, true
+	case "/komari.enrollment.v1.EnrollmentService/PollEnrollment":
+		return "enrollment-poll", [2]float64{20, 80}, true
+	case "/komari.enrollment.v1.EnrollmentService/GetTrustBundle":
+		return "enrollment-trust", [2]float64{10, 40}, true
+	case "/komari.enrollment.v1.EnrollmentService/RefreshCredentials":
+		return "enrollment-refresh", [2]float64{20, 80}, true
+	default:
+		return "", [2]float64{}, false
+	}
 }
 
 func (ctrl *RateLimitController) acquireHistory(key string) bool {

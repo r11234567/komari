@@ -13,28 +13,39 @@ func TestCorsMiddlewareValidatesAPIOrigins(t *testing.T) {
 
 	tests := []struct {
 		name            string
+		url             string
 		origin          string
 		wantStatus      int
 		wantAllowOrigin string
 	}{
 		{
 			name:       "allows API requests without Origin",
+			url:        "https://api.example/api/ping",
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:            "allows same host Origin",
+			name:            "allows same scheme and host Origin",
+			url:             "https://api.example/api/ping",
 			origin:          "https://api.example",
 			wantStatus:      http.StatusOK,
 			wantAllowOrigin: "https://api.example",
 		},
 		{
+			name:       "rejects scheme downgrade Origin",
+			url:        "http://api.example/api/ping",
+			origin:     "https://api.example",
+			wantStatus: http.StatusForbidden,
+		},
+		{
 			name:            "allows configured Origin",
+			url:             "https://api.example/api/ping",
 			origin:          "https://allowed.example",
 			wantStatus:      http.StatusOK,
 			wantAllowOrigin: "https://allowed.example",
 		},
 		{
 			name:       "rejects unlisted Origin",
+			url:        "https://api.example/api/ping",
 			origin:     "https://evil.example",
 			wantStatus: http.StatusForbidden,
 		},
@@ -42,7 +53,7 @@ func TestCorsMiddlewareValidatesAPIOrigins(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			response := performCORSRequest(router, http.MethodGet, "/api/ping", "api.example", tt.origin)
+			response := performCORSRequest(router, http.MethodGet, tt.url, "api.example", tt.origin)
 
 			if response.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d", response.Code, tt.wantStatus)
@@ -72,7 +83,12 @@ func TestCorsMiddlewareRejectsUnverifiedBearerFromForeignOrigin(t *testing.T) {
 func TestCorsMiddlewareHandlesAPIPreflight(t *testing.T) {
 	router := setupCORSRouter(true, "https://allowed.example")
 
-	allowed := performCORSRequest(router, http.MethodOptions, "/api/ping", "api.example", "https://allowed.example")
+	allowedReq := httptest.NewRequest(http.MethodOptions, "https://api.example/api/ping", nil)
+	allowedReq.Host = "api.example"
+	allowedReq.Header.Set("Origin", "https://allowed.example")
+	allowedReq.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	allowed := httptest.NewRecorder()
+	router.ServeHTTP(allowed, allowedReq)
 	if allowed.Code != http.StatusNoContent {
 		t.Fatalf("allowed preflight status = %d, want %d", allowed.Code, http.StatusNoContent)
 	}
@@ -80,7 +96,7 @@ func TestCorsMiddlewareHandlesAPIPreflight(t *testing.T) {
 		t.Fatalf("allowed preflight Access-Control-Allow-Origin = %q", got)
 	}
 
-	rejected := performCORSRequest(router, http.MethodOptions, "/api/ping", "api.example", "https://evil.example")
+	rejected := performCORSRequest(router, http.MethodOptions, "https://api.example/api/ping", "api.example", "https://evil.example")
 	if rejected.Code != http.StatusForbidden {
 		t.Fatalf("rejected preflight status = %d, want %d", rejected.Code, http.StatusForbidden)
 	}
@@ -98,12 +114,35 @@ func TestCorsMiddlewareProtectsConnectProcedures(t *testing.T) {
 	}
 }
 
-func TestCorsMiddlewareAllowsAuthorizationPreflightFromAnyOrigin(t *testing.T) {
+func TestCorsMiddlewareRejectsForeignAuthorizationPreflight(t *testing.T) {
 	router := setupCORSRouter(true, "")
 
-	request := httptest.NewRequest(http.MethodOptions, "/api/ping", nil)
+	request := httptest.NewRequest(http.MethodOptions, "https://api.example/api/ping", nil)
 	request.Host = "api.example"
 	request.Header.Set("Origin", "https://evil.example")
+	request.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	request.Header.Set("Access-Control-Request-Headers", "authorization")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want empty", got)
+	}
+	if got := response.Header().Get("Vary"); got == "" {
+		t.Fatal("expected Vary headers even when rejecting preflight")
+	}
+}
+
+func TestCorsMiddlewareAllowsAuthorizationPreflightFromAllowedOrigin(t *testing.T) {
+	router := setupCORSRouter(true, "https://allowed.example")
+
+	request := httptest.NewRequest(http.MethodOptions, "https://api.example/api/ping", nil)
+	request.Host = "api.example"
+	request.Header.Set("Origin", "https://allowed.example")
+	request.Header.Set("Access-Control-Request-Method", http.MethodGet)
 	request.Header.Set("Access-Control-Request-Headers", "authorization")
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
@@ -111,11 +150,11 @@ func TestCorsMiddlewareAllowsAuthorizationPreflightFromAnyOrigin(t *testing.T) {
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
 	}
-	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "https://evil.example" {
-		t.Fatalf("Access-Control-Allow-Origin = %q, want %q", got, "https://evil.example")
+	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "https://allowed.example" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want %q", got, "https://allowed.example")
 	}
-	if got := response.Header().Get("Access-Control-Allow-Credentials"); got != "" {
-		t.Fatalf("Access-Control-Allow-Credentials = %q, want empty", got)
+	if got := response.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("Access-Control-Allow-Credentials = %q, want true", got)
 	}
 }
 

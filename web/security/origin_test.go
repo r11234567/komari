@@ -3,16 +3,31 @@ package security
 import (
 	"net/http/httptest"
 	"testing"
+
+	"github.com/komari-monitor/komari/pkg/requestmeta"
 )
 
-func TestOriginMatchesRequestThroughPrivateReverseProxy(t *testing.T) {
+func TestOriginMatchesRequestRequiresExplicitTrustForPrivateReverseProxy(t *testing.T) {
 	request := httptest.NewRequest("GET", "http://komari:25774/api/clients", nil)
 	request.Host = "komari:25774"
 	request.RemoteAddr = "172.17.0.1:41234"
 	request.Header.Set("X-Forwarded-Host", "monitor.example.com")
+	request.Header.Set("X-Forwarded-Proto", "https")
 
-	if !OriginMatchesRequest("https://monitor.example.com", request) {
-		t.Fatal("forwarded public host was not accepted from a private reverse proxy")
+	if OriginMatchesRequest("https://monitor.example.com", request) {
+		t.Fatal("unconfigured private proxy unexpectedly gained forwarded host trust")
+	}
+
+	policy, err := requestmeta.NewPolicy("172.17.0.0/16", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := policy.BindRequest(request)
+	if !OriginMatchesRequest("https://monitor.example.com", trusted) {
+		t.Fatal("forwarded public host was not accepted from an explicitly trusted reverse proxy")
+	}
+	if OriginMatchesRequest("http://monitor.example.com", trusted) {
+		t.Fatal("HTTP origin matched HTTPS forwarded request")
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/pkg/requestmeta"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/web/signonauth"
@@ -226,6 +227,19 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 			)
 		}
 		cfg[config.AdminDefaultPageSizeKey] = pageSize
+	}
+	for _, key := range []string{config.CorsAllowedOriginsKey, config.WsAllowedOriginsKey} {
+		if raw, ok := cfg[key]; ok {
+			text, ok := raw.(string)
+			if !ok {
+				return nil, rpc.MakeError(rpc.InvalidParams, key+" must be a string", nil)
+			}
+			normalized, err := requestmeta.NormalizeAllowlist(text, false)
+			if err != nil {
+				return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
+			}
+			cfg[key] = normalized
+		}
 	}
 	// Ignore retired controls submitted by an older cached frontend. The
 	// startup normalizer keeps their persisted compatibility values fixed.

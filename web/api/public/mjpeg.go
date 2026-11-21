@@ -544,12 +544,16 @@ func renderFrame(ctx context.Context, lang string, tzOffset *int) *image.RGBA {
 	// 检查是否正在下载
 	downloadMutex.Lock()
 	isDownloading := downloading
-	progress := downloadProgress
+	var progressCopy *DownloadProgress
+	if downloadProgress != nil {
+		copied := *downloadProgress
+		progressCopy = &copied
+	}
 	downloadMutex.Unlock()
 
 	if !ready {
-		if isDownloading && progress != nil {
-			return renderDownloadProgress(progress)
+		if isDownloading && progressCopy != nil {
+			return renderDownloadProgress(*progressCopy)
 		}
 		// 如果下载失败且不在下载中，尝试使用基础字体渲染
 		if ferr != nil {
@@ -562,7 +566,7 @@ func renderFrame(ctx context.Context, lang string, tzOffset *int) *image.RGBA {
 }
 
 // renderDownloadProgress 渲染下载进度（使用基础字体）
-func renderDownloadProgress(p *DownloadProgress) *image.RGBA {
+func renderDownloadProgress(p DownloadProgress) *image.RGBA {
 	width := 600
 	height := 200
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
@@ -1258,12 +1262,14 @@ func drawProgressBar(img *image.RGBA, x, y, w, h int, pct float64, face font.Fac
 	// 百分比文字
 	text := fmt.Sprintf("%.1f%%", pct)
 	if face != nil {
-		// 计算文字宽度并居中
+		// opentype.Face caches glyph state internally and is not safe for concurrent BoundString/DrawString.
+		fontDrawMu.Lock()
 		bounds, _ := font.BoundString(face, text)
 		textW := (bounds.Max.X - bounds.Min.X).Ceil()
 		textX := x + (w-textW)/2
 		textY := y + h/2 + 4
-		drawString(img, text, textX, textY, color.Black, face)
+		drawStringLocked(img, text, textX, textY, color.Black, face)
+		fontDrawMu.Unlock()
 	}
 }
 
@@ -1309,6 +1315,10 @@ func drawString(img *image.RGBA, s string, x, y int, c color.Color, face font.Fa
 	// opentype.Face caches glyph state internally and is not safe for concurrent draws.
 	fontDrawMu.Lock()
 	defer fontDrawMu.Unlock()
+	drawStringLocked(img, s, x, y, c, face)
+}
+
+func drawStringLocked(img *image.RGBA, s string, x, y int, c color.Color, face font.Face) {
 	d := &font.Drawer{
 		Dst:  img,
 		Src:  image.NewUniform(c),

@@ -42,6 +42,9 @@ http {
       grpc_set_header Host \$http_host;
       grpc_set_header X-Forwarded-Proto https;
       grpc_set_header X-Forwarded-Host \$http_host;
+      grpc_set_header X-Forwarded-For \$remote_addr;
+      grpc_set_header X-Real-IP \$remote_addr;
+      grpc_set_header Forwarded '';
       grpc_read_timeout 180s;
     }
     location / {
@@ -50,6 +53,9 @@ http {
       proxy_set_header Host \$http_host;
       proxy_set_header X-Forwarded-Proto https;
       proxy_set_header X-Forwarded-Host \$http_host;
+      proxy_set_header X-Forwarded-For \$remote_addr;
+      proxy_set_header X-Real-IP \$remote_addr;
+      proxy_set_header Forwarded '';
       proxy_set_header Connection '';
       proxy_buffering off;
       proxy_request_buffering off;
@@ -64,10 +70,15 @@ if [[ "${KOMARI_E2E_LOCAL:-}" = 1 ]]; then
 fi
 sudo nginx -t -c "$E2E_ROOT/nginx.conf" -p "$E2E_ROOT/"
 sudo nginx -c "$E2E_ROOT/nginx.conf" -p "$E2E_ROOT/"
+panel_env=(--setenv="KOMARI_TRUSTED_PROXIES=${KOMARI_TRUSTED_PROXIES:-127.0.0.1,::1}")
+if [[ -n "${KOMARI_PUBLIC_ORIGIN:-}" ]]; then
+  panel_env+=(--setenv="KOMARI_PUBLIC_ORIGIN=${KOMARI_PUBLIC_ORIGIN}")
+fi
 sudo systemd-run --unit=komari-e2e-panel --collect \
 	--slice=komari-e2e.slice \
   --property="User=$runner_user" --property="WorkingDirectory=$E2E_ROOT/panel" \
   --property=CPUQuota=100% --property=MemoryMax=1G \
+  "${panel_env[@]}" \
   "$E2E_ROOT/bin/komari" server --listen 127.0.0.1:29444
 sudo systemctl set-property --runtime komari-e2e.slice CPUQuota=100% MemoryMax=1G MemorySwapMax=0
 for attempt in $(seq 1 60); do

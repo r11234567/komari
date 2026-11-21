@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/rescueapp"
@@ -44,13 +46,27 @@ func (s *rescueService) CreateRescueSession(ctx context.Context, req *connect.Re
 	if err := requireRescueAdministrator(meta); err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(req.Msg.AgentId) == "" {
+		return nil, connectError(connect.CodeInvalidArgument, errors.New("agent ID is required"))
+	}
+	if err := rescueapp.ValidateTarget(req.Msg.AgentId); err != nil {
+		return nil, connectError(connect.CodeFailedPrecondition, err)
+	}
+	spec, err := rescueapp.NormalizeCreateSpec(req.Msg.Action, req.Msg.Arguments, req.Msg.Timeout, req.Msg.MaxOutputBytes, req.Msg.GetSshPort())
+	if err != nil {
+		return nil, connectError(connect.CodeInvalidArgument, err)
+	}
 	if rescueapp.RequiresTwoFactor(req.Msg.Action) {
-		if err := verifyConnectCredential(ctx, req.Msg.TwoFactor, "rescue:create", req.Msg.AgentId, strconv.Itoa(int(req.Msg.Action)), strconv.FormatUint(uint64(req.Msg.GetSshPort()), 10)); err != nil {
+		targets := credentialaction.RescueTargets(req.Msg.AgentId, int32(req.Msg.Action), spec.Arguments, spec.TimeoutSeconds, spec.MaxOutputBytes, spec.SSHPort)
+		if err := verifyConnectCredential(ctx, req.Msg.TwoFactor, "rescue:create", targets...); err != nil {
 			return nil, err
 		}
 	}
 	session, err := rescueapp.Create(req.Msg.AgentId, req.Msg.Action, req.Msg.Arguments, req.Msg.Timeout, req.Msg.MaxOutputBytes, req.Msg.IdempotencyKey, req.Msg.GetSshPort())
 	if err != nil {
+		if errors.Is(err, rescueapp.ErrIdempotencyConflict) {
+			return nil, connectError(connect.CodeAborted, err)
+		}
 		return nil, connectError(connect.CodeFailedPrecondition, err)
 	}
 	// Read-only diagnostics are logged at a lower severity so that routine

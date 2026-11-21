@@ -708,10 +708,7 @@ func publicMetricEntityIDs(_ context.Context, requested []string) ([]string, *rp
 	}
 	out := make([]string, 0, len(requested))
 	for _, entityID := range requested {
-		if hidden[entityID] {
-			continue
-		}
-		if visible[entityID] || !hidden[entityID] {
+		if visible[entityID] {
 			out = append(out, entityID)
 		}
 	}

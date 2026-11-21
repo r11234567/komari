@@ -157,7 +157,10 @@ func loadAccount(ctx context.Context, user string, records []Record, allowSynced
 		id, _ := base64.RawURLEncoding.DecodeString(record.ID)
 		key, _ := base64.RawURLEncoding.DecodeString(record.PublicKey)
 		var revoked int64
-		if err := db.Model(&models.PasskeyRevocation{}).Where("credential_hash = ?", idDigest(id)).Count(&revoked).Error; err == nil && revoked > 0 {
+		if err := db.Model(&models.PasskeyRevocation{}).Where("credential_hash = ?", idDigest(id)).Count(&revoked).Error; err != nil {
+			return account{}, credential.ErrProviderUnavailable
+		}
+		if revoked > 0 {
 			continue
 		}
 		row := models.PasskeyCounter{UserUUID: user, KeyDigest: keyDigest(id, key)}

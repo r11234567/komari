@@ -1,10 +1,12 @@
 package connectapi
 
 import (
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/pkg/requestmeta"
 	deploymentv1 "github.com/r11234567/komari-proto/gen/go/komari/deployment/v1"
 )
 
@@ -58,18 +60,29 @@ func TestDeploymentCommandDisablesRemoteControlForNonPrivilegedRuntime(t *testin
 	}
 }
 
-func TestNormalizeDeploymentEndpointUsesRequestOriginWhenSettingIsEmpty(t *testing.T) {
-	endpoint, err := normalizeDeploymentEndpoint("", "https://monitor.example.com/")
+func TestDeploymentEndpointUsesDestinationNotCORSOrigin(t *testing.T) {
+	policy, err := requestmeta.NewPolicy("none", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "https://monitor.example.com/install", nil)
+	r.Header.Set("Origin", "https://different-console.example.com")
+	endpoint, err := requestmeta.PublicURL(policy.BindRequest(r).Context(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if endpoint != "https://monitor.example.com" {
-		t.Fatalf("endpoint = %q", endpoint)
+		t.Fatalf("endpoint = %q, want destination origin", endpoint)
 	}
 }
 
 func TestNormalizeDeploymentEndpointPrefersConfiguredDomain(t *testing.T) {
-	endpoint, err := normalizeDeploymentEndpoint("https://agents.example.com/", "https://monitor.example.com")
+	policy, err := requestmeta.NewPolicy("none", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := policy.BindRequest(httptest.NewRequest("POST", "https://monitor.example.com/install", nil))
+	endpoint, err := requestmeta.PublicURL(r.Context(), "https://agents.example.com/")
 	if err != nil {
 		t.Fatal(err)
 	}

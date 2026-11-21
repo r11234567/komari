@@ -119,30 +119,19 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 			return
 		}
 		if strings.HasPrefix(path, "/komari.") {
-			// Public site metadata must remain reachable so the browser can render
-			// the login/private-site state before it has a session.
-			if path == "/komari.browser.v1.BrowserService/GetPublicInfo" ||
-				path == "/komari.browser.v1.BrowserService/GetThemeContract" ||
-				path == "/komari.browser.v1.BrowserService/GetSession" ||
-				path == "/komari.credential.v1.PasskeyLoginService/GetPasskeyStatus" ||
-				path == "/komari.credential.v1.PasskeyLoginService/BeginPasskeyLogin" ||
-				path == "/komari.credential.v1.PasskeyLoginService/CompletePasskeyLogin" ||
-				path == "/komari.credential.v1.PasswordLoginService/BeginPasswordLogin" ||
-				path == "/komari.credential.v1.PasswordLoginService/BeginLoginVerification" ||
-				path == "/komari.credential.v1.PasswordLoginService/CompletePasswordLogin" ||
-				path == "/komari.credential.v1.PasswordLoginService/CancelPasswordLogin" {
+			// Public site metadata and pre-auth / enrollment ceremonies must remain
+			// reachable so browsers and enrolling agents can proceed without a token.
+			if privateSiteBootstrapProcedure(path) {
 				c.Next()
 				return
 			}
 			privateSite, err := config.GetAs[bool](config.PrivateSiteKey, false)
 			if err != nil {
-				RespondError(c, http.StatusInternalServerError, "Failed to get configuration.")
-				c.Abort()
+				security.AbortRequest(c, http.StatusInternalServerError, "Failed to get configuration.")
 				return
 			}
 			if privateSite && !HasTempAccess(c) {
-				RespondError(c, http.StatusUnauthorized, "Private site is enabled, please login first.")
-				c.Abort()
+				security.AbortRequest(c, http.StatusUnauthorized, "Private site is enabled, please login first.")
 				return
 			}
 			c.Next()
@@ -259,12 +248,20 @@ func PublicPrivateSiteMiddleware() gin.HandlerFunc {
 		}
 		privateSite, err := config.GetAs[bool](config.PrivateSiteKey, false)
 		if err != nil {
-			RespondError(c, http.StatusInternalServerError, "Failed to get configuration.")
-			c.Abort()
+			if strings.HasPrefix(path, "/komari.") {
+				security.AbortRequest(c, http.StatusInternalServerError, "Failed to get configuration.")
+			} else {
+				RespondError(c, http.StatusInternalServerError, "Failed to get configuration.")
+				c.Abort()
+			}
 			return
 		}
 		if !privateSite || HasTempAccess(c) {
 			c.Next()
+			return
+		}
+		if strings.HasPrefix(path, "/komari.") {
+			security.AbortRequest(c, http.StatusUnauthorized, "Private site is enabled; please sign in on the management panel.")
 			return
 		}
 		resp := gin.H{
@@ -313,15 +310,24 @@ func extractClientToken(c *gin.Context) string {
 		return token
 	}
 
-	if c.Request.Method != http.MethodGet {
-		bodyBytes, err := io.ReadAll(c.Request.Body)
+	if c.Request.Method != http.MethodGet && c.Request.Body != nil && !strings.HasPrefix(c.Request.URL.Path, "/komari.") {
+		const maxTokenInspectBytes = 256 << 10
+		origBody := c.Request.Body
+		bodyBytes, err := io.ReadAll(io.LimitReader(origBody, maxTokenInspectBytes+1))
 		if err != nil {
+			c.Request.Body = struct {
+				io.Reader
+				io.Closer
+			}{io.MultiReader(bytes.NewReader(bodyBytes), origBody), origBody}
 			return ""
 		}
-		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		c.Request.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(bodyBytes), origBody), origBody}
 
 		var bodyMap map[string]interface{}
-		if len(bodyBytes) > 0 {
+		if len(bodyBytes) > 0 && len(bodyBytes) <= maxTokenInspectBytes {
 			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
 				if tokenVal, exists := bodyMap["token"]; exists {
 					if str, ok := tokenVal.(string); ok && str != "" {

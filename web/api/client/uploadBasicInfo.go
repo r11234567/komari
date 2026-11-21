@@ -93,6 +93,9 @@ func appendClientRegionFromGeoIP(info map[string]interface{}) {
 }
 
 func UploadBasicInfo(c *gin.Context) {
+	if c.Request != nil && c.Request.Body != nil {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 256<<10)
+	}
 	var cbi = map[string]interface{}{}
 	if err := c.ShouldBindJSON(&cbi); err != nil {
 		c.JSON(400, gin.H{"status": "error", "error": "Invalid or missing data"})
