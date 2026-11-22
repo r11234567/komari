@@ -129,25 +129,26 @@ func registerPanelAuthAndSystemRoutes(r *gin.Engine) {
 // registerAgentRoutes agent（客户端）上报与拉取路由。
 func registerAgentRoutes(r *gin.Engine) {
 	tokenAuthorized := r.Group("/api/clients", api.RequireRole(api.RoleAdmin, api.RoleClient))
+	legacy := tokenAuthorized.Group("", api.RequireLegacyAgent)
 	{
 		// 上报类（WS / 原始流）保留 REST handler。
 		// v2 JSON-RPC 路由已移除：所有 agent 必须使用 Connect RPC (komari.report.v1)，
 		// 不再接受旧的 WebSocket/POST JSON-RPC 上报路径。
-		tokenAuthorized.GET("/report", client.WebSocketReport)
-		tokenAuthorized.POST("/uploadBasicInfo", client.UploadBasicInfo)
-		tokenAuthorized.POST("/report", client.UploadReport)
+		legacy.GET("/report", client.WebSocketReport)
+		legacy.POST("/uploadBasicInfo", client.UploadBasicInfo)
+		legacy.POST("/report", client.UploadReport)
 
 		// Agent 侧遗留终端/远程通道。Connect 的 WebSSHService.AttachSession 已覆盖，
 		// 仅在显式开启兼容开关时挂载。
 		if legacyRemoteCompatEnabled() {
-			tokenAuthorized.GET("/terminal", terminal.EstablishConnection)
-			tokenAuthorized.GET("/remote", remote.EstablishAgent)
+			legacy.GET("/terminal", terminal.EstablishConnection)
+			legacy.GET("/remote", remote.EstablishAgent)
 		}
 
 		// JSON 接口 -> RPC2 (client: 命名空间)。
-		tokenAuthorized.POST("/task/result", jsonRpc.Bind("client:taskResult", jsonRpc.WithRaw()))
-		tokenAuthorized.GET("/ping/tasks", jsonRpc.Bind("client:getPingTasks", jsonRpc.WithRaw()))
-		tokenAuthorized.POST("/ping/result", jsonRpc.Bind("client:uploadPingResult", jsonRpc.WithRaw()))
+		legacy.POST("/task/result", jsonRpc.Bind("client:taskResult", jsonRpc.WithRaw()))
+		legacy.GET("/ping/tasks", jsonRpc.Bind("client:getPingTasks", jsonRpc.WithRaw()))
+		legacy.POST("/ping/result", jsonRpc.Bind("client:uploadPingResult", jsonRpc.WithRaw()))
 		// Agent-initiated one-shot file transfer endpoint. Image/video previews
 		// and large uploads/chunks use this rather than the control RPC.
 		tokenAuthorized.GET("/transfer/:id", filemanager.AgentTransfer)
