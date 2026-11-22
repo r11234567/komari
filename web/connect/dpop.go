@@ -158,6 +158,24 @@ func currentDPoPNonce(agentID string, now time.Time) string {
 	return dpopNonceForBucket(agentID, now.Unix()/dpopNonceBucketSeconds)
 }
 
+// AdvertiseAgentProof handles the unauthenticated compatibility probe. A
+// challenge is scoped to the supplied identifier and says nothing about
+// whether that identifier is registered.
+func AdvertiseAgentProof(c *gin.Context) {
+	c.Writer.Header().Add("Vary", "X-Komari-Agent-Nonce-For")
+	agentID := c.GetHeader("X-Komari-Agent-Nonce-For")
+	if agentID == "" || len(agentID) > 128 ||
+		strings.IndexFunc(agentID, func(r rune) bool {
+			return r != '-' && r != '_' && !(r >= '0' && r <= '9') &&
+				!(r >= 'A' && r <= 'Z') && !(r >= 'a' && r <= 'z')
+		}) >= 0 {
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Komari-Agent-Proof", "dpop-jwt-v1")
+	c.Header("DPoP-Nonce", currentDPoPNonce(agentID, time.Now()))
+}
+
 func verifyDPoPServerNonce(agentID, raw string, now time.Time) bool {
 	bucketStr, macStr, ok := strings.Cut(raw, ".")
 	if !ok || bucketStr == "" || macStr == "" {
