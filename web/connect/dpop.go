@@ -3,13 +3,18 @@ package connectapi
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +22,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/enrollment"
+	"github.com/komari-monitor/komari/pkg/requestmeta"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"gorm.io/gorm"
 )
@@ -28,6 +34,8 @@ const (
 	maxRefreshPerSubject   = 256
 	maxNonceLength         = 128
 	maxDPoPBodyBytes       = 10 << 20
+	maxDPoPJWTBytes        = 8192
+	dpopNonceBucketSeconds = 60
 )
 
 // replayEntry tracks an active replay-prevention key and its owner bucket.
@@ -113,6 +121,9 @@ func (r *replayCache) Cleanup() {
 var (
 	dpopReplayCache    = newReplayCache(maxDPoPNonceEntries, maxDPoPPerSubject)
 	refreshReplayCache = newReplayCache(maxRefreshNonceEntries, maxRefreshPerSubject)
+
+	dpopNonceKeyOnce sync.Once
+	dpopNonceKey     [32]byte
 )
 
 func init() {
@@ -124,6 +135,51 @@ func init() {
 			refreshReplayCache.Cleanup()
 		}
 	}()
+}
+
+func dpopHMACSecret() []byte {
+	dpopNonceKeyOnce.Do(func() {
+		if _, err := io.ReadFull(rand.Reader, dpopNonceKey[:]); err != nil {
+			panic(fmt.Sprintf("dpop: generate hmac key: %v", err))
+		}
+	})
+	return dpopNonceKey[:]
+}
+
+func dpopNonceForBucket(agentID string, bucket int64) string {
+	mac := hmac.New(sha256.New, dpopHMACSecret())
+	_, _ = mac.Write([]byte(agentID))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(strconv.FormatInt(bucket, 10)))
+	return strconv.FormatInt(bucket, 10) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func currentDPoPNonce(agentID string, now time.Time) string {
+	return dpopNonceForBucket(agentID, now.Unix()/dpopNonceBucketSeconds)
+}
+
+func verifyDPoPServerNonce(agentID, raw string, now time.Time) bool {
+	bucketStr, macStr, ok := strings.Cut(raw, ".")
+	if !ok || bucketStr == "" || macStr == "" {
+		return false
+	}
+	bucket, err := strconv.ParseInt(bucketStr, 10, 64)
+	if err != nil || bucket < 0 {
+		return false
+	}
+	currentBucket := now.Unix() / dpopNonceBucketSeconds
+	if bucket < currentBucket-2 || bucket > currentBucket {
+		return false
+	}
+	gotMAC, err := base64.RawURLEncoding.DecodeString(macStr)
+	if err != nil || len(gotMAC) != sha256.Size {
+		return false
+	}
+	mac := hmac.New(sha256.New, dpopHMACSecret())
+	_, _ = mac.Write([]byte(agentID))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(strconv.FormatInt(bucket, 10)))
+	return hmac.Equal(gotMAC, mac.Sum(nil))
 }
 
 // isClientStreamingProcedure reports whether the Connect RPC procedure uses a
@@ -141,8 +197,51 @@ func isClientStreamingProcedure(path string) bool {
 	}
 }
 
+type dpopJWTHeader struct {
+	Typ string     `json:"typ"`
+	Alg string     `json:"alg"`
+	JWK dpopJWTJWK `json:"jwk"`
+}
+
+type dpopJWTJWK struct {
+	Kty string `json:"kty"`
+	Crv string `json:"crv"`
+	X   string `json:"x"`
+}
+
+type dpopJWTClaims struct {
+	JTI   string `json:"jti"`
+	HTM   string `json:"htm"`
+	HTU   string `json:"htu"`
+	IAT   int64  `json:"iat"`
+	ATH   string `json:"ath"`
+	Nonce string `json:"nonce"`
+	BH    string `json:"bh"`
+	BM    string `json:"bm"`
+}
+
+func normalizeDPoPHTU(raw string) (string, error) {
+	if raw == "" || strings.TrimSpace(raw) != raw || strings.ContainsAny(raw, "?#") {
+		return "", errors.New("dpop: invalid htu claim")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil || u.Opaque != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return "", errors.New("dpop: invalid htu claim")
+	}
+	origin, err := requestmeta.NormalizeOrigin(strings.ToLower(u.Scheme) + "://" + u.Host)
+	if err != nil {
+		return "", errors.New("dpop: invalid htu origin")
+	}
+	p := u.EscapedPath()
+	if p == "" {
+		p = "/"
+	}
+	return origin + p, nil
+}
+
 func verifyDPoP(c *gin.Context, principal *rpc.Principal) error {
-	sig := strings.TrimSpace(c.GetHeader("X-Komari-Signature"))
+	dpopProof := strings.TrimSpace(c.GetHeader("DPoP"))
+	legacySig := strings.TrimSpace(c.GetHeader("X-Komari-Signature"))
 
 	var pubKey ed25519.PublicKey
 	if principal != nil && principal.Type == rpc.PrincipalAgent && principal.ClientUUID != "" {
@@ -150,11 +249,11 @@ func verifyDPoP(c *gin.Context, principal *rpc.Principal) error {
 		if err != nil {
 			// Legacy un-enrolled agents have no row in agent_credentials; only
 			// allow unsigned passthrough when no credential row exists AND no
-			// signature was supplied. Any DB failure or corrupted key fails closed.
+			// proof header was supplied. Any DB failure or corrupted key fails closed.
 			if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return fmt.Errorf("dpop: resolve agent public key: %w", err)
 			}
-			if sig == "" {
+			if dpopProof == "" && legacySig == "" {
 				return nil
 			}
 			return fmt.Errorf("dpop: resolve agent public key: %w", err)
@@ -163,15 +262,160 @@ func verifyDPoP(c *gin.Context, principal *rpc.Principal) error {
 			return errors.New("dpop: invalid stored agent public key")
 		}
 		pubKey = pk
-		if sig == "" {
-			return errors.New("dpop: missing required X-Komari-Signature header for enrolled agent")
+		if dpopProof == "" && legacySig == "" {
+			c.Header("DPoP-Nonce", currentDPoPNonce(principal.ClientUUID, time.Now()))
+			c.Header("WWW-Authenticate", `DPoP error="invalid_dpop_proof"`)
+			return errors.New("dpop: missing required DPoP proof for enrolled agent")
 		}
-	} else if sig == "" {
+	} else if dpopProof == "" && legacySig == "" {
 		return nil
 	} else {
 		return errors.New("dpop: agent principal required for signed request")
 	}
 
+	if dpopProof != "" {
+		return verifyRFC9449DPoP(c, principal.ClientUUID, pubKey, dpopProof)
+	}
+	return verifyLegacyDPoP(c, principal.ClientUUID, pubKey, legacySig)
+}
+
+func verifyRFC9449DPoP(c *gin.Context, agentID string, pubKey ed25519.PublicKey, rawJWT string) error {
+	now := time.Now()
+	c.Header("DPoP-Nonce", currentDPoPNonce(agentID, now))
+
+	if len(rawJWT) > maxDPoPJWTBytes {
+		return errors.New("dpop: proof exceeds maximum size")
+	}
+	authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "DPoP") || strings.TrimSpace(parts[1]) == "" {
+		c.Header("WWW-Authenticate", `DPoP error="invalid_token"`)
+		return errors.New("dpop: Authorization DPoP scheme required")
+	}
+	token := strings.TrimSpace(parts[1])
+
+	segments := strings.Split(rawJWT, ".")
+	if len(segments) != 3 || segments[0] == "" || segments[1] == "" || segments[2] == "" {
+		return errors.New("dpop: malformed compact JWS")
+	}
+	headerBytes, err := base64.RawURLEncoding.DecodeString(segments[0])
+	if err != nil {
+		return errors.New("dpop: invalid JWS header encoding")
+	}
+	claimsBytes, err := base64.RawURLEncoding.DecodeString(segments[1])
+	if err != nil {
+		return errors.New("dpop: invalid JWS claims encoding")
+	}
+	sigBytes, err := base64.RawURLEncoding.DecodeString(segments[2])
+	if err != nil || len(sigBytes) != ed25519.SignatureSize {
+		return errors.New("dpop: invalid JWS signature encoding")
+	}
+
+	var hdr dpopJWTHeader
+	if err := json.Unmarshal(headerBytes, &hdr); err != nil {
+		return errors.New("dpop: malformed JWS header JSON")
+	}
+	if !strings.EqualFold(hdr.Typ, "dpop+jwt") || hdr.Alg != "EdDSA" ||
+		hdr.JWK.Kty != "OKP" || hdr.JWK.Crv != "Ed25519" {
+		return errors.New("dpop: unsupported JWS header parameters")
+	}
+	jwkPub, err := base64.RawURLEncoding.DecodeString(hdr.JWK.X)
+	if err != nil || len(jwkPub) != ed25519.PublicKeySize {
+		return errors.New("dpop: invalid OKP JWK public key")
+	}
+	if subtle.ConstantTimeCompare(jwkPub, pubKey) != 1 {
+		return errors.New("dpop: JWK does not match enrolled agent public key")
+	}
+
+	signingInput := segments[0] + "." + segments[1]
+	if !ed25519.Verify(pubKey, []byte(signingInput), sigBytes) {
+		return errors.New("dpop: JWS signature verification failed")
+	}
+
+	var claims dpopJWTClaims
+	if err := json.Unmarshal(claimsBytes, &claims); err != nil {
+		return errors.New("dpop: malformed JWS claims JSON")
+	}
+	if claims.JTI == "" || len(claims.JTI) > maxNonceLength {
+		return errors.New("dpop: missing or invalid jti claim")
+	}
+	if !strings.EqualFold(claims.HTM, c.Request.Method) || claims.HTM != c.Request.Method {
+		return errors.New("dpop: htm method mismatch")
+	}
+	expectedOrigin, err := requestmeta.Origin(c.Request)
+	if err != nil {
+		return errors.New("dpop: cannot resolve canonical request origin")
+	}
+	reqPath := c.Request.URL.EscapedPath()
+	if reqPath == "" {
+		reqPath = "/"
+	}
+	gotHTU, err := normalizeDPoPHTU(claims.HTU)
+	if err != nil || gotHTU != expectedOrigin+reqPath {
+		return errors.New("dpop: htu claim mismatch")
+	}
+	if math.Abs(float64(now.Unix()-claims.IAT)) > 120 {
+		return errors.New("dpop: iat drift exceeds allowed window (120s)")
+	}
+	tokenDigest := sha256.Sum256([]byte(token))
+	expectedATH := base64.RawURLEncoding.EncodeToString(tokenDigest[:])
+	if subtle.ConstantTimeCompare([]byte(claims.ATH), []byte(expectedATH)) != 1 {
+		return errors.New("dpop: ath access token hash mismatch")
+	}
+
+	allowStream := isClientStreamingProcedure(c.Request.URL.Path)
+	if claims.BM != "" && claims.BM != "stream" {
+		return errors.New("dpop: unsupported bm body mode")
+	}
+	if claims.BM == "stream" && !allowStream {
+		return errors.New("dpop: stream body mode not permitted for unary RPC")
+	}
+	isStream := allowStream && (claims.BM == "stream" || c.Request.ContentLength < 0)
+
+	var expectedBH string
+	if isStream {
+		emptyDigest := sha256.Sum256(nil)
+		expectedBH = base64.RawURLEncoding.EncodeToString(emptyDigest[:])
+	} else {
+		var bodyBytes []byte
+		if c.Request.Body != nil {
+			bodyBytes, err = io.ReadAll(io.LimitReader(c.Request.Body, maxDPoPBodyBytes+1))
+			if err != nil {
+				return errors.New("dpop: failed to read request body")
+			}
+			if len(bodyBytes) > maxDPoPBodyBytes {
+				return errors.New("dpop: request body exceeds maximum size")
+			}
+			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
+		bodyDigest := sha256.Sum256(bodyBytes)
+		expectedBH = base64.RawURLEncoding.EncodeToString(bodyDigest[:])
+	}
+	if subtle.ConstantTimeCompare([]byte(claims.BH), []byte(expectedBH)) != 1 {
+		return errors.New("dpop: bh body hash mismatch")
+	}
+
+	if claims.Nonce != "" {
+		if !verifyDPoPServerNonce(agentID, claims.Nonce, now) {
+			c.Header("WWW-Authenticate", `DPoP error="use_dpop_nonce"`)
+			return errors.New("dpop: invalid or expired server nonce")
+		}
+	} else if !allowStream {
+		c.Header("WWW-Authenticate", `DPoP error="use_dpop_nonce"`)
+		return errors.New("dpop: server nonce challenge required")
+	}
+
+	jtiTTL := time.Until(time.Unix(claims.IAT, 0).Add(125 * time.Second))
+	if jtiTTL < 120*time.Second {
+		jtiTTL = 120 * time.Second
+	}
+	if !dpopReplayCache.CheckAndRecord(agentID, claims.JTI, jtiTTL) {
+		return errors.New("dpop: jti replay detected")
+	}
+	return nil
+}
+
+func verifyLegacyDPoP(c *gin.Context, agentID string, pubKey ed25519.PublicKey, sig string) error {
 	tsStr := strings.TrimSpace(c.GetHeader("X-Komari-Timestamp"))
 	if tsStr == "" {
 		return errors.New("dpop: missing X-Komari-Timestamp header")
@@ -210,9 +454,10 @@ func verifyDPoP(c *gin.Context, principal *rpc.Principal) error {
 		bodyHash = hex.EncodeToString(bodyDigest[:])
 	} else {
 		var bodyBytes []byte
+		var readErr error
 		if c.Request.Body != nil {
-			bodyBytes, err = io.ReadAll(io.LimitReader(c.Request.Body, maxDPoPBodyBytes+1))
-			if err != nil {
+			bodyBytes, readErr = io.ReadAll(io.LimitReader(c.Request.Body, maxDPoPBodyBytes+1))
+			if readErr != nil {
 				return errors.New("dpop: failed to read request body")
 			}
 			if len(bodyBytes) > maxDPoPBodyBytes {
@@ -241,14 +486,11 @@ func verifyDPoP(c *gin.Context, principal *rpc.Principal) error {
 
 	// Record nonce only after signature verification succeeds so an attacker
 	// without the enrolled private key cannot pollute or exhaust replay capacity.
-	// Retain the nonce at least until the signature's own timestamp window
-	// expires (ts + 120s + 5s margin) so future-skewed signatures cannot be
-	// replayed after a shorter fixed retention elapses.
 	nonceTTL := time.Until(time.Unix(ts, 0).Add(125 * time.Second))
 	if nonceTTL < 120*time.Second {
 		nonceTTL = 120 * time.Second
 	}
-	if !dpopReplayCache.CheckAndRecord(principal.ClientUUID, nonce, nonceTTL) {
+	if !dpopReplayCache.CheckAndRecord(agentID, nonce, nonceTTL) {
 		return errors.New("dpop: nonce replay detected")
 	}
 

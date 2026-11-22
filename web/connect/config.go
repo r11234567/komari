@@ -103,18 +103,28 @@ func (s *configService) WatchDesiredConfig(ctx context.Context, req *connect.Req
 	if err != nil {
 		return err
 	}
-	profile, found, state, err := deploymentapp.WaitForDesired(ctx, agentID, req.Msg.AfterRevision)
-	if err != nil {
-		return connectError(connect.CodeCanceled, err)
-	}
-	if !found {
+	for {
+		waitCtx, cancel := context.WithTimeout(ctx, streamHeartbeatInterval)
+		profile, found, state, err := deploymentapp.WaitForDesired(waitCtx, agentID, req.Msg.AfterRevision)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			if sendErr := stream.Send(&configv1.WatchDesiredConfigResponse{Heartbeat: true}); sendErr != nil {
+				return sendErr
+			}
+			continue
+		}
+		if err != nil {
+			return connectError(connect.CodeCanceled, err)
+		}
+		if !found {
+			return nil
+		}
+		if err := stream.Send(&configv1.WatchDesiredConfigResponse{Desired: &configv1.DesiredConfig{
+			AgentId: agentID, Revision: state.Revision, Runtime: runtimeToProto(profile), SavedAt: timestamppb.New(state.SavedAt),
+		}}); err != nil {
+			return err
+		}
+		_, _ = clients.MarkDeploymentConfigSent(agentID, state.Revision)
 		return nil
 	}
-	if err := stream.Send(&configv1.WatchDesiredConfigResponse{Desired: &configv1.DesiredConfig{
-		AgentId: agentID, Revision: state.Revision, Runtime: runtimeToProto(profile), SavedAt: timestamppb.New(state.SavedAt),
-	}}); err != nil {
-		return err
-	}
-	_, _ = clients.MarkDeploymentConfigSent(agentID, state.Revision)
-	return nil
 }

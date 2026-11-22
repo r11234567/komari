@@ -130,7 +130,6 @@ func TestPolicyDeclaresEveryGeneratedProcedure(t *testing.T) {
 		"/komari.exec.v1.ExecutionService/GetExecution",
 		"/komari.exec.v1.ExecutionService/LeaseExecution",
 		"/komari.exec.v1.ExecutionService/ReportExecutionEvent",
-		"/komari.webssh.v1.WebSSHService/OpenSession",
 		"/komari.webssh.v1.WebSSHService/CreateSession",
 		"/komari.webssh.v1.WebSSHService/SendSessionCommand",
 		"/komari.webssh.v1.WebSSHService/WatchSession",

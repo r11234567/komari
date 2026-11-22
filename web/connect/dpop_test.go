@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,9 +16,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/komari-monitor/komari/database/apitokens"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/security"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 	"github.com/stretchr/testify/require"
 )
@@ -180,4 +184,187 @@ func TestDPoPNonceLengthCapAndFutureTimestampRetention(t *testing.T) {
 	require.True(t, exists)
 	require.True(t, entry.expires.After(time.Unix(futureTS, 0).Add(120*time.Second)),
 		"nonce expiry %s must cover full valid signature window beyond %s", entry.expires, time.Unix(futureTS, 0).Add(120*time.Second))
+}
+
+func makeRFC9449Proof(t *testing.T, priv ed25519.PrivateKey, pubKey ed25519.PublicKey, method, htu, accessToken, nonce, jti string, body []byte, bm string) string {
+	t.Helper()
+	hdrJSON, err := json.Marshal(dpopJWTHeader{
+		Typ: "dpop+jwt",
+		Alg: "EdDSA",
+		JWK: dpopJWTJWK{
+			Kty: "OKP",
+			Crv: "Ed25519",
+			X:   base64.RawURLEncoding.EncodeToString(pubKey),
+		},
+	})
+	require.NoError(t, err)
+	tokSum := sha256.Sum256([]byte(accessToken))
+	bodySum := sha256.Sum256(body)
+	claimsJSON, err := json.Marshal(dpopJWTClaims{
+		JTI:   jti,
+		HTM:   method,
+		HTU:   htu,
+		IAT:   time.Now().Unix(),
+		ATH:   base64.RawURLEncoding.EncodeToString(tokSum[:]),
+		Nonce: nonce,
+		BH:    base64.RawURLEncoding.EncodeToString(bodySum[:]),
+		BM:    bm,
+	})
+	require.NoError(t, err)
+	input := base64.RawURLEncoding.EncodeToString(hdrJSON) + "." + base64.RawURLEncoding.EncodeToString(claimsJSON)
+	sig := ed25519.Sign(priv, []byte(input))
+	return input + "." + base64.RawURLEncoding.EncodeToString(sig)
+}
+
+func makeRFC9449Context(t *testing.T, method, rawURL string, body []byte, authHeader, proof string) (*gin.Context, *httptest.ResponseRecorder) {
+	t.Helper()
+	req := httptest.NewRequest(method, rawURL, bytes.NewReader(body))
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	if proof != "" {
+		req.Header.Set("DPoP", proof)
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+	return c, rec
+}
+
+func TestRFC9449DPoPNonceChallengeReplayAndBindings(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	agentID, accessToken, priv := dpopTestAgent(t)
+	pub := priv.Public().(ed25519.PublicKey)
+	principal := rpc.NewAgentPrincipal(agentID)
+	body := []byte(`{"metric":"cpu"}`)
+	unaryURL := "http://example.com/komari.report.v1.AgentReportService/SubmitReport"
+
+	// 1. Cold-start unary request without server nonce fails with use_dpop_nonce and issues DPoP-Nonce without consuming jti.
+	coldJTI := "jti-" + uuid.NewString()
+	coldProof := makeRFC9449Proof(t, priv, pub, http.MethodPost, unaryURL, accessToken, "", coldJTI, body, "")
+	coldCtx, coldRec := makeRFC9449Context(t, http.MethodPost, unaryURL, body, "DPoP "+accessToken, coldProof)
+	err := verifyDPoP(coldCtx, principal)
+	require.Error(t, err)
+	issuedNonce := coldRec.Header().Get("DPoP-Nonce")
+	require.NotEmpty(t, issuedNonce)
+	require.Contains(t, coldRec.Header().Get("WWW-Authenticate"), `use_dpop_nonce`)
+
+	// Retrying with the SAME jti and the issued server nonce succeeds once, then replay fails.
+	okProof := makeRFC9449Proof(t, priv, pub, http.MethodPost, unaryURL, accessToken, issuedNonce, coldJTI, body, "")
+	okCtx, okRec := makeRFC9449Context(t, http.MethodPost, unaryURL, body, "DPoP "+accessToken, okProof)
+	require.NoError(t, verifyDPoP(okCtx, principal))
+	require.NotEmpty(t, okRec.Header().Get("DPoP-Nonce"))
+
+	replayCtx, _ := makeRFC9449Context(t, http.MethodPost, unaryURL, body, "DPoP "+accessToken, okProof)
+	require.Error(t, verifyDPoP(replayCtx, principal))
+
+	// 2. Reject wrong Authorization scheme ("Bearer" when sending DPoP proof), wrong htu, htm, ath, bh, jwk, and spoofed bm="stream".
+	_, otherPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	otherPub := otherPriv.Public().(ed25519.PublicKey)
+
+	badSchemeCtx, _ := makeRFC9449Context(t, http.MethodPost, unaryURL, body, "Bearer "+accessToken,
+		makeRFC9449Proof(t, priv, pub, http.MethodPost, unaryURL, accessToken, issuedNonce, "jti-"+uuid.NewString(), body, ""))
+	require.Error(t, verifyDPoP(badSchemeCtx, principal))
+
+	badHTUCtx, _ := makeRFC9449Context(t, http.MethodPost, unaryURL, body, "DPoP "+accessToken,
+		makeRFC9449Proof(t, priv, pub, http.MethodPost, "http://evil.example/komari.report.v1.AgentReportService/SubmitReport", accessToken, issuedNonce, "jti-"+uuid.NewString(), body, ""))
+	require.Error(t, verifyDPoP(badHTUCtx, principal))
+
+	badHTMCtx, _ := makeRFC9449Context(t, http.MethodPost, unaryURL, body, "DPoP "+accessToken,
+		makeRFC9449Proof(t, priv, pub, http.MethodGet, unaryURL, accessToken, issuedNonce, "jti-"+uuid.NewString(), body, ""))
+	require.Error(t, verifyDPoP(badHTMCtx, principal))
+
+	badATHCtx, _ := makeRFC9449Context(t, http.MethodPost, unaryURL, body, "DPoP "+accessToken,
+		makeRFC9449Proof(t, priv, pub, http.MethodPost, unaryURL, "different-token", issuedNonce, "jti-"+uuid.NewString(), body, ""))
+	require.Error(t, verifyDPoP(badATHCtx, principal))
+
+	badBHCtx, _ := makeRFC9449Context(t, http.MethodPost, unaryURL, body, "DPoP "+accessToken,
+		makeRFC9449Proof(t, priv, pub, http.MethodPost, unaryURL, accessToken, issuedNonce, "jti-"+uuid.NewString(), []byte("tampered"), ""))
+	require.Error(t, verifyDPoP(badBHCtx, principal))
+
+	badJWKCtx, _ := makeRFC9449Context(t, http.MethodPost, unaryURL, body, "DPoP "+accessToken,
+		makeRFC9449Proof(t, otherPriv, otherPub, http.MethodPost, unaryURL, accessToken, issuedNonce, "jti-"+uuid.NewString(), body, ""))
+	require.Error(t, verifyDPoP(badJWKCtx, principal))
+
+	spoofStreamCtx, _ := makeRFC9449Context(t, http.MethodPost, unaryURL, body, "DPoP "+accessToken,
+		makeRFC9449Proof(t, priv, pub, http.MethodPost, unaryURL, accessToken, issuedNonce, "jti-"+uuid.NewString(), nil, "stream"))
+	require.Error(t, verifyDPoP(spoofStreamCtx, principal))
+
+	// 3. Cold-start client stream succeeds without server nonce and returns DPoP-Nonce; forged nonce on stream is rejected.
+	streamURL := "http://example.com/komari.file.v1.FileService/AttachFileOperations"
+	coldStreamProof := makeRFC9449Proof(t, priv, pub, http.MethodPost, streamURL, accessToken, "", "jti-"+uuid.NewString(), nil, "stream")
+	streamCtx, streamRec := makeRFC9449Context(t, http.MethodPost, streamURL, []byte("wire-frames"), "DPoP "+accessToken, coldStreamProof)
+	require.NoError(t, verifyDPoP(streamCtx, principal))
+	require.NotEmpty(t, streamRec.Header().Get("DPoP-Nonce"))
+
+	forgedStreamProof := makeRFC9449Proof(t, priv, pub, http.MethodPost, streamURL, accessToken, "0.forgedmac", "jti-"+uuid.NewString(), nil, "stream")
+	forgedStreamCtx, _ := makeRFC9449Context(t, http.MethodPost, streamURL, []byte("wire-frames"), "DPoP "+accessToken, forgedStreamProof)
+	require.Error(t, verifyDPoP(forgedStreamCtx, principal))
+}
+
+func TestDPoPMiddlewareAndBridgeAuthSchemes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	agentID, accessToken, priv := dpopTestAgent(t)
+	pub := priv.Public().(ed25519.PublicKey)
+
+	createdRow, createdSecret, err := apitokens.Create(t.Context(), "dpop-pat-owner", apitokens.Policy{
+		Name:      "dpop-pat-test",
+		Scopes:    []string{rpc.ScopeNodesRead},
+		AllAgents: true,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}, "")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		dbcore.GetDBInstance().Where("id = ?", createdRow.ID).Delete(&models.APIToken{})
+	})
+
+	router := gin.New()
+	router.Use(api.APIAuthenticationMiddleware())
+	router.POST("/komari.report.v1.AgentReportService/SubmitReport", bridge(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		meta := rpc.MetaFromContext(r.Context())
+		if meta == nil || meta.Principal == nil || meta.Principal.ClientUUID != agentID {
+			http.Error(w, "missing agent principal", http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})))
+
+	targetPath := "/komari.report.v1.AgentReportService/SubmitReport"
+	targetURL := "http://example.com" + targetPath
+	body := []byte(`{}`)
+
+	// 1. Cold-start Authorization: DPoP reaches bridge -> 401 use_dpop_nonce with DPoP-Nonce header.
+	req1 := httptest.NewRequest(http.MethodPost, targetURL, bytes.NewReader(body))
+	req1.Header.Set("Authorization", "DPoP "+accessToken)
+	req1.Header.Set("DPoP", makeRFC9449Proof(t, priv, pub, http.MethodPost, targetURL, accessToken, "", "jti-"+uuid.NewString(), body, ""))
+	rec1 := httptest.NewRecorder()
+	router.ServeHTTP(rec1, req1)
+	require.Equal(t, http.StatusUnauthorized, rec1.Code)
+	nonce := rec1.Header().Get("DPoP-Nonce")
+	require.NotEmpty(t, nonce)
+	require.Contains(t, rec1.Header().Get("WWW-Authenticate"), `use_dpop_nonce`)
+
+	// 2. Retried request with returned DPoP-Nonce succeeds with authenticated agent principal.
+	req2 := httptest.NewRequest(http.MethodPost, targetURL, bytes.NewReader(body))
+	req2.Header.Set("Authorization", "DPoP "+accessToken)
+	req2.Header.Set("DPoP", makeRFC9449Proof(t, priv, pub, http.MethodPost, targetURL, accessToken, nonce, "jti-"+uuid.NewString(), body, ""))
+	rec2 := httptest.NewRecorder()
+	router.ServeHTTP(rec2, req2)
+	require.Equal(t, http.StatusOK, rec2.Code)
+
+	// 3. Invalid DPoP agent token is rejected at APIAuthenticationMiddleware without falling back to cookies.
+	req3 := httptest.NewRequest(http.MethodPost, targetURL, bytes.NewReader(body))
+	req3.Header.Set("Authorization", "DPoP invalid-agent-token")
+	req3.AddCookie(&http.Cookie{Name: security.SessionCookieName, Value: "forged-session"})
+	rec3 := httptest.NewRecorder()
+	router.ServeHTTP(rec3, req3)
+	require.Equal(t, http.StatusUnauthorized, rec3.Code)
+
+	// 4. User PAT sent with Authorization: DPoP is rejected (DPoP is agent-only).
+	req4 := httptest.NewRequest(http.MethodPost, targetURL, bytes.NewReader(body))
+	req4.Header.Set("Authorization", "DPoP "+createdSecret)
+	rec4 := httptest.NewRecorder()
+	router.ServeHTTP(rec4, req4)
+	require.Equal(t, http.StatusUnauthorized, rec4.Code)
 }

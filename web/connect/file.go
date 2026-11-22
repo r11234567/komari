@@ -351,10 +351,16 @@ func (s *fileService) LeaseFileOperations(ctx context.Context, req *connect.Requ
 	channel := make(chan *filev1.FileAssignment, 32)
 	s.store.registerAgent(agentID, channel)
 	defer s.store.unregisterAgent(agentID, channel)
+	ticker := time.NewTicker(streamHeartbeatInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-ticker.C:
+			if err := stream.Send(&filev1.LeaseFileOperationsResponse{Heartbeat: true}); err != nil {
+				return err
+			}
 		case assignment := <-channel:
 			if _, err := workspace.Default.ByID(assignment.WorkspaceId, agentID, assignment.SystemUser); err != nil {
 				continue

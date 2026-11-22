@@ -34,7 +34,15 @@ func (s *agentEventService) SubscribeEvents(ctx context.Context, req *connect.Re
 	}
 	after := req.Msg.AfterEventId
 	for {
-		event, err := agentevents.Next(ctx, agentID, after)
+		waitCtx, cancel := context.WithTimeout(ctx, streamHeartbeatInterval)
+		event, err := agentevents.Next(waitCtx, agentID, after)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			if sendErr := stream.Send(&agentv1.SubscribeEventsResponse{Heartbeat: true}); sendErr != nil {
+				return sendErr
+			}
+			continue
+		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}

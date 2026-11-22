@@ -96,7 +96,6 @@ func newPolicyInterceptor() *policyInterceptor {
 	add(exec, rpc.RoleAdmin, 30*time.Minute, "WatchExecution")
 	add(exec, rpc.RoleClient, 30*time.Minute, "LeaseExecution")
 	add(exec, rpc.RoleClient, 30*time.Second, "ReportExecutionEvent")
-	add(webssh, rpc.RoleAdmin, 2*time.Hour, "OpenSession")
 	add(webssh, rpc.RoleAdmin, 30*time.Minute, "WatchSession")
 	add(webssh, rpc.RoleAdmin, 15*time.Second, "CreateSession", "SendSessionCommand", "AcknowledgeSessionEvents", "CloseSession")
 	add(webssh, rpc.RoleClient, 30*time.Minute, "LeaseSessions")

@@ -101,3 +101,128 @@ func TestCallRejectsUnscopedAndWrongAgent(t *testing.T) {
 		}
 	}
 }
+
+func TestCallBuildsTypedPayloadsWithoutLegacyArguments(t *testing.T) {
+	cases := []struct {
+		name      string
+		op        string
+		args      map[string]any
+		wantOp    filev1.FileOperation
+		checkFunc func(t *testing.T, a *filev1.FileAssignment)
+	}{
+		{
+			name:   "list",
+			op:     "list",
+			args:   map[string]any{"path": "/etc"},
+			wantOp: filev1.FileOperation_FILE_OPERATION_LIST,
+			checkFunc: func(t *testing.T, a *filev1.FileAssignment) {
+				if p := a.GetList(); p == nil || p.GetPath() != "/etc" {
+					t.Fatalf("unexpected list payload: %+v", p)
+				}
+			},
+		},
+		{
+			name: "download_stream",
+			op:   "download_stream",
+			args: map[string]any{
+				"transfer_id":    "tid-1",
+				"transfer_token": "tok-1",
+				"path":           "/var/log/syslog",
+				"offset":         int64(128),
+				"length":         int64(4096),
+				"chunk_index":    int64(2),
+				"file_size":      int64(8192),
+				"modified_at":    "2026-11-22T06:00:00Z",
+			},
+			wantOp: filev1.FileOperation_FILE_OPERATION_DOWNLOAD_STREAM,
+			checkFunc: func(t *testing.T, a *filev1.FileAssignment) {
+				p := a.GetDownloadStream()
+				if p == nil || p.GetTransferId() != "tid-1" || p.GetOffset() != 128 || p.GetLength() != 4096 || p.GetModifiedAt() == nil {
+					t.Fatalf("unexpected download_stream payload: %+v", p)
+				}
+			},
+		},
+		{
+			name: "upload_stream",
+			op:   "upload_stream",
+			args: map[string]any{
+				"path":           "/tmp/a.bin",
+				"offset":         int64(0),
+				"chunk_index":    int64(0),
+				"chunk_count":    int64(3),
+				"total_size":     int64(100),
+				"chunk_size":     int64(40),
+				"upload_id":      "up-1",
+				"first":          true,
+				"final":          false,
+				"transfer_id":    "tid-2",
+				"transfer_token": "tok-2",
+			},
+			wantOp: filev1.FileOperation_FILE_OPERATION_UPLOAD_STREAM,
+			checkFunc: func(t *testing.T, a *filev1.FileAssignment) {
+				p := a.GetUploadStream()
+				if p == nil || p.GetUploadId() != "up-1" || !p.GetFirst() || p.GetFinal() || p.GetTransferToken() != "tok-2" {
+					t.Fatalf("unexpected upload_stream payload: %+v", p)
+				}
+			},
+		},
+		{
+			name: "upload_commit",
+			op:   "upload_commit",
+			args: map[string]any{
+				"path":        "/tmp/a.bin",
+				"upload_id":   "up-1",
+				"chunk_index": int64(3),
+				"chunk_count": int64(3),
+				"total_size":  int64(100),
+				"chunk_size":  int64(40),
+				"offset":      int64(100),
+				"final":       true,
+			},
+			wantOp: filev1.FileOperation_FILE_OPERATION_UPLOAD_COMMIT,
+			checkFunc: func(t *testing.T, a *filev1.FileAssignment) {
+				p := a.GetUploadCommit()
+				if p == nil || p.GetUploadId() != "up-1" || !p.GetFinal() || p.GetTotalSize() != 100 {
+					t.Fatalf("unexpected upload_commit payload: %+v", p)
+				}
+			},
+		},
+		{
+			name:   "upload_cancel",
+			op:     "upload_cancel",
+			args:   map[string]any{"upload_id": "up-1", "path": "/tmp/a.bin"},
+			wantOp: filev1.FileOperation_FILE_OPERATION_UPLOAD_CANCEL,
+			checkFunc: func(t *testing.T, a *filev1.FileAssignment) {
+				p := a.GetUploadCancel()
+				if p == nil || p.GetUploadId() != "up-1" || p.GetPath() != "/tmp/a.bin" {
+					t.Fatalf("unexpected upload_cancel payload: %+v", p)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got *filev1.FileAssignment
+			withDispatcher(t, func(agentID string, assignment *filev1.FileAssignment) bool {
+				got = assignment
+				go Resolve(agentID, &filev1.AgentFileEvent{RequestId: assignment.GetRequestId(), Success: true})
+				return true
+			})
+			_, err := Call(testWorkspaceContext(t, "agent-1"), "agent-1", tc.op, tc.args, CallOptions{Timeout: time.Second})
+			if err != nil {
+				t.Fatalf("call %s: %v", tc.op, err)
+			}
+			if got == nil {
+				t.Fatal("missing assignment")
+			}
+			if got.GetArguments() != nil {
+				t.Fatalf("expected nil deprecated Arguments, got %+v", got.GetArguments())
+			}
+			if got.GetOperation() != tc.wantOp {
+				t.Fatalf("operation = %v, want %v", got.GetOperation(), tc.wantOp)
+			}
+			tc.checkFunc(t, got)
+		})
+	}
+}
