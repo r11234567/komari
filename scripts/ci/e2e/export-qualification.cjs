@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { request } = require('playwright');
 const { newestObservation, agentRecovered } = require('./qualification-observations.cjs');
-const { pairedWindow, populationFingerprint, comparePerformancePairs } = require('./qualification-performance.cjs');
+const { pairedMaxPoints, pairedWindow, pairedPopulation, samePopulation, comparePerformancePairs } = require('./qualification-performance.cjs');
 const root = process.env.E2E_ROOT, artifacts = process.env.E2E_ARTIFACTS;
 require('./guard.cjs');
 const base = 'https://127.0.0.1:29443';
@@ -72,21 +72,26 @@ async function run() {
   const foreground = async (target, options = {}) => {
     const end = new Date(), start = new Date(end.getTime()-3600_000);
     const range = options.range || { startTime:start.toISOString(), endTime:end.toISOString() };
+    const maxPoints = options.range ? pairedMaxPoints : 360;
     const requests = {
-      ping: [`/${services.metrics}/QueryMetrics`,{agentIds:[manifest.agentId],metrics:['ping.latency_ms'],...range,maxPoints:360,downsample:true}],
-      ping_stats: [`/${services.metrics}/GetPingStats`,{agentIds:[manifest.agentId],taskIds:[String(manifest.pingTaskId)],...range,maxPoints:360}],
-      chart: [`/${services.metrics}/QueryMetrics`,{agentIds:[manifest.agentId],metrics:['cpu.usage'],...range,maxPoints:360,downsample:true}],
+      ping: [`/${services.metrics}/QueryMetrics`,{agentIds:[manifest.agentId],metrics:['ping.latency_ms'],...range,maxPoints,downsample:true}],
+      ping_stats: [`/${services.metrics}/GetPingStats`,{agentIds:[manifest.agentId],taskIds:[String(manifest.pingTaskId)],...range,maxPoints}],
+      chart: [`/${services.metrics}/QueryMetrics`,{agentIds:[manifest.agentId],metrics:['cpu.usage'],...range,maxPoints,downsample:true}],
       traffic: [`/${services.browser}/GetTrafficTrend`,{window:'86400s',interval:'1200s'}],
       billing: [`/${services.dashboard}/GetDashboardCharts`,{charts:['DASHBOARD_CHART_TRAFFIC'],rankingLimit:5}],
     };
-    const fingerprints = {};
+    const populations = {};
     const results = await Promise.allSettled(Object.entries(requests).map(async ([key,args]) => {
       const result = await api(...args); (target[key] ||= []).push(result.ms);
       reads.write(JSON.stringify({at:new Date().toISOString(),phase:options.phase||(target===baseline?'initial_baseline':'live_during_export'),pair:options.pair,query:key,ms:result.ms,range})+'\n');
-      fingerprints[key] = populationFingerprint(key, result.body);
-      if(options.expected && fingerprints[key] !== options.expected[key]) {
-        fs.writeFileSync(path.join(artifacts,`export-pair-${options.pair}-${key}-changed.json`),JSON.stringify(result.body,null,2));
-        throw Error(`Paired ${key} input population changed; latency comparison is invalid`);
+      if (options.range) {
+        const population = pairedPopulation(key, result.body);
+        populations[key] = population;
+        if (options.expected && !samePopulation(options.expected[key], population)) {
+          const detail = { range, maxPoints, before: options.expected[key], after: result.body };
+          fs.writeFileSync(path.join(artifacts,`export-pair-${options.pair}-${key}-changed.json`),JSON.stringify(detail,null,2));
+          throw Error(`Paired ${key} input population changed; latency comparison is invalid`);
+        }
       }
       if(options.fresh!==false && (key==='chart'||key==='ping')) {
         if(newestObservation(result.body,key==='chart'?'cpu.usage':'ping.latency_ms')<=Date.now()-120_000) {
@@ -103,7 +108,7 @@ async function run() {
     const rejected = results.find(result => result.status === 'rejected');
     if (rejected) throw rejected.reason;
     execFileSync('systemctl',['is-active','--quiet','komari-e2e.service']);
-    return fingerprints;
+    return populations;
   };
   // Initial rolling-history measurements are diagnostic only: the installed
   // Agent's history grows during the run. Acceptance uses adjacent paired
@@ -149,7 +154,8 @@ async function run() {
   let paused=false,restarted=false,reduced=false,restored=false,reducedAt;
   let nextPairAt=started+300_000;
   const measurePair = async () => {
-    const id=performancePairs.length+1, pair={id,anchor:Date.now(),capacity,state:'pausing',baseline:{},during:{},fingerprints:[],control_observations:[]};
+    const id=performancePairs.length+1, pair={id,anchor:Date.now(),capacity,state:'pausing',baseline:{},during:{},control_observations:[]};
+    const baselinePopulations = [];
     performancePairs.push(pair);
     const savePair = () => fs.writeFileSync(path.join(artifacts,'export-performance-pairs.json'),JSON.stringify(performancePairs,null,2));
     const readPairState = async () => {
@@ -173,7 +179,7 @@ async function run() {
     const offAt=Date.now(), pausedBytes=state.output_bytes;
     pair.state='export_off';pair.output_bytes_before=pausedBytes;
     for(let i=0;i<40;i++) {
-      pair.fingerprints.push(await foreground(pair.baseline,{range:pairedWindow(pair.anchor,i),fresh:false,phase:'paired_export_off',pair:id}));
+      baselinePopulations.push(await foreground(pair.baseline,{range:pairedWindow(pair.anchor,i),fresh:false,phase:'paired_export_off',pair:id}));
       savePair();
       await sleep(500);
     }
@@ -194,7 +200,7 @@ async function run() {
     // Every replay follows all forty baseline requests (>20s), beyond the 5s
     // application cache TTL. Both phases execute the same five-way concurrency.
     for(let i=0;i<40;i++) {
-      await foreground(pair.during,{range:pairedWindow(pair.anchor,i),fresh:false,phase:'paired_export_on',pair:id,expected:pair.fingerprints[i]});
+      await foreground(pair.during,{range:pairedWindow(pair.anchor,i),fresh:false,phase:'paired_export_on',pair:id,expected:baselinePopulations[i]});
       savePair();
       await sleep(500);
     }
