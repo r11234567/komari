@@ -86,7 +86,7 @@ func (l *RestoreLock) SaveUploadedBackup(file io.Reader, filename string) error 
 	}
 
 	finalPath := filepath.Join(".", "data", "backup.zip")
-	if err := os.Rename(tempPath, finalPath); err != nil {
+	if err := datadir.Rename(tempPath, finalPath); err != nil {
 		return fmt.Errorf("publish uploaded backup: %w", err)
 	}
 	return datadir.SyncDirectory(filepath.Dir(finalPath))

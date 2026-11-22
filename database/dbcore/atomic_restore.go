@@ -226,7 +226,7 @@ func claimRestore(root, inbox string) (string, error) {
 	var entropy [16]byte
 	rand.Read(entropy[:])
 	id := "gen-" + hex.EncodeToString(entropy[:])
-	if err := os.Rename(path, filepath.Join(inbox, id+".zip")); err != nil {
+	if err := datadir.Rename(path, filepath.Join(inbox, id+".zip")); err != nil {
 		return "", err
 	}
 	return id, errors.Join(syncDir(inbox), syncDir(root))
@@ -237,7 +237,7 @@ func rejectRestore(root, inbox, archive string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if err := os.Rename(archive, filepath.Join(dir, filepath.Base(archive))); err != nil {
+	if err := datadir.Rename(archive, filepath.Join(dir, filepath.Base(archive))); err != nil {
 		return err
 	}
 	return errors.Join(syncDir(dir), syncDir(inbox), syncDir(root))

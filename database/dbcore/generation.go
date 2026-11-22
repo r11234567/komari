@@ -88,9 +88,6 @@ func syncDir(dir string) error {
 }
 
 func syncTree(root string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
 	var dirs []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
@@ -103,7 +100,11 @@ func syncTree(root string) error {
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		f, err := os.Open(path)
+		mode := os.O_RDONLY
+		if runtime.GOOS == "windows" {
+			mode = os.O_RDWR
+		}
+		f, err := os.OpenFile(path, mode, 0)
 		if err != nil {
 			return err
 		}
@@ -154,7 +155,7 @@ func replaceDurableFile(path string, data []byte, perm os.FileMode) (bool, error
 	if err := tmp.Close(); err != nil {
 		return false, err
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := datadir.Rename(tmpPath, path); err != nil {
 		return false, err
 	}
 	return true, syncDir(dir)
