@@ -155,9 +155,30 @@ func TestSplitListenersStartServeAndShutdownWithoutPortLeak(t *testing.T) {
 	if err := app.Bootstrap(); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
+	app.settings.CorsOriginCheckEnabled = false
+	app.settings.CorsAllowedOrigins = flags.PublicOrigin
 	if err := app.BuildRouter(); err != nil {
 		_ = app.Shutdown()
 		t.Fatalf("BuildRouter: %v", err)
+	}
+
+	for _, check := range []struct {
+		origin string
+		status int
+	}{
+		{flags.PublicOrigin, http.StatusForbidden},
+		{flags.PanelOrigin, http.StatusNoContent},
+	} {
+		request := httptest.NewRequest(http.MethodOptions, flags.PanelOrigin+"/api/login", nil)
+		request.Header.Set("Origin", check.origin)
+		request.Header.Set("Access-Control-Request-Method", http.MethodPost)
+		request.Header.Set("Access-Control-Request-Headers", "Content-Type")
+		response := httptest.NewRecorder()
+		app.panelEngine.ServeHTTP(response, request)
+		if response.Code != check.status {
+			_ = app.Shutdown()
+			t.Fatalf("Panel preflight from %s = %d, want %d", check.origin, response.Code, check.status)
+		}
 	}
 
 	runErr := make(chan error, 1)
