@@ -7,10 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
-
-	logger "github.com/komari-monitor/komari/utils/log"
 )
 
 const (
@@ -30,6 +29,7 @@ type generationManifest struct {
 	PreviousGeneration string    `json:"previous_generation,omitempty"`
 	State              string    `json:"state"`
 	StagedEntries      []string  `json:"staged_entries,omitempty"`
+	LiveEntries        []string  `json:"live_entries,omitempty"`
 	SecurityEpoch      uint64    `json:"security_epoch"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }
@@ -80,16 +80,15 @@ func mergeReservedDataExcludes(dataDir string, exclude map[string]struct{}) map[
 	return merged
 }
 
-func syncDir(dir string) {
+func syncDir(dir string) error {
 	if runtime.GOOS == "windows" {
-		return
+		return nil
 	}
 	d, err := os.Open(dir)
 	if err != nil {
-		return
+		return err
 	}
-	_ = d.Sync()
-	_ = d.Close()
+	return errors.Join(d.Sync(), d.Close())
 }
 
 func syncTree(root string) error {
@@ -120,7 +119,9 @@ func syncTree(root string) error {
 		return err
 	}
 	for i := len(dirs) - 1; i >= 0; i-- {
-		syncDir(dirs[i])
+		if err := syncDir(dirs[i]); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -136,12 +137,7 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	tmpPath := tmp.Name()
-	keepTmp := false
-	defer func() {
-		if !keepTmp {
-			_ = os.Remove(tmpPath)
-		}
-	}()
+	defer os.Remove(tmpPath)
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return err
@@ -160,9 +156,7 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return err
 	}
-	keepTmp = true
-	syncDir(dir)
-	return nil
+	return syncDir(dir)
 }
 
 func atomicWriteJSON(path string, value any, perm os.FileMode) error {
@@ -190,7 +184,7 @@ func readGenerationManifest(dataDir string) (*generationManifest, error) {
 }
 
 func writeGenerationManifest(dataDir string, manifest generationManifest) error {
-	manifest.Version = 1
+	manifest.Version = 2
 	manifest.UpdatedAt = time.Now().UTC()
 	return atomicWriteJSON(filepath.Join(dataDir, currentManifestFileName), manifest, 0o600)
 }
@@ -199,112 +193,66 @@ func newGenerationID(prefix string) string {
 	return fmt.Sprintf("%s-%d", prefix, time.Now().UTC().UnixNano())
 }
 
-func isEmptyDir(path string) bool {
-	info, err := os.Lstat(path)
-	if err != nil || !info.IsDir() {
-		return false
-	}
-	entries, err := os.ReadDir(path)
-	return err == nil && len(entries) == 0
-}
-
-func parkLiveDataEntries(dataDir, prevDir string) error {
-	if err := os.MkdirAll(prevDir, 0o700); err != nil {
-		return fmt.Errorf("create previous generation directory: %w", err)
-	}
-	entries, err := os.ReadDir(dataDir)
+func generationEntries(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return fmt.Errorf("list data directory entries: %w", err)
+		return nil, err
 	}
+	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		name := entry.Name()
-		if isReservedDataControlEntry(name) {
-			continue
-		}
-		src := filepath.Join(dataDir, name)
-		dst := filepath.Join(prevDir, name)
-		if _, err := os.Lstat(dst); err == nil {
-			if isEmptyDir(src) {
-				_ = os.Remove(src)
-				continue
-			}
-			dst = filepath.Join(prevDir, fmt.Sprintf("%s.partial-%d", name, time.Now().UTC().UnixNano()))
-		}
-		if err := os.Rename(src, dst); err != nil {
-			return fmt.Errorf("park live data entry %q: %w", name, err)
+		if !isReservedDataControlEntry(entry.Name()) {
+			names = append(names, entry.Name())
 		}
 	}
-	syncDir(prevDir)
-	syncDir(dataDir)
-	return nil
+	return names, nil
 }
 
-func publishStagedEntries(dataDir, stageDir, prevDir string) error {
-	entries, err := os.ReadDir(stageDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("list staged generation entries: %w", err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if isReservedDataControlEntry(name) {
-			continue
-		}
-		src := filepath.Join(stageDir, name)
-		dst := filepath.Join(dataDir, name)
-		if _, err := os.Lstat(dst); err == nil {
-			if isEmptyDir(dst) {
-				_ = os.Remove(dst)
-			} else if prevDir != "" {
-				if err := os.MkdirAll(prevDir, 0o700); err != nil {
-					return err
-				}
-				parked := filepath.Join(prevDir, fmt.Sprintf("%s.prepublish-%d", name, time.Now().UTC().UnixNano()))
-				if err := os.Rename(dst, parked); err != nil {
-					return fmt.Errorf("park colliding live entry %q before publish: %w", name, err)
-				}
-			}
-		}
-		if err := os.Rename(src, dst); err != nil {
-			return fmt.Errorf("publish restored entry %q: %w", name, err)
-		}
-	}
-	syncDir(dataDir)
-	return nil
+func validGenerationName(name string) bool {
+	return name != "" && name != "." && name != ".." &&
+		filepath.Base(name) == name && !strings.ContainsAny(name, "/\\:") &&
+		!isReservedDataControlEntry(name)
 }
 
-func rollbackGenerationToLive(dataDir, stageDir, prevDir string) error {
-	var rollbackErrs []error
-	// Move any newly published entries back into stageDir before returning prevDir entries.
-	if entries, err := os.ReadDir(dataDir); err == nil {
-		for _, entry := range entries {
-			name := entry.Name()
-			if isReservedDataControlEntry(name) {
-				continue
-			}
-			src := filepath.Join(dataDir, name)
-			dst := filepath.Join(stageDir, name)
+func generationEntryExists(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// The journal gives each move exactly two legitimate locations. A missing or
+// ambiguous entry stops startup and leaves both generations available.
+func moveGenerationEntries(from, to string, names []string) error {
+	for _, dir := range []string{from, to} {
+		info, err := os.Lstat(dir)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("generation path %q is not a directory", dir)
+		}
+	}
+	for _, name := range names {
+		src, dst := filepath.Join(from, name), filepath.Join(to, name)
+		atSource, err := generationEntryExists(src)
+		if err != nil {
+			return err
+		}
+		atDestination, err := generationEntryExists(dst)
+		if err != nil {
+			return err
+		}
+		if atSource == atDestination {
+			return fmt.Errorf("generation entry %q must exist in exactly one of %s and %s", name, from, to)
+		}
+		if atSource {
 			if err := os.Rename(src, dst); err != nil {
-				rollbackErrs = append(rollbackErrs, fmt.Errorf("revert published entry %q: %w", name, err))
+				return fmt.Errorf("move generation entry %q: %w", name, err)
 			}
 		}
 	}
-	if entries, err := os.ReadDir(prevDir); err == nil {
-		for _, entry := range entries {
-			name := entry.Name()
-			src := filepath.Join(prevDir, name)
-			dst := filepath.Join(dataDir, name)
-			if err := os.Rename(src, dst); err != nil {
-				rollbackErrs = append(rollbackErrs, fmt.Errorf("restore previous entry %q: %w", name, err))
-			}
-		}
-	} else if !os.IsNotExist(err) {
-		rollbackErrs = append(rollbackErrs, err)
-	}
-	syncDir(dataDir)
-	return errors.Join(rollbackErrs...)
+	return errors.Join(syncDir(from), syncDir(to))
 }
 
 func cleanupOrphanedGenerations(dataDir string) {
@@ -327,145 +275,83 @@ func cleanupOrphanedGenerations(dataDir string) {
 	}
 }
 
-// RecoverPendingGeneration reconciles any generation switch interrupted by a
-// crash or reboot before databases or runtime directories are initialized.
+// RecoverPendingGeneration completes the durable restore journal before any
+// database or HTTP listener opens. Failures retain the journal and both trees.
 func RecoverPendingGeneration(dataDir string) error {
-	if _, err := os.Stat(dataDir); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
 	manifest, err := readGenerationManifest(dataDir)
 	if err != nil {
 		return err
 	}
-	if manifest == nil || manifest.State == "" || manifest.State == generationStateActive {
+	if manifest == nil || manifest.State == generationStateActive {
 		cleanupOrphanedGenerations(dataDir)
 		return nil
+	}
+	return resumeGenerationSwitch(dataDir, *manifest)
+}
+
+func resumeGenerationSwitch(dataDir string, manifest generationManifest) error {
+	if manifest.Version != 2 || !validGenerationName(manifest.ActiveGeneration) ||
+		!validGenerationName(manifest.PreviousGeneration) ||
+		manifest.ActiveGeneration == manifest.PreviousGeneration || manifest.SecurityEpoch == 0 {
+		return errors.New("invalid or unsupported pending generation journal")
+	}
+	for _, names := range [][]string{manifest.LiveEntries, manifest.StagedEntries} {
+		for _, name := range names {
+			if !validGenerationName(name) {
+				return fmt.Errorf("invalid generation entry %q", name)
+			}
+		}
+	}
+	requiredDB := false
+	for _, name := range manifest.StagedEntries {
+		if name == "komari.db" {
+			requiredDB = true
+		}
+	}
+	if !requiredDB {
+		return errors.New("staged generation does not include the primary database")
 	}
 
 	genRoot := filepath.Join(dataDir, generationsDirName)
 	stageDir := filepath.Join(genRoot, manifest.ActiveGeneration)
-	prevDir := ""
-	if manifest.PreviousGeneration != "" {
-		prevDir = filepath.Join(genRoot, manifest.PreviousGeneration)
-	}
-
+	prevDir := filepath.Join(genRoot, manifest.PreviousGeneration)
 	switch manifest.State {
 	case generationStatePendingPark:
-		if manifest.ActiveGeneration == "" {
-			return errors.New("pending_park generation manifest missing active generation")
+		staged, err := generationEntries(stageDir)
+		if err != nil {
+			return fmt.Errorf("inspect staged generation: %w", err)
 		}
-		if _, err := os.Stat(stageDir); err != nil {
-			return fmt.Errorf("pending_park staged generation %q missing: %w", manifest.ActiveGeneration, err)
+		if !slices.Equal(staged, manifest.StagedEntries) {
+			return errors.New("staged generation does not match its journal")
 		}
-		if prevDir == "" {
-			prevDir = filepath.Join(genRoot, newGenerationID("prev"))
-			manifest.PreviousGeneration = filepath.Base(prevDir)
+		if err := moveGenerationEntries(dataDir, prevDir, manifest.LiveEntries); err != nil {
+			return fmt.Errorf("park live generation: %w", err)
 		}
-		if err := parkLiveDataEntries(dataDir, prevDir); err != nil {
-			return err
+		if restoreFaultHook.afterManifestPark != nil {
+			if err := restoreFaultHook.afterManifestPark(); err != nil {
+				return err
+			}
 		}
 		manifest.State = generationStatePendingPublish
-		if err := writeGenerationManifest(dataDir, *manifest); err != nil {
+		if err := writeGenerationManifest(dataDir, manifest); err != nil {
 			return err
 		}
-		fallthrough
-
 	case generationStatePendingPublish:
-		if manifest.SecurityEpoch > 0 {
-			if err := writeSecurityEpochFile(dataDir, manifest.SecurityEpoch); err != nil {
-				return fmt.Errorf("commit restored security epoch during recovery: %w", err)
-			}
-			SetCurrentSecurityEpoch(manifest.SecurityEpoch)
-		}
-		if err := publishStagedEntries(dataDir, stageDir, prevDir); err != nil {
-			return err
-		}
-		if err := publishRestoredCustomDatabase(dataDir); err != nil {
-			return err
-		}
-		syncDir(dataDir)
-		manifest.State = generationStateActive
-		manifest.PreviousGeneration = ""
-		if err := writeGenerationManifest(dataDir, *manifest); err != nil {
-			return err
-		}
-		_ = os.Remove(filepath.Join(dataDir, backupArchiveFileName))
-		cleanupOrphanedGenerations(dataDir)
-		logger.Infof("dbcore", "[restore] recovered interrupted generation switch into %s", manifest.ActiveGeneration)
-		return nil
-
 	default:
 		return fmt.Errorf("unsupported generation manifest state %q", manifest.State)
 	}
-}
 
-func commitStagedGeneration(dataDir, stageDir string, prevEpoch, newEpoch uint64, manifestCommitted *bool) error {
-	genID := filepath.Base(stageDir)
-	prevID := newGenerationID("prev")
-	prevDir := filepath.Join(dataDir, generationsDirName, prevID)
-
-	stagedList, err := os.ReadDir(stageDir)
+	if err := moveGenerationEntries(stageDir, dataDir, manifest.StagedEntries); err != nil {
+		return fmt.Errorf("publish staged generation: %w", err)
+	}
+	live, err := generationEntries(dataDir)
 	if err != nil {
-		return fmt.Errorf("list staged generation before commit: %w", err)
-	}
-	names := make([]string, 0, len(stagedList))
-	for _, entry := range stagedList {
-		if !isReservedDataControlEntry(entry.Name()) {
-			names = append(names, entry.Name())
-		}
-	}
-
-	if err := syncTree(stageDir); err != nil {
-		return fmt.Errorf("sync staged generation: %w", err)
-	}
-
-	manifest := generationManifest{
-		Version:            1,
-		ActiveGeneration:   genID,
-		PreviousGeneration: prevID,
-		State:              generationStatePendingPark,
-		StagedEntries:      names,
-		SecurityEpoch:      newEpoch,
-	}
-	if err := writeGenerationManifest(dataDir, manifest); err != nil {
-		return fmt.Errorf("write pending_park manifest: %w", err)
-	}
-	if manifestCommitted != nil {
-		*manifestCommitted = true
-	}
-	if err := parkLiveDataEntries(dataDir, prevDir); err != nil {
-		if rbErr := rollbackGenerationToLive(dataDir, stageDir, prevDir); rbErr == nil {
-			_ = os.RemoveAll(prevDir)
-			_ = writeGenerationManifest(dataDir, generationManifest{State: generationStateActive, SecurityEpoch: prevEpoch})
-			if manifestCommitted != nil {
-				*manifestCommitted = false
-			}
-		}
 		return err
 	}
-	if restoreFaultHook.afterManifestPark != nil {
-		if err := restoreFaultHook.afterManifestPark(); err != nil {
-			return err
-		}
+	if !slices.Equal(live, manifest.StagedEntries) {
+		return errors.New("published generation does not match its journal")
 	}
-
-	manifest.State = generationStatePendingPublish
-	if err := writeGenerationManifest(dataDir, manifest); err != nil {
-		return fmt.Errorf("write pending_publish manifest: %w", err)
-	}
-	if err := publishStagedEntries(dataDir, stageDir, prevDir); err != nil {
-		rbErr := rollbackGenerationToLive(dataDir, stageDir, prevDir)
-		if rbErr != nil {
-			return fmt.Errorf("publish restored generation: %v; rollback: %w", err, rbErr)
-		}
-		_ = os.RemoveAll(prevDir)
-		_ = writeGenerationManifest(dataDir, generationManifest{State: generationStateActive, SecurityEpoch: prevEpoch})
-		if manifestCommitted != nil {
-			*manifestCommitted = false
-		}
+	if err := validateRestoredSQLite(filepath.Join(dataDir, "komari.db"), "published komari.db"); err != nil {
 		return err
 	}
 	if restoreFaultHook.afterManifestPublish != nil {
@@ -474,33 +360,61 @@ func commitStagedGeneration(dataDir, stageDir string, prevEpoch, newEpoch uint64
 		}
 	}
 	if err := publishRestoredCustomDatabase(dataDir); err != nil {
-		rbErr := rollbackGenerationToLive(dataDir, stageDir, prevDir)
-		if rbErr != nil {
-			return fmt.Errorf("publish restored custom database: %v; rollback: %w", err, rbErr)
-		}
-		_ = os.RemoveAll(prevDir)
-		_ = writeGenerationManifest(dataDir, generationManifest{State: generationStateActive, SecurityEpoch: prevEpoch})
-		if manifestCommitted != nil {
-			*manifestCommitted = false
-		}
 		return err
 	}
-	if newEpoch > 0 {
-		if err := writeSecurityEpochFile(dataDir, newEpoch); err != nil {
-			return fmt.Errorf("persist restored security epoch: %w", err)
-		}
+	if err := writeSecurityEpochFile(dataDir, manifest.SecurityEpoch); err != nil {
+		return err
 	}
-	syncDir(dataDir)
-
+	// A restart after consuming the archive still sees the pending journal.
+	// An active journal can therefore never apply the same staged archive again.
+	if err := os.Remove(filepath.Join(dataDir, backupArchiveFileName)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	manifest.State = generationStateActive
 	manifest.PreviousGeneration = ""
 	if err := writeGenerationManifest(dataDir, manifest); err != nil {
-		return fmt.Errorf("write active generation manifest: %w", err)
+		return err
 	}
-	SetCurrentSecurityEpoch(newEpoch)
-	if err := os.Remove(filepath.Join(dataDir, backupArchiveFileName)); err != nil && !os.IsNotExist(err) {
-		logger.Errorf("dbcore", "[restore] generation active, failed to remove backup.zip: %v", err)
-	}
+	SetCurrentSecurityEpoch(manifest.SecurityEpoch)
 	cleanupOrphanedGenerations(dataDir)
 	return nil
+}
+
+func commitStagedGeneration(dataDir, stageDir string, newEpoch uint64, manifestCommitted *bool) error {
+	names, err := generationEntries(stageDir)
+	if err != nil {
+		return err
+	}
+	liveNames, err := generationEntries(dataDir)
+	if err != nil {
+		return err
+	}
+	if err := syncTree(stageDir); err != nil {
+		return fmt.Errorf("sync staged generation: %w", err)
+	}
+
+	prevID := newGenerationID("prev")
+	genRoot := filepath.Join(dataDir, generationsDirName)
+	if err := os.Mkdir(filepath.Join(genRoot, prevID), 0o700); err != nil {
+		return err
+	}
+	if err := syncDir(genRoot); err != nil {
+		return err
+	}
+	manifest := generationManifest{
+		Version:            2,
+		ActiveGeneration:   filepath.Base(stageDir),
+		PreviousGeneration: prevID,
+		State:              generationStatePendingPark,
+		StagedEntries:      names,
+		LiveEntries:        liveNames,
+		SecurityEpoch:      newEpoch,
+	}
+	// A directory sync error can follow a successful manifest rename. Retain
+	// the staged data from this point since the next startup may see it.
+	*manifestCommitted = true
+	if err := writeGenerationManifest(dataDir, manifest); err != nil {
+		return fmt.Errorf("write pending_park manifest: %w", err)
+	}
+	return resumeGenerationSwitch(dataDir, manifest)
 }

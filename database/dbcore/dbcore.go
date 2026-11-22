@@ -347,7 +347,7 @@ func restoreStagedBackup(dataDir string) error {
 	if err := retireRestoredLegacyPasskeyPlugin(stageDir); err != nil {
 		return fmt.Errorf("retire legacy passkey plugin state in backup: %w", err)
 	}
-	prevEpoch, newEpoch, err := reconcileRestoreSecurityState(dataDir, stageDir)
+	_, newEpoch, err := reconcileRestoreSecurityState(dataDir, stageDir)
 	if err != nil {
 		return fmt.Errorf("reconcile security state across restore: %w", err)
 	}
@@ -397,10 +397,10 @@ func restoreStagedBackup(dataDir string) error {
 	if err != nil {
 		return err
 	}
-	if err := commitStagedGeneration(dataDir, stageDir, prevEpoch, newEpoch, &manifestCommitted); err != nil {
+	if err := commitStagedGeneration(dataDir, stageDir, newEpoch, &manifestCommitted); err != nil {
 		return err
 	}
-	logger.Infof("dbcore", "[restore] backup restored atomically via same-volume generation swap (epoch=%d); previous data saved to %s", newEpoch, preRestorePath)
+	logger.Infof("dbcore", "[restore] verified generation published (epoch=%d); previous data saved to %s", newEpoch, preRestorePath)
 	return nil
 }
 
@@ -663,13 +663,40 @@ func atomicCopySQLiteFile(srcPath, dstPath string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	_ = os.Remove(dstPath + "-wal")
-	_ = os.Remove(dstPath + "-shm")
+	if err := checkpointRestoreDestination(dstPath); err != nil {
+		return err
+	}
 	if err := os.Rename(tmpName, dstPath); err != nil {
 		return err
 	}
 	removeTmp = false
-	return nil
+	return syncDir(filepath.Dir(dstPath))
+}
+
+func checkpointRestoreDestination(path string) error {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		return err
+	}
+	var busy, logPages, flushed int
+	checkpointErr := db.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logPages, &flushed)
+	if err := errors.Join(checkpointErr, db.Close()); err != nil {
+		return fmt.Errorf("checkpoint configured database before restore: %w", err)
+	}
+	if busy != 0 {
+		return errors.New("configured database has an active SQLite writer")
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return syncDir(filepath.Dir(path))
 }
 
 var (

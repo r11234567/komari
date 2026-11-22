@@ -224,3 +224,44 @@ func TestRestoreReconcilesSecurityEpochPurgesSessionsAndCarriesRevocations(t *te
 		t.Fatalf("agent_refresh_uses not carried forward: count=%d err=%v", count, err)
 	}
 }
+
+func TestPendingRestoreNeverActivatesAnIncompleteGeneration(t *testing.T) {
+	for _, missing := range []string{"entry", "directory"} {
+		t.Run(missing, func(t *testing.T) {
+			dataDir := t.TempDir()
+			genRoot := filepath.Join(dataDir, generationsDirName)
+			stage := filepath.Join(genRoot, "gen-new")
+			previous := filepath.Join(genRoot, "gen-old")
+			for _, path := range []string{stage, previous} {
+				if err := os.MkdirAll(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			createRestoreSQLite(t, filepath.Join(previous, "komari.db"), "previous")
+			createRestoreSQLite(t, filepath.Join(dataDir, "komari.db"), "published-first")
+			if missing == "directory" {
+				if err := os.Remove(stage); err != nil {
+					t.Fatal(err)
+				}
+			}
+			journal := generationManifest{
+				ActiveGeneration: "gen-new", PreviousGeneration: "gen-old",
+				State: generationStatePendingPublish, SecurityEpoch: 2,
+				StagedEntries: []string{"komari.db", "metrics.db"},
+			}
+			if err := writeGenerationManifest(dataDir, journal); err != nil {
+				t.Fatal(err)
+			}
+			if err := RecoverPendingGeneration(dataDir); err == nil {
+				t.Fatal("incomplete generation was activated")
+			}
+			got, err := readGenerationManifest(dataDir)
+			if err != nil || got == nil || got.State != generationStatePendingPublish {
+				t.Fatalf("pending journal was lost: %+v, %v", got, err)
+			}
+			if _, err := os.Stat(filepath.Join(previous, "komari.db")); err != nil {
+				t.Fatalf("previous database was lost: %v", err)
+			}
+		})
+	}
+}
