@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	RefreshRecoveryWindow    = 24 * time.Hour
-	minRefreshRecoveryWindow = time.Minute
-	maxRefreshRecoveryWindow = 7 * 24 * time.Hour
+	RefreshRecoveryWindow           = 24 * time.Hour
+	RefreshConcurrentConflictWindow = 60 * time.Second
+	minRefreshRecoveryWindow        = time.Minute
+	maxRefreshRecoveryWindow        = 7 * 24 * time.Hour
 )
 const AccessHandoffWindow = time.Minute
 
@@ -162,7 +163,11 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 				return fmt.Errorf("%w: refresh expired", ErrCredentialRejected)
 			}
 			if digest != cur.RefreshTokenHash {
-				if digest == cur.PreviousRefreshHash && cur.RefreshRecoveryUntil != nil && now.Before(*cur.RefreshRecoveryUntil) {
+				conflictDeadline := cur.UpdatedAt.Add(RefreshConcurrentConflictWindow)
+				if cur.LastRefreshAt != nil {
+					conflictDeadline = cur.LastRefreshAt.Add(RefreshConcurrentConflictWindow)
+				}
+				if digest == cur.PreviousRefreshHash && cur.RefreshRecoveryUntil != nil && now.Before(*cur.RefreshRecoveryUntil) && (cur.RefreshRecoveryRequest == requestHash || now.Before(conflictDeadline)) {
 					if cur.RefreshRecoveryRequest != requestHash {
 						return ErrRefreshConflict
 					}

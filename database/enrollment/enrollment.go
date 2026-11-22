@@ -429,33 +429,47 @@ func Revoke(clientUUID, reason string) error {
 		}).Error
 }
 
-// ResolveAccessToken identifies the machine presenting an access token.
-func ResolveAccessToken(accessToken string) (string, error) {
+// LookupAccessToken performs a single database lookup for accessToken,
+// returning knownRecord=true even when a matching Agent credential is expired
+// or revoked so rate-limit lanes classify known Agents without querying twice.
+func LookupAccessToken(accessToken string) (clientUUID string, knownRecord bool, err error) {
+	return lookupAccessTokenDB(dbcore.GetDBInstance(), accessToken, time.Now().UTC())
+}
+
+func lookupAccessTokenDB(db *gorm.DB, accessToken string, now time.Time) (string, bool, error) {
 	digest := hashToken(accessToken)
 	if digest == "" {
-		return "", errors.New("an access token is required")
+		return "", false, errors.New("an access token is required")
+	}
+	if db == nil {
+		return "", false, errors.New("database unavailable")
 	}
 	var row models.AgentCredential
-	now := time.Now().UTC()
-	if err := dbcore.GetDBInstance().Where("access_token_hash = ? OR previous_access_hash = ?", digest, digest).First(&row).Error; err != nil {
-		return "", err
+	if err := db.Where("access_token_hash = ? OR previous_access_hash = ?", digest, digest).First(&row).Error; err != nil {
+		return "", false, err
 	}
 	// SQLite stores datetime offsets in text. Comparing a legacy local-offset
 	// expiry to UTC text can accept an expired handoff. Compare actual instants
 	// after decoding, independently of the host timezone or persisted offset.
 	if digest != row.AccessTokenHash && (row.PreviousAccessExpires == nil || !now.Before(*row.PreviousAccessExpires)) {
-		return "", errors.New("the access token handoff has expired")
+		return "", true, errors.New("the access token handoff has expired")
 	}
 	if row.RevokedAt != nil {
-		return "", errors.New("these credentials were revoked")
+		return "", true, errors.New("these credentials were revoked")
 	}
 	if (row.EnrollmentExpiresAt != nil && !now.Before(*row.EnrollmentExpiresAt)) || (row.LifecycleVersion > 0 && !now.Before(row.RefreshExpiresAt)) {
-		return "", errors.New("machine authorization expired; administrator reapproval required")
+		return "", true, errors.New("machine authorization expired; administrator reapproval required")
 	}
 	if !now.Before(row.AccessExpiresAt) {
-		return "", errors.New("the access token has expired")
+		return "", true, errors.New("the access token has expired")
 	}
-	return row.Client, nil
+	return row.Client, true, nil
+}
+
+// ResolveAccessToken identifies the machine presenting an access token.
+func ResolveAccessToken(accessToken string) (string, error) {
+	clientUUID, _, err := LookupAccessToken(accessToken)
+	return clientUUID, err
 }
 
 // HasAccessTokenRecord reports whether accessToken matches a stored (possibly
@@ -466,21 +480,8 @@ func HasAccessTokenRecord(accessToken string) bool {
 }
 
 func hasAccessTokenRecordDB(db *gorm.DB, accessToken string) bool {
-	if db == nil {
-		return false
-	}
-	digest := hashToken(accessToken)
-	if digest == "" {
-		return false
-	}
-	var count int64
-	if err := db.Model(&models.AgentCredential{}).
-		Where("access_token_hash = ? OR previous_access_hash = ?", digest, digest).
-		Limit(1).
-		Count(&count).Error; err != nil {
-		return false
-	}
-	return count > 0
+	_, known, _ := lookupAccessTokenDB(db, accessToken, time.Now().UTC())
+	return known
 }
 
 // GetCredential returns the stored credential record for a machine, which is

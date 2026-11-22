@@ -451,8 +451,7 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
-	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
-		WithTrustedOrigins(flags.EffectivePanelOrigin())
+	cors := a.newUpgradeCorsController()
 	r.Use(cors.Middleware())
 	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 	r.Use(api.IdentityMiddleware())
@@ -531,8 +530,7 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
-	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
-		WithTrustedOrigins(flags.EffectivePanelOrigin())
+	cors := a.newUpgradeCorsController()
 	r.Use(cors.Middleware())
 	r.Use(api.IdentityMiddleware())
 	r.Use(func(c *gin.Context) {
@@ -733,6 +731,15 @@ func apiNoStoreMiddleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func (a *App) newUpgradeCorsController() *security.CorsController {
+	if flags.SplitPanelEnabled() {
+		return security.NewCorsController(true, "").
+			WithTrustedOrigins(flags.EffectivePanelOrigin())
+	}
+	return security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
+		WithTrustedOrigins(flags.EffectivePublicOrigin(), flags.EffectivePanelOrigin())
 }
 
 // BuildRouter 构建 Gin 引擎、中间件与全部路由，并登记热重载处理器。
