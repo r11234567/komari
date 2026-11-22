@@ -49,6 +49,7 @@ func main() {
 	const count = 80000
 	at := time.Now().UTC().Add(-12 * time.Hour).Truncate(time.Minute)
 	labels := map[string]string{"origin": "synthetic_cold_csv_qualification", "payload": strings.Repeat("abcd0123", 1024)}
+	drainColdArchive(ctx, tel, time.Now())
 	for base := 0; base < count; base += 128 {
 		points := make([]metric.Point, 0, 128)
 		for i := base; i < min(base+128, count); i++ {
@@ -56,30 +57,14 @@ func main() {
 		}
 		_, e = tel.Accept(ctx, metric.TelemetryBatch{Source: scope.AgentID, Identity: fmt.Sprintf("csv-qualification-%d", base), Points: points}, time.Now())
 		must(e)
-		for {
-			n, e := tel.SummarizeNext(ctx)
-			must(e)
-			if n == 0 {
-				break
-			}
+		// Drain sealed segments between batches to stay within the engine's
+		// real hot-storage budget. Force the final open segment cold as well.
+		sealAt := time.Now()
+		if base+128 >= count {
+			sealAt = sealAt.Add(time.Minute)
 		}
+		drainColdArchive(ctx, tel, sealAt)
 		if base%4096 == 0 || base+128 >= count {
-			_, e = tel.SealDue(ctx, time.Now().Add(2*time.Hour))
-			must(e)
-			for {
-				more, e := tel.ArchiveNext(ctx)
-				must(e)
-				if !more {
-					break
-				}
-			}
-			for {
-				n, e := tel.DeleteArchivedChunk(ctx, time.Now().Add(2*time.Hour), 512)
-				must(e)
-				if n == 0 {
-					break
-				}
-			}
 			fmt.Printf("synthetic cold fixture: %d/%d\n", min(base+128, count), count)
 		}
 	}
@@ -89,4 +74,30 @@ func main() {
 	b, e = json.MarshalIndent(manifest, "", "  ")
 	must(e)
 	must(os.WriteFile(filepath.Join(root, "qualification-manifest.json"), b, 0600))
+}
+
+func drainColdArchive(ctx context.Context, tel *metric.Telemetry, sealAt time.Time) {
+	for {
+		n, err := tel.SummarizeNext(ctx)
+		must(err)
+		if n == 0 {
+			break
+		}
+	}
+	_, err := tel.SealDue(ctx, sealAt)
+	must(err)
+	for {
+		more, err := tel.ArchiveNext(ctx)
+		must(err)
+		if !more {
+			break
+		}
+	}
+	for {
+		n, err := tel.DeleteArchivedChunk(ctx, time.Now(), 512)
+		must(err)
+		if n == 0 {
+			return
+		}
+	}
 }

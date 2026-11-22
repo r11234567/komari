@@ -38,14 +38,22 @@ func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}, o
 		normExclude[abs] = struct{}{}
 	}
 
-	out, err := os.Create(dstZip)
+	absZip, err := filepath.Abs(dstZip)
 	if err != nil {
 		return err
 	}
+	// Keep sensitive backup contents private even in existing backup directories
+	// with wider permissions. Publish the complete archive by replacing the entry.
+	out, err := os.CreateTemp(filepath.Dir(absZip), ".komari-backup-*.zip")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(out.Name())
 	defer out.Close()
+	normExclude[absZip] = struct{}{}
+	normExclude[out.Name()] = struct{}{}
 
 	zw := zip.NewWriter(out)
-	defer zw.Close()
 
 	addFile := func(path string, info os.FileInfo, zipName string) error {
 		if info.IsDir() {
@@ -127,7 +135,19 @@ func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}, o
 			return err
 		}
 	}
-	return zw.Close()
+	if err := zw.Close(); err != nil {
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	if err := datadir.Rename(out.Name(), absZip); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(absZip))
 }
 
 // Automatic upgrade/pre-restore packages use the same portable queue snapshot
@@ -442,7 +462,7 @@ func writePreRestoreSnapshotFrom(dataDir, activeDir, backupZipPath, custom strin
 
 	primaryDir := filepath.Join(filepath.Dir(dataDir), "backup")
 	primaryPath := filepath.Join(primaryDir, filename)
-	if mkErr := os.MkdirAll(primaryDir, 0o755); mkErr == nil {
+	if mkErr := os.MkdirAll(primaryDir, 0o700); mkErr == nil {
 		if err := backupDataDirectory(activeDir, primaryPath, map[string]struct{}{backupZipPath: {}}, true, preRestoreOverlays...); err == nil {
 			return primaryPath, nil
 		} else {
@@ -828,7 +848,7 @@ func backupOnVersionUpgrade() {
 		instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 	}
 
-	if err := os.MkdirAll("./backup", 0755); err != nil {
+	if err := os.MkdirAll("./backup", 0o700); err != nil {
 		logger.Errorf("dbcore", "[upgrade-backup] failed to create backup dir: %v", err)
 		return
 	}
