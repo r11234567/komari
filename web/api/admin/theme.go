@@ -22,6 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/utils/fsmove"
 	"github.com/komari-monitor/komari/utils/safepath"
@@ -93,7 +94,7 @@ func temporaryThemeArchiveFromReader(reader io.Reader, prefix string) (string, e
 }
 
 func installedThemes() ([]models.Theme, error) {
-	entries, err := os.ReadDir("./data/theme")
+	entries, err := os.ReadDir(datadir.Resolve("./data/theme"))
 	if os.IsNotExist(err) {
 		return []models.Theme{}, nil
 	}
@@ -105,7 +106,7 @@ func installedThemes() ([]models.Theme, error) {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !public.IsLocalThemeUsable(entry.Name()) {
 			continue
 		}
-		configPath, pathErr := safepath.JoinUnder("./data/theme", filepath.Join(entry.Name(), "komari-theme.json"))
+		configPath, pathErr := safepath.JoinUnder(datadir.Resolve("./data/theme"), filepath.Join(entry.Name(), "komari-theme.json"))
 		if pathErr != nil {
 			continue
 		}
@@ -249,13 +250,13 @@ func DeleteTheme(c *gin.Context) {
 		}
 	}
 
-	themesRoot, err := os.OpenRoot("./data/theme")
+	themesRoot, err := os.OpenRoot(datadir.Resolve("./data/theme"))
 	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "打开主题目录失败: "+err.Error())
 		return
 	}
 	defer themesRoot.Close()
-	tombstone, err := os.MkdirTemp("./data/theme", ".deleted-")
+	tombstone, err := os.MkdirTemp(datadir.Resolve("./data/theme"), ".deleted-")
 	if err != nil {
 		if currentTheme == req.Short {
 			_ = config.Set(config.ThemeKey, currentTheme)
@@ -372,7 +373,7 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 		return themeInfo, err
 	}
 
-	themesDir := "./data/theme"
+	themesDir := datadir.Resolve("./data/theme")
 	if err := os.MkdirAll(themesDir, 0755); err != nil {
 		return themeInfo, fmt.Errorf("创建主题目录失败: %v", err)
 	}
@@ -795,7 +796,7 @@ func UpdateTheme(c *gin.Context) {
 	}
 
 	// 检查主题是否存在
-	themeDir, err := safepath.JoinUnder("./data/theme", req.Short)
+	themeDir, err := safepath.JoinUnder(datadir.Resolve("./data/theme"), req.Short)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, "无效的主题路径")
 		return
@@ -806,7 +807,7 @@ func UpdateTheme(c *gin.Context) {
 		return
 	}
 
-	themesRoot, err := os.OpenRoot("./data/theme")
+	themesRoot, err := os.OpenRoot(datadir.Resolve("./data/theme"))
 	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "打开主题目录失败: "+err.Error())
 		return
@@ -1090,7 +1091,7 @@ func ImportTheme(c *gin.Context) {
 
 		// 检查是否已存在同名主题
 		exists := false
-		themeDir, pathErr := safepath.JoinUnder("./data/theme", themeInfo.Short)
+		themeDir, pathErr := safepath.JoinUnder(datadir.Resolve("./data/theme"), themeInfo.Short)
 		if pathErr != nil {
 			api.RespondError(c, http.StatusBadRequest, "无效的主题路径")
 			return
@@ -1115,7 +1116,7 @@ func ImportTheme(c *gin.Context) {
 	}
 
 	overwritten := false
-	themeDir, pathErr := safepath.JoinUnder("./data/theme", themeInfo.Short)
+	themeDir, pathErr := safepath.JoinUnder(datadir.Resolve("./data/theme"), themeInfo.Short)
 	if pathErr != nil {
 		api.RespondError(c, http.StatusBadRequest, "无效的主题路径")
 		return
@@ -1179,7 +1180,7 @@ func GetThemeManifest(c *gin.Context) {
 		return
 	}
 
-	themesRoot, err := os.OpenRoot("./data/theme")
+	themesRoot, err := os.OpenRoot(datadir.Resolve("./data/theme"))
 	if err != nil {
 		api.RespondError(c, http.StatusNotFound, "主题不存在")
 		return
@@ -1220,7 +1221,7 @@ func GetThemePreview(c *gin.Context) {
 		return
 	}
 
-	configPath, err := safepath.JoinUnder("./data/theme", filepath.Join(short, "komari-theme.json"))
+	configPath, err := safepath.JoinUnder(datadir.Resolve("./data/theme"), filepath.Join(short, "komari-theme.json"))
 	if err != nil {
 		c.Status(http.StatusBadRequest)
 		return
@@ -1247,7 +1248,7 @@ func GetThemePreview(c *gin.Context) {
 		return
 	}
 
-	themeRoot, err := os.OpenRoot(filepath.Join("./data/theme", short))
+	themeRoot, err := os.OpenRoot(filepath.Join(datadir.Resolve("./data/theme"), short))
 	if err != nil {
 		c.Status(http.StatusNotFound)
 		return

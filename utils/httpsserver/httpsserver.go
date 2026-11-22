@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/config"
 	logger "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/requestscheme"
@@ -665,12 +666,12 @@ func (m *Manager) setSecurityHeaders(w http.ResponseWriter, secure bool) {
 
 func buildProvider(settings Settings) (certificateProvider, error) {
 	if !settings.Enabled {
-		available, err := certificatePairAvailable(settings.CertificatePath, settings.PrivateKeyPath)
+		available, err := certificatePairAvailable(datadir.Resolve(settings.CertificatePath), datadir.Resolve(settings.PrivateKeyPath))
 		if err != nil || !available {
 			return nil, err
 		}
 	}
-	return newManualProvider(settings.CertificatePath, settings.PrivateKeyPath)
+	return newManualProvider(datadir.Resolve(settings.CertificatePath), datadir.Resolve(settings.PrivateKeyPath))
 }
 
 func certificatePairAvailable(certPath, keyPath string) (bool, error) {

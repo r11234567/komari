@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/metric"
 )
@@ -74,7 +75,7 @@ func telemetryConfig(cfg *MetricStoreConfig) (metric.TelemetryConfig, error) {
 	if hot < 1 || hot > 120 || segment < 1 || segment > 1440 || budget < 4 || budget > 65536 || cfg.ArchiveRetentionDays < 0 || cfg.ArchiveRetentionDays > 3650 {
 		return metric.TelemetryConfig{}, fmt.Errorf("invalid telemetry retention/capacity settings")
 	}
-	return metric.TelemetryConfig{ArchiveDirectory: dir, RawWindow: time.Duration(hot) * time.Minute, SegmentDuration: time.Duration(segment) * time.Minute, MaxHotBytes: int64(budget) << 20}, nil
+	return metric.TelemetryConfig{ArchiveDirectory: datadir.Resolve(dir), RawWindow: time.Duration(hot) * time.Minute, SegmentDuration: time.Duration(segment) * time.Minute, MaxHotBytes: int64(budget) << 20}, nil
 }
 
 func enableTelemetryStore(ctx context.Context, s *metric.Store, cfg *MetricStoreConfig) error {

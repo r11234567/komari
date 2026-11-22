@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/komari-monitor/komari/internal/datadir"
 )
 
 const keyFilePath = "./data/secret.key"
@@ -127,11 +129,12 @@ func loadOrCreateKey() ([]byte, error) {
 		return normalizeKey(env)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(keyFilePath), 0700); err != nil {
+	keyPath := datadir.Resolve(keyFilePath)
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
 		return nil, err
 	}
 
-	if data, err := os.ReadFile(keyFilePath); err == nil {
+	if data, err := os.ReadFile(keyPath); err == nil {
 		return normalizeKey(strings.TrimSpace(string(data)))
 	} else if !os.IsNotExist(err) {
 		return nil, err
@@ -143,7 +146,7 @@ func loadOrCreateKey() ([]byte, error) {
 	}
 
 	encoded := base64.StdEncoding.EncodeToString(key)
-	if err := os.WriteFile(keyFilePath, []byte(encoded), 0600); err != nil {
+	if err := os.WriteFile(keyPath, []byte(encoded), 0600); err != nil {
 		return nil, err
 	}
 

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/jsruntime"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/messageSender/outboundhttp"
@@ -66,11 +67,11 @@ func (j *JavaScriptSender) ensureRuntime(script string) error {
 	if strings.TrimSpace(script) == "" {
 		return errors.New("JavaScript notification script is not configured")
 	}
-	if err := os.MkdirAll(DataDir, 0755); err != nil {
+	if err := os.MkdirAll(datadir.Resolve(DataDir), 0755); err != nil {
 		return fmt.Errorf("create JavaScript notification directory: %w", err)
 	}
 	runtime, err := jsruntime.New(script, jsruntime.Options{
-		BaseDir:    DataDir,
+		BaseDir:    datadir.Resolve(DataDir),
 		NodeJS:     true,
 		Timeout:    executionTimeout,
 		HTTPClient: outboundhttp.NewClient(executionTimeout),

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/datadir"
 )
 
 // Package admission is serialized independently of runtime locks. Callers must
@@ -48,7 +49,7 @@ func (p PackageReview) Targets() []string {
 	return []string{p.Plugin.Short, p.Digest, p.Plugin.Version, p.PermissionsHash, p.CurrentDigest}
 }
 
-func packageDir() string { return filepath.Join(DataDir, ".packages") }
+func packageDir() string { return filepath.Join(datadir.Resolve(DataDir), ".packages") }
 func validDigest(s string) bool {
 	b, e := hex.DecodeString(s)
 	return e == nil && len(b) == sha256.Size && s == strings.ToLower(s)
@@ -215,10 +216,10 @@ func unpackPackage(path string) (models.Plugin, string, error) {
 	if e = CheckKomariVersion(info.Komari); e != nil {
 		return info, "", e
 	}
-	if e = os.MkdirAll(DataDir, 0700); e != nil {
+	if e = os.MkdirAll(datadir.Resolve(DataDir), 0700); e != nil {
 		return info, "", e
 	}
-	dir, e := os.MkdirTemp(DataDir, ".activate-")
+	dir, e := os.MkdirTemp(datadir.Resolve(DataDir), ".activate-")
 	if e != nil {
 		return info, "", e
 	}
@@ -339,7 +340,7 @@ func stageZip(path, source, expectedShort, expectedVersion string) (models.Plugi
 // Existing installations are snapshotted once for explicit migration review.
 // Deterministic headers/path ordering keep unchanged snapshots stable.
 func snapshotInstalled(short string) error {
-	dir := filepath.Join(DataDir, short)
+	dir := filepath.Join(datadir.Resolve(DataDir), short)
 	temp, e := os.CreateTemp("", "komari-plugin-review-*.zip")
 	if e != nil {
 		return e
@@ -408,7 +409,7 @@ func receiptDigest(short string) string {
 	var receipt struct {
 		Digest string `json:"digest"`
 	}
-	b, e := os.ReadFile(filepath.Join(DataDir, short, packageReceipt))
+	b, e := os.ReadFile(filepath.Join(datadir.Resolve(DataDir), short, packageReceipt))
 	if e != nil || len(b) > 1024 {
 		return ""
 	}
@@ -508,7 +509,7 @@ func approveTrustedDirectory(short string) error {
 	if newest.Digest == "" {
 		return errors.New("existing plugin snapshot not found")
 	}
-	if e = writeReceipt(filepath.Join(DataDir, short), newest.Digest); e != nil {
+	if e = writeReceipt(filepath.Join(datadir.Resolve(DataDir), short), newest.Digest); e != nil {
 		return e
 	}
 	st := global.stateStore().get(short)
@@ -699,8 +700,8 @@ type packageJournal struct {
 
 func journalPath(short string) string { return filepath.Join(packageDir(), "journal-"+short+".json") }
 func activatePrepared(short, digest, prepared string, old PluginState, enabled bool) error {
-	active := filepath.Join(DataDir, short)
-	backup, e := os.MkdirTemp(DataDir, ".rollback-")
+	active := filepath.Join(datadir.Resolve(DataDir), short)
+	backup, e := os.MkdirTemp(datadir.Resolve(DataDir), ".rollback-")
 	if e != nil {
 		return e
 	}
@@ -747,7 +748,7 @@ func activatePrepared(short, digest, prepared string, old PluginState, enabled b
 	if e = os.Rename(prepared, active); e != nil {
 		return restore(e)
 	}
-	if e = syncPackageDirectory(DataDir); e != nil {
+	if e = syncPackageDirectory(datadir.Resolve(DataDir)); e != nil {
 		return restore(e)
 	}
 	st := old
@@ -780,8 +781,8 @@ func restorePackageJournal(j packageJournal) error {
 	if !validShort(j.Short) || !validDigest(j.Digest) || !strings.HasPrefix(j.Backup, ".rollback-") || filepath.Base(j.Backup) != j.Backup || !strings.HasPrefix(j.Prepared, ".activate-") || filepath.Base(j.Prepared) != j.Prepared {
 		return errors.New("invalid plugin recovery journal")
 	}
-	active := filepath.Join(DataDir, j.Short)
-	backup := filepath.Join(DataDir, j.Backup)
+	active := filepath.Join(datadir.Resolve(DataDir), j.Short)
+	backup := filepath.Join(datadir.Resolve(DataDir), j.Backup)
 	if _, e := os.Stat(backup); e == nil {
 		if e = os.RemoveAll(active); e != nil {
 			return e
@@ -799,7 +800,7 @@ func restorePackageJournal(j packageJournal) error {
 	if e := global.stateStore().set(j.Short, j.Old); e != nil {
 		return e
 	}
-	_ = os.RemoveAll(filepath.Join(DataDir, j.Prepared))
+	_ = os.RemoveAll(filepath.Join(datadir.Resolve(DataDir), j.Prepared))
 	return os.Remove(journalPath(j.Short))
 }
 func recoverPackageTransactions() error {

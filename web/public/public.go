@@ -20,6 +20,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/utils/fsmove"
 	websecurity "github.com/komari-monitor/komari/web/security"
@@ -120,9 +121,9 @@ func renderPublicDocumentTitle(htmlStr, title string) string {
 }
 
 func init() {
-	_ = os.MkdirAll("./data/theme", 0755)
+	_ = os.MkdirAll(datadir.Resolve("./data/theme"), 0755)
 	if _, err := removeFaviconIfHashMatches(
-		filepath.Join(DataDir, FaviconFile),
+		filepath.Join(datadir.Resolve(DataDir), FaviconFile),
 		legacyDefaultFaviconSHA256,
 	); err != nil {
 		log.Printf("Failed to migrate legacy default favicon: %v", err)
@@ -215,7 +216,7 @@ func localThemeFileContent(themeID, relativePath string) ([]byte, string, bool) 
 	if !validThemeID(themeID) {
 		return nil, "", false
 	}
-	themeBasePath := filepath.Join(DataDir, ThemesDir, themeID)
+	themeBasePath := filepath.Join(datadir.Resolve(DataDir), ThemesDir, themeID)
 	themeRoot, err := os.OpenRoot(themeBasePath)
 	if err != nil {
 		return nil, "", false
@@ -242,7 +243,7 @@ func IsLocalThemeUsable(themeID string) bool {
 	if !validThemeID(themeID) {
 		return false
 	}
-	base := filepath.Join(DataDir, ThemesDir, themeID)
+	base := filepath.Join(datadir.Resolve(DataDir), ThemesDir, themeID)
 	for _, relativePath := range []string{"komari-theme.json", filepath.Join(DistDir, IndexFile)} {
 		info, err := os.Stat(filepath.Join(base, relativePath))
 		if err != nil || info.IsDir() {
@@ -260,7 +261,7 @@ func installEmbeddedThemeWithReplace(root, themeID string, replace bool) error {
 	if !replace && IsLocalThemeUsable(themeID) {
 		return nil
 	}
-	themesDir := filepath.Join(DataDir, ThemesDir)
+	themesDir := filepath.Join(datadir.Resolve(DataDir), ThemesDir)
 	if err := os.MkdirAll(themesDir, 0o755); err != nil {
 		return err
 	}
@@ -313,7 +314,7 @@ func localThemeFallback() string {
 	if IsLocalThemeUsable(DefaultTheme) {
 		return DefaultTheme
 	}
-	entries, err := os.ReadDir(filepath.Join(DataDir, ThemesDir))
+	entries, err := os.ReadDir(filepath.Join(datadir.Resolve(DataDir), ThemesDir))
 	if err != nil {
 		return ""
 	}
@@ -456,7 +457,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		c.Header("Expires", "0")
 
 		// 优先：./data/favicon.ico
-		localFavicon := filepath.Join(DataDir, FaviconFile)
+		localFavicon := filepath.Join(datadir.Resolve(DataDir), FaviconFile)
 		if _, err := os.Stat(localFavicon); err == nil {
 			c.Header("Content-Type", contentTypeForPath(localFavicon))
 			c.File(localFavicon)
@@ -707,7 +708,7 @@ func StaticPublic(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc))
 
 	r.GET("/favicon.ico", func(c *gin.Context) {
 		setNoStoreHeaders(c)
-		localFavicon := filepath.Join(DataDir, FaviconFile)
+		localFavicon := filepath.Join(datadir.Resolve(DataDir), FaviconFile)
 		if _, err := os.Stat(localFavicon); err == nil {
 			c.Header("Content-Type", contentTypeForPath(localFavicon))
 			c.File(localFavicon)
@@ -788,7 +789,7 @@ func StaticPanel(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) 
 
 	r.GET("/favicon.ico", func(c *gin.Context) {
 		setNoStoreHeaders(c)
-		localFavicon := filepath.Join(DataDir, FaviconFile)
+		localFavicon := filepath.Join(datadir.Resolve(DataDir), FaviconFile)
 		if _, err := os.Stat(localFavicon); err == nil {
 			c.Header("Content-Type", contentTypeForPath(localFavicon))
 			c.File(localFavicon)
