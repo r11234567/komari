@@ -132,7 +132,10 @@ func nativeSnapshot(ctx context.Context, user string) (Snapshot, error) {
 		var revokedHashes []string
 		if err := db.Model(&models.PasskeyRevocation{}).
 			Where("user_uuid = ?", user).
-			Pluck("credential_hash", &revokedHashes).Error; err == nil && len(revokedHashes) > 0 {
+			Pluck("credential_hash", &revokedHashes).Error; err != nil {
+			return Snapshot{}, credential.ErrProviderUnavailable
+		}
+		if len(revokedHashes) > 0 {
 			revokedSet := make(map[string]bool, len(revokedHashes))
 			for _, h := range revokedHashes {
 				revokedSet[h] = true

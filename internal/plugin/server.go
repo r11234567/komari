@@ -51,10 +51,10 @@ import (
 //	                                      allowHooks permission and accept
 //	                                      only path matchers
 //	server.injectHTML(head, body)         register HTML fragments embedded
-//	                                      into every text/html response:
+//	                                      into non-protected text/html responses:
 //	                                      head before </head>, body before
-//	                                      </body> (all pages, including the
-//	                                      admin and terminal pages)
+//	                                      </body> (admin, login, terminal, and
+//	                                      control-plane pages are excluded)
 //	server.call(method, params...)        call a registered RPC method with
 //	                                      admin authority; resolves to the RPC
 //	                                      result or rejects with an Error
@@ -340,6 +340,9 @@ func normalizeRPCValue(value any) (any, error) {
 // the manager lock itself. The critical section is short and never waits on
 // the event loop, so no lock cycle is possible.
 func (m *Manager) registerRoute(short, method, path string, handler moejs.Value) (err error) {
+	if protectedWorkspacePath(path) || normalizeBoundaryPath(path) == "/api" {
+		return fmt.Errorf("plugin route path %q is reserved for core application controls", path)
+	}
 	key := method + " " + path
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -563,6 +566,9 @@ type staticConfig struct {
 // slots survive unload (they return 404) and are reused on reload; the
 // handler always resolves the current config from the instance.
 func (m *Manager) registerStatic(short, mount, dir string, spa bool) (err error) {
+	if protectedWorkspacePath(mount) || normalizeBoundaryPath(mount) == "/api" {
+		return fmt.Errorf("plugin static mount %q is reserved for core application controls", mount)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	inst, ok := m.instances[short]
@@ -812,7 +818,8 @@ func (state *routeResponse) finish(status int, body []byte) {
 }
 
 func routeRequest(vm *moejs.Runtime, c *gin.Context, body []byte) *engine.Object {
-	req := hookRequestObject(vm, c.Request, body)
+	allowForeignAuth := c.GetString("api_token_id") == "" && c.GetString("client_uuid") == ""
+	req := hookRequestObjectWithHeaders(vm, c.Request, body, sanitizedPluginHeaders(c.Request.Header, allowForeignAuth))
 	_ = native.Set(vm, req, "context", routeRequestContext(vm, c))
 	return req
 }

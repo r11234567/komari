@@ -6,13 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/enrollment"
-	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/komari-monitor/komari/utils"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	deploymentapp "github.com/komari-monitor/komari/web/deployment"
 	"github.com/komari-monitor/komari/web/rescueapp"
@@ -25,7 +24,7 @@ type deploymentService struct {
 	deploymentv1connect.UnimplementedDeploymentServiceHandler
 }
 
-func (s *deploymentService) GenerateInstallCommand(_ context.Context, req *connect.Request[deploymentv1.GenerateInstallCommandRequest]) (*connect.Response[deploymentv1.GenerateInstallCommandResponse], error) {
+func (s *deploymentService) GenerateInstallCommand(ctx context.Context, req *connect.Request[deploymentv1.GenerateInstallCommandRequest]) (*connect.Response[deploymentv1.GenerateInstallCommandResponse], error) {
 	if strings.TrimSpace(req.Msg.AgentId) == "" {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("agent ID is required"))
 	}
@@ -36,7 +35,7 @@ func (s *deploymentService) GenerateInstallCommand(_ context.Context, req *conne
 	if !saved {
 		return nil, connectError(connect.CodeFailedPrecondition, errors.New("save the deployment profile before generating an install command"))
 	}
-	endpoint, err := deploymentEndpoint(req)
+	endpoint, err := utils.PublicPanelURL(ctx)
 	if err != nil {
 		return nil, connectError(connect.CodeFailedPrecondition, err)
 	}
@@ -61,27 +60,6 @@ func (s *deploymentService) GenerateInstallCommand(_ context.Context, req *conne
 		Command: command,
 		Sha256:  hex.EncodeToString(sum[:]),
 	}), nil
-}
-
-func deploymentEndpoint(req *connect.Request[deploymentv1.GenerateInstallCommandRequest]) (string, error) {
-	value, err := config.GetAs[string](config.ScriptDomainKey, "")
-	if err != nil {
-		return "", fmt.Errorf("read script domain: %w", err)
-	}
-	return normalizeDeploymentEndpoint(value, req.Header().Get("Origin"))
-}
-
-func normalizeDeploymentEndpoint(configured, requestOrigin string) (string, error) {
-	value := strings.TrimRight(strings.TrimSpace(configured), "/")
-	if value == "" {
-		value = strings.TrimRight(strings.TrimSpace(requestOrigin), "/")
-	}
-	parsed, parseErr := url.Parse(value)
-	if parseErr != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
-		(parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return "", errors.New("configure an HTTP(S) script domain before generating install commands")
-	}
-	return value, nil
 }
 
 func deploymentCommand(profile clients.DeploymentProfile, endpoint, token string) (string, error) {

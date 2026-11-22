@@ -281,10 +281,13 @@ func gpuUsageFromReport(rep *v1.Report) float32 {
 	return float32(rep.GPU.AverageUsage)
 }
 
-func getPublicInfo(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func getPublicInfo(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	info, err := database.GetPublicInfo()
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to get public info", err.Error())
+	}
+	if meta := rpc.MetaFromContext(ctx); meta != nil && meta.TempShareValid {
+		info["private_site"] = false
 	}
 	return info, nil
 }
@@ -475,9 +478,12 @@ func getMe(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) 
 		resp.SSOId = "client"
 		resp.SSOType = "client"
 		resp.Username = "client"
-		resp.UUID = meta.ClientToken
+		resp.UUID = meta.ClientUUID
+		if resp.UUID == "" {
+			resp.UUID = meta.ClientToken
+		}
 		client, err := clients.GetClientUUIDByToken(meta.ClientToken)
-		if err != nil {
+		if err == nil && client != "" {
 			resp.UUID = client
 		}
 		return resp, nil

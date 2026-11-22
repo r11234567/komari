@@ -49,7 +49,7 @@ func TestRemoteBrowserOriginSupportsInstalledMobileWebApps(t *testing.T) {
 		want   bool
 	}{
 		{name: "same origin", origin: "https://monitor.example", want: true},
-		{name: "opaque mobile web app origin", origin: "null", want: true},
+		{name: "opaque origin has no same-origin authority", origin: "null", want: false},
 		{name: "missing mobile web app origin", origin: "", want: true},
 		{name: "cross origin", origin: "https://attacker.example", want: false},
 	}

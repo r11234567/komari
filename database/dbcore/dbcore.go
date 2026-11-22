@@ -133,10 +133,10 @@ func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}, o
 // Automatic upgrade/pre-restore packages use the same portable queue snapshot
 // as explicit full backups. The panel is stopped here; an old standalone
 // worker may still be alive, so its mutations must be excluded as well.
-func backupDataDirectory(dataDir, destination string, exclude map[string]struct{}, exportLocked bool) error {
+func backupDataDirectory(dataDir, destination string, exclude map[string]struct{}, exportLocked bool, extraOverlays ...map[string]string) error {
 	queueDir := filepath.Join(dataDir, "exports-v2")
 	if _, err := os.Stat(filepath.Join(queueDir, "queue.db")); os.IsNotExist(err) {
-		return zipDirectoryExcluding(dataDir, destination, exclude)
+		return zipDirectoryExcluding(dataDir, destination, exclude, extraOverlays...)
 	} else if err != nil {
 		return err
 	}
@@ -165,7 +165,54 @@ func backupDataDirectory(dataDir, destination string, exclude map[string]struct{
 	if err = q.BackupLocked(ctx, snapshot); err != nil {
 		return err
 	}
-	return zipDirectoryExcluding(dataDir, destination, exclude, map[string]string{"exports-v2": snapshot})
+	overlays := append([]map[string]string{{"exports-v2": snapshot}}, extraOverlays...)
+	return zipDirectoryExcluding(dataDir, destination, exclude, overlays...)
+}
+
+func snapshotExternalDatabaseForBackup(customPath string) (string, error) {
+	info, err := os.Stat(customPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("inspect configured database %s: %w", customPath, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", nil
+	}
+	snapDir, err := os.MkdirTemp("", ".komari-extdb-snap-*")
+	if err != nil {
+		return "", err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.RemoveAll(snapDir)
+		}
+	}()
+	base := filepath.Base(customPath)
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		srcPath := customPath + suffix
+		src, err := os.Open(srcPath)
+		if err != nil {
+			if suffix != "" && os.IsNotExist(err) {
+				continue
+			}
+			return "", err
+		}
+		dst, err := os.OpenFile(filepath.Join(snapDir, base+suffix), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			_ = src.Close()
+			return "", err
+		}
+		_, copyErr := io.Copy(dst, src)
+		closeErr := errors.Join(src.Close(), dst.Close())
+		if copyErr != nil || closeErr != nil {
+			return "", errors.Join(copyErr, closeErr)
+		}
+	}
+	ok = true
+	return snapDir, nil
 }
 
 // removeAllInDirExcept 删除 dir 下除 exclude 指定绝对路径外的所有文件和文件夹
@@ -366,7 +413,18 @@ func restoreStagedBackup(dataDir string) error {
 	}
 	timestamp := time.Now().UTC().Format("20060102-150405")
 	preRestorePath := filepath.Join(backupDir, fmt.Sprintf("pre-restore-%s.zip", timestamp))
-	if err := backupDataDirectory(dataDir, preRestorePath, map[string]struct{}{backupZipPath: {}}, true); err != nil {
+	var preRestoreOverlays []map[string]string
+	if custom := configuredSQLiteFilePath(); isCustomConfiguredSQLitePath(dataDir, custom) {
+		extSnapDir, err := snapshotExternalDatabaseForBackup(custom)
+		if err != nil {
+			return fmt.Errorf("snapshot configured database before restore: %w", err)
+		}
+		if extSnapDir != "" {
+			defer os.RemoveAll(extSnapDir)
+			preRestoreOverlays = append(preRestoreOverlays, map[string]string{"external-database": extSnapDir})
+		}
+	}
+	if err := backupDataDirectory(dataDir, preRestorePath, map[string]struct{}{backupZipPath: {}}, true, preRestoreOverlays...); err != nil {
 		return fmt.Errorf("preserve current data before restore: %w", err)
 	}
 
@@ -421,16 +479,82 @@ func sqliteTableExists(db *sql.DB, name string) (bool, error) {
 }
 
 // retireRestoredLegacyPasskeyPlugin strips any persisted enabled/approval state
-// and package receipt for the retired komari-passkey plugin when extracting an
-// older backup archive, so restoring a backup containing plugins/plugin-data
-// never automatically re-enables the retired package or its legacy approvals.
+// and package receipt/staged packages for the retired komari-passkey plugin
+// (case-insensitively and across manifest short identifiers) when extracting an
+// older backup archive.
 func retireRestoredLegacyPasskeyPlugin(stageDir string) error {
 	const legacyShort = "komari-passkey"
-	receiptPath := filepath.Join(stageDir, "plugin", legacyShort, ".komari-package.json")
-	if err := os.Remove(receiptPath); err != nil && !os.IsNotExist(err) {
+	pluginRoot := filepath.Join(stageDir, "plugin")
+	retiredShorts := map[string]bool{legacyShort: true}
+
+	if entries, err := os.ReadDir(pluginRoot); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			dirPath := filepath.Join(pluginRoot, name)
+			matched := strings.EqualFold(strings.TrimSpace(name), legacyShort)
+			if !matched {
+				for _, manifestName := range []string{"komari-plugin.json", "plugin.json"} {
+					data, err := os.ReadFile(filepath.Join(dirPath, manifestName))
+					if err != nil {
+						continue
+					}
+					var manifest struct {
+						Short string `json:"short"`
+					}
+					if json.Unmarshal(data, &manifest) == nil && strings.EqualFold(strings.TrimSpace(manifest.Short), legacyShort) {
+						matched = true
+						break
+					}
+				}
+			}
+			if !matched {
+				continue
+			}
+			retiredShorts[strings.ToLower(strings.TrimSpace(name))] = true
+			receiptPath := filepath.Join(dirPath, ".komari-package.json")
+			if err := os.Remove(receiptPath); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+	} else if !os.IsNotExist(err) {
 		return err
 	}
-	statePath := filepath.Join(stageDir, "plugin", "state.json")
+
+	packagesDir := filepath.Join(pluginRoot, ".packages")
+	if pkgEntries, err := os.ReadDir(packagesDir); err == nil {
+		for _, entry := range pkgEntries {
+			if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+				continue
+			}
+			metaPath := filepath.Join(packagesDir, entry.Name())
+			raw, err := os.ReadFile(metaPath)
+			if err != nil {
+				continue
+			}
+			var meta struct {
+				Short  string `json:"short"`
+				Plugin struct {
+					Short string `json:"short"`
+				} `json:"plugin"`
+			}
+			if json.Unmarshal(raw, &meta) != nil {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(meta.Short), legacyShort) ||
+				strings.EqualFold(strings.TrimSpace(meta.Plugin.Short), legacyShort) {
+				_ = os.Remove(metaPath)
+				stem := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+				_ = os.Remove(filepath.Join(packagesDir, stem+".zip"))
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	statePath := filepath.Join(pluginRoot, "state.json")
 	data, err := os.ReadFile(statePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -444,15 +568,24 @@ func retireRestoredLegacyPasskeyPlugin(stageDir string) error {
 	if err := json.Unmarshal(data, &doc); err != nil || doc.Plugins == nil {
 		return nil
 	}
-	entry, ok := doc.Plugins[legacyShort]
-	if !ok || entry == nil {
+	modified := false
+	for key, entry := range doc.Plugins {
+		if entry == nil {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(key), legacyShort) && !retiredShorts[strings.ToLower(strings.TrimSpace(key))] {
+			continue
+		}
+		entry["enabled"] = false
+		entry["approved_permissions_hash"] = ""
+		delete(entry, "approved_package_digest")
+		entry["last_error"] = "legacy Passkey plugin is retired; configure native Passkey instead"
+		doc.Plugins[key] = entry
+		modified = true
+	}
+	if !modified {
 		return nil
 	}
-	entry["enabled"] = false
-	entry["approved_permissions_hash"] = ""
-	delete(entry, "approved_package_digest")
-	entry["last_error"] = "legacy Passkey plugin is retired; configure native Passkey instead"
-	doc.Plugins[legacyShort] = entry
 	updated, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
@@ -713,7 +846,12 @@ func preservePasskeySecurityStateFromSources(currentPaths []string, stagedPath s
 	if err != nil {
 		return err
 	}
-	defer stagedDB.Close()
+	stagedClosed := false
+	defer func() {
+		if !stagedClosed {
+			_ = stagedDB.Close()
+		}
+	}()
 
 	stagedHasUsers, err := sqliteTableExists(stagedDB, "users")
 	if err != nil {
@@ -790,7 +928,19 @@ func preservePasskeySecurityStateFromSources(currentPaths []string, stagedPath s
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if _, err := stagedDB.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		return fmt.Errorf("checkpoint staged database: %w", err)
+	}
+	stagedClosed = true
+	if err := stagedDB.Close(); err != nil {
+		return fmt.Errorf("close staged database after checkpoint: %w", err)
+	}
+	_ = os.Remove(stagedPath + "-wal")
+	_ = os.Remove(stagedPath + "-shm")
+	return nil
 }
 
 var (

@@ -481,9 +481,13 @@ func descriptorSortKey(secret []byte, rpID, username string, id []byte) [32]byte
 // cap), empty transports, and stable order across restarts and origins within an RP.
 func padAccountFirstRecords(real []webauthn.Credential, envelope []lengthSlot, secret []byte, rpID, username string) []webauthn.Credential {
 	totalSlots := 0
+	allowedByLen := make(map[int]int, len(envelope))
 	for _, slotSpec := range envelope {
 		if slotSpec.length > 0 && slotSpec.count > 0 {
 			totalSlots += slotSpec.count
+			if slotSpec.length <= maxAccountFirstCredentialIDBytes {
+				allowedByLen[slotSpec.length] += slotSpec.count
+			}
 		}
 	}
 	targetCount := min(maxAccountFirstEnvelopeDescriptors, max(totalSlots, 1))
@@ -493,6 +497,11 @@ func padAccountFirstRecords(real []webauthn.Credential, envelope []lengthSlot, s
 	totalBytes := 0
 	for _, rec := range real {
 		if len(rec.ID) == 0 || len(rec.ID) > maxAccountFirstCredentialIDBytes {
+			continue
+		}
+		// Never emit a descriptor length or multiplicity beyond what the capped
+		// RP-wide envelope retains, so rare credential shapes cannot bypass padding.
+		if have[len(rec.ID)] >= allowedByLen[len(rec.ID)] {
 			continue
 		}
 		if len(out) >= targetCount || totalBytes+len(rec.ID) > maxAccountFirstEnvelopeBytes {

@@ -45,7 +45,7 @@ func TestAPISourceIgnoresSpoofedForwardingWithoutExplicitProxyTrust(t *testing.T
 		t.Run(trust, func(t *testing.T) {
 			t.Setenv(TrustedProxyEnv, trust)
 			router := gin.New()
-			if err := ConfigureTrustedProxies(router, trust); err != nil {
+			if err := ConfigureRequestMetadata(router); err != nil {
 				t.Fatal(err)
 			}
 			router.GET("/", func(c *gin.Context) { c.String(200, AuthSourceIP(c)) })

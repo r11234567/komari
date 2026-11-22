@@ -336,11 +336,35 @@ func TestIsRequestSecureTrustsOnlyPrivateProxies(t *testing.T) {
 		t.Fatal("spoofed X-Forwarded-Proto from public IP was trusted")
 	}
 
+	privateReq := httptest.NewRequest(http.MethodPost, "http://panel.example.test/", nil)
+	privateReq.RemoteAddr = "172.17.0.5:44321"
+	privateReq.Header.Set("X-Forwarded-Proto", "https")
+	if security.IsRequestSecure(privateReq) {
+		t.Fatal("X-Forwarded-Proto from unconfigured private CIDR was trusted without KOMARI_TRUSTED_PROXIES")
+	}
+
 	proxyReq := httptest.NewRequest(http.MethodPost, "http://panel.example.test/", nil)
 	proxyReq.RemoteAddr = "127.0.0.1:44321"
-	proxyReq.Header.Set("X-Forwarded-Proto", "https, http")
+	proxyReq.Header.Set("X-Forwarded-Proto", "http, https")
 	if !security.IsRequestSecure(proxyReq) {
-		t.Fatal("local reverse proxy X-Forwarded-Proto=https was rejected")
+		t.Fatal("local loopback reverse proxy X-Forwarded-Proto=https was rejected")
+	}
+
+	spoofedPrefixReq := httptest.NewRequest(http.MethodPost, "http://panel.example.test/", nil)
+	spoofedPrefixReq.RemoteAddr = "127.0.0.1:44321"
+	spoofedPrefixReq.Header.Set("X-Forwarded-Proto", "https, http")
+	if security.IsRequestSecure(spoofedPrefixReq) {
+		t.Fatal("leftmost spoofed X-Forwarded-Proto entry must not override closest proxy hop")
+	}
+
+	t.Setenv("KOMARI_TRUSTED_PROXIES", "none")
+	if security.IsRequestSecure(proxyReq) {
+		t.Fatal("X-Forwarded-Proto from loopback was trusted when KOMARI_TRUSTED_PROXIES=none")
+	}
+
+	t.Setenv("KOMARI_TRUSTED_PROXIES", "172.17.0.0/16")
+	if !security.IsRequestSecure(privateReq) {
+		t.Fatal("configured trusted private CIDR X-Forwarded-Proto=https was rejected")
 	}
 }
 

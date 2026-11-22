@@ -92,19 +92,17 @@ func TestRetiredAdminKeyFullTransportStackAndDefenseInDepth(t *testing.T) {
 		require.Equal(t, rpc.PrincipalAnonymous, out.Type, "IdentifyPrincipal did not return anonymous for %q", header)
 	}
 
-	// 4. CORS allowed solely via IsAPIKeyRequest must NOT emit Access-Control-Allow-Credentials: true.
+	// 4. Foreign Origin with a Bearer token must be rejected by CORS without fallback.
 	corsRouter := gin.New()
 	corsCtrl := security.NewCorsController(true, "")
-	corsRouter.Use(func(c *gin.Context) {
-		c.Request = security.WithAPIKeyAuthentication(c.Request, true)
-		c.Next()
-	}, corsCtrl.Middleware())
+	corsRouter.Use(corsCtrl.Middleware())
 	corsRouter.GET("/api/test", func(c *gin.Context) { c.Status(http.StatusOK) })
 	corsReq := httptest.NewRequest(http.MethodGet, "https://panel.example.test/api/test", nil)
 	corsReq.Header.Set("Origin", "https://external-client.example.net")
+	corsReq.Header.Set("Authorization", "Bearer retired-legacy-key")
 	corsRec := httptest.NewRecorder()
 	corsRouter.ServeHTTP(corsRec, corsReq)
-	require.Equal(t, http.StatusOK, corsRec.Code)
-	require.Equal(t, "https://external-client.example.net", corsRec.Header().Get("Access-Control-Allow-Origin"))
+	require.Equal(t, http.StatusForbidden, corsRec.Code)
+	require.Empty(t, corsRec.Header().Get("Access-Control-Allow-Origin"))
 	require.Empty(t, corsRec.Header().Get("Access-Control-Allow-Credentials"))
 }

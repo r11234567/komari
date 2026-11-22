@@ -47,8 +47,11 @@ func TestWSHookConnectDenyAndAllow(t *testing.T) {
 	if deny, reason := global.OnConnect(wsInfo("/deny")); !deny || reason != "no agents here" {
 		t.Fatalf("deny = %v, reason = %q", deny, reason)
 	}
-	if deny, reason := global.OnConnect(wsInfo("/api/clients/v2/rpc")); deny || reason != "" {
+	if deny, reason := global.OnConnect(wsInfo("/api/clients")); deny || reason != "" {
 		t.Fatalf("unmatched path must be allowed, deny = %v, reason = %q", deny, reason)
+	}
+	if deny, _ := global.OnConnect(wsInfo("/api/clients/terminal")); deny {
+		t.Fatal("protected control path must not invoke plugin wsConnect hook")
 	}
 }
 
@@ -81,7 +84,7 @@ func TestWSHookMessageChainReplaceAndDrop(t *testing.T) {
 	}
 	defer func() { _ = SetEnabled("ws", false, false) }()
 
-	info := wsInfo("/api/clients/v2/rpc")
+	info := wsInfo("/api/clients")
 	// 第一个钩子改 hello->hi，第二个钩子丢弃 hi：结果应为 drop。
 	if _, _, drop := global.OnMessage(info, 1, []byte("hello")); !drop {
 		t.Fatal("chained replace followed by drop must drop")
@@ -154,15 +157,15 @@ func TestWSHookClose(t *testing.T) {
 	}
 	defer func() { _ = SetEnabled("ws", false, false) }()
 
-	global.OnClose(wsInfo("/api/clients/v2/rpc"))
-	global.OnClose(wsInfo("/api/clients/v2/rpc"))
+	global.OnClose(wsInfo("/api/clients"))
+	global.OnClose(wsInfo("/api/clients"))
 
 	data, err := os.ReadFile(filepath.Join(DataDir, "ws", "closes.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(data); strings.Count(got, "/api/clients/v2/rpc") != 2 {
-		t.Fatalf("wsClose fired %d times: %q", strings.Count(got, "/api/clients/v2/rpc"), got)
+	if got := string(data); strings.Count(got, "/api/clients") != 2 {
+		t.Fatalf("wsClose fired %d times: %q", strings.Count(got, "/api/clients"), got)
 	}
 }
 
@@ -177,7 +180,7 @@ func TestWSHookPathFiltering(t *testing.T) {
 		"script.js": `
 			const server = require("server");
 			function load() {
-				server.hook("wsMessage", "/api/clients/v2/rpc", (ctx, msg) => {
+				server.hook("wsMessage", "/api/clients", (ctx, msg) => {
 					return { data: "filtered" };
 				});
 			}
@@ -191,7 +194,7 @@ func TestWSHookPathFiltering(t *testing.T) {
 	}
 	defer func() { _ = SetEnabled("ws", false, false) }()
 
-	typ, data, _ := global.OnMessage(wsInfo("/api/clients/v2/rpc"), 1, []byte("x"))
+	typ, data, _ := global.OnMessage(wsInfo("/api/clients"), 1, []byte("x"))
 	if string(data) != "filtered" {
 		t.Fatalf("matching path not intercepted: %q", data)
 	}

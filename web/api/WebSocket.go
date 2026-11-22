@@ -33,14 +33,15 @@ func RequireSameOriginWebSocket(upgrader *websocket.Upgrader) {
 }
 
 // RequireRemoteBrowserOrigin keeps normal same-origin enforcement while
-// accepting opaque origins used by some installed mobile web apps. The remote
+// accepting non-browser clients without an Origin. Opaque browser origins are
+// not same-origin. The remote
 // endpoint additionally requires an administrator cookie and a single-use,
 // high-entropy browser ticket before it can attach to a session.
 func RequireRemoteBrowserOrigin(upgrader *websocket.Upgrader) {
 	upgrader.CheckOrigin = func(r *http.Request) bool {
 		origin := strings.TrimSpace(r.Header.Get("Origin"))
-		return origin == "" || strings.EqualFold(origin, "null") ||
-			security.OriginMatchesRequest(origin, r)
+		return len(r.Header.Values("Origin")) <= 1 && (origin == "" ||
+			security.OriginMatchesRequest(origin, r))
 	}
 }
 
@@ -77,11 +78,14 @@ func UpgradeSafeConn(c *gin.Context, options ...WebSocketUpgradeOption) (*connec
 	if err != nil {
 		return nil, err
 	}
-	sc := connection.NewSafeConn(unsafeConn)
+	if c.GetBool("panel_listener") {
+		return connection.NewSafeConn(unsafeConn), nil
+	}
 	interceptor := connection.Interceptor()
 	if interceptor == nil {
-		return sc, nil
+		return connection.NewSafeConn(unsafeConn), nil
 	}
+	sc := connection.NewSafeConn(unsafeConn)
 	info := &connection.ConnInfo{
 		ID:        sc.ID,
 		Path:      c.Request.URL.Path,
@@ -97,7 +101,7 @@ func UpgradeSafeConn(c *gin.Context, options ...WebSocketUpgradeOption) (*connec
 		_ = unsafeConn.WriteControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, reason),
 			time.Now().Add(time.Second))
-		_ = sc.Close()
+		_ = unsafeConn.Close()
 		return nil, errors.New("websocket connection denied by plugin")
 	}
 	sc.SetInterceptor(info, interceptor)
@@ -109,16 +113,16 @@ func CheckWebSocketOrigin(r *http.Request) bool {
 	if strings.EqualFold(os.Getenv("KOMARI_WS_DISABLE_ORIGIN"), "true") {
 		return true
 	}
-	if origin == "" && r.URL.Query().Get("token") != "" {
-		return true
-	}
 	enabled, _ := config.GetAs[bool](config.WsOriginCheckEnabledKey, true)
 	if !enabled {
 		return true
 	}
-	if origin == "" {
+	if len(r.Header.Values("Origin")) > 1 {
 		return false
 	}
+	if origin == "" {
+		return true
+	} // Browsers always supply Origin; route authentication still applies.
 	if security.OriginMatchesRequest(origin, r) {
 		return true
 	}
