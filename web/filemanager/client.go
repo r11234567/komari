@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strconv"
 	"strings"
@@ -18,6 +19,8 @@ import (
 
 	"github.com/komari-monitor/komari/web/workspace"
 	filev1 "github.com/r11234567/komari-proto/gen/go/komari/file/v1"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -47,8 +50,10 @@ var (
 )
 
 type pendingCall struct {
-	uuid     string
-	response chan *filev1.AgentFileEvent
+	uuid      string
+	response  chan *filev1.AgentFileEvent
+	operation string
+	args      map[string]any
 }
 
 // CallOptions bounds one control operation.
@@ -107,7 +112,7 @@ func Call(ctx context.Context, uuid string, operation string, args map[string]an
 
 	responses := make(chan *filev1.AgentFileEvent, 1)
 	pendingMu.Lock()
-	pending[requestID] = pendingCall{uuid: uuid, response: responses}
+	pending[requestID] = pendingCall{uuid: uuid, response: responses, operation: strings.TrimSpace(operation), args: maps.Clone(args)}
 	pendingMu.Unlock()
 	defer removePending(requestID)
 
@@ -131,6 +136,51 @@ func Call(ctx context.Context, uuid string, operation string, args map[string]an
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+const TypedPayloadHeader = "X-Komari-File-Payload"
+
+// LegacyAssignment projects a live typed call for an older Agent. The
+// deprecated discriminator is written only on the legacy wire.
+func LegacyAssignment(agentID string, assignment *filev1.FileAssignment) (*filev1.FileAssignment, error) {
+	pendingMu.Lock()
+	call, ok := pending[assignment.GetRequestId()]
+	pendingMu.Unlock()
+	if !ok || call.uuid != agentID {
+		return nil, ErrUnknownToken
+	}
+	args := make(map[string]any, len(call.args)+1)
+	for key, arg := range call.args {
+		// A legacy Struct cannot carry large integer offsets exactly.
+		switch value := arg.(type) {
+		case int64:
+			if value > 1<<53-1 || value < -(1<<53-1) {
+				return nil, errors.New("file offset requires a typed Agent")
+			}
+		case uint64:
+			if value > 1<<53-1 {
+				return nil, errors.New("file offset requires a typed Agent")
+			}
+		case float64:
+			if math.Abs(value) > 1<<53-1 {
+				return nil, errors.New("file offset requires a typed Agent")
+			}
+		}
+		args[key] = arg
+	}
+	args["_op"] = call.operation
+	encoded, err := structpb.NewStruct(args)
+	if err != nil {
+		return nil, err
+	}
+	legacy := proto.CloneOf(assignment)
+	legacy.Payload = nil
+	legacy.Arguments = encoded
+	switch assignment.GetOperation() {
+	case filev1.FileOperation_FILE_OPERATION_UPLOAD_COMMIT, filev1.FileOperation_FILE_OPERATION_UPLOAD_CANCEL:
+		legacy.Operation = filev1.FileOperation_FILE_OPERATION_UPLOAD_STREAM
+	}
+	return legacy, nil
 }
 
 // Resolve delivers one agent event to the caller waiting for its request.

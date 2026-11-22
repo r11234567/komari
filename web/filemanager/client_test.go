@@ -226,3 +226,28 @@ func TestCallBuildsTypedPayloadsWithoutLegacyArguments(t *testing.T) {
 		})
 	}
 }
+
+func TestLegacyFileAssignmentPreservesOldUploadDiscriminators(t *testing.T) {
+	for _, operation := range []string{"upload_commit", "upload_cancel"} {
+		t.Run(operation, func(t *testing.T) {
+			withDispatcher(t, func(agent string, assignment *filev1.FileAssignment) bool {
+				legacy, err := LegacyAssignment(agent, assignment)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if legacy.GetOperation() != filev1.FileOperation_FILE_OPERATION_UPLOAD_STREAM ||
+					legacy.GetArguments().GetFields()["_op"].GetStringValue() != operation || legacy.GetPayload() != nil {
+					t.Fatalf("legacy assignment did not match the old schema: %v", legacy)
+				}
+				if assignment.GetPayload() == nil || assignment.GetArguments() != nil {
+					t.Fatal("legacy projection mutated the typed assignment")
+				}
+				return Resolve(agent, &filev1.AgentFileEvent{RequestId: assignment.GetRequestId(), Success: true})
+			})
+			args := map[string]any{"path": "/tmp/test", "upload_id": "old-agent", "total_size": int64(8), "chunk_size": int64(4), "chunk_count": int64(2)}
+			if _, err := Call(testWorkspaceContext(t, "agent-1"), "agent-1", operation, args); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
