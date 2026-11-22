@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/cmd/flags"
@@ -517,34 +516,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		//
-		func() {
-			tempKey := c.Query("temp_key")
-			if tempKey == "" {
-				return
-			}
-
-			tempKeyExpireTime, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
-			if err != nil {
-				return
-			}
-			allowTempKey, err := config.GetAs[string]("tempory_share_token", "")
-			if err != nil {
-				return
-			}
-
-			if allowTempKey == "" || tempKey != allowTempKey {
-				return
-			}
-			now := time.Now().Unix()
-			if tempKeyExpireTime < now {
-				return
-			}
-			expireSeconds := int(tempKeyExpireTime - now)
-			if expireSeconds > 0 {
-				websecurity.SetSensitiveCookie(c, "temp_key", tempKey, expireSeconds)
-			}
-		}()
+		websecurity.RedeemTempShareQuery(c)
 		reqPath := c.Request.URL.Path
 		if isUnmountedAPIOrConnectPath(reqPath) {
 			c.Status(http.StatusNotFound)
@@ -605,26 +577,7 @@ func isPrivateApplicationPath(requestPath string) bool {
 }
 
 func redeemOrCheckTempShare(c *gin.Context) bool {
-	expireAt, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
-	if err != nil {
-		return false
-	}
-	allowKey, err := config.GetAs[string]("tempory_share_token", "")
-	if err != nil || allowKey == "" {
-		return false
-	}
-	now := time.Now().Unix()
-	if expireAt < now {
-		return false
-	}
-	if queryKey := strings.TrimSpace(c.Query("temp_key")); queryKey != "" && queryKey == allowKey {
-		if expireSeconds := int(expireAt - now); expireSeconds > 0 {
-			websecurity.SetSensitiveCookie(c, "temp_key", queryKey, expireSeconds)
-		}
-		return true
-	}
-	cookieKey, err := c.Cookie("temp_key")
-	return err == nil && cookieKey == allowKey
+	return websecurity.RedeemTempShareQuery(c) || websecurity.HasTempAccess(c)
 }
 
 func renderPrivateSitePublicNotice(sitename, panelOrigin string) []byte {

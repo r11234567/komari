@@ -11,6 +11,7 @@ import (
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/web/security"
 	"github.com/pquerna/otp/totp"
 )
 
@@ -55,7 +56,7 @@ func TestEnable2FAValidatesCodeFirstAndChecksRegisteredFactors(t *testing.T) {
 
 	// An invalid TOTP code must fail 400 BEFORE checking/consuming step-up.
 	badReq := httptest.NewRequest(http.MethodPost, "/api/admin/2fa/enable?code=000000", nil)
-	badReq.AddCookie(&http.Cookie{Name: "2fa_secret", Value: newKey.Secret()})
+	badReq.AddCookie(&http.Cookie{Name: security.TwoFactorSecretCookieName, Value: newKey.Secret()})
 	badRec := httptest.NewRecorder()
 	r.ServeHTTP(badRec, badReq)
 	if badRec.Code != http.StatusBadRequest {
@@ -68,7 +69,7 @@ func TestEnable2FAValidatesCodeFirstAndChecksRegisteredFactors(t *testing.T) {
 		t.Fatal(err)
 	}
 	noStepUpReq := httptest.NewRequest(http.MethodPost, "/api/admin/2fa/enable?code="+validCode, nil)
-	noStepUpReq.AddCookie(&http.Cookie{Name: "2fa_secret", Value: newKey.Secret()})
+	noStepUpReq.AddCookie(&http.Cookie{Name: security.TwoFactorSecretCookieName, Value: newKey.Secret()})
 	noStepUpRec := httptest.NewRecorder()
 	r.ServeHTTP(noStepUpRec, noStepUpReq)
 	if noStepUpRec.Code != http.StatusUnauthorized {

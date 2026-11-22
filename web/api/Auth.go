@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/cmd/flags"
@@ -190,33 +189,9 @@ func PublicViewerMiddleware() gin.HandlerFunc {
 }
 
 // RedeemTempShareQuery exchanges a valid ?temp_key= query parameter on GET
-// requests into the sensitive temp_key cookie and marks the current request.
+// requests into the host-scoped temp_key cookie and marks the current request.
 func RedeemTempShareQuery(c *gin.Context) bool {
-	if c == nil || c.Request == nil || c.Request.Method != http.MethodGet {
-		return false
-	}
-	tempKey := strings.TrimSpace(c.Query("temp_key"))
-	if tempKey == "" {
-		return false
-	}
-	expireAt, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
-	if err != nil {
-		return false
-	}
-	allowKey, err := config.GetAs[string]("tempory_share_token", "")
-	if err != nil || allowKey == "" || tempKey != allowKey {
-		return false
-	}
-	now := time.Now().Unix()
-	if expireAt < now {
-		return false
-	}
-	expireSeconds := int(expireAt - now)
-	if expireSeconds > 0 {
-		security.SetSensitiveCookie(c, "temp_key", tempKey, expireSeconds)
-	}
-	c.Set("temp_share_redeemed", true)
-	return true
+	return security.RedeemTempShareQuery(c)
 }
 
 // PublicPrivateSiteMiddleware gates data routes on the dedicated Public
@@ -279,25 +254,7 @@ func PublicPrivateSiteMiddleware() gin.HandlerFunc {
 // cookie. Transport adapters use the same check to populate canonical RPC
 // context metadata.
 func HasTempAccess(c *gin.Context) bool {
-	if c != nil && c.GetBool("temp_share_redeemed") {
-		return true
-	}
-	tempKey, err := c.Cookie("temp_key")
-	if err != nil {
-		return false
-	}
-	expireAt, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
-	if err != nil {
-		return false
-	}
-	allowKey, err := config.GetAs[string]("tempory_share_token", "")
-	if err != nil {
-		return false
-	}
-	if allowKey == "" || tempKey != allowKey {
-		return false
-	}
-	return expireAt >= time.Now().Unix()
+	return security.HasTempAccess(c)
 }
 
 func extractClientToken(c *gin.Context) string {

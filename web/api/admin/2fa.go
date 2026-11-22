@@ -19,7 +19,7 @@ func Generate2FA(c *gin.Context) {
 		api.RespondError(c, 500, "Failed to generate 2FA: "+err.Error())
 		return
 	}
-	security.SetSensitiveCookie(c, "2fa_secret", secret, 1800)
+	security.SetStrictSensitiveCookie(c, security.TwoFactorSecretCookieName, secret, 1800)
 	c.Header("Content-Type", "image/png")
 	c.Writer.WriteHeader(200)
 	png.Encode(c.Writer, img)
@@ -28,7 +28,7 @@ func Generate2FA(c *gin.Context) {
 func Enable2FA(c *gin.Context) {
 	uuidRaw, _ := c.Get("uuid")
 	userUUID, _ := uuidRaw.(string)
-	secret, _ := c.Cookie("2fa_secret")
+	secret, _ := c.Cookie(security.TwoFactorSecretCookieName)
 	code := c.Query("code")
 	if secret == "" || userUUID == "" || code == "" {
 		api.RespondError(c, 400, "2FA secret or code not provided")
@@ -59,7 +59,7 @@ func Enable2FA(c *gin.Context) {
 		api.RespondError(c, 500, "Failed to enable 2FA: "+err.Error())
 		return
 	}
-	security.SetSensitiveCookie(c, "2fa_secret", "", -1)
+	security.ClearCookie(c, security.TwoFactorSecretCookieName, security.LegacyTwoFactorSecretCookieName)
 
 	api.RespondSuccess(c, "2FA enabled successfully")
 }
@@ -93,7 +93,10 @@ func UnlockSignOn(c *gin.Context) {
 		return
 	}
 	http.SetCookie(c.Writer, &http.Cookie{Name: signonauth.CookieName, Value: token,
-		Path: "/api/admin/settings", MaxAge: int(signonauth.Lifetime.Seconds()),
+		Path: "/", MaxAge: int(signonauth.Lifetime.Seconds()),
+		Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(c.Writer, &http.Cookie{Name: signonauth.LegacyCookieName,
+		Path: "/api/admin/settings", MaxAge: -1,
 		Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	c.Header("Cache-Control", "no-store")
 	api.RespondSuccess(c, gin.H{"expires_in": int(signonauth.Lifetime.Seconds())})

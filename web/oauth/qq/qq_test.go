@@ -4,8 +4,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-
-	"github.com/patrickmn/go-cache"
 )
 
 func TestConsumeStateIsAtomicUnderConcurrency(t *testing.T) {
@@ -16,7 +14,9 @@ func TestConsumeStateIsAtomicUnderConcurrency(t *testing.T) {
 	defer provider.Destroy()
 
 	const state = "concurrent-state-token"
-	provider.stateCache.Set(state, true, cache.DefaultExpiration)
+	if !provider.stateStore.Issue(state) {
+		t.Fatal("failed to issue state")
+	}
 
 	const workers = 16
 	var winners atomic.Int32
