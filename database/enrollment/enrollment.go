@@ -181,6 +181,7 @@ var (
 type cachedPollResult struct {
 	attempt   Attempt
 	issued    Issued
+	epoch     uint64
 	expiresAt time.Time
 }
 
@@ -216,7 +217,7 @@ func Poll(deviceCode string) (Attempt, *Issued, error) {
 	// return the same issued credentials to handle network packet loss on the initial response.
 	if val, ok := pollGraceCache.Load(code); ok {
 		cached := val.(*cachedPollResult)
-		if time.Now().UTC().Before(cached.expiresAt) {
+		if time.Now().UTC().Before(cached.expiresAt) && cached.epoch == dbcore.CurrentSecurityEpoch() {
 			issuedCopy := cached.issued
 			return cached.attempt, &issuedCopy, nil
 		}
@@ -268,6 +269,7 @@ func Poll(deviceCode string) (Attempt, *Issued, error) {
 		pollGraceCache.Store(code, &cachedPollResult{
 			attempt:   attempt,
 			issued:    credentials,
+			epoch:     dbcore.CurrentSecurityEpoch(),
 			expiresAt: now.Add(60 * time.Second),
 		})
 		// Atomic single-use invalidation: once credentials have been issued, the attempt row is deleted
@@ -429,15 +431,26 @@ func Revoke(clientUUID, reason string) error {
 		}).Error
 }
 
+// ErrEpochMismatch indicates the panel's security epoch advanced (e.g. after a
+// backup restore) and the agent must re-negotiate credentials via signed refresh.
+var ErrEpochMismatch = errors.New("credential security epoch requires refresh")
+
 // ResolveAccessToken identifies the machine presenting an access token.
 func ResolveAccessToken(accessToken string) (string, error) {
+	return resolveAccessTokenDB(dbcore.GetDBInstance(), accessToken)
+}
+
+func resolveAccessTokenDB(db *gorm.DB, accessToken string) (string, error) {
+	if db == nil {
+		return "", errors.New("database is not initialized")
+	}
 	digest := hashToken(accessToken)
 	if digest == "" {
 		return "", errors.New("an access token is required")
 	}
 	var row models.AgentCredential
 	now := time.Now().UTC()
-	if err := dbcore.GetDBInstance().Where("access_token_hash = ? OR previous_access_hash = ?", digest, digest).First(&row).Error; err != nil {
+	if err := db.Where("access_token_hash = ? OR previous_access_hash = ?", digest, digest).First(&row).Error; err != nil {
 		return "", err
 	}
 	// SQLite stores datetime offsets in text. Comparing a legacy local-offset
@@ -454,6 +467,9 @@ func ResolveAccessToken(accessToken string) (string, error) {
 	}
 	if !now.Before(row.AccessExpiresAt) {
 		return "", errors.New("the access token has expired")
+	}
+	if curEpoch := dbcore.CurrentSecurityEpoch(); curEpoch > 1 && row.SecurityEpoch < curEpoch {
+		return "", ErrEpochMismatch
 	}
 	return row.Client, nil
 }
@@ -543,6 +559,7 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 			"agent_key_id":             keyID,
 			"key_algorithm":            algorithm,
 			"scopes":                   encodeScopes(scopes),
+			"security_epoch":           dbcore.CurrentSecurityEpoch(),
 			"updated_at":               now,
 		}
 		if err := tx.Where("client = ?", clientUUID).Delete(&models.AgentRefreshUse{}).Error; err != nil {
@@ -568,6 +585,7 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 			AgentKeyID:       keyID,
 			KeyAlgorithm:     algorithm,
 			Scopes:           encodeScopes(scopes),
+			SecurityEpoch:    dbcore.CurrentSecurityEpoch(),
 			CreatedAt:        now,
 		}
 		if err := tx.Create(&row).Error; err != nil {

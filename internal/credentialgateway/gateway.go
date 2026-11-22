@@ -9,9 +9,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"time"
 
 	"github.com/komari-monitor/komari/database/accounts"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/notificationotp"
 	"github.com/komari-monitor/komari/internal/passkeycredential"
@@ -95,7 +97,7 @@ func deriveBinding(ctx context.Context, user models.User, token string, created 
 	if err != nil {
 		return credential.Binding{}, credential.ErrProviderUnavailable
 	}
-	version, _ := json.Marshal([]string{user.Passwd, user.TwoFactor, user.CredentialVersion, created.UTC().Format(time.RFC3339Nano), passkey.Revision})
+	version, _ := json.Marshal([]string{user.Passwd, user.TwoFactor, user.CredentialVersion, created.UTC().Format(time.RFC3339Nano), passkey.Revision, strconv.FormatUint(dbcore.CurrentSecurityEpoch(), 10)})
 	sessionHash := opaqueDigest("session", token)
 	mac := hmac.New(sha256.New, securityVersionKey)
 	_, _ = mac.Write(version)

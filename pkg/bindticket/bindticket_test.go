@@ -65,6 +65,7 @@ func TestExpiredTicket(t *testing.T) {
 		key,
 		time.Now().UTC().Add(-TicketDuration-time.Second),
 		TicketDuration,
+		1,
 	)
 	if err != nil {
 		t.Fatalf("Issue failed: %v", err)
@@ -87,5 +88,20 @@ func TestIssueRejectsMissingKeyAndSubject(t *testing.T) {
 	}
 	if _, _, err := IssueWithDuration("user", key, TicketDuration+time.Second); err != ErrInvalidDuration {
 		t.Fatalf("Issue with excessive duration error = %v, want ErrInvalidDuration", err)
+	}
+}
+
+func TestBindTicketEpochMismatchRejected(t *testing.T) {
+	key := []byte("01234567890123456789012345678901")
+	ticket, _, err := IssueWithDurationAndEpoch("epoch-user", key, TicketDuration, 2)
+	if err != nil {
+		t.Fatalf("IssueWithDurationAndEpoch failed: %v", err)
+	}
+	claims, err := VerifyWithEpoch(ticket, key, 2)
+	if err != nil || claims.Epoch != 2 {
+		t.Fatalf("VerifyWithEpoch(2) failed: claims=%+v err=%v", claims, err)
+	}
+	if _, err := VerifyWithEpoch(ticket, key, 3); err != ErrInvalidToken {
+		t.Fatalf("VerifyWithEpoch(3) error = %v, want ErrInvalidToken", err)
 	}
 }

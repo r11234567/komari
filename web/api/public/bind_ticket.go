@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/pkg/bindticket"
 	"github.com/komari-monitor/komari/web/api"
 )
@@ -44,7 +45,7 @@ func RequestBindTicket(c *gin.Context) {
 	}
 
 	key := accounts.SessionDigestKey()
-	ticket, exp, err := bindticket.IssueWithDuration(uuid, key, ticketDuration)
+	ticket, exp, err := bindticket.IssueWithDurationAndEpoch(uuid, key, ticketDuration, dbcore.CurrentSecurityEpoch())
 	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to issue bind ticket: "+err.Error())
 		return

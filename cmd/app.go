@@ -46,6 +46,7 @@ import (
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/backup"
 	"github.com/komari-monitor/komari/web/connection"
 	installweb "github.com/komari-monitor/komari/web/install"
 	"github.com/komari-monitor/komari/web/oauth"
@@ -140,6 +141,15 @@ func (a *App) Bootstrap() error {
 	if err := flags.ValidateListenerConfig(); err != nil {
 		return err
 	}
+	if err := dbcore.RecoverPendingGeneration(filepath.Join(".", "data")); err != nil {
+		return fmt.Errorf("recover pending data generation: %w", err)
+	}
+	backup.RegisterRestartHandler(func(reason string) {
+		logger.Infof("server", "Graceful shutdown requested (%s)", reason)
+		go func() {
+			_ = a.Shutdown()
+		}()
+	})
 	if err := os.MkdirAll("./data/theme", os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create theme directory: %w", err)
 	}
@@ -381,6 +391,7 @@ func (a *App) RunInstallGuide() (bool, error) {
 	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
+	r.Use(backup.RejectMutationsWhileRestarting())
 	r.Use(func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, "/api") {
 			c.Header("Cache-Control", "no-store")
@@ -424,6 +435,11 @@ func (a *App) RunInstallGuide() (bool, error) {
 		return false, fmt.Errorf("listen in install mode: %w", err)
 	case <-quit:
 		return false, a.Shutdown()
+	case <-a.stopCh:
+		if a.shutdownDone != nil {
+			<-a.shutdownDone
+		}
+		return false, nil
 	case <-controller.Done():
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -451,6 +467,7 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
+	r.Use(backup.RejectMutationsWhileRestarting())
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
 		WithTrustedOrigins(flags.EffectivePanelOrigin())
 	r.Use(cors.Middleware())
@@ -531,6 +548,7 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
+	r.Use(backup.RejectMutationsWhileRestarting())
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
 		WithTrustedOrigins(flags.EffectivePanelOrigin())
 	r.Use(cors.Middleware())
@@ -706,6 +724,7 @@ func configureBaseEngine(r *gin.Engine, canonicalOrigin string) error {
 	r.Use(diagnostics.Default.Middleware())
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
+	r.Use(backup.RejectMutationsWhileRestarting())
 	if err := security.ConfigureRequestMetadataForOrigin(r, canonicalOrigin); err != nil {
 		return fmt.Errorf("invalid request metadata policy: %w", err)
 	}
@@ -756,6 +775,7 @@ func (a *App) BuildRouter() error {
 		cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
 			WithTrustedOrigins(flags.EffectivePublicOrigin(), flags.EffectivePanelOrigin())
 		r.Use(cors.Middleware())
+		r.Use(backup.RejectMutationsWhileRestarting())
 		r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 		r.Use(api.IdentityMiddleware())
 		rateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)
@@ -814,6 +834,7 @@ func (a *App) BuildRouter() error {
 	panelCors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
 		WithTrustedOrigins(flags.EffectivePanelOrigin())
 	panelEngine.Use(panelCors.Middleware())
+	panelEngine.Use(backup.RejectMutationsWhileRestarting())
 	panelEngine.Use(api.APIAuthenticationMiddleware())
 	panelEngine.Use(api.IdentityMiddleware())
 	panelRateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)

@@ -142,19 +142,43 @@ print(json.dumps({'source_rows':source.execute('SELECT COUNT(*) FROM metric_poin
  if(process.env.KOMARI_E2E_LOCAL==='1')execFileSync('chown',['-R',process.env.KOMARI_E2E_USER,restored]);
  startPanel(restored);
  const original=await browser.newContext({baseURL:base,storageState:path.join(root,'qualification-browser-state.json')});
+ let restoredCtx;
  try {
   await expect.poll(async()=>{try{return(await original.request.get('/api/public')).status()}catch{return 0}},{timeout:60000}).toBe(200);
+  // Restore into a fresh security epoch must invalidate pre-restore session cookies.
+  expect((await original.request.get('/api/admin/settings')).status()).toBe(401);
+  expect((await original.request.post('/komari.admin.v1.DashboardService/GetDashboardCharts',{
+   data:{charts:['DASHBOARD_CHART_TRAFFIC'],rankingLimit:5},headers:{Origin:base,'Connect-Protocol-Version':'1'},
+  })).status()).toBe(401);
+
+  restoredCtx=await browser.newContext({baseURL:base});
+  await restoredCtx.addInitScript(()=>localStorage.setItem('i18nextLng','en'));
+  const loginPage=await restoredCtx.newPage();
+  await loginPage.goto(`${base}/login?returnTo=/admin/dashboard`);
+  await loginPage.locator('.km-login-form input[name=username]').fill(credentials.username);
+  await loginPage.locator('.km-login-form input[name=password]').fill(credentials.password);
+  await loginPage.locator('.km-login-form button[type=submit]').click();
+  if(credentials.secret){
+   const code=loginPage.getByRole('textbox',{name:'Enter verification code',exact:true});
+   await expect(code).toBeVisible({timeout:15000});
+   if(Date.now()%30000>27000)await sleep(3100);
+   await code.fill(totp(credentials.secret));
+   await loginPage.locator('.km-password-credential-step').getByRole('button',{name:'Continue',exact:true}).click();
+  }
+  await expect(loginPage).toHaveURL(`${base}/admin/dashboard`,{timeout:30000});
+  await loginPage.close();
+
   if(skipCSV){
    const scope=JSON.parse(fs.readFileSync(path.join(root,'qualification-scope.json')));
    const end=new Date();
-   const history=await original.request.post('/komari.metrics.v1.MetricsService/QueryMetrics',{
+   const history=await restoredCtx.request.post('/komari.metrics.v1.MetricsService/QueryMetrics',{
     data:{agentIds:[scope.agentId],metrics:['cpu.usage'],startTime:new Date(end.getTime()-3600_000).toISOString(),endTime:end.toISOString(),maxPoints:360,downsample:true},
     headers:{Origin:base,'Connect-Protocol-Version':'1'},
    });
    expect(history.status()).toBe(200);
    const body=await history.json();
    expect(body.series?.some(series=>series.queryPoints?.some(point=>Number(point.sampleCount)>0))).toBe(true);
-   const traffic=await original.request.post('/komari.admin.v1.DashboardService/GetDashboardCharts',{
+   const traffic=await restoredCtx.request.post('/komari.admin.v1.DashboardService/GetDashboardCharts',{
     data:{charts:['DASHBOARD_CHART_TRAFFIC'],rankingLimit:5},headers:{Origin:base,'Connect-Protocol-Version':'1'},
    });
    expect(traffic.status()).toBe(200);
@@ -166,22 +190,22 @@ print(json.dumps({'source_rows':source.execute('SELECT COUNT(*) FROM metric_poin
   }
   const proof=JSON.parse(fs.readFileSync(path.join(root,'export-restore-proof.json'))),verified=[];
   for(const expected of proof.ready){
-   const response=await original.request.get(`/api/admin/history/export/${expected.id}`);expect(response.status()).toBe(200);
+   const response=await restoredCtx.request.get(`/api/admin/history/export/${expected.id}`);expect(response.status()).toBe(200);
    const job=(await response.json()).data;expect(job.status).toBe('done');expect(job.sha256).toBe(expected.sha256);
-   const download=await original.request.get(`/api/admin/history/export/${expected.id}/download`);expect(download.status()).toBe(200);
+   const download=await restoredCtx.request.get(`/api/admin/history/export/${expected.id}/download`);expect(download.status()).toBe(200);
    const bytes=await download.body();expect(crypto.createHash('sha256').update(bytes).digest('hex')).toBe(expected.sha256);
    verified.push({id:job.id,mode:job.mode,sha256:job.sha256,bytes:bytes.length});
   }
-  const paused=await original.request.get(`/api/admin/history/export/${proof.paused.id}`);expect(paused.status()).toBe(200);expect((await paused.json()).data.status).toBe('paused');
-  expect((await original.request.get(`/api/admin/history/export/${proof.paused.id}/download`)).status()).toBe(409);
+  const paused=await restoredCtx.request.get(`/api/admin/history/export/${proof.paused.id}`);expect(paused.status()).toBe(200);expect((await paused.json()).data.status).toBe('paused');
+  expect((await restoredCtx.request.get(`/api/admin/history/export/${proof.paused.id}/download`)).status()).toBe(409);
   startWorker(restored);
-  expect((await original.request.post(`/api/admin/history/export/${proof.paused.id}/resume`,{data:{}})).status()).toBe(202);
+  expect((await restoredCtx.request.post(`/api/admin/history/export/${proof.paused.id}/resume`,{data:{}})).status()).toBe(202);
   let resumed;
-  await expect.poll(async()=>{resumed=(await (await original.request.get(`/api/admin/history/export/${proof.paused.id}`)).json()).data;if(['failed','cancelled'].includes(resumed.status))throw Error(JSON.stringify(resumed));return resumed.status;},{timeout:120000}).toBe('done');
-  const resumedBytes=await (await original.request.get(`/api/admin/history/export/${resumed.id}/download`)).body();
+  await expect.poll(async()=>{resumed=(await (await restoredCtx.request.get(`/api/admin/history/export/${proof.paused.id}`)).json()).data;if(['failed','cancelled'].includes(resumed.status))throw Error(JSON.stringify(resumed));return resumed.status;},{timeout:120000}).toBe('done');
+  const resumedBytes=await (await restoredCtx.request.get(`/api/admin/history/export/${resumed.id}/download`)).body();
   expect(crypto.createHash('sha256').update(resumedBytes).digest('hex')).toBe(resumed.sha256);
   fs.writeFileSync(path.join(artifacts,'export-restored-tasks.json'),JSON.stringify({verified,resumed},null,2));
- } finally { await original.close();if(!skipCSV)system('stop','komari-e2e-export.service'); }
+ } finally { await original.close();if(restoredCtx)await restoredCtx.close();if(!skipCSV)system('stop','komari-e2e-export.service'); }
 }
 run().catch(async e=>{console.error(e);process.exitCode=1;fs.writeFileSync(path.join(artifacts,'storage-upgrade-error.txt'),e.stack||String(e));if(context)for(const page of context.pages())await page.screenshot({path:path.join(artifacts,'storage-upgrade-error.png'),fullPage:true}).catch(()=>{});}).finally(async()=>{
  if(locker&&locker.exitCode===null)locker.kill();if(context){await context.tracing.stop({path:path.join(artifacts,'storage-upgrade-trace.zip')});await context.close();}if(browser)await browser.close();

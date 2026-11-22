@@ -242,10 +242,19 @@ type AgentCredential struct {
 	AgentKeyID     string     `json:"-" gorm:"type:varchar(64)"`
 	KeyAlgorithm   int32      `json:"-" gorm:"not null;default:0"`
 	Scopes         string     `json:"-" gorm:"type:text;not null;default:''"`
+	SecurityEpoch  uint64     `json:"-" gorm:"not null;default:1;index"`
 	RevokedAt      *time.Time `json:"-"`
 	RevokedReason  string     `json:"-" gorm:"type:varchar(255)"`
 	CreatedAt      time.Time  `json:"-"`
 	UpdatedAt      time.Time  `json:"-"`
+}
+
+// SecurityEpochState records the monotonically advancing control-plane
+// security epoch in the primary database for cross-check against dataDir.
+type SecurityEpochState struct {
+	ID        uint      `json:"-" gorm:"primaryKey;autoIncrement:false"`
+	Epoch     uint64    `json:"-" gorm:"not null;default:1"`
+	UpdatedAt time.Time `json:"-"`
 }
 
 // Consumed refresh hashes identify an authenticated replay after recovery
@@ -347,6 +356,7 @@ type Session struct {
 	LatestOnline    time.Time `json:"latest_online" gorm:"type:timestamp"`
 	LatestUserAgent string    `json:"latest_user_agent" gorm:"type:text"`
 	LatestIp        string    `json:"latest_ip" gorm:"type:varchar(100)"`
+	SecurityEpoch   uint64    `json:"-" gorm:"not null;default:1;index"`
 	Expires         time.Time `json:"expires" gorm:"not null"`
 	CreatedAt       time.Time `json:"created_at"`
 }
