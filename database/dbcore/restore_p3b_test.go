@@ -56,12 +56,13 @@ func TestRestoreStagedBackupHandlesReadOnlyMountParentSameVolume(t *testing.T) {
 }
 
 func TestRecoverPendingGenerationCompletesInterruptedSwitch(t *testing.T) {
-	for _, stage := range []string{"park", "publish"} {
+	for _, stage := range []string{"park", "publish", "archive_sync"} {
 		t.Run("crash_after_"+stage, func(t *testing.T) {
 			t.Cleanup(func() {
 				SetCurrentSecurityEpoch(1)
 				restoreFaultHook.afterManifestPark = nil
 				restoreFaultHook.afterManifestPublish = nil
+				restoreFaultHook.afterArchiveSync = nil
 			})
 
 			root := t.TempDir()
@@ -83,10 +84,13 @@ func TestRecoverPendingGenerationCompletesInterruptedSwitch(t *testing.T) {
 			writeRestoreArchive(t, filepath.Join(dataDir, "backup.zip"), newDB)
 
 			boom := errors.New("simulated crash")
-			if stage == "park" {
+			switch stage {
+			case "park":
 				restoreFaultHook.afterManifestPark = func() error { return boom }
-			} else {
+			case "publish":
 				restoreFaultHook.afterManifestPublish = func() error { return boom }
+			case "archive_sync":
+				restoreFaultHook.afterArchiveSync = func() error { return boom }
 			}
 
 			err := restoreStagedBackup(dataDir)
@@ -95,6 +99,16 @@ func TestRecoverPendingGenerationCompletesInterruptedSwitch(t *testing.T) {
 			}
 			restoreFaultHook.afterManifestPark = nil
 			restoreFaultHook.afterManifestPublish = nil
+			restoreFaultHook.afterArchiveSync = nil
+			if stage == "archive_sync" {
+				if _, err := os.Stat(filepath.Join(dataDir, "backup.zip")); !os.IsNotExist(err) {
+					t.Fatalf("pending publication did not consume backup.zip: %v", err)
+				}
+				manifest, err := readGenerationManifest(dataDir)
+				if err != nil || manifest == nil || manifest.State != generationStatePendingPublish {
+					t.Fatalf("archive was consumed without a pending journal: %#v, %v", manifest, err)
+				}
+			}
 
 			// Simulate process reboot completing pending switch before opening DB.
 			if err := RecoverPendingGeneration(dataDir); err != nil {

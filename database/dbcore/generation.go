@@ -37,6 +37,7 @@ type generationManifest struct {
 var restoreFaultHook = struct {
 	afterManifestPark    func() error
 	afterManifestPublish func() error
+	afterArchiveSync     func() error
 }{}
 
 func isReservedDataControlEntry(name string) bool {
@@ -369,6 +370,14 @@ func resumeGenerationSwitch(dataDir string, manifest generationManifest) error {
 	// An active journal can therefore never apply the same staged archive again.
 	if err := os.Remove(filepath.Join(dataDir, backupArchiveFileName)); err != nil && !os.IsNotExist(err) {
 		return err
+	}
+	if err := syncDir(dataDir); err != nil {
+		return fmt.Errorf("persist restore archive removal: %w", err)
+	}
+	if restoreFaultHook.afterArchiveSync != nil {
+		if err := restoreFaultHook.afterArchiveSync(); err != nil {
+			return err
+		}
 	}
 	manifest.State = generationStateActive
 	manifest.PreviousGeneration = ""
