@@ -230,3 +230,27 @@ func TestAtomicRestoreRefusesExternalPrimaryFile(t *testing.T) {
 		t.Fatalf("external database value=%q, err=%v", value, err)
 	}
 }
+
+func TestAtomicRestoreCanApplyNextUploadAfterPriorArchiveWasPublished(t *testing.T) {
+	root, backupDB := newAtomicRestoreFixture(t)
+	atomicRestoreTestHook = func(step string) error {
+		if step == "after-pointer" {
+			return errors.New("interrupted before consuming the archive")
+		}
+		return nil
+	}
+	_, err := activateQueuedRestore(root)
+	atomicRestoreTestHook = nil
+	if err == nil {
+		t.Fatal("expected an interruption")
+	}
+	first, err := datadir.Open(root)
+	if err != nil || first.Pointer.Epoch != 2 {
+		t.Fatalf("first generation: %+v, %v", first, err)
+	}
+	writeRestoreArchive(t, filepath.Join(root, backupArchiveFileName), backupDB)
+	next, err := activateQueuedRestore(root)
+	if err != nil || next.Dir == first.Dir || next.Pointer.Epoch != 3 {
+		t.Fatalf("subsequent restore = %+v, err=%v", next, err)
+	}
+}

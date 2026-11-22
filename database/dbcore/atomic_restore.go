@@ -149,6 +149,13 @@ func activateQueuedRestore(root string) (datadir.Layout, error) {
 		logger.Errorf("dbcore", "[restore] inspect pending archive: %v", err)
 		return active, nil
 	}
+	if len(ids) == 1 && active.Pointer.Version == datadir.Version && active.Pointer.Generation == ids[0] {
+		if err := consumeRestoreArchive(inbox, filepath.Join(inbox, ids[0]+".zip")); err != nil {
+			logger.Errorf("dbcore", "[restore] clean up published archive: %v", err)
+			return active, nil
+		}
+		ids = nil
+	}
 	if len(ids) == 0 {
 		id, err := claimRestore(root, inbox)
 		if err != nil {
@@ -166,10 +173,6 @@ func activateQueuedRestore(root string) (datadir.Layout, error) {
 	}
 	id := ids[0]
 	archive := filepath.Join(inbox, id+".zip")
-	if active.Pointer.Version == datadir.Version && active.Pointer.Generation == id {
-		consumeRestoreArchive(inbox, archive)
-		return active, nil
-	}
 
 	// Before publication every error leaves the old generation selected.
 	// After attempting publication, preserve the staged tree even when a
@@ -185,7 +188,9 @@ func activateQueuedRestore(root string) (datadir.Layout, error) {
 		}
 		return active, nil
 	}
-	consumeRestoreArchive(inbox, archive)
+	if err := consumeRestoreArchive(inbox, archive); err != nil {
+		logger.Errorf("dbcore", "[restore] clean up published archive: %v", err)
+	}
 	return datadir.Open(root)
 }
 
@@ -243,14 +248,12 @@ func rejectRestore(root, inbox, archive string) error {
 	return errors.Join(syncDir(dir), syncDir(inbox), syncDir(root))
 }
 
-func consumeRestoreArchive(inbox, archive string) {
+func consumeRestoreArchive(inbox, archive string) error {
 	err := os.Remove(archive)
 	if err == nil || os.IsNotExist(err) {
-		err = syncDir(inbox)
+		return syncDir(inbox)
 	}
-	if err != nil {
-		logger.Errorf("dbcore", "[restore] clean up published archive: %v", err)
-	}
+	return err
 }
 
 func publishQueuedRestore(active datadir.Layout, id, archive string) (publishing bool, err error) {
