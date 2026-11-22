@@ -308,7 +308,17 @@ func TestDPoPMiddlewareAndBridgeAuthSchemes(t *testing.T) {
 	agentID, accessToken, priv := dpopTestAgent(t)
 	pub := priv.Public().(ed25519.PublicKey)
 
-	createdRow, createdSecret, err := apitokens.Create(t.Context(), "dpop-pat-owner", apitokens.Policy{
+	ownerID := uuid.NewString()
+	require.NoError(t, dbcore.GetDBInstance().Create(&models.User{
+		UUID:     ownerID,
+		Username: ownerID,
+		Passwd:   "synthetic-unused",
+	}).Error)
+	t.Cleanup(func() {
+		dbcore.GetDBInstance().Where("uuid = ?", ownerID).Delete(&models.User{})
+	})
+
+	createdRow, createdSecret, err := apitokens.Create(t.Context(), ownerID, apitokens.Policy{
 		Name:      "dpop-pat-test",
 		Scopes:    []string{rpc.ScopeNodesRead},
 		AllAgents: true,

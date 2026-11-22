@@ -90,7 +90,7 @@ async function run() {
     name: 'Real database qualification TCP', target: '127.0.0.1:29444', type: 'tcp',
     intervalSeconds: 5, clients: [agentId], defaultOn: false,
   });
-  const pingTaskId = created.taskId;
+  const pingTaskId = Number(created.taskId);
   assert(pingTaskId > 0, 'No real TCP probe task');
   const result = await until('Actual Agent TCP samples', 120, async () => {
     const end = new Date();

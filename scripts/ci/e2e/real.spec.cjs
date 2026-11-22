@@ -278,7 +278,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         name: 'Real E2E panel TCP', target: '127.0.0.1:29444', type: 'tcp',
         intervalSeconds: 5, clients: [agentId], defaultOn: false,
       });
-      pingTaskId = created.taskId;
+      pingTaskId = Number(created.taskId);
       expect(pingTaskId).toBeGreaterThan(0);
       let result;
       await expect.poll(async () => {

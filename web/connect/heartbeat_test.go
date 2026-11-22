@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/workspace"
 	agentv1 "github.com/r11234567/komari-proto/gen/go/komari/agent/v1"
@@ -84,7 +85,8 @@ func TestStreamHeartbeatsEmittedWhenIdle(t *testing.T) {
 	})
 
 	t.Run("WatchDesiredConfig", func(t *testing.T) {
-		agentID := "hb-config-agent"
+		agentID, _, err := clients.CreateClient()
+		require.NoError(t, err)
 		path, handler := configv1connect.NewConfigServiceHandler(&configService{}, connect.WithInterceptors(newPolicyInterceptor()))
 		srv := wrapAgentMux(t, agentID, path, handler)
 		client := configv1connect.NewConfigServiceClient(srv.Client(), srv.URL)
