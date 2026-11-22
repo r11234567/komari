@@ -830,7 +830,8 @@ func (a *App) BuildRouter() error {
 		c.Set("panel_listener", true)
 		c.Next()
 	})
-	panelCors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
+	// The public site's mutable CORS allowlist must not govern the Panel.
+	panelCors := security.NewCorsController(true, "").
 		WithTrustedOrigins(flags.EffectivePanelOrigin())
 	panelEngine.Use(panelCors.Middleware())
 	panelEngine.Use(backup.RejectMutationsWhileRestarting())
@@ -844,7 +845,7 @@ func (a *App) BuildRouter() error {
 	closeExports := router.MountPanelRoutes(panelEngine)
 	a.addCleanup("history-export-queue", func(context.Context) error { return closeExports() })
 
-	a.registerReloadHandlers(publicCors, panelCors)
+	a.registerReloadHandlers(publicCors)
 	a.reload.Register("rate-limit", func(event config.ConfigEvent) {
 		publicRateLimiter.Update(event)
 		panelRateLimiter.Update(event)
