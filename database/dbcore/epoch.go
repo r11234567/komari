@@ -1,9 +1,13 @@
 package dbcore
 
 import (
+	"math"
+
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,6 +85,13 @@ func epochMarkerDirForStartup(defaultDataDir string) string {
 
 func reconcileStartupSecurityEpoch(defaultDataDir string, db *gorm.DB) (uint64, error) {
 	markerDir := epochMarkerDirForStartup(defaultDataDir)
+	layout, err := datadir.Open(defaultDataDir)
+	if err != nil {
+		return 0, err
+	}
+	if layout.Pointer.Version == datadir.Version {
+		markerDir = layout.Root
+	}
 	fileEpoch, err := readSecurityEpochFile(markerDir)
 	if err != nil {
 		return 0, err
@@ -92,7 +103,7 @@ func reconcileStartupSecurityEpoch(defaultDataDir string, db *gorm.DB) (uint64, 
 			dbEpoch = row.Epoch
 		}
 	}
-	epoch := max(max(fileEpoch, dbEpoch), 1)
+	epoch := max(fileEpoch, dbEpoch, layout.Pointer.Epoch, 1)
 	now := time.Now().UTC()
 	if db.Migrator().HasTable(&models.SecurityEpochState{}) {
 		if err := db.Exec(
@@ -196,9 +207,13 @@ func readSQLiteSecurityEpoch(db *sql.DB) (uint64, error) {
 }
 
 func collectLiveSecurityState(dataDir string) (restoreSecurityCarryover, uint64, error) {
+	return collectLiveSecurityStateFrom(dataDir, configuredSQLiteFilePath())
+}
+
+func collectLiveSecurityStateFrom(dataDir, custom string) (restoreSecurityCarryover, uint64, error) {
 	primaryPath := filepath.Join(dataDir, "komari.db")
 	sources := []string{primaryPath}
-	if custom := configuredSQLiteFilePath(); isCustomConfiguredSQLitePath(dataDir, custom) {
+	if isCustomConfiguredSQLitePath(dataDir, custom) {
 		primaryPath = custom
 		sources = append(sources, custom)
 		if base := filepath.Base(custom); base != "" && base != "komari.db" {
@@ -243,7 +258,7 @@ func collectLiveSecurityState(dataDir string) (restoreSecurityCarryover, uint64,
 			continue
 		}
 
-		curDB, err := sql.Open("sqlite3", currentPath)
+		curDB, err := sql.Open("sqlite3", readOnlyRestoreDSN(absPath))
 		if err != nil {
 			return carry, 0, err
 		}
@@ -477,7 +492,11 @@ func applyRestoreSecurityStateToDB(stagedPath string, prevMaxEpoch uint64, carry
 	if err != nil {
 		return 0, err
 	}
-	newEpoch := max(max(prevMaxEpoch, stagedEpoch), 1) + 1
+	priorEpoch := max(prevMaxEpoch, stagedEpoch, 1)
+	if priorEpoch >= math.MaxInt64 {
+		return 0, errors.New("security epoch cannot be advanced")
+	}
+	newEpoch := priorEpoch + 1
 
 	stagedHasUsers, err := sqliteTableExists(stagedDB, "users")
 	if err != nil {

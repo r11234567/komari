@@ -43,3 +43,31 @@ func TestGenerationRenameAcrossMountsLeavesBothTreesIntact(t *testing.T) {
 		t.Fatalf("unexpected destination entry: %v", err)
 	}
 }
+
+func TestAtomicRestoreRejectsGenerationDirectoryOnAnotherVolume(t *testing.T) {
+	root, _ := newAtomicRestoreFixture(t)
+	other, err := os.MkdirTemp("/dev/shm", "komari-restore-")
+	if err != nil {
+		t.Skipf("independent tmpfs unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(other) })
+	sourceInfo, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationInfo, err := os.Stat(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourceInfo.Sys().(*syscall.Stat_t).Dev == destinationInfo.Sys().(*syscall.Stat_t).Dev {
+		t.Skip("temporary directories are on the same mount")
+	}
+	if err := verifyRestoreVolume(root, other); !errors.Is(err, syscall.EXDEV) {
+		t.Fatalf("verifyRestoreVolume = %v, want EXDEV", err)
+	}
+	assertRestoreValue(t, root, "live")
+	entries, err := os.ReadDir(other)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("unexpected files on other volume: %v, %v", entries, err)
+	}
+}

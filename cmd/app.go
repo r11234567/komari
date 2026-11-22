@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
@@ -141,24 +142,12 @@ func (a *App) Bootstrap() error {
 	if err := flags.ValidateListenerConfig(); err != nil {
 		return err
 	}
-	if err := dbcore.RecoverPendingGeneration(filepath.Join(".", "data")); err != nil {
-		return fmt.Errorf("recover pending data generation: %w", err)
-	}
 	backup.RegisterRestartHandler(func(reason string) {
 		logger.Infof("server", "Graceful shutdown requested (%s)", reason)
 		go func() {
 			_ = a.Shutdown()
 		}()
 	})
-	if err := os.MkdirAll("./data/theme", os.ModePerm); err != nil {
-		return fmt.Errorf("failed to create theme directory: %w", err)
-	}
-	if err := os.MkdirAll(plugin.DataDir, os.ModePerm); err != nil {
-		return fmt.Errorf("failed to create plugin directory: %w", err)
-	}
-	if err := os.MkdirAll(plugin.StorageDir, os.ModePerm); err != nil {
-		return fmt.Errorf("failed to create plugin storage directory: %w", err)
-	}
 
 	// 注入版本标识，供 dbcore 在检测到版本升级时自动备份 ./data。
 	// 必须在 Initialize() 之前设置。
@@ -169,15 +158,25 @@ func (a *App) Bootstrap() error {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
 	a.dbReady = true
+	a.addCleanup("database", func(context.Context) error {
+		return dbcore.Close()
+	})
+	if err := os.MkdirAll(datadir.Resolve("./data/theme"), os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create theme directory: %w", err)
+	}
+	if err := os.MkdirAll(datadir.Resolve(plugin.DataDir), os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create plugin directory: %w", err)
+	}
+	if err := os.MkdirAll(datadir.Resolve(plugin.StorageDir), os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create plugin storage directory: %w", err)
+	}
+
 	if err := enrollment.InitializeLifecycle(context.Background()); err != nil {
 		return fmt.Errorf("initialize credential lifecycle: %w", err)
 	}
 	if _, err := enrollment.ActiveSigningKey(); err != nil {
 		logger.Warnf("server", "failed to initialize active signing key: %v", err)
 	}
-	a.addCleanup("database", func(context.Context) error {
-		return dbcore.Close()
-	})
 	if err := frontendpublic.EnsureBundledThemes(); err != nil {
 		return fmt.Errorf("failed to initialize public themes: %w", err)
 	}

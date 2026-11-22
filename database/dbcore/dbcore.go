@@ -18,6 +18,7 @@ import (
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/billing"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/internal/diagnostics"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/historyexport"
@@ -267,9 +268,12 @@ func unzipToDir(zipPath, dstDir string) error {
 			rc.Close()
 			return err
 		}
-		_ = out.Chmod(perm)
-		out.Close()
-		rc.Close()
+		if err := errors.Join(out.Chmod(perm), out.Close(), rc.Close()); err != nil {
+			return err
+		}
+		if err := atomicRestoreCheckpoint("extract-entry"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -338,47 +342,12 @@ func restoreStagedBackup(dataDir string) error {
 			_ = os.RemoveAll(stageDir)
 		}
 	}()
-	if err := unzipToDir(backupZipPath, stageDir); err != nil {
-		return fmt.Errorf("extract backup into staging directory: %w", err)
-	}
-	if err := validateRestoredSQLite(filepath.Join(stageDir, "komari.db"), "komari.db"); err != nil {
-		return err
-	}
-	if err := retireRestoredLegacyPasskeyPlugin(stageDir); err != nil {
-		return fmt.Errorf("retire legacy passkey plugin state in backup: %w", err)
-	}
-	_, newEpoch, err := reconcileRestoreSecurityState(dataDir, stageDir)
+	newEpoch, err := prepareStagedGeneration(backupZipPath, stageDir, dataDir, func(stageDir string) (uint64, error) {
+		_, epoch, err := reconcileRestoreSecurityState(dataDir, stageDir)
+		return epoch, err
+	})
 	if err != nil {
-		return fmt.Errorf("reconcile security state across restore: %w", err)
-	}
-	metricsPath := filepath.Join(stageDir, "metrics.db")
-	if _, err := os.Stat(metricsPath); err == nil {
-		if err := validateRestoredSQLite(metricsPath, "metrics.db"); err != nil {
-			return err
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-		err := metric.ValidateTelemetryBackup(ctx, metricsPath, filepath.Join(stageDir, "telemetry"))
-		cancel()
-		if err != nil {
-			return fmt.Errorf("validate restored telemetry bundle: %w", err)
-		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("inspect restored metrics.db: %w", err)
-	}
-	_ = os.Remove(filepath.Join(stageDir, "komari-backup-markup"))
-	queueDir := filepath.Join(stageDir, "exports-v2")
-	if _, err := os.Stat(queueDir); err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-		err = historyexport.ValidateAndRebindBackup(ctx, queueDir, dataDir)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("validate restored export queue: %w", err)
-		}
-	} else if !os.IsNotExist(err) {
 		return err
-	}
-	if err := os.MkdirAll(filepath.Join(stageDir, "theme"), 0o755); err != nil {
-		return fmt.Errorf("prepare restored theme directory: %w", err)
 	}
 
 	if _, err := os.Stat(filepath.Join(dataDir, "exports-v2")); err == nil {
@@ -404,12 +373,63 @@ func restoreStagedBackup(dataDir string) error {
 	return nil
 }
 
+func prepareStagedGeneration(backupZipPath, stageDir, publishDir string, reconcileSecurity func(string) (uint64, error)) (uint64, error) {
+	if err := unzipToDir(backupZipPath, stageDir); err != nil {
+		return 0, fmt.Errorf("extract backup into staging directory: %w", err)
+	}
+	if err := validateRestoredSQLite(filepath.Join(stageDir, "komari.db"), "komari.db"); err != nil {
+		return 0, err
+	}
+	if err := retireRestoredLegacyPasskeyPlugin(stageDir); err != nil {
+		return 0, fmt.Errorf("retire legacy passkey plugin state in backup: %w", err)
+	}
+	newEpoch, err := reconcileSecurity(stageDir)
+	if err != nil {
+		return 0, fmt.Errorf("reconcile security state across restore: %w", err)
+	}
+	metricsPath := filepath.Join(stageDir, "metrics.db")
+	if _, err := os.Stat(metricsPath); err == nil {
+		if err := validateRestoredSQLite(metricsPath, "metrics.db"); err != nil {
+			return 0, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		err := metric.ValidateTelemetryBackup(ctx, metricsPath, filepath.Join(stageDir, "telemetry"))
+		cancel()
+		if err != nil {
+			return 0, fmt.Errorf("validate restored telemetry bundle: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return 0, fmt.Errorf("inspect restored metrics.db: %w", err)
+	}
+	_ = os.Remove(filepath.Join(stageDir, "komari-backup-markup"))
+	queueDir := filepath.Join(stageDir, "exports-v2")
+	if _, err := os.Stat(queueDir); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		err = historyexport.ValidateAndRebindBackup(ctx, queueDir, publishDir)
+		cancel()
+		if err != nil {
+			return 0, fmt.Errorf("validate restored export queue: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return 0, err
+	}
+	if err := os.MkdirAll(filepath.Join(stageDir, "theme"), 0o755); err != nil {
+		return 0, fmt.Errorf("prepare restored theme directory: %w", err)
+	}
+
+	return newEpoch, nil
+}
+
 func writePreRestoreSnapshot(dataDir, backupZipPath string) (string, error) {
+	return writePreRestoreSnapshotFrom(dataDir, dataDir, backupZipPath, configuredSQLiteFilePath())
+}
+
+func writePreRestoreSnapshotFrom(dataDir, activeDir, backupZipPath, custom string) (string, error) {
 	timestamp := time.Now().UTC().Format("20060102-150405")
-	filename := fmt.Sprintf("pre-restore-%s.zip", timestamp)
+	filename := fmt.Sprintf("pre-restore-%s-%d.zip", timestamp, time.Now().UnixNano())
 
 	var preRestoreOverlays []map[string]string
-	if custom := configuredSQLiteFilePath(); isCustomConfiguredSQLitePath(dataDir, custom) {
+	if isCustomConfiguredSQLitePath(activeDir, custom) {
 		extSnapDir, err := snapshotExternalDatabaseForBackup(custom)
 		if err != nil {
 			return "", fmt.Errorf("snapshot configured database before restore: %w", err)
@@ -423,7 +443,7 @@ func writePreRestoreSnapshot(dataDir, backupZipPath string) (string, error) {
 	primaryDir := filepath.Join(filepath.Dir(dataDir), "backup")
 	primaryPath := filepath.Join(primaryDir, filename)
 	if mkErr := os.MkdirAll(primaryDir, 0o755); mkErr == nil {
-		if err := backupDataDirectory(dataDir, primaryPath, map[string]struct{}{backupZipPath: {}}, true, preRestoreOverlays...); err == nil {
+		if err := backupDataDirectory(activeDir, primaryPath, map[string]struct{}{backupZipPath: {}}, true, preRestoreOverlays...); err == nil {
 			return primaryPath, nil
 		} else {
 			_ = os.Remove(primaryPath)
@@ -433,7 +453,7 @@ func writePreRestoreSnapshot(dataDir, backupZipPath string) (string, error) {
 				return "", fmt.Errorf("preserve current data before restore: %w", err)
 			}
 			fallbackPath := filepath.Join(fallbackDir, filename)
-			if fbErr := backupDataDirectory(dataDir, fallbackPath, map[string]struct{}{backupZipPath: {}}, true, preRestoreOverlays...); fbErr != nil {
+			if fbErr := backupDataDirectory(activeDir, fallbackPath, map[string]struct{}{backupZipPath: {}}, true, preRestoreOverlays...); fbErr != nil {
 				_ = os.Remove(fallbackPath)
 				return "", fmt.Errorf("preserve current data before restore (primary: %v; fallback: %w)", err, fbErr)
 			}
@@ -446,11 +466,32 @@ func writePreRestoreSnapshot(dataDir, backupZipPath string) (string, error) {
 		return "", fmt.Errorf("create pre-restore backup directory: %w", err)
 	}
 	fallbackPath := filepath.Join(fallbackDir, filename)
-	if err := backupDataDirectory(dataDir, fallbackPath, map[string]struct{}{backupZipPath: {}}, true, preRestoreOverlays...); err != nil {
+	if err := backupDataDirectory(activeDir, fallbackPath, map[string]struct{}{backupZipPath: {}}, true, preRestoreOverlays...); err != nil {
 		_ = os.Remove(fallbackPath)
 		return "", fmt.Errorf("preserve current data before restore: %w", err)
 	}
 	return fallbackPath, nil
+}
+
+// NormalizePortableMetricConfig binds restored history to the generation that
+// holds the files, even when an older backup used absolute paths or a DSN.
+func NormalizePortableMetricConfig(ctx context.Context, db *sql.DB) error {
+	if exists, err := sqliteTableExists(db, "configs"); err != nil || !exists {
+		return err
+	}
+	values := map[string]string{
+		"metric_archive_directory": `"./data/telemetry"`,
+		"metric_db_driver":         `"sqlite"`,
+		"metric_db_dsn":            `"./data/metrics.db"`,
+		"metric_migration_target":  `"sqlite|./data/metrics.db"`,
+	}
+	for key, value := range values {
+		if _, err := db.ExecContext(ctx, `INSERT INTO configs (key, value) VALUES (?, ?)
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value); err != nil {
+			return fmt.Errorf("normalize portable metric config %s: %w", key, err)
+		}
+	}
+	return nil
 }
 
 func sqliteTableExists(db *sql.DB, name string) (bool, error) {
@@ -743,7 +784,7 @@ func resolveDatabaseFile() string {
 	if dbFile == "" {
 		dbFile = "./data/komari.db"
 	}
-	return dbFile
+	return datadir.ResolveSQLite(dbFile)
 }
 
 // backupOnVersionUpgrade 在检测到版本升级时，把当前 ./data 打包到
@@ -794,7 +835,7 @@ func backupOnVersionUpgrade() {
 	tsName := time.Now().UTC().Format("20060102-150405")
 	bakPath := filepath.Join("./backup", fmt.Sprintf("upgrade-%s.zip", tsName))
 	backupZipPath := filepath.Join(".", "data", "backup.zip")
-	if zipErr := backupDataDirectory("./data", bakPath, map[string]struct{}{backupZipPath: {}}, false); zipErr != nil {
+	if zipErr := backupDataDirectory(datadir.Resolve(datadir.Root), bakPath, map[string]struct{}{backupZipPath: {}}, false); zipErr != nil {
 		logger.Errorf("dbcore", "[upgrade-backup] failed to backup ./data before upgrade (from %q to %q): %v", prevVersion, versionID, zipErr)
 		return
 	}
@@ -838,7 +879,9 @@ func buildSQLiteDSN(databaseFile string) string {
 func Initialize() error {
 	once.Do(func() {
 		initErr = doInitialize()
-		if initErr == nil {
+		if initErr != nil {
+			closeDataOwner()
+		} else {
 			if pool, err := instance.DB(); err == nil {
 				diagnosticPool.Store(pool)
 			}
@@ -883,6 +926,7 @@ func TryGetDBInstance() *gorm.DB {
 
 // Close 关闭底层数据库连接，供关闭流程调用。
 func Close() error {
+	defer closeDataOwner()
 	if instance == nil {
 		return nil
 	}
@@ -900,7 +944,7 @@ func doInitialize() error {
 	var err error
 
 	// 在数据库连接创建前完整校验并原子恢复，失败时保留原 data/ 不动。
-	if err := restoreStagedBackup(filepath.Join(".", "data")); err != nil {
+	if err := initializeDataLayout(); err != nil {
 		return fmt.Errorf("restore staged backup: %w", err)
 	}
 
@@ -929,7 +973,7 @@ func doInitialize() error {
 		//     的锁升级在并发写入下产生死锁式的立即 SQLITE_BUSY。
 		//   - _journal_mode=WAL / _synchronous=NORMAL：与下方 PRAGMA 保持一致，
 		//     在 DSN 层为所有连接预设。
-		dsn := buildSQLiteDSN(flags.DatabaseFile)
+		dsn := buildSQLiteDSN(resolveDatabaseFile())
 		instance, err = gorm.Open(sqlite.Open(dsn), logConfig)
 		if err != nil {
 			return fmt.Errorf("failed to connect to SQLite3 database: %w", err)

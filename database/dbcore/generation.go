@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/komari-monitor/komari/internal/datadir"
 )
 
 const (
@@ -42,7 +44,7 @@ var restoreFaultHook = struct {
 
 func isReservedDataControlEntry(name string) bool {
 	switch name {
-	case generationsDirName,
+	case ".restore-inbox", ".restore-rejected", ".restore-lock", generationsDirName,
 		currentManifestFileName,
 		securityEpochFileName,
 		backupArchiveFileName,
@@ -67,7 +69,7 @@ func mergeReservedDataExcludes(dataDir string, exclude map[string]struct{}) map[
 		securityEpochFileName,
 		backupArchiveFileName,
 		".uploading",
-		fallbackPreRestoreDir,
+		fallbackPreRestoreDir, ".restore-inbox", ".restore-rejected", ".restore-lock",
 	} {
 		merged[filepath.Join(dataDir, fixed)] = struct{}{}
 	}
@@ -82,14 +84,7 @@ func mergeReservedDataExcludes(dataDir string, exclude map[string]struct{}) map[
 }
 
 func syncDir(dir string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	return errors.Join(d.Sync(), d.Close())
+	return datadir.SyncDirectory(dir)
 }
 
 func syncTree(root string) error {
@@ -128,36 +123,41 @@ func syncTree(root string) error {
 }
 
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	_, err := replaceDurableFile(path, data, perm)
+	return err
+}
+
+func replaceDurableFile(path string, data []byte, perm os.FileMode) (bool, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+		return false, err
 	}
 	prefix := "." + filepath.Base(path) + ".tmp-"
 	tmp, err := os.CreateTemp(dir, prefix)
 	if err != nil {
-		return err
+		return false, err
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
-		return err
+		return false, err
 	}
 	if err := tmp.Chmod(perm); err != nil && runtime.GOOS != "windows" {
 		_ = tmp.Close()
-		return err
+		return false, err
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return err
+		return false, err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return false, err
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		return err
+		return false, err
 	}
-	return syncDir(dir)
+	return true, syncDir(dir)
 }
 
 func atomicWriteJSON(path string, value any, perm os.FileMode) error {
@@ -282,6 +282,9 @@ func RecoverPendingGeneration(dataDir string) error {
 	manifest, err := readGenerationManifest(dataDir)
 	if err != nil {
 		return err
+	}
+	if manifest != nil && manifest.Version == datadir.Version {
+		return nil
 	}
 	if manifest == nil || manifest.State == generationStateActive {
 		cleanupOrphanedGenerations(dataDir)
