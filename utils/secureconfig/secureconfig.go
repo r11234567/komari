@@ -20,12 +20,14 @@ func EncryptString(plaintext string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return encryptWithKey(plaintext, key)
+}
 
+func encryptWithKey(plaintext string, key []byte) (string, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
 	}
-
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return "", err
@@ -49,7 +51,10 @@ func DecryptString(ciphertext string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return decryptWithKey(ciphertext, key)
+}
 
+func decryptWithKey(ciphertext string, key []byte) (string, error) {
 	raw, err := base64.StdEncoding.DecodeString(ciphertext)
 	if err != nil {
 		return "", err
@@ -77,6 +82,44 @@ func DecryptString(ciphertext string) (string, error) {
 	}
 
 	return string(plaintext), nil
+}
+
+// RewrapForRestore moves selected encrypted state between the live and staged
+// data directories without creating keys or persisting plaintext.
+func RewrapForRestore(ciphertext, liveDir, stageDir string) (string, error) {
+	if ciphertext == "" {
+		return "", nil
+	}
+	if strings.TrimSpace(os.Getenv("KOMARI_SECRET_KEY")) != "" {
+		return ciphertext, nil
+	}
+	keyFor := func(dir string) ([]byte, error) {
+		data, err := os.ReadFile(filepath.Join(dir, filepath.Base(keyFilePath)))
+		if err != nil {
+			return nil, err
+		}
+		return normalizeKey(strings.TrimSpace(string(data)))
+	}
+	liveKey, err := keyFor(liveDir)
+	if err != nil {
+		return "", err
+	}
+	stagedKey, err := keyFor(stageDir)
+	if errors.Is(err, os.ErrNotExist) {
+		keyPath := filepath.Join(stageDir, filepath.Base(keyFilePath))
+		if err := os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(liveKey)), 0o600); err != nil {
+			return "", err
+		}
+		return ciphertext, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	plain, err := decryptWithKey(ciphertext, liveKey)
+	if err != nil {
+		return "", err
+	}
+	return encryptWithKey(plain, stagedKey)
 }
 
 func loadOrCreateKey() ([]byte, error) {

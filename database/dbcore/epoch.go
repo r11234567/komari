@@ -142,6 +142,9 @@ type restoreSecurityCarryover struct {
 	twoFactorCounters    []twoFactorCounterRow
 	agentRevocations     map[string]agentRevocationRow
 	agentRefreshUses     map[string]agentRefreshUseRow
+	agentCredentials     map[string]models.AgentCredential
+	controlPlaneKeys     []models.ControlPlaneKey
+	controlPlanePrivate  []models.ControlPlanePrivateKey
 	maxLiveSecurityEpoch uint64
 }
 
@@ -193,8 +196,10 @@ func readSQLiteSecurityEpoch(db *sql.DB) (uint64, error) {
 }
 
 func collectLiveSecurityState(dataDir string) (restoreSecurityCarryover, uint64, error) {
-	sources := []string{filepath.Join(dataDir, "komari.db")}
+	primaryPath := filepath.Join(dataDir, "komari.db")
+	sources := []string{primaryPath}
 	if custom := configuredSQLiteFilePath(); isCustomConfiguredSQLitePath(dataDir, custom) {
+		primaryPath = custom
 		sources = append(sources, custom)
 		if base := filepath.Base(custom); base != "" && base != "komari.db" {
 			sources = append(sources, filepath.Join(dataDir, base))
@@ -245,6 +250,17 @@ func collectLiveSecurityState(dataDir string) (restoreSecurityCarryover, uint64,
 		if err := readCarryoverFromDB(curDB, &carry, tfSeen); err != nil {
 			_ = curDB.Close()
 			return carry, 0, err
+		}
+		if sameRestoreDBPath(currentPath, primaryPath) {
+			carry.agentCredentials, err = readLiveAgentCredentials(curDB)
+			if err != nil {
+				_ = curDB.Close()
+				return carry, 0, err
+			}
+			if err := readLiveControlPlaneKeys(curDB, &carry); err != nil {
+				_ = curDB.Close()
+				return carry, 0, err
+			}
 		}
 		_ = curDB.Close()
 	}
@@ -417,6 +433,9 @@ func reconcileRestoreSecurityState(dataDir, stageDir string) (prevEpoch uint64, 
 	if err != nil {
 		return 0, 0, err
 	}
+	if err := carry.rewrapAgentRecovery(dataDir, stageDir); err != nil {
+		return 0, 0, err
+	}
 	stagedKomari := filepath.Join(stageDir, "komari.db")
 	newEpoch, err = applyRestoreSecurityStateToDB(stagedKomari, prevEpoch, carry)
 	if err != nil {
@@ -504,12 +523,30 @@ func applyRestoreSecurityStateToDB(stagedPath string, prevMaxEpoch uint64, carry
 	if err != nil {
 		return 0, err
 	}
+	if stagedHasAgentCreds && carry.agentCredentials != nil {
+		if err := prepareStagedAgentCredentials(stagedDB); err != nil {
+			return 0, err
+		}
+	}
+	if len(carry.controlPlaneKeys) != 0 {
+		orm, err := restoreDBModel(stagedDB)
+		if err != nil {
+			return 0, err
+		}
+		if err := orm.AutoMigrate(&models.ControlPlaneKey{}, &models.ControlPlanePrivateKey{}); err != nil {
+			return 0, err
+		}
+	}
 
 	tx, err := stagedDB.Begin()
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if err := reconcileLiveControlPlaneKeys(tx, carry); err != nil {
+		return 0, err
+	}
 
 	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS security_epoch_states (
 		id integer PRIMARY KEY,
@@ -646,6 +683,12 @@ func applyRestoreSecurityStateToDB(stagedPath string, prevMaxEpoch uint64, carry
 			); err != nil {
 				return 0, err
 			}
+		}
+	}
+
+	if stagedHasAgentCreds && carry.agentCredentials != nil {
+		if err := reconcileLiveAgentCredentials(tx, carry.agentCredentials); err != nil {
+			return 0, err
 		}
 	}
 

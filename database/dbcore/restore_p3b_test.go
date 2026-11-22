@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/komari-monitor/komari/database/models"
 )
 
 func TestRestoreStagedBackupHandlesReadOnlyMountParentSameVolume(t *testing.T) {
@@ -263,5 +265,62 @@ func TestPendingRestoreNeverActivatesAnIncompleteGeneration(t *testing.T) {
 				t.Fatalf("previous database was lost: %v", err)
 			}
 		})
+	}
+}
+
+func TestRestoreKeepsTheLiveRefreshGenerationForTheSameDeviceKey(t *testing.T) {
+	t.Cleanup(func() { SetCurrentSecurityEpoch(1) })
+	dataDir := t.TempDir()
+	snapshot := filepath.Join(t.TempDir(), "snapshot.db")
+	now := time.Now().UTC()
+	live := []models.AgentCredential{
+		{Client: "rotated", AgentPublicKey: "same-key", Generation: 9, RefreshTokenHash: "current-rt", AccessTokenHash: "current-at",
+			RefreshExpiresAt: now.Add(time.Hour), AccessExpiresAt: now.Add(time.Minute), RefreshProtocol: 2},
+		{Client: "changed", AgentPublicKey: "new-key", Generation: 2, RefreshTokenHash: "replacement-rt"},
+	}
+	old := []models.AgentCredential{
+		{Client: "rotated", AgentPublicKey: "same-key", Generation: 8, RefreshTokenHash: "backup-rt"},
+		{Client: "changed", AgentPublicKey: "former-key", Generation: 1, RefreshTokenHash: "retired-rt"},
+		{Client: "removed", AgentPublicKey: "deleted-key", Generation: 1, RefreshTokenHash: "deleted-rt"},
+	}
+	for path, records := range map[string][]models.AgentCredential{filepath.Join(dataDir, "komari.db"): live, snapshot: old} {
+		db, err := sql.Open("sqlite3", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		store, err := restoreDBModel(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AutoMigrate(&models.AgentCredential{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Create(&records).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRestoreArchive(t, filepath.Join(dataDir, backupArchiveFileName), snapshot)
+	if err := restoreStagedBackup(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite3", filepath.Join(dataDir, "komari.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := readLiveAgentCredentials(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated := rows["rotated"]
+	if rotated.Generation != 9 || rotated.RefreshTokenHash != "current-rt" || rotated.AccessTokenHash != "current-at" ||
+		rotated.SecurityEpoch >= CurrentSecurityEpoch() || rotated.RevokedAt != nil {
+		t.Fatal("live rotated credentials were not preserved behind a stale epoch")
+	}
+	if rows["changed"].RevokedAt == nil || rows["removed"].RevokedAt == nil {
+		t.Fatal("restored an obsolete or removed device key")
 	}
 }
