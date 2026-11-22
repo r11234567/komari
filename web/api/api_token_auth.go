@@ -21,9 +21,36 @@ func APIAuthenticationMiddleware(pluginRoute ...func(method, pattern string) boo
 	limiter := security.NewAPIKeyAttemptLimiter()
 	usage := security.NewAPITokenUsageLimiter()
 	return func(c *gin.Context) {
-		secret, bearer := requestBearer(c.GetHeader("Authorization"))
-		if !bearer {
+		scheme, secret, ok := requestAuthCredential(c.GetHeader("Authorization"))
+		if !ok {
 			c.Next()
+			return
+		}
+		sourceIP := security.AuthSourceIP(c)
+		if scheme == "DPoP" {
+			if !strings.HasPrefix(c.FullPath(), "/komari.") {
+				security.AbortRequest(c, http.StatusUnauthorized, "DPoP credentials require a Connect procedure")
+				return
+			}
+			if secret != "" && !strings.HasPrefix(secret, apitokens.Prefix) {
+				if principal := agentPrincipal(secret); principal.Type == rpc.PrincipalAgent {
+					SetPrincipal(c, principal)
+					c.Next()
+					return
+				}
+			}
+			family := "unknown"
+			if enrollment.IsInstallToken(secret) || enrollment.HasAccessTokenRecord(secret) {
+				family = "agent"
+			}
+			failureKey := family + ":" + sourceIP
+			if allowed, retry := limiter.Allow(failureKey, time.Now()); !allowed {
+				c.Header("Retry-After", strconv.Itoa(int(math.Ceil(retry.Seconds()))))
+				security.AbortRequest(c, http.StatusTooManyRequests, "API authentication rate limit exceeded")
+				return
+			}
+			limiter.Failure(failureKey, time.Now())
+			security.AbortRequest(c, http.StatusUnauthorized, "invalid API credential")
 			return
 		}
 		// Official plugins may implement their own Bearer authentication on
@@ -34,7 +61,6 @@ func APIAuthenticationMiddleware(pluginRoute ...func(method, pattern string) boo
 			c.Next()
 			return
 		}
-		sourceIP := security.AuthSourceIP(c)
 		// Existing enrolled device credentials have their own identity and DPoP
 		// gates. They must not spend the API credential budget on every report.
 		if !strings.HasPrefix(secret, apitokens.Prefix) {

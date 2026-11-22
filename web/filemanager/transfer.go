@@ -449,31 +449,15 @@ func mergeRemoteUpload(c *gin.Context, clientUUID string) {
 		"first":       false,
 		"final":       true,
 	}, CallOptions{Timeout: 90 * time.Second})
-	if err == nil {
-		finishUploadSession(session)
-		auditFileTransfer(c, "upload", clientUUID, session.Path)
-	} else if strings.Contains(err.Error(), "unknown upload session") {
-		// A previous merge request may have timed out after the agent renamed the part file.
-		event, statErr := Call(c.Request.Context(), clientUUID, "stat", map[string]any{
-			"path": session.Path,
-		}, CallOptions{Timeout: 60 * time.Second})
-		if statErr == nil {
-			entries := event.GetEntries()
-			if len(entries) > 0 && int64(entries[0].GetSize()) == session.Size {
-				finishUploadSession(session)
-				auditFileTransfer(c, "upload", clientUUID, session.Path)
-				api.RespondSuccess(c, gin.H{"complete": true})
-				return
-			}
-		}
-		saveUploadSession(session)
-		respondTransferError(c, err)
-		return
-	} else {
+	if err != nil {
+		// Only a positive Agent result for this upload can prove completion.
+		// An existing path with matching length may still be the old file.
 		saveUploadSession(session)
 		respondTransferError(c, err)
 		return
 	}
+	finishUploadSession(session)
+	auditFileTransfer(c, "upload", clientUUID, session.Path)
 	api.RespondSuccess(c, gin.H{"complete": true})
 }
 

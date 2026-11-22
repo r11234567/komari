@@ -403,7 +403,7 @@ func alertSummaryToProto(value jsonRpc.DashboardAlertSummary) *adminv1.Dashboard
 			Title:      value.LatestAlert.Title,
 			NodeUuid:   value.LatestAlert.NodeUUID,
 			NodeName:   value.LatestAlert.NodeName,
-			TaskId:     uint32(value.LatestAlert.TaskID),
+			TaskId:     uint64(value.LatestAlert.TaskID),
 			TaskName:   value.LatestAlert.TaskName,
 			OccurredAt: optionalTimestamp(value.LatestAlert.OccurredAt),
 			DueAt:      optionalTimestamp(value.LatestAlert.DueAt),
@@ -418,7 +418,7 @@ func alertItemToProto(value jsonRpc.DashboardAlertItem) *adminv1.DashboardAlertI
 		Title:      value.Title,
 		NodeUuid:   value.NodeUUID,
 		NodeName:   value.NodeName,
-		TaskId:     uint32(value.TaskID),
+		TaskId:     uint64(value.TaskID),
 		TaskName:   value.TaskName,
 		OccurredAt: optionalTimestamp(value.OccurredAt),
 		DueAt:      optionalTimestamp(value.DueAt),
@@ -490,7 +490,7 @@ func latencyToProto(value jsonRpc.DashboardLatency) *adminv1.DashboardLatency {
 			Uuid:      item.UUID,
 			Name:      item.Name,
 			AverageMs: item.Average,
-			TaskId:    uint32(item.TaskID),
+			TaskId:    uint64(item.TaskID),
 			DetailUrl: item.DetailURL,
 		})
 	}
@@ -502,7 +502,7 @@ func latencyToProto(value jsonRpc.DashboardLatency) *adminv1.DashboardLatency {
 			PreviousMs: item.Previous,
 			CurrentMs:  item.Current,
 			DeltaMs:    item.Delta,
-			TaskId:     uint32(item.TaskID),
+			TaskId:     uint64(item.TaskID),
 			DetailUrl:  item.DetailURL,
 		})
 	}
@@ -523,7 +523,7 @@ func packetLossToProto(value jsonRpc.DashboardPacketLoss) *adminv1.DashboardPack
 		ranking = append(ranking, &adminv1.DashboardPacketLossRankItem{
 			Uuid:      item.UUID,
 			Name:      item.Name,
-			TaskId:    uint32(item.TaskID),
+			TaskId:    uint64(item.TaskID),
 			TaskName:  item.TaskName,
 			LossRate:  item.LossRate,
 			Lost:      int32(item.Lost),

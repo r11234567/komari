@@ -48,7 +48,7 @@ func (s *pingTaskService) CreatePingTask(_ context.Context, req *connect.Request
 	if err != nil {
 		return nil, connectError(connect.CodeInternal, err)
 	}
-	return connect.NewResponse(&adminv1.CreatePingTaskResponse{TaskId: uint32(taskID)}), nil
+	return connect.NewResponse(&adminv1.CreatePingTaskResponse{TaskId: uint64(taskID)}), nil
 }
 
 func (s *pingTaskService) UpdatePingTasks(_ context.Context, req *connect.Request[adminv1.UpdatePingTasksRequest]) (*connect.Response[adminv1.UpdatePingTasksResponse], error) {
@@ -107,7 +107,7 @@ func (s *pingTaskService) ReorderPingTasks(_ context.Context, req *connect.Reque
 
 func pingTaskToProto(task models.PingTask) *adminv1.PingTask {
 	return &adminv1.PingTask{
-		Id:              uint32(task.Id),
+		Id:              uint64(task.Id),
 		Name:            task.Name,
 		Target:          task.Target,
 		Type:            task.Type,

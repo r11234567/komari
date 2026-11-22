@@ -126,7 +126,15 @@ func (s *executionService) WatchExecution(ctx context.Context, req *connect.Requ
 	}
 	sequence := req.Msg.AfterSequence
 	for {
-		event, err := task.NextEvent(ctx, sequence)
+		waitCtx, cancel := context.WithTimeout(ctx, streamHeartbeatInterval)
+		event, err := task.NextEvent(waitCtx, sequence)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			if sendErr := stream.Send(&execv1.WatchExecutionResponse{Heartbeat: true}); sendErr != nil {
+				return sendErr
+			}
+			continue
+		}
 		if errors.Is(err, executionapp.ErrTerminal) {
 			return nil
 		}
@@ -183,7 +191,15 @@ func (s *executionService) LeaseExecution(ctx context.Context, req *connect.Requ
 	agentRuntime.MarkConnectExecutionLease(agentID)
 	delivered := make(map[string]bool)
 	for {
-		dispatch, err := executionapp.NextDispatch(ctx, agentID, req.Msg.AfterAssignmentId, delivered)
+		waitCtx, cancel := context.WithTimeout(ctx, streamHeartbeatInterval)
+		dispatch, err := executionapp.NextDispatch(waitCtx, agentID, req.Msg.AfterAssignmentId, delivered)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			if sendErr := stream.Send(&execv1.LeaseExecutionResponse{Heartbeat: true}); sendErr != nil {
+				return sendErr
+			}
+			continue
+		}
 		if err != nil {
 			return err
 		}

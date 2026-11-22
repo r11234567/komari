@@ -18,7 +18,10 @@ func IdentifyPrincipal(c *gin.Context) *rpc.Principal {
 	if p := GetPrincipal(c); p != nil {
 		return p
 	}
-	if token, bearer := requestBearer(c.GetHeader("Authorization")); bearer {
+	if scheme, token, ok := requestAuthCredential(c.GetHeader("Authorization")); ok {
+		if scheme == "DPoP" && !strings.HasPrefix(c.FullPath(), "/komari.") {
+			return rpc.NewAnonymousPrincipal()
+		}
 		return agentPrincipal(token)
 	}
 	if session, err := c.Cookie(security.SessionCookieName); err == nil && session != "" {
@@ -29,19 +32,36 @@ func IdentifyPrincipal(c *gin.Context) *rpc.Principal {
 	return agentPrincipal(extractClientToken(c))
 }
 
-func requestBearer(header string) (string, bool) {
+func requestAuthCredential(header string) (scheme string, token string, ok bool) {
 	trimmed := strings.TrimSpace(header)
 	if trimmed == "" {
-		return "", false
+		return "", "", false
 	}
 	idx := strings.IndexAny(trimmed, " \t")
 	if idx < 0 {
-		return "", strings.EqualFold(trimmed, "Bearer")
+		switch {
+		case strings.EqualFold(trimmed, "Bearer"):
+			return "Bearer", "", true
+		case strings.EqualFold(trimmed, "DPoP"):
+			return "DPoP", "", true
+		default:
+			return "", "", false
+		}
 	}
-	if !strings.EqualFold(trimmed[:idx], "Bearer") {
-		return "", false
+	switch {
+	case strings.EqualFold(trimmed[:idx], "Bearer"):
+		scheme = "Bearer"
+	case strings.EqualFold(trimmed[:idx], "DPoP"):
+		scheme = "DPoP"
+	default:
+		return "", "", false
 	}
-	return strings.TrimSpace(trimmed[idx+1:]), true
+	return scheme, strings.TrimSpace(trimmed[idx+1:]), true
+}
+
+func requestBearer(header string) (string, bool) {
+	scheme, token, ok := requestAuthCredential(header)
+	return token, ok && scheme == "Bearer"
 }
 
 func agentPrincipal(token string) *rpc.Principal {
