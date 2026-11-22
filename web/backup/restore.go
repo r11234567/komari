@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/internal/datadir"
 )
 
 var restoreMutex sync.Mutex
@@ -46,6 +49,9 @@ func SaveUploadedBackup(file io.Reader, filename string) error {
 }
 
 func (l *RestoreLock) SaveUploadedBackup(file io.Reader, filename string) error {
+	if err := dbcore.SupportsAtomicRestore(); err != nil {
+		return err
+	}
 	if !strings.HasSuffix(strings.ToLower(filename), ".zip") {
 		return fmt.Errorf("uploaded file must be a ZIP archive")
 	}
@@ -68,6 +74,10 @@ func (l *RestoreLock) SaveUploadedBackup(file io.Reader, filename string) error 
 		tempFile.Close()
 		return fmt.Errorf("backup archive exceeds the %d byte limit", MaxArchiveSize)
 	}
+	if err := tempFile.Sync(); err != nil {
+		_ = tempFile.Close()
+		return fmt.Errorf("sync uploaded backup: %w", err)
+	}
 	if err := tempFile.Close(); err != nil {
 		return fmt.Errorf("close uploaded backup: %w", err)
 	}
@@ -76,29 +86,10 @@ func (l *RestoreLock) SaveUploadedBackup(file io.Reader, filename string) error 
 	}
 
 	finalPath := filepath.Join(".", "data", "backup.zip")
-	if err := os.Remove(finalPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove previous backup: %w", err)
+	if err := os.Rename(tempPath, finalPath); err != nil {
+		return fmt.Errorf("publish uploaded backup: %w", err)
 	}
-	if err := os.Rename(tempPath, finalPath); err == nil {
-		return nil
-	}
-	source, err := os.Open(tempPath)
-	if err != nil {
-		return fmt.Errorf("prepare backup file: %w", err)
-	}
-	defer source.Close()
-	destination, err := os.Create(finalPath)
-	if err != nil {
-		return fmt.Errorf("create backup file: %w", err)
-	}
-	if _, err := io.Copy(destination, source); err != nil {
-		destination.Close()
-		return fmt.Errorf("write backup file: %w", err)
-	}
-	if err := destination.Close(); err != nil {
-		return fmt.Errorf("close backup file: %w", err)
-	}
-	return nil
+	return datadir.SyncDirectory(filepath.Dir(finalPath))
 }
 
 func normalizedArchivePath(name string) (string, error) {
