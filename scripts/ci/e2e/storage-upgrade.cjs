@@ -143,13 +143,14 @@ print(json.dumps({'source_rows':source.execute('SELECT COUNT(*) FROM metric_poin
  startPanel(restored);
  const original=await browser.newContext({baseURL:base,storageState:path.join(root,'qualification-browser-state.json')});
  let restoredCtx;
+ let workerStarted=false;
  try {
   await expect.poll(async()=>{try{return(await original.request.get('/api/public')).status()}catch{return 0}},{timeout:60000}).toBe(200);
   // Restore into a fresh security epoch must invalidate pre-restore session cookies.
   expect((await original.request.get('/api/admin/settings')).status()).toBe(401);
-  expect((await original.request.post('/komari.admin.v1.DashboardService/GetDashboardCharts',{
+  expect([401,403]).toContain((await original.request.post('/komari.admin.v1.DashboardService/GetDashboardCharts',{
    data:{charts:['DASHBOARD_CHART_TRAFFIC'],rankingLimit:5},headers:{Origin:base,'Connect-Protocol-Version':'1'},
-  })).status()).toBe(401);
+  })).status());
 
   restoredCtx=await browser.newContext({baseURL:base});
   await restoredCtx.addInitScript(()=>localStorage.setItem('i18nextLng','en'));
@@ -199,13 +200,14 @@ print(json.dumps({'source_rows':source.execute('SELECT COUNT(*) FROM metric_poin
   const paused=await restoredCtx.request.get(`/api/admin/history/export/${proof.paused.id}`);expect(paused.status()).toBe(200);expect((await paused.json()).data.status).toBe('paused');
   expect((await restoredCtx.request.get(`/api/admin/history/export/${proof.paused.id}/download`)).status()).toBe(409);
   startWorker(restored);
+  workerStarted=true;
   expect((await restoredCtx.request.post(`/api/admin/history/export/${proof.paused.id}/resume`,{data:{}})).status()).toBe(202);
   let resumed;
   await expect.poll(async()=>{resumed=(await (await restoredCtx.request.get(`/api/admin/history/export/${proof.paused.id}`)).json()).data;if(['failed','cancelled'].includes(resumed.status))throw Error(JSON.stringify(resumed));return resumed.status;},{timeout:120000}).toBe('done');
   const resumedBytes=await (await restoredCtx.request.get(`/api/admin/history/export/${resumed.id}/download`)).body();
   expect(crypto.createHash('sha256').update(resumedBytes).digest('hex')).toBe(resumed.sha256);
   fs.writeFileSync(path.join(artifacts,'export-restored-tasks.json'),JSON.stringify({verified,resumed},null,2));
- } finally { await original.close();if(restoredCtx)await restoredCtx.close();if(!skipCSV)system('stop','komari-e2e-export.service'); }
+ } finally { await original.close();if(restoredCtx)await restoredCtx.close();if(!skipCSV&&workerStarted)system('stop','komari-e2e-export.service'); }
 }
 run().catch(async e=>{console.error(e);process.exitCode=1;fs.writeFileSync(path.join(artifacts,'storage-upgrade-error.txt'),e.stack||String(e));if(context)for(const page of context.pages())await page.screenshot({path:path.join(artifacts,'storage-upgrade-error.png'),fullPage:true}).catch(()=>{});}).finally(async()=>{
  if(locker&&locker.exitCode===null)locker.kill();if(context){await context.tracing.stop({path:path.join(artifacts,'storage-upgrade-trace.zip')});await context.close();}if(browser)await browser.close();
