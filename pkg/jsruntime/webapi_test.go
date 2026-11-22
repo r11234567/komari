@@ -98,7 +98,7 @@ func TestFetchRequestResponseAndRedirect(t *testing.T) {
 				body.accepted === true && JSON.parse(cloneText).accepted === true &&
 				redirected.redirected && redirected.url.endsWith("/final") && await redirected.text() === "final";
 		}
-	`, Options{Console: io.Discard, Timeout: 2 * time.Second})
+	`, Options{AllowPrivateNet: true, Console: io.Discard, Timeout: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestFetchFormDataAndResponseFormData(t *testing.T) {
 			const result = await response.formData();
 			return response.status === 200 && result.getAll("accepted").sort().join(",") === "again,yes";
 		}
-	`, Options{Console: io.Discard, Timeout: 2 * time.Second})
+	`, Options{AllowPrivateNet: true, Console: io.Discard, Timeout: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestAbortControllerCancelsFetch(t *testing.T) {
 			try { await pending; return false; }
 			catch (error) { return controller.signal.aborted && error === controller.signal.reason && error.name === "AbortError"; }
 		}
-	`, Options{Console: io.Discard, Timeout: 2 * time.Second})
+	`, Options{AllowPrivateNet: true, Console: io.Discard, Timeout: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestXMLHttpRequestStatesEventsAndResponseTypes(t *testing.T) {
 				xhr.send();
 			});
 		}
-	`, Options{Console: io.Discard, Timeout: 2 * time.Second})
+	`, Options{AllowPrivateNet: true, Console: io.Discard, Timeout: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestXMLHttpRequestBinaryResponseTypes(t *testing.T) {
 		function verify(url) {
 			return Promise.all([load(url, "arraybuffer"), load(url, "blob")]).then((results) => results.every(Boolean));
 		}
-	`, Options{Console: io.Discard, Timeout: 2 * time.Second})
+	`, Options{AllowPrivateNet: true, Console: io.Discard, Timeout: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestXMLHttpRequestTimeoutAbortAndSynchronousMode(t *testing.T) {
 				})
 			]).then((results) => results.every(Boolean));
 		}
-	`, Options{Console: io.Discard, Timeout: 2 * time.Second})
+	`, Options{AllowPrivateNet: true, Console: io.Discard, Timeout: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

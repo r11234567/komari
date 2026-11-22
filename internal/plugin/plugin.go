@@ -341,7 +341,7 @@ func (m *Manager) load(short string) error {
 		NodeJS:              info.Permissions.Node,
 		AllowExec:           info.Permissions.AllowExec,
 		AllowListen:         info.Permissions.AllowListen,
-		BlockPrivateNet:     !strings.EqualFold(strings.TrimSpace(os.Getenv("KOMARI_PLUGIN_ALLOW_PRIVATE_NET")), "true"),
+		AllowPrivateNet:     strings.EqualFold(strings.TrimSpace(os.Getenv("KOMARI_PLUGIN_ALLOW_PRIVATE_NET")), "true"),
 		AllowAllFileAccess:  info.Permissions.AllowAllFileAccess,
 		MaxHTTPBodyBytes:    info.Permissions.MaxHTTPBodyBytes,
 		MaxChildOutputBytes: info.Permissions.MaxChildOutputBytes,
@@ -650,7 +650,7 @@ func (m *Manager) reload(short string) error {
 // the load failure for the startup error summary.
 func (m *Manager) disableWithError(short string, st PluginState, err error) error {
 	st.Enabled = false
-	if short == legacyPasskeyPluginShort {
+	if isLegacyPasskeyPlugin(short) {
 		st.ApprovedPermissionsHash = ""
 		st.ApprovedPackageDigest = ""
 	}
@@ -736,7 +736,16 @@ func ResolvePublicFile(short, name string) (string, error) {
 
 // OpenPublicFile securely opens a public plugin file beneath DataDir.
 func OpenPublicFile(short, name string) (*os.File, error) {
-	if err := validatePublicFile(short, name); err != nil {
+	if err := validateDeclaredPageFile(short, name, false); err != nil {
+		return nil, err
+	}
+	return OpenFile(short, name)
+}
+
+// OpenAdminPageFile securely opens a declared admin or public iframe page asset
+// beneath DataDir for authenticated administrator requests.
+func OpenAdminPageFile(short, name string) (*os.File, error) {
+	if err := validateDeclaredPageFile(short, name, true); err != nil {
 		return nil, err
 	}
 	return OpenFile(short, name)
@@ -778,6 +787,10 @@ var allowedRootPublicAssetExtensions = map[string]struct{}{
 }
 
 func validatePublicFile(short, name string) error {
+	return validateDeclaredPageFile(short, name, false)
+}
+
+func validateDeclaredPageFile(short, name string, allowAdmin bool) error {
 	if !validShort(short) {
 		return fmt.Errorf("invalid plugin short %q", short)
 	}
@@ -810,8 +823,18 @@ func validatePublicFile(short, name string) error {
 	if _, blocked := blockedPublicPluginExtensions[ext]; blocked {
 		return fmt.Errorf("plugin file %q is not public", name)
 	}
+	if !allowAdmin {
+		for _, page := range info.Pages {
+			if page.Visibility != models.PageVisibilityPublic && name == filepath.Clean(strings.TrimPrefix(page.File, "/")) {
+				return fmt.Errorf("plugin page %q is not public", name)
+			}
+		}
+	}
 	for _, page := range info.Pages {
-		if page.Visibility != models.PageVisibilityPublic || page.Type != models.PageTypeIframe {
+		if page.Type != models.PageTypeIframe {
+			continue
+		}
+		if page.Visibility != models.PageVisibilityPublic && (!allowAdmin || page.Visibility != models.PageVisibilityAdmin) {
 			continue
 		}
 		pageFile := filepath.Clean(strings.TrimPrefix(page.File, "/"))
@@ -831,7 +854,7 @@ func validatePublicFile(short, name string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("plugin page %q is not public", name)
+	return fmt.Errorf("plugin page %q is not declared", name)
 }
 
 // ResolveFile returns the absolute path of a file inside an installed plugin

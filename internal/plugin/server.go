@@ -105,15 +105,14 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 			mount := strings.TrimSpace(native.String(vm, moejs.Arg(args, 0)))
 			mount = strings.TrimRight(mount, "/")
 			dir := strings.TrimSpace(native.String(vm, moejs.Arg(args, 1)))
+			cleanDir := filepath.Clean(dir)
 			if mount == "" || mount == "/" || !strings.HasPrefix(mount, "/") {
 				return moejs.Undefined(), native.TypeError(vm, "server.static requires a mount path starting with / (and not \"/\")")
 			}
-			if dir == "" {
-				return moejs.Undefined(), native.TypeError(vm, "server.static requires a folder name")
+			if dir == "" || cleanDir == "." || !filepath.IsLocal(cleanDir) {
+				return moejs.Undefined(), native.TypeError(vm, "server.static requires a subdirectory inside the plugin directory")
 			}
-			if !filepath.IsLocal(dir) {
-				return moejs.Undefined(), native.TypeError(vm, "server.static folder must be a relative path inside the plugin directory")
-			}
+			dir = cleanDir
 			if !inst.info.Permissions.AllowRoutes {
 				return moejs.Undefined(), native.TypeError(vm, "server.static requires the \"route\" permission (allowRoutes)")
 			}
@@ -455,14 +454,11 @@ func (m *Manager) routeHandler(short string) gin.HandlerFunc {
 			if body != nil {
 				_, _ = state.body.Write(body)
 			}
-			for name, values := range state.headers {
-				for _, value := range values {
-					c.Header(name, value)
-				}
-			}
+			headers := state.headers.Clone()
 			statusCode := state.statusCode
 			responseBody := append([]byte(nil), state.body.Bytes()...)
 			state.mu.Unlock()
+			writeSanitizedRouteHeaders(c, headers)
 			c.Status(statusCode)
 			_, _ = c.Writer.Write(responseBody)
 		}
@@ -509,13 +505,10 @@ func (m *Manager) routeHandler(short string) gin.HandlerFunc {
 			case chunk := <-state.chunks:
 				if !committed {
 					state.mu.Lock()
-					for name, values := range state.headers {
-						for _, value := range values {
-							c.Header(name, value)
-						}
-					}
+					headers := state.headers.Clone()
 					statusCode := state.statusCode
 					state.mu.Unlock()
+					writeSanitizedRouteHeaders(c, headers)
 					c.Status(statusCode)
 					committed = true
 				}
@@ -578,14 +571,24 @@ func (m *Manager) registerStatic(short, mount, dir string, spa bool) (err error)
 	if m.engine == nil {
 		return fmt.Errorf("plugin manager has no HTTP engine")
 	}
-	absDir := filepath.Join(inst.dir, dir)
+	cleanDir := filepath.Clean(strings.TrimSpace(dir))
+	if cleanDir == "" || cleanDir == "." || !filepath.IsLocal(cleanDir) {
+		return fmt.Errorf("static folder %q must be a subdirectory inside the plugin directory", dir)
+	}
+	absDir := filepath.Join(inst.dir, cleanDir)
 	if !withinDir(absDir, inst.dir) {
 		return fmt.Errorf("static folder %q must be inside the plugin directory", dir)
 	}
-	fi, statErr := os.Stat(absDir)
-	if statErr != nil || !fi.IsDir() {
+	pluginRoot, rootErr := os.OpenRoot(inst.dir)
+	if rootErr != nil {
+		return fmt.Errorf("static folder %q cannot be opened", dir)
+	}
+	subRoot, subErr := pluginRoot.OpenRoot(cleanDir)
+	_ = pluginRoot.Close()
+	if subErr != nil {
 		return fmt.Errorf("static folder %q does not exist", dir)
 	}
+	_ = subRoot.Close()
 	if m.routes[short] == nil {
 		m.routes[short] = make(map[string]bool)
 	}
@@ -634,42 +637,87 @@ func (m *Manager) staticHandler(short, mount string) gin.HandlerFunc {
 		}
 		name := strings.TrimPrefix(c.Request.URL.Path, mount)
 		name = strings.TrimPrefix(name, "/")
-		target, err := resolveStaticFile(cfg.dir, name)
+		file, info, serveName, err := openStaticFile(cfg.dir, name, cfg.spa)
 		if err != nil {
-			if !cfg.spa {
-				c.Status(http.StatusNotFound)
-				return
-			}
-			target = filepath.Join(cfg.dir, "index.html")
+			c.Status(http.StatusNotFound)
+			return
 		}
-		c.File(target)
+		defer file.Close()
+		c.Header("X-Content-Type-Options", "nosniff")
+		http.ServeContent(c.Writer, c.Request, serveName, info.ModTime(), file)
 	}
 }
 
-// resolveStaticFile maps a request path to a file inside a static folder,
-// rejecting traversal. A directory resolves to its index.html.
-func resolveStaticFile(dir, name string) (string, error) {
-	if name == "" {
-		name = "index.html"
+func writeSanitizedRouteHeaders(c *gin.Context, headers http.Header) {
+	if len(headers) == 0 {
+		return
 	}
-	if !filepath.IsLocal(name) {
-		return "", fmt.Errorf("invalid static path %q", name)
-	}
-	full := filepath.Join(dir, name)
-	if !withinDir(full, dir) {
-		return "", fmt.Errorf("invalid static path %q", name)
-	}
-	fi, err := os.Stat(full)
-	if err != nil {
-		return "", err
-	}
-	if fi.IsDir() {
-		full = filepath.Join(full, "index.html")
-		if _, err := os.Stat(full); err != nil {
-			return "", err
+	sanitized := headers.Clone()
+	stripReservedSetCookies(sanitized)
+	dst := c.Writer.Header()
+	for name, values := range sanitized {
+		dst.Del(name)
+		for _, value := range values {
+			dst.Add(name, value)
 		}
 	}
-	return full, nil
+}
+
+// openStaticFile maps a request path inside a static folder using os.OpenRoot so
+// traversal and symlink escapes out of dir are always rejected, including for
+// directories and SPA fallbacks.
+func openStaticFile(dir, name string, spa bool) (*os.File, os.FileInfo, string, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	defer root.Close()
+
+	cleanReq := ""
+	if name != "" {
+		cleanReq = filepath.Clean(strings.TrimPrefix(name, "/"))
+		if !filepath.IsLocal(cleanReq) {
+			return nil, nil, "", fmt.Errorf("invalid static path %q", name)
+		}
+	} else {
+		cleanReq = "index.html"
+	}
+
+	openTarget := func(rel string) (*os.File, os.FileInfo, string, error) {
+		file, err := root.Open(rel)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		info, err := file.Stat()
+		if err != nil {
+			_ = file.Close()
+			return nil, nil, "", err
+		}
+		if info.IsDir() {
+			_ = file.Close()
+			rel = filepath.Join(rel, "index.html")
+			file, err = root.Open(rel)
+			if err != nil {
+				return nil, nil, "", err
+			}
+			info, err = file.Stat()
+			if err != nil {
+				_ = file.Close()
+				return nil, nil, "", err
+			}
+		}
+		if !info.Mode().IsRegular() {
+			_ = file.Close()
+			return nil, nil, "", fmt.Errorf("static path %q is not a regular file", rel)
+		}
+		return file, info, filepath.Base(rel), nil
+	}
+
+	file, info, serveName, err := openTarget(cleanReq)
+	if err != nil && spa && cleanReq != "index.html" {
+		return openTarget("index.html")
+	}
+	return file, info, serveName, err
 }
 
 // routeResponse is the Go side of the JS response object. It mirrors the
