@@ -17,6 +17,7 @@ import (
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/historyexport"
 	"github.com/spf13/cobra"
 	"gorm.io/gorm"
@@ -29,12 +30,12 @@ func init() {
 		if !offline || destination == "" || backup == "" {
 			return fmt.Errorf("stop panel AND export workers, then pass --confirm-offline --output NEW-METRICS.db --backup-dir NEW-BACKUP-DIRECTORY")
 		}
-		// Normal startup consumes this file and replaces the data directory.
-		// Maintenance must not silently turn into a pending restore operation.
-		if _, err := os.Lstat(filepath.Join("data", "backup.zip")); err == nil {
-			return fmt.Errorf("staged data/backup.zip restore exists; complete or remove that staged restore before offline compaction")
-		} else if !os.IsNotExist(err) {
+		pending, err := dbcore.PendingRestore(datadir.Root)
+		if err != nil {
 			return err
+		}
+		if pending {
+			return fmt.Errorf("complete the queued restore before offline compaction")
 		}
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
@@ -51,7 +52,7 @@ func init() {
 		}
 		// A running worker must not change queue files while maintenance changes
 		// the source generation. Epoch fencing invalidates pre-swap jobs later.
-		queueDir := filepath.Join("data", "exports-v2")
+		queueDir := datadir.Resolve(filepath.Join("data", "exports-v2"))
 		if _, err := os.Stat(queueDir); err == nil {
 			release, err := historyexport.LockMaintenance(ctx, queueDir)
 			if err != nil {
@@ -66,7 +67,7 @@ func init() {
 			return fmt.Errorf("offline portable compaction currently requires SQLite metadata as well as SQLite metrics")
 		}
 		result, err := metricstore.GetStore().Telemetry().CompactSQLite(ctx, destination, backup, retire, func() error {
-			return backupCompactMetadata(ctx, metadata, backup, filepath.Join("data", "secret.key"), os.Getenv("KOMARI_SECRET_KEY"))
+			return backupCompactMetadata(ctx, metadata, backup, datadir.Resolve(filepath.Join("data", "secret.key")), os.Getenv("KOMARI_SECRET_KEY"))
 		})
 		if err != nil {
 			return err
