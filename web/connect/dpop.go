@@ -242,6 +242,11 @@ func normalizeDPoPHTU(raw string) (string, error) {
 func verifyDPoP(c *gin.Context, principal *rpc.Principal) error {
 	dpopProof := strings.TrimSpace(c.GetHeader("DPoP"))
 	legacySig := strings.TrimSpace(c.GetHeader("X-Komari-Signature"))
+	auth := strings.Fields(c.GetHeader("Authorization"))
+	if len(auth) != 0 && strings.EqualFold(auth[0], "DPoP") && dpopProof == "" {
+		c.Header("WWW-Authenticate", `DPoP error="invalid_dpop_proof"`)
+		return errors.New("dpop: Authorization DPoP requires a DPoP proof")
+	}
 
 	var pubKey ed25519.PublicKey
 	if principal != nil && principal.Type == rpc.PrincipalAgent && principal.ClientUUID != "" {
@@ -395,14 +400,9 @@ func verifyRFC9449DPoP(c *gin.Context, agentID string, pubKey ed25519.PublicKey,
 		return errors.New("dpop: bh body hash mismatch")
 	}
 
-	if claims.Nonce != "" {
-		if !verifyDPoPServerNonce(agentID, claims.Nonce, now) {
-			c.Header("WWW-Authenticate", `DPoP error="use_dpop_nonce"`)
-			return errors.New("dpop: invalid or expired server nonce")
-		}
-	} else if !allowStream {
+	if !verifyDPoPServerNonce(agentID, claims.Nonce, now) {
 		c.Header("WWW-Authenticate", `DPoP error="use_dpop_nonce"`)
-		return errors.New("dpop: server nonce challenge required")
+		return errors.New("dpop: missing, invalid or expired server nonce")
 	}
 
 	jtiTTL := time.Until(time.Unix(claims.IAT, 0).Add(125 * time.Second))

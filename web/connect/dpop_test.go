@@ -291,12 +291,17 @@ func TestRFC9449DPoPNonceChallengeReplayAndBindings(t *testing.T) {
 		makeRFC9449Proof(t, priv, pub, http.MethodPost, unaryURL, accessToken, issuedNonce, "jti-"+uuid.NewString(), nil, "stream"))
 	require.Error(t, verifyDPoP(spoofStreamCtx, principal))
 
-	// 3. Cold-start client stream succeeds without server nonce and returns DPoP-Nonce; forged nonce on stream is rejected.
+	// Client streams use the same nonce requirement, including on cold start.
 	streamURL := "http://example.com/komari.file.v1.FileService/AttachFileOperations"
 	coldStreamProof := makeRFC9449Proof(t, priv, pub, http.MethodPost, streamURL, accessToken, "", "jti-"+uuid.NewString(), nil, "stream")
 	streamCtx, streamRec := makeRFC9449Context(t, http.MethodPost, streamURL, []byte("wire-frames"), "DPoP "+accessToken, coldStreamProof)
-	require.NoError(t, verifyDPoP(streamCtx, principal))
-	require.NotEmpty(t, streamRec.Header().Get("DPoP-Nonce"))
+	require.Error(t, verifyDPoP(streamCtx, principal))
+	require.Contains(t, streamRec.Header().Get("WWW-Authenticate"), "use_dpop_nonce")
+	streamNonce := streamRec.Header().Get("DPoP-Nonce")
+	require.NotEmpty(t, streamNonce)
+	validStreamProof := makeRFC9449Proof(t, priv, pub, http.MethodPost, streamURL, accessToken, streamNonce, "jti-"+uuid.NewString(), nil, "stream")
+	validStreamCtx, _ := makeRFC9449Context(t, http.MethodPost, streamURL, []byte("wire-frames"), "DPoP "+accessToken, validStreamProof)
+	require.NoError(t, verifyDPoP(validStreamCtx, principal))
 
 	forgedStreamProof := makeRFC9449Proof(t, priv, pub, http.MethodPost, streamURL, accessToken, "0.forgedmac", "jti-"+uuid.NewString(), nil, "stream")
 	forgedStreamCtx, _ := makeRFC9449Context(t, http.MethodPost, streamURL, []byte("wire-frames"), "DPoP "+accessToken, forgedStreamProof)
@@ -331,6 +336,10 @@ func TestDPoPMiddlewareAndBridgeAuthSchemes(t *testing.T) {
 
 	router := gin.New()
 	router.Use(api.APIAuthenticationMiddleware())
+	router.POST("/api/clients/report", func(c *gin.Context) {
+		t.Error("a DPoP credential was admitted to a route without proof verification")
+		c.Status(http.StatusOK)
+	})
 	router.POST("/komari.report.v1.AgentReportService/SubmitReport", bridge(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		meta := rpc.MetaFromContext(r.Context())
 		if meta == nil || meta.Principal == nil || meta.Principal.ClientUUID != agentID {
@@ -377,4 +386,10 @@ func TestDPoPMiddlewareAndBridgeAuthSchemes(t *testing.T) {
 	rec4 := httptest.NewRecorder()
 	router.ServeHTTP(rec4, req4)
 	require.Equal(t, http.StatusUnauthorized, rec4.Code)
+
+	report := httptest.NewRequest(http.MethodPost, "/api/clients/report", nil)
+	report.Header.Set("Authorization", "DPoP "+accessToken)
+	reportResponse := httptest.NewRecorder()
+	router.ServeHTTP(reportResponse, report)
+	require.Equal(t, http.StatusUnauthorized, reportResponse.Code)
 }

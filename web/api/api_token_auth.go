@@ -28,6 +28,10 @@ func APIAuthenticationMiddleware(pluginRoute ...func(method, pattern string) boo
 		}
 		sourceIP := security.AuthSourceIP(c)
 		if scheme == "DPoP" {
+			if !strings.HasPrefix(c.FullPath(), "/komari.") {
+				security.AbortRequest(c, http.StatusUnauthorized, "DPoP credentials require a Connect procedure")
+				return
+			}
 			if secret != "" && !strings.HasPrefix(secret, apitokens.Prefix) {
 				if principal := agentPrincipal(secret); principal.Type == rpc.PrincipalAgent {
 					SetPrincipal(c, principal)

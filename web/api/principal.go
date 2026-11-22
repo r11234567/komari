@@ -18,7 +18,10 @@ func IdentifyPrincipal(c *gin.Context) *rpc.Principal {
 	if p := GetPrincipal(c); p != nil {
 		return p
 	}
-	if _, token, ok := requestAuthCredential(c.GetHeader("Authorization")); ok {
+	if scheme, token, ok := requestAuthCredential(c.GetHeader("Authorization")); ok {
+		if scheme == "DPoP" && !strings.HasPrefix(c.FullPath(), "/komari.") {
+			return rpc.NewAnonymousPrincipal()
+		}
 		return agentPrincipal(token)
 	}
 	if session, err := c.Cookie(security.SessionCookieName); err == nil && session != "" {
