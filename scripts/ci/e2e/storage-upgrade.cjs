@@ -159,11 +159,12 @@ print(json.dumps({'source_rows':source.execute('SELECT COUNT(*) FROM metric_poin
   await loginPage.locator('.km-login-form input[name=username]').fill(credentials.username);
   await loginPage.locator('.km-login-form input[name=password]').fill(credentials.password);
   await loginPage.locator('.km-login-form button[type=submit]').click();
-  if(credentials.secret){
+  const restoreSecret=credentials.restoreSecret??credentials.secret;
+  if(restoreSecret){
    const code=loginPage.getByRole('textbox',{name:'Enter verification code',exact:true});
    await expect(code).toBeVisible({timeout:15000});
    if(Date.now()%30000>27000)await sleep(3100);
-   await code.fill(totp(credentials.secret));
+   await code.fill(totp(restoreSecret));
    await loginPage.locator('.km-password-credential-step').getByRole('button',{name:'Continue',exact:true}).click();
   }
   await expect(loginPage).toHaveURL(`${base}/admin/dashboard`,{timeout:30000});

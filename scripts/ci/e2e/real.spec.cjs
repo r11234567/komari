@@ -773,6 +773,13 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         fs.writeFileSync(path.join(artifacts, 'real-history.csv'), csv);
         csvBytes = csv.length;
       }
+      if (skipCSV) {
+        await request('/api/admin/2fa/generate');
+        secret = (await context.cookies()).find(cookie => cookie.name === '2fa_secret')?.value;
+        expect(secret).toBeTruthy();
+        console.log(`::add-mask::${secret}`);
+        await request(`/api/admin/2fa/enable?code=${await freshCode()}`);
+      }
       const backup = await request('/api/admin/download/backup?scope=full', undefined, { method: 'GET', headers: { 'X-2FA-Code': await freshCode() } });
       // Credentials stay inside the disposable fixture, outside uploaded artifacts.
       fs.writeFileSync(path.join(root, 'real-full-backup.zip'), await backup.body());
@@ -780,7 +787,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       if (skipCSV) {
         await context.storageState({ path: path.join(root, 'qualification-browser-state.json') });
         fs.writeFileSync(path.join(root, 'qualification-scope.json'), JSON.stringify({ agentId, pingTaskId }));
-        fs.writeFileSync(path.join(root, 'migration-credentials.json'), JSON.stringify({ username: 'e2e-user', password: fixturePassword }), { mode: 0o600 });
+        fs.writeFileSync(path.join(root, 'migration-credentials.json'), JSON.stringify({ username: 'e2e-user', password: fixturePassword, restoreSecret: secret }), { mode: 0o600 });
         fs.writeFileSync(path.join(artifacts, 'database-scenario-scope.json'), JSON.stringify({
           database_only: true, csv_scenarios: false,
           completed: [...completedSteps, 'real reports archive, charts survive raw deletion, CSV and complete backup use cold history'],
