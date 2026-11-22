@@ -16,6 +16,7 @@ import (
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/metricstore"
 	dbtasks "github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/historyexport"
 	"github.com/komari-monitor/komari/pkg/metric"
@@ -35,7 +36,7 @@ type backgroundExportRequest struct {
 }
 
 func RegisterHistoryExportRoutes(group *gin.RouterGroup) func() error {
-	q, e := historyexport.Open("./data/exports-v2")
+	q, e := historyexport.Open(datadir.Resolve("./data/exports-v2"))
 	a := &backgroundExportAPI{queue: q, err: e}
 	group.GET("/history/export/retention", a.retention)
 	group.GET("/history/export", a.list)
@@ -133,7 +134,7 @@ func backgroundSource(cfg *metricstore.MetricStoreConfig) (historyexport.Source,
 	if path == ":memory:" {
 		return historyexport.Source{}, errors.New("background export requires a persistent SQLite file")
 	}
-	path, e := filepath.Abs(path)
+	path, e := filepath.Abs(datadir.Resolve(path))
 	if e != nil {
 		return historyexport.Source{}, e
 	}
@@ -141,7 +142,7 @@ func backgroundSource(cfg *metricstore.MetricStoreConfig) (historyexport.Source,
 	if archive == "" {
 		archive = "./data/telemetry"
 	}
-	archive, e = filepath.Abs(archive)
+	archive, e = filepath.Abs(datadir.Resolve(archive))
 	if e != nil {
 		return historyexport.Source{}, e
 	}

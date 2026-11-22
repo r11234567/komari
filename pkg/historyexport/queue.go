@@ -113,9 +113,10 @@ type Commit struct {
 	Slot                  int64
 }
 type Queue struct {
-	db       *sql.DB
-	Dir      string
-	identity os.FileInfo
+	db             *sql.DB
+	Dir            string
+	identity       os.FileInfo
+	generationRoot string
 }
 
 func Open(dir string) (*Queue, error) {

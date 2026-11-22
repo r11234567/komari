@@ -8,6 +8,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/historyexport"
 	logger "github.com/komari-monitor/komari/utils/log"
 )
@@ -53,7 +54,7 @@ func publishExportPolicy(ctx context.Context) error {
 	case p.State.Pending > 1024:
 		p.Pressure = "telemetry_backlog"
 	}
-	return historyexport.WritePolicy("./data/exports-v2", p)
+	return historyexport.WritePolicy(datadir.Resolve("./data/exports-v2"), p)
 }
 func (a *App) startExportPolicy() {
 	ctx, cancel := context.WithCancel(context.Background())
