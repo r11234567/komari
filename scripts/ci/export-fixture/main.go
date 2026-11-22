@@ -5,12 +5,13 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/komari-monitor/komari/pkg/metric"
@@ -43,17 +44,23 @@ func main() {
 	tel, e := s.OpenTelemetry(ctx, metric.TelemetryConfig{ArchiveDirectory: filepath.Join(root, "panel/data/telemetry"), RawWindow: time.Minute, SegmentDuration: time.Minute})
 	must(e)
 	defer tel.Close()
-	// At the measured logical-I/O throughput this is about 2.5 hours of
-	// actual work, leaving recovery and final verification within the 4.5h
-	// qualification deadline. The test still rejects any run shorter than 2h.
+	// Use seeded, distinct payloads so compression does not eliminate most
+	// archive reads. At 128 KiB/s, reading the compressed input and writing
+	// the CSV both count toward the two-hour active-work requirement.
 	const count = 80000
+	const payloadBytes = 8192
 	at := time.Now().UTC().Add(-12 * time.Hour).Truncate(time.Minute)
-	labels := map[string]string{"origin": "synthetic_cold_csv_qualification", "payload": strings.Repeat("abcd0123", 1024)}
+	random := rand.NewChaCha8([32]byte{1})
+	payload := make([]byte, payloadBytes/2)
+	tags := map[string]string{"fixture": "cold_csv_qualification"}
 	drainColdArchive(ctx, tel, time.Now())
 	for base := 0; base < count; base += 128 {
 		points := make([]metric.Point, 0, 128)
 		for i := base; i < min(base+128, count); i++ {
-			points = append(points, metric.Point{MetricName: "cpu.usage", EntityID: scope.AgentID, Timestamp: at.Add(time.Duration(i) * time.Millisecond), Value: float64(i % 100), Tags: map[string]string{"fixture": "cold_csv_qualification"}, Labels: labels})
+			_, e := random.Read(payload)
+			must(e)
+			labels := map[string]string{"origin": "synthetic_cold_csv_qualification", "payload": hex.EncodeToString(payload)}
+			points = append(points, metric.Point{MetricName: "cpu.usage", EntityID: scope.AgentID, Timestamp: at.Add(time.Duration(i) * time.Millisecond), Value: float64(i % 100), Tags: tags, Labels: labels})
 		}
 		_, e = tel.Accept(ctx, metric.TelemetryBatch{Source: scope.AgentID, Identity: fmt.Sprintf("csv-qualification-%d", base), Points: points}, time.Now())
 		must(e)
@@ -70,7 +77,7 @@ func main() {
 	}
 	state, e := tel.ExportState(ctx)
 	must(e)
-	manifest := map[string]any{"origin": "synthetic load; real installed Agent continues separately", "records": count, "payload_bytes_per_record": 8192, "agentId": scope.AgentID, "pingTaskId": scope.PingTaskID, "start": at, "end": at.Add(time.Duration(count)*time.Millisecond + time.Second), "state": state, "io_budget_bytes_per_second": 131072}
+	manifest := map[string]any{"origin": "synthetic load; real installed Agent continues separately", "records": count, "payload_bytes_per_record": payloadBytes, "agentId": scope.AgentID, "pingTaskId": scope.PingTaskID, "start": at, "end": at.Add(time.Duration(count)*time.Millisecond + time.Second), "state": state, "io_budget_bytes_per_second": 131072}
 	b, e = json.MarshalIndent(manifest, "", "  ")
 	must(e)
 	must(os.WriteFile(filepath.Join(root, "qualification-manifest.json"), b, 0600))
