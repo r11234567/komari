@@ -70,8 +70,8 @@ func (ctrl *CorsController) snapshot() (bool, string, string) {
 }
 
 const corsMethods = "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS"
-const corsRequestHeaders = "Origin, Content-Type, Authorization, Accept, If-None-Match, If-Match, If-Modified-Since, If-Unmodified-Since, Range, X-CSRF-Token, X-Requested-With, X-2FA-Code, X-Two-Factor-Code, Connect-Protocol-Version, Connect-Timeout-Ms, Connect-Content-Encoding, Connect-Accept-Encoding, Grpc-Timeout, Grpc-Encoding, Grpc-Accept-Encoding, X-Grpc-Web, X-User-Agent, X-Bind-Ticket, X-Komari-Workspace-Grant, X-Komari-Workspace-Token, X-Komari-Credential-Authorization, X-Komari-Signature, X-Komari-Timestamp, X-Komari-Nonce, X-Komari-Body-Mode, DPoP"
-const corsResponseHeaders = "Content-Length, ETag, Last-Modified, Accept-Ranges, Content-Range, Retry-After, Bind-Ticket-Reason, X-Komari-Workspace-Identity, X-Komari-Storage-Policy, Grpc-Status, Grpc-Message, Grpc-Status-Details-Bin, Connect-Content-Encoding, Connect-Accept-Encoding"
+const corsRequestHeaders = "Origin, Content-Type, Authorization, Accept, If-None-Match, If-Match, If-Modified-Since, If-Unmodified-Since, Range, X-CSRF-Token, X-Requested-With, X-2FA-Code, X-Two-Factor-Code, Connect-Protocol-Version, Connect-Timeout-Ms, Connect-Content-Encoding, Connect-Accept-Encoding, Grpc-Timeout, Grpc-Encoding, Grpc-Accept-Encoding, X-Grpc-Web, X-User-Agent, X-Bind-Ticket, X-Komari-Workspace-Grant, X-Komari-Workspace-Token, X-Komari-Credential-Authorization, X-Komari-Stream-Heartbeat, X-Komari-Signature, X-Komari-Timestamp, X-Komari-Nonce, X-Komari-Body-Mode, DPoP"
+const corsResponseHeaders = "Content-Length, ETag, Last-Modified, Accept-Ranges, Content-Range, Retry-After, Bind-Ticket-Reason, X-Komari-Workspace-Identity, X-Komari-Storage-Policy, Grpc-Status, Grpc-Message, Grpc-Status-Details-Bin, Connect-Content-Encoding, Connect-Accept-Encoding, DPoP-Nonce, WWW-Authenticate"
 
 func varyBy(header http.Header, name string) {
 	for _, value := range header.Values("Vary") {

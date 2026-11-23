@@ -82,6 +82,8 @@ func MountPanelRoutes(r *gin.Engine) func() error {
 
 func registerHealthRoute(r *gin.Engine) {
 	r.Any("/ping", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		connectapi.AdvertiseAgentProof(c)
 		c.String(200, "pong")
 	})
 }
@@ -110,7 +112,7 @@ func registerPublicReadRoutes(r *gin.Engine) {
 }
 
 // registerPanelAuthAndSystemRoutes mounts authentication, enrollment tickets,
-// install/upgrade completion markers, and one-shot file preview download routes.
+// install/upgrade completion markers, and bounded-use file preview downloads.
 func registerPanelAuthAndSystemRoutes(r *gin.Engine) {
 	installweb.RegisterCompleted(r)
 	storageupdate.RegisterCompleted(r)

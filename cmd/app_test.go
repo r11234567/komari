@@ -23,6 +23,25 @@ import (
 	"gorm.io/gorm"
 )
 
+func TestShutdownPropagatesCleanupErrorsAndGivesEachCleanupItsOwnContext(t *testing.T) {
+	app := NewApp()
+	checkpointError := errors.New("checkpoint failed")
+	var earlier context.Context
+	app.addCleanup("database", func(ctx context.Context) error {
+		if earlier == nil || earlier.Err() == nil || ctx.Err() != nil {
+			t.Fatal("database cleanup did not receive a fresh context")
+		}
+		return checkpointError
+	})
+	app.addCleanup("other", func(ctx context.Context) error {
+		earlier = ctx
+		return nil
+	})
+	if err := app.Shutdown(); !errors.Is(err, checkpointError) {
+		t.Fatalf("shutdown error = %v", err)
+	}
+}
+
 func TestFirstRunInstallRedirect(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()

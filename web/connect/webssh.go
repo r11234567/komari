@@ -20,7 +20,6 @@ import (
 
 const (
 	maxTerminalInput          = 1 << 20
-	maxFileChunk              = 384 << 10
 	terminalHeartbeatInterval = 5 * time.Second
 )
 
@@ -89,8 +88,6 @@ func (s *webSSHService) SendSessionCommand(ctx context.Context, req *connect.Req
 			return nil, err
 		}
 		command = remotemanagement.Resize{Size: value.Resize}
-	case *websshv1.SendSessionCommandRequest_File:
-		return nil, connectError(connect.CodePermissionDenied, errors.New("use the account-isolated FileService"))
 	default:
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("session command is required"))
 	}
@@ -325,132 +322,6 @@ func (s *webSSHService) AttachSession(ctx context.Context, stream *connect.BidiS
 	}
 }
 
-func (s *webSSHService) OpenSession(ctx context.Context, stream *connect.BidiStream[websshv1.OpenSessionRequest, websshv1.OpenSessionResponse]) error {
-	first, err := stream.Receive()
-	if err != nil {
-		return err
-	}
-	start := first.GetStart()
-	if start == nil || strings.TrimSpace(start.AgentId) == "" {
-		return connectError(connect.CodeInvalidArgument, errors.New("first message must contain a session start"))
-	}
-	meta := rpc.MetaFromContext(ctx)
-	ownerID, err := requireAdminUser(meta)
-	if err != nil {
-		return err
-	}
-	ctx, cancelGrant, grant, err := workspace.Authorize(ctx, start.AgentId)
-	if err != nil {
-		return connectError(connect.CodeUnauthenticated, err)
-	}
-	defer cancelGrant()
-	agentID := strings.TrimSpace(start.AgentId)
-	if _, err := clients.GetClientByUUID(agentID); err != nil {
-		return connectError(connect.CodeNotFound, errors.New("agent not found"))
-	}
-	allowed, err := clients.PrivilegedCapabilityAllowed(agentID, "webssh")
-	if err != nil {
-		return connectError(connect.CodeInternal, err)
-	}
-	if !allowed {
-		return connectError(connect.CodePermissionDenied, errors.New("remote control is disabled for this agent"))
-	}
-	if !agentRuntime.IsAgentOnline(agentID) || !agentRuntime.SupportsWebSSH(agentID) {
-		return connectError(connect.CodeFailedPrecondition, errors.New("agent is offline or does not support Connect WebSSH"))
-	}
-	if err := validateTerminalSize(start.Size); err != nil {
-		return err
-	}
-	session, err := remotemanagement.Create(agentID, ownerID, start.Shell, start.WorkingDirectory, start.Size, grant)
-	if err != nil {
-		return remoteSessionError(err)
-	}
-	releaseBrowser := session.RetainBrowser()
-	defer releaseBrowser()
-	defer session.Close(websshv1.CloseReason_CLOSE_REASON_CANCELLED)
-	if err := stream.Send(&websshv1.OpenSessionResponse{Event: &websshv1.OpenSessionResponse_Started{Started: &websshv1.SessionStarted{
-		SessionId: session.ID, StartedAt: timestamppb.New(session.CreatedAt),
-	}}}); err != nil {
-		return err
-	}
-	receiveCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	receiveErr := make(chan error, 1)
-	go func() {
-		var commandSequence uint64
-		for {
-			request, err := stream.Receive()
-			if err != nil {
-				receiveErr <- err
-				cancel()
-				return
-			}
-			switch value := request.Event.(type) {
-			case *websshv1.OpenSessionRequest_Input:
-				if value.Input.SessionId != session.ID || len(value.Input.Data) == 0 || len(value.Input.Data) > maxTerminalInput {
-					receiveErr <- errors.New("invalid terminal input")
-					cancel()
-					return
-				}
-				_, err = session.EnqueueCommand(value.Input.Sequence, remotemanagement.Input(value.Input.Data))
-				if value.Input.Sequence > commandSequence {
-					commandSequence = value.Input.Sequence
-				}
-			case *websshv1.OpenSessionRequest_Resize:
-				if value.Resize.SessionId != session.ID {
-					err = errors.New("invalid terminal resize session")
-					break
-				}
-				if err = validateTerminalSize(value.Resize.Size); err == nil {
-					commandSequence++
-					_, err = session.EnqueueCommand(commandSequence, remotemanagement.Resize{Size: value.Resize.Size})
-				}
-			default:
-				err = errors.New("unsupported native session event")
-			}
-			if err != nil {
-				receiveErr <- err
-				cancel()
-				return
-			}
-		}
-	}()
-	var outputSequence uint64
-	for {
-		event, err := session.NextEvent(receiveCtx, outputSequence)
-		if err != nil {
-			select {
-			case receiveError := <-receiveErr:
-				if errors.Is(receiveError, io.EOF) || errors.Is(receiveError, context.Canceled) {
-					return nil
-				}
-				return receiveError
-			default:
-				if errors.Is(err, remotemanagement.ErrClosed) || errors.Is(err, context.Canceled) {
-					return nil
-				}
-				return err
-			}
-		}
-		outputSequence = event.Sequence
-		var response *websshv1.OpenSessionResponse
-		switch value := event.Event.(type) {
-		case *websshv1.SessionEvent_Output:
-			response = &websshv1.OpenSessionResponse{Event: &websshv1.OpenSessionResponse_Output{Output: &websshv1.TerminalOutput{SessionId: session.ID, Sequence: event.Sequence, Data: value.Output}}}
-		case *websshv1.SessionEvent_Closed:
-			response = &websshv1.OpenSessionResponse{Event: &websshv1.OpenSessionResponse_Closed{Closed: value.Closed}}
-		default:
-			continue
-		}
-		if err := stream.Send(response); err != nil {
-			return err
-		}
-		if event.GetClosed() != nil {
-			return nil
-		}
-	}
-}
-
 func requireAdminUser(meta *rpc.ContextMeta) (string, error) {
 	if meta == nil || meta.Principal == nil || meta.Principal.UserUUID == "" || meta.Principal.Type != rpc.PrincipalUser {
 		return "", connectError(connect.CodePermissionDenied, errors.New("an administrator user session is required"))
@@ -464,16 +335,6 @@ func validateTerminalSize(size *websshv1.TerminalSize) error {
 	}
 	if size.Rows == 0 || size.Columns == 0 || size.Rows > 1000 || size.Columns > 1000 {
 		return connectError(connect.CodeInvalidArgument, errors.New("terminal size is outside the supported range"))
-	}
-	return nil
-}
-
-func validateFileCommand(command *websshv1.FileCommand) error {
-	if command == nil || command.Operation == websshv1.FileOperation_FILE_OPERATION_UNSPECIFIED || strings.TrimSpace(command.RequestId) == "" {
-		return connectError(connect.CodeInvalidArgument, errors.New("typed file operation and request_id are required"))
-	}
-	if len(command.Data) > maxFileChunk {
-		return connectError(connect.CodeResourceExhausted, errors.New("file chunk is too large"))
 	}
 	return nil
 }

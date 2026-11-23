@@ -109,9 +109,14 @@ func APIAuthenticationMiddleware(pluginRoute ...func(method, pattern string) boo
 	storedDigests, _ := enrollment.StoredAccessTokenDigests(ctx)
 	cancel()
 	return func(c *gin.Context) {
-		secret, bearer := requestBearer(c.GetHeader("Authorization"))
-		if !bearer {
+		scheme, secret, ok := requestAuthCredential(c.GetHeader("Authorization"))
+		if !ok {
 			c.Next()
+			return
+		}
+		if scheme == "DPoP" && (!strings.HasPrefix(c.FullPath(), "/komari.") ||
+			strings.HasPrefix(secret, apitokens.Prefix) || enrollment.IsInstallToken(secret)) {
+			security.AbortRequest(c, http.StatusUnauthorized, "DPoP credentials require an enrolled Agent Connect procedure")
 			return
 		}
 		now := time.Now()

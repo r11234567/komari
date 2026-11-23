@@ -80,7 +80,7 @@ func (s *privilegedDeliveryService) WatchPrivilegedDelivery(ctx context.Context,
 	if rescue {
 		stream.ResponseHeader().Set(rescueWatchHeader, "v1")
 	}
-	heartbeat := privilegedWatchHeartbeat
+	heartbeat := streamHeartbeatInterval
 	if rescue {
 		heartbeat = rescueWatchHeartbeat
 	}
@@ -93,7 +93,7 @@ func (s *privilegedDeliveryService) WatchPrivilegedDelivery(ctx context.Context,
 		if rescue {
 			// A live stream must not outlive revocation or replacement of the
 			// credential that opened it. Reauthentication uses current DB state.
-			token := strings.TrimPrefix(req.Header().Get("Authorization"), "Bearer ")
+			token := extractAuthSchemeToken(req.Header().Get("Authorization"))
 			id, e := enrollment.ResolveAccessToken(token)
 			if e != nil || id != agentID {
 				unsubscribe()
@@ -138,6 +138,12 @@ func (s *privilegedDeliveryService) WatchPrivilegedDelivery(ctx context.Context,
 		case <-changed:
 			timer.Stop()
 		case <-timer.C:
+			if !rescue {
+				if sendErr := stream.Send(&configv1.WatchPrivilegedDeliveryResponse{Heartbeat: true}); sendErr != nil {
+					unsubscribe()
+					return sendErr
+				}
+			}
 		}
 		unsubscribe()
 	}

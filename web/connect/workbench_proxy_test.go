@@ -37,6 +37,7 @@ func TestWorkbenchNginxFileLeaseAndDuplexAttach(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	withShortStreamHeartbeat(t, 1200*time.Millisecond)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	store := workspace.NewStore(time.Now, func(workspace.Binding) bool { return true })
@@ -116,6 +117,7 @@ func TestWorkbenchNginxFileLeaseAndDuplexAttach(t *testing.T) {
 	}
 	stream := client.AttachFileOperations(ctx)
 	stream.RequestHeader().Set(workspace.IdentityHeader, "v1")
+	stream.RequestHeader().Set(streamHeartbeatHeader, "1")
 	defer stream.CloseResponse()
 	if err := stream.Send(&filev1.AttachFileOperationsRequest{Message: &filev1.AttachFileOperationsRequest_Attach{Attach: &filev1.AgentFileAttach{
 		AgentId: "fixture-agent", AssignmentId: assignment.AssignmentId, RequestId: assignment.RequestId,
@@ -131,7 +133,9 @@ func TestWorkbenchNginxFileLeaseAndDuplexAttach(t *testing.T) {
 	}
 	// Inherit a deliberately short 1s global body timeout from the fixture.
 	// The workbench location must override it during an idle duplex request.
-	time.Sleep(1200 * time.Millisecond)
+	if heartbeat, err := stream.Receive(); err != nil || heartbeat.GetCommand() != nil {
+		t.Fatalf("expected a heartbeat before sending the file result: %v, %v", heartbeat, err)
+	}
 	if err := stream.Send(&filev1.AttachFileOperationsRequest{Message: &filev1.AttachFileOperationsRequest_Event{Event: &filev1.AgentFileEvent{
 		RequestId: assignment.RequestId, Operation: assignment.Operation, Success: true, Path: "/home/fixture-user",
 	}}}); err != nil {
@@ -146,8 +150,14 @@ func TestWorkbenchNginxFileLeaseAndDuplexAttach(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("file metadata response did not reach the caller")
 	}
-	if _, err := stream.Receive(); !errors.Is(err, io.EOF) {
-		t.Fatalf("attach completion: %v", err)
+	for {
+		response, err := stream.Receive()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil || response.GetCommand() != nil {
+			t.Fatalf("unexpected attach response before completion: %v, %v", response, err)
+		}
 	}
 	t.Log("small file lease and account-bound duplex result completed through checked-in Nginx routes")
 }

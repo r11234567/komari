@@ -351,13 +351,28 @@ func (s *fileService) LeaseFileOperations(ctx context.Context, req *connect.Requ
 	channel := make(chan *filev1.FileAssignment, 32)
 	s.store.registerAgent(agentID, channel)
 	defer s.store.unregisterAgent(agentID, channel)
+	ticker := time.NewTicker(streamHeartbeatInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-ticker.C:
+			if err := stream.Send(&filev1.LeaseFileOperationsResponse{Heartbeat: true}); err != nil {
+				return err
+			}
 		case assignment := <-channel:
 			if _, err := workspace.Default.ByID(assignment.WorkspaceId, agentID, assignment.SystemUser); err != nil {
 				continue
+			}
+			if req.Header().Get(filemanager.TypedPayloadHeader) != "1" {
+				legacy, err := filemanager.LegacyAssignment(agentID, assignment)
+				if err != nil {
+					filemanager.Resolve(agentID, &filev1.AgentFileEvent{RequestId: assignment.GetRequestId(), Error: err.Error()})
+					s.store.finishAssignment(assignment.GetAssignmentId())
+					continue
+				}
+				assignment = legacy
 			}
 			if err := stream.Send(&filev1.LeaseFileOperationsResponse{Assignment: assignment}); err != nil {
 				return err
@@ -392,8 +407,15 @@ func (s *fileService) AttachFileOperations(ctx context.Context, stream *connect.
 	}
 	bounded, cancel := workspace.Bind(ctx, grant)
 	defer cancel()
+	wireAssignment := assignment
+	if stream.RequestHeader().Get(filemanager.TypedPayloadHeader) != "1" {
+		wireAssignment, err = filemanager.LegacyAssignment(authenticated, assignment)
+		if err != nil {
+			return connectError(connect.CodeFailedPrecondition, err)
+		}
+	}
 	if err := stream.Send(&filev1.AttachFileOperationsResponse{
-		Command: &filev1.AttachFileOperationsResponse_Assignment{Assignment: assignment},
+		Command: &filev1.AttachFileOperationsResponse_Assignment{Assignment: wireAssignment},
 	}); err != nil {
 		return err
 	}
@@ -403,15 +425,25 @@ func (s *fileService) AttachFileOperations(ctx context.Context, stream *connect.
 	}
 	resultCh := make(chan received, 1)
 	go func() { msg, err := stream.Receive(); resultCh <- received{msg, err} }()
+	ticks, stopHeartbeat := heartbeatTicks(stream.RequestHeader())
+	defer stopHeartbeat()
 	var event *filev1.AttachFileOperationsRequest
-	select {
-	case <-bounded.Done():
-		return connectError(connect.CodeUnauthenticated, workspace.ErrLocked)
-	case value := <-resultCh:
-		if value.err != nil {
-			return value.err
+waitForEvent:
+	for {
+		select {
+		case <-bounded.Done():
+			return connectError(connect.CodeUnauthenticated, workspace.ErrLocked)
+		case <-ticks:
+			if err := stream.Send(&filev1.AttachFileOperationsResponse{}); err != nil {
+				return err
+			}
+		case value := <-resultCh:
+			if value.err != nil {
+				return value.err
+			}
+			event = value.msg
+			break waitForEvent
 		}
-		event = value.msg
 	}
 	result := event.GetEvent()
 	if result == nil {

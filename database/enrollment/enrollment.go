@@ -507,15 +507,28 @@ func GetCredential(clientUUID string) (models.AgentCredential, error) {
 
 // ResolveAgentPublicKey decodes and returns the registered Ed25519 public key for an agent.
 func ResolveAgentPublicKey(clientUUID string) (ed25519.PublicKey, error) {
+	key, _, err := ResolveAgentProofKey(clientUUID)
+	return key, err
+}
+
+// ResolveAgentProofKey returns the pinned key and whether it has upgraded to JWT proofs.
+func ResolveAgentProofKey(clientUUID string) (ed25519.PublicKey, bool, error) {
 	cred, err := GetCredential(clientUUID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	raw, err := base64.StdEncoding.DecodeString(cred.AgentPublicKey)
 	if err != nil || len(raw) != ed25519.PublicKeySize {
-		return nil, errors.New("invalid agent public key")
+		return nil, false, errors.New("invalid agent public key")
 	}
-	return ed25519.PublicKey(raw), nil
+	return ed25519.PublicKey(raw), cred.DPoPJWTRequired, nil
+}
+
+// RequireAgentDPoPJWT records the upgrade for the key that proved possession.
+func RequireAgentDPoPJWT(ctx context.Context, agentID string, key ed25519.PublicKey) error {
+	return dbcore.GetDBInstance().WithContext(ctx).Model(&models.AgentCredential{}).
+		Where("client = ? AND agent_public_key = ? AND revoked_at IS NULL", agentID, base64.StdEncoding.EncodeToString(key)).
+		UpdateColumn("dpop_jwt_required", true).Error
 }
 
 // issueLocked mints a pair inside an open transaction.
@@ -538,7 +551,7 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 	graceExpiry := now.Add(refreshGracePeriod)
 
 	var existing models.AgentCredential
-	err = tx.Where("client = ?", clientUUID).First(&existing).Error
+	err = tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("client = ?", clientUUID).First(&existing).Error
 	switch {
 	case err == nil:
 		if existing.RevokedAt != nil && existing.AgentPublicKey == publicKey {
@@ -562,6 +575,9 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 			"scopes":                   encodeScopes(scopes),
 			"security_epoch":           dbcore.CurrentSecurityEpoch(),
 			"updated_at":               now,
+		}
+		if existing.AgentPublicKey != publicKey {
+			updates["dpop_jwt_required"] = false
 		}
 		if err := tx.Where("client = ?", clientUUID).Delete(&models.AgentRefreshUse{}).Error; err != nil {
 			return Issued{}, err

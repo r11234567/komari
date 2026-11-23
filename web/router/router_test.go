@@ -25,6 +25,16 @@ import (
 	"github.com/komari-monitor/komari/web/security"
 )
 
+func TestHealthRouteDisablesCaching(t *testing.T) {
+	engine := gin.New()
+	registerHealthRoute(engine)
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/ping", nil))
+	if response.Code != http.StatusOK || response.Body.String() != "pong" || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("ping returned %d %q with cache policy %q", response.Code, response.Body.String(), response.Header().Get("Cache-Control"))
+	}
+}
+
 func TestLegacyAgentRoutesRejectEnrolledBearerWithoutBreakingTransferTickets(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := dbcore.GetDBInstance()

@@ -345,7 +345,7 @@ func isHistoricalReadPath(path string) bool {
 }
 
 func isLongLivedRequest(path string) bool {
-	for _, suffix := range []string{"/WatchAgentStatus", "/WatchDesiredConfig", "/WatchPrivilegedDelivery", "/WatchMetrics", "/UploadMetrics", "/StreamMetrics", "/WatchExecution", "/WatchSession", "/SubscribeEvents", "/WatchRescueSession", "/AttachSession", "/OpenSession", "/LeaseSessions", "/LeaseExecution", "/LeaseFileOperations", "/AttachFileOperations", "/LeaseRescueSessions"} {
+	for _, suffix := range []string{"/WatchAgentStatus", "/WatchDesiredConfig", "/WatchPrivilegedDelivery", "/WatchMetrics", "/UploadMetrics", "/StreamMetrics", "/WatchExecution", "/WatchSession", "/SubscribeEvents", "/WatchRescueSession", "/AttachSession", "/LeaseSessions", "/LeaseExecution", "/LeaseFileOperations", "/AttachFileOperations", "/LeaseRescueSessions"} {
 		if strings.HasSuffix(path, suffix) {
 			return true
 		}

@@ -70,13 +70,8 @@ func TestEventMetadataIsBudgetedAndInvalidCloseDoesNotChangeState(t *testing.T) 
 	if s.agentSeq != 0 || s.bufferedOutput != 0 || s.bufferedEventBytes != 0 {
 		t.Fatal("invalid event mutated buffer")
 	}
-	metadata := strings.Repeat("x", 1<<20)
-	for sequence := uint64(1); sequence <= 15; sequence++ {
-		if _, err = s.AppendAgentEvent(&websshv1.AgentSessionEvent{Sequence: sequence, Event: &websshv1.AgentSessionEvent_File{File: &websshv1.FileEvent{Error: metadata}}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err = s.AppendAgentEvent(&websshv1.AgentSessionEvent{Sequence: 16, Event: &websshv1.AgentSessionEvent_File{File: &websshv1.FileEvent{Error: metadata}}}); !errors.Is(err, ErrOutputLimit) {
+	metadata := strings.Repeat("x", (16<<20)+1024)
+	if _, err = s.AppendAgentEvent(&websshv1.AgentSessionEvent{Sequence: 1, Event: &websshv1.AgentSessionEvent_Closed{Closed: &websshv1.SessionClosed{SessionId: metadata, Reason: websshv1.CloseReason_CLOSE_REASON_CANCELLED}}}); !errors.Is(err, ErrOutputLimit) {
 		t.Fatalf("unbounded metadata accepted: %v", err)
 	}
 	if s.bufferedEventBytes > 1024 {

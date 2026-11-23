@@ -238,15 +238,16 @@ type AgentCredential struct {
 	RefreshExpiresAt       time.Time  `json:"-"`
 	// AgentPublicKey is what refresh proofs are verified against, which is
 	// what stops a leaked refresh token from being usable on its own.
-	AgentPublicKey string     `json:"-" gorm:"type:text;not null"`
-	AgentKeyID     string     `json:"-" gorm:"type:varchar(64)"`
-	KeyAlgorithm   int32      `json:"-" gorm:"not null;default:0"`
-	Scopes         string     `json:"-" gorm:"type:text;not null;default:''"`
-	SecurityEpoch  uint64     `json:"-" gorm:"not null;default:1;index"`
-	RevokedAt      *time.Time `json:"-"`
-	RevokedReason  string     `json:"-" gorm:"type:varchar(255)"`
-	CreatedAt      time.Time  `json:"-"`
-	UpdatedAt      time.Time  `json:"-"`
+	AgentPublicKey  string     `json:"-" gorm:"type:text;not null"`
+	AgentKeyID      string     `json:"-" gorm:"type:varchar(64)"`
+	KeyAlgorithm    int32      `json:"-" gorm:"not null;default:0"`
+	DPoPJWTRequired bool       `json:"-" gorm:"column:dpop_jwt_required;not null;default:false"`
+	Scopes          string     `json:"-" gorm:"type:text;not null;default:''"`
+	SecurityEpoch   uint64     `json:"-" gorm:"not null;default:1;index"`
+	RevokedAt       *time.Time `json:"-"`
+	RevokedReason   string     `json:"-" gorm:"type:varchar(255)"`
+	CreatedAt       time.Time  `json:"-"`
+	UpdatedAt       time.Time  `json:"-"`
 }
 
 // SecurityEpochState records the monotonically advancing control-plane

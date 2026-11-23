@@ -955,18 +955,27 @@ func TryGetDBInstance() *gorm.DB {
 
 // Close 关闭底层数据库连接，供关闭流程调用。
 func Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return CloseContext(ctx)
+}
+
+// CloseContext applies the shutdown budget to the WAL checkpoint and closes
+// the pool even if the checkpoint fails. SQLite can recover the remaining WAL.
+func CloseContext(ctx context.Context) error {
 	defer closeDataOwner()
 	if instance == nil {
 		return nil
-	}
-	if flags.IsSQLite() {
-		instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 	}
 	sqlDB, err := instance.DB()
 	if err != nil {
 		return err
 	}
-	return sqlDB.Close()
+	diagnosticPool.Store(nil)
+	if flags.IsSQLite() {
+		err = checkpointSQLiteWAL(ctx, sqlDB)
+	}
+	return errors.Join(err, sqlDB.Close())
 }
 
 func doInitialize() error {

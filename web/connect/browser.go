@@ -261,6 +261,8 @@ func (s *browserService) WatchAgentStatus(ctx context.Context, req *connect.Requ
 	showGuestIP, _ := config.GetAs[bool](config.SendIpAddrToGuestKey, false)
 	requested := stringSet(req.Msg.AgentIds)
 	last := make(map[string]string)
+	ticks, stopHeartbeat := heartbeatTicks(req.Header())
+	defer stopHeartbeat()
 
 	for {
 		items, err := clients.GetAllClientBasicInfo()
@@ -291,12 +293,10 @@ func (s *browserService) WatchAgentStatus(ctx context.Context, req *connect.Requ
 			last[item.UUID] = version
 		}
 
-		timer := time.NewTimer(2 * time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return connectError(connect.CodeCanceled, ctx.Err())
-		case <-timer.C:
+		if err := waitForWatchPoll(ctx, 2*time.Second, ticks, func() error {
+			return stream.Send(&browserv1.WatchAgentStatusResponse{})
+		}); err != nil {
+			return err
 		}
 	}
 }

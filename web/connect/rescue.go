@@ -103,6 +103,7 @@ func (s *rescueService) WatchRescueSession(ctx context.Context, req *connect.Req
 	if err := stream.Send(&rescuev1.WatchRescueSessionResponse{Session: session}); err != nil {
 		return err
 	}
+	lastSent := time.Now()
 	lastState := session.State
 	sequence := req.Msg.AfterSequence
 	for {
@@ -115,6 +116,7 @@ func (s *rescueService) WatchRescueSession(ctx context.Context, req *connect.Req
 			if err := stream.Send(&rescuev1.WatchRescueSessionResponse{Event: event}); err != nil {
 				return err
 			}
+			lastSent = time.Now()
 			sequence = event.Sequence
 			if rescueTerminal(event.State) {
 				return nil
@@ -133,6 +135,7 @@ func (s *rescueService) WatchRescueSession(ctx context.Context, req *connect.Req
 			if err := stream.Send(&rescuev1.WatchRescueSessionResponse{Session: session}); err != nil {
 				return err
 			}
+			lastSent = time.Now()
 			lastState = session.State
 			if rescueTerminal(session.State) {
 				// The terminal event and session transition are committed together,
@@ -149,6 +152,12 @@ func (s *rescueService) WatchRescueSession(ctx context.Context, req *connect.Req
 		case <-currentSignal:
 			deadlineWait.Stop()
 		case <-deadlineWait.C:
+			if time.Since(lastSent) >= streamHeartbeatInterval {
+				if err := stream.Send(&rescuev1.WatchRescueSessionResponse{Heartbeat: true}); err != nil {
+					return err
+				}
+				lastSent = time.Now()
+			}
 		}
 	}
 }

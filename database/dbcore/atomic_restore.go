@@ -55,6 +55,9 @@ func initializeDataLayout() error {
 		release()
 		return err
 	}
+	if err := pruneSupersededGenerations(layout); err != nil {
+		logger.Warnf("dbcore", "[restore] reclaim superseded generations: %v", err)
+	}
 	datadir.Pin(layout)
 	releaseDataOwner = release
 	return nil
@@ -325,6 +328,9 @@ func publishQueuedRestore(active datadir.Layout, id, archive string) (publishing
 		return false, fmt.Errorf("sync unpublished restore: %w", err)
 	}
 	pointer := datadir.Pointer{Version: datadir.Version, Generation: id, Epoch: epoch}
+	if active.Pointer.Version == datadir.Version {
+		pointer.PreviousGeneration = active.Pointer.Generation
+	}
 	encoded, err := json.Marshal(pointer)
 	if err != nil {
 		return false, err
@@ -341,6 +347,54 @@ func publishQueuedRestore(active datadir.Layout, id, archive string) (publishing
 	}
 	logger.Infof("dbcore", "[restore] selected generation %s (epoch=%d); previous data saved to %s", id, epoch, previous)
 	return true, nil
+}
+
+// Reclaim only automatically named restore directories once a durable pointer
+// identifies both the active tree and its immediate predecessor. The original
+// flat data and pre-restore archives are outside this directory.
+func pruneSupersededGenerations(layout datadir.Layout) error {
+	if layout.Pointer.Version != datadir.Version || layout.Pointer.PreviousGeneration == "" {
+		return nil
+	}
+	if pending, err := PendingRestore(layout.Root); pending || err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	release, err := historyexport.LockGenerationPublication(ctx, layout.Root)
+	if err != nil {
+		return err
+	}
+	defer release()
+	// A prior startup may have stopped immediately after replacing current.json.
+	if err := syncDir(layout.Root); err != nil {
+		return err
+	}
+	path := filepath.Join(layout.Root, datadir.Generations)
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	var removeErr error
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || name == layout.Pointer.Generation || name == layout.Pointer.PreviousGeneration {
+			continue
+		}
+		hexID, ok := strings.CutPrefix(name, "gen-")
+		if !ok || len(hexID) != 32 || strings.Trim(hexID, "0123456789abcdef") != "" {
+			continue
+		}
+		if err := root.RemoveAll(name); err != nil {
+			removeErr = errors.Join(removeErr, fmt.Errorf("remove %s: %w", name, err))
+		}
+	}
+	return errors.Join(removeErr, syncDir(path))
 }
 
 func verifyRestoreVolume(root, parent string) error {

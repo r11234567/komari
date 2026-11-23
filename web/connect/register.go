@@ -168,6 +168,17 @@ func newHandler(path string, handler http.Handler) struct {
 
 func bridge(handler http.Handler) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		req, err := requestmeta.EnsureBound(c.Request)
+		if err != nil {
+			security.AbortRequest(c, http.StatusBadRequest, "invalid request origin")
+			return
+		}
+		origin, err := requestmeta.Origin(req)
+		if err != nil {
+			security.AbortRequest(c, http.StatusBadRequest, "invalid request origin")
+			return
+		}
+		c.Request = req
 		principal := api.GetPrincipal(c)
 		if principal == nil {
 			principal = api.IdentifyPrincipal(c)
@@ -192,16 +203,6 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 			if session, err := c.Cookie(security.SessionCookieName); err == nil {
 				meta.SessionToken = session
 			}
-		}
-		req, err := requestmeta.EnsureBound(c.Request)
-		if err != nil {
-			security.AbortRequest(c, http.StatusBadRequest, "invalid request origin")
-			return
-		}
-		origin, err := requestmeta.Origin(req)
-		if err != nil {
-			security.AbortRequest(c, http.StatusBadRequest, "invalid request origin")
-			return
 		}
 		scheme, host, _ := strings.Cut(origin, "://")
 		secure := scheme == "https"

@@ -454,9 +454,6 @@ func (s *Session) AppendAgentEvent(event *websshv1.AgentSessionEvent) (uint64, e
 		return s.agentSeq, ErrSequence
 	}
 	buffered := uint64(len(event.GetOutput()))
-	if file := event.GetFile(); file != nil {
-		buffered += uint64(len(file.Data))
-	}
 	occurredAt := event.OccurredAt
 	if occurredAt == nil || !occurredAt.IsValid() {
 		occurredAt = timestamppb.Now()
@@ -465,8 +462,6 @@ func (s *Session) AppendAgentEvent(event *websshv1.AgentSessionEvent) (uint64, e
 	switch value := event.Event.(type) {
 	case *websshv1.AgentSessionEvent_Output:
 		stored.Event = &websshv1.SessionEvent_Output{Output: append([]byte(nil), value.Output...)}
-	case *websshv1.AgentSessionEvent_File:
-		stored.Event = &websshv1.SessionEvent_File{File: value.File}
 	case *websshv1.AgentSessionEvent_Closed:
 		if value.Closed == nil {
 			return s.agentSeq, errors.New("agent session close is empty")
@@ -517,9 +512,6 @@ func (s *Session) AcknowledgeEvents(sequence uint64) (uint64, error) {
 			continue
 		}
 		released := uint64(len(event.GetOutput()))
-		if file := event.GetFile(); file != nil {
-			released += uint64(len(file.Data))
-		}
 		if released >= s.bufferedOutput {
 			s.bufferedOutput = 0
 		} else {
@@ -596,12 +588,6 @@ type Resize struct{ Size *websshv1.TerminalSize }
 
 func (resize Resize) Response(sequence uint64) *websshv1.AttachSessionResponse {
 	return &websshv1.AttachSessionResponse{Sequence: sequence, Command: &websshv1.AttachSessionResponse_Resize{Resize: cloneSize(resize.Size)}}
-}
-
-type File struct{ Command *websshv1.FileCommand }
-
-func (file File) Response(sequence uint64) *websshv1.AttachSessionResponse {
-	return &websshv1.AttachSessionResponse{Sequence: sequence, Command: &websshv1.AttachSessionResponse_File{File: file.Command}}
 }
 
 func (s *Session) assignment() *websshv1.SessionAssignment {

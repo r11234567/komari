@@ -200,6 +200,8 @@ func (s *metricsService) WatchMetrics(ctx context.Context, req *connect.Request[
 	}
 	requested := stringSet(req.Msg.Metrics)
 	last := make(map[string]string, len(agentIDs))
+	ticks, stopHeartbeat := heartbeatTicks(req.Header())
+	defer stopHeartbeat()
 	for {
 		latest := agentRuntimeReports()
 		cycleUsages, _ := trafficledger.CurrentCalibratedCycleUsages(ctx, dbcore.GetDBInstance(), time.Now().UTC())
@@ -222,12 +224,10 @@ func (s *metricsService) WatchMetrics(ctx context.Context, req *connect.Request[
 			}
 			last[agentID] = version
 		}
-		timer := time.NewTimer(period)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
+		if err := waitForWatchPoll(ctx, period, ticks, func() error {
+			return stream.Send(&metricsv1.WatchMetricsResponse{})
+		}); err != nil {
+			return err
 		}
 	}
 }

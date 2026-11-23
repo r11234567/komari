@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/web/workspace"
+	filev1 "github.com/r11234567/komari-proto/gen/go/komari/file/v1"
 )
 
 func TestUploadSessionLimitAndRelease(t *testing.T) {
@@ -32,6 +33,38 @@ func TestUploadSessionLimitAndRelease(t *testing.T) {
 	finishUploadSession(sessions[0])
 	if _, created, err := acquireUploadSession("", "client", "/tmp/reused", 100, 0); err != nil || !created {
 		t.Fatalf("slot was not released: created=%v err=%v", created, err)
+	}
+}
+
+func TestUploadCommitRequiresAnAcknowledgementForThisUpload(t *testing.T) {
+	resetUploadSessionsForTest()
+	t.Cleanup(resetUploadSessionsForTest)
+	ctx := testWorkspaceContext(t, "agent-1")
+	session, _, err := acquireUploadSession("", "agent-1", "/tmp/target", 8, 0, workspace.FromContext(ctx).ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { finishUploadSession(session) })
+	withDispatcher(t, func(agent string, assignment *filev1.FileAssignment) bool {
+		event := &filev1.AgentFileEvent{RequestId: assignment.GetRequestId()}
+		if assignment.GetOperation() == filev1.FileOperation_FILE_OPERATION_STAT {
+			event.Success = true
+			event.Entries = []*filev1.FileEntry{{Size: 8}}
+		} else {
+			event.Error = "unknown upload session"
+		}
+		return Resolve(agent, event)
+	})
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest(http.MethodPost, "/merge", strings.NewReader(fmt.Sprintf("{\"upload_id\":%q}", session.ID))).WithContext(ctx)
+	c.Request.Header.Set("Content-Type", "application/json")
+	mergeRemoteUpload(c, "agent-1")
+	if response.Code < 400 || strings.Contains(response.Body.String(), `"complete":true`) {
+		t.Fatalf("upload without an acknowledgement was reported complete: %d %s", response.Code, response.Body)
+	}
+	if _, _, err := acquireUploadSession(session.ID, "agent-1", "", 0, 0, workspace.FromContext(ctx).ID); err != nil {
+		t.Fatalf("unconfirmed upload state was discarded: %v", err)
 	}
 }
 

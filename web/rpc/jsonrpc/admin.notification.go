@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 
 	"github.com/komari-monitor/komari/database"
@@ -342,15 +343,63 @@ func adminListPingLossNotifications(_ context.Context, _ *rpc.JsonRpcRequest) (a
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to list ping loss notifications: "+err.Error(), nil)
 	}
-	return list, nil
+	result := make([]pingLossNotificationParams, 0, len(list))
+	for _, rule := range list {
+		result = append(result, pingLossNotificationParams{
+			PingLossNotification: rule,
+			TaskIDDecimal:        strconv.FormatUint(uint64(rule.TaskId), 10),
+		})
+	}
+	return result, nil
+}
+
+type pingLossNotificationParams struct {
+	models.PingLossNotification
+	TaskIDDecimal string `json:"task_id_decimal,omitempty"`
+}
+
+func (p *pingLossNotificationParams) notification() (*models.PingLossNotification, error) {
+	if p == nil {
+		return nil, errors.New("notification is required")
+	}
+	if p.TaskIDDecimal != "" {
+		id, err := strconv.ParseUint(p.TaskIDDecimal, 10, strconv.IntSize)
+		if err != nil || id == 0 || (p.TaskId != 0 && uint64(p.TaskId) != id) {
+			return nil, errors.New("invalid or conflicting decimal ping task ID")
+		}
+		p.TaskId = uint(id)
+	}
+	return &p.PingLossNotification, nil
+}
+
+func bindPingLossNotifications(req *rpc.JsonRpcRequest) ([]*models.PingLossNotification, error) {
+	var params struct {
+		Notifications []*pingLossNotificationParams `json:"notifications"`
+	}
+	if err := req.BindParams(&params); err != nil {
+		return nil, err
+	}
+	rules := make([]*models.PingLossNotification, 0, len(params.Notifications))
+	for _, entry := range params.Notifications {
+		rule, err := entry.notification()
+		if err != nil {
+			return nil, err
+		}
+		rules = append(rules, rule)
+	}
+	return rules, nil
 }
 
 func adminAddPingLossNotification(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	var params models.PingLossNotification
+	var params pingLossNotificationParams
 	if err := req.BindParams(&params); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
 	}
-	id, err := notification.AddPingLossNotification(params)
+	rule, err := params.notification()
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
+	}
+	id, err := notification.AddPingLossNotification(*rule)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
 	}
@@ -358,26 +407,22 @@ func adminAddPingLossNotification(_ context.Context, req *rpc.JsonRpcRequest) (a
 }
 
 func adminEditPingLossNotifications(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	var params struct {
-		Notifications []*models.PingLossNotification `json:"notifications"`
-	}
-	if err := req.BindParams(&params); err != nil {
+	rules, err := bindPingLossNotifications(req)
+	if err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
 	}
-	if err := notification.EditPingLossNotifications(params.Notifications); err != nil {
+	if err := notification.EditPingLossNotifications(rules); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
 	}
 	return nil, nil
 }
 
 func adminUpsertPingLossNotifications(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	var params struct {
-		Notifications []*models.PingLossNotification `json:"notifications"`
-	}
-	if err := req.BindParams(&params); err != nil {
+	rules, err := bindPingLossNotifications(req)
+	if err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
 	}
-	if err := notification.UpsertPingLossNotifications(params.Notifications); err != nil {
+	if err := notification.UpsertPingLossNotifications(rules); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
 	}
 	return nil, nil
