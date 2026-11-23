@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/komari-monitor/komari/internal/restorearchive"
 )
 
 func TestAutomaticBackupStaysPrivateInExistingDirectory(t *testing.T) {
@@ -42,7 +44,7 @@ func TestAutomaticBackupStaysPrivateInExistingDirectory(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer reader.Close()
-		if len(reader.File) != 1 || reader.File[0].Name != "state" {
+		if len(reader.File) != 2 || reader.File[0].Name != restorearchive.MarkupName || reader.File[1].Name != "state" {
 			t.Fatalf("unexpected archive contents: %v", reader.File)
 		}
 	}

@@ -1,11 +1,13 @@
 package signonauth_test
 
 import (
-	"github.com/komari-monitor/komari/database/accounts"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/komari-monitor/komari/database/accounts"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -79,7 +81,7 @@ func TestFresh2FAUnlocksOnlySameLoginSettingsSession(t *testing.T) {
 			cookie = item
 		}
 	}
-	if cookie == nil || !cookie.HttpOnly || !cookie.Secure || cookie.Path != "/api/admin/settings" || cookie.SameSite != http.SameSiteStrictMode {
+	if cookie == nil || !strings.HasPrefix(cookie.Name, "__Host-") || !cookie.HttpOnly || !cookie.Secure || cookie.Path != "/" || cookie.Domain != "" || cookie.SameSite != http.SameSiteStrictMode {
 		t.Fatalf("unsafe grant cookie: %v", cookie)
 	}
 	if rec := call("/settings", "", session, cookie); rec.Code != http.StatusOK {

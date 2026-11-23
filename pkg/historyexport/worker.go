@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/metric"
 )
 
@@ -82,21 +83,13 @@ func writeJSON(path string, value any, durable bool) error {
 	if e != nil {
 		return e
 	}
-	if e = os.Rename(path+".tmp", path); e != nil {
+	if !durable {
+		return os.Rename(path+".tmp", path)
+	}
+	if e = datadir.Rename(path+".tmp", path); e != nil {
 		return e
 	}
-	if durable {
-		return syncDir(filepath.Dir(path))
-	}
-	return nil
-}
-func syncDir(path string) error {
-	f, e := os.Open(path)
-	if e != nil {
-		return e
-	}
-	defer f.Close()
-	return f.Sync()
+	return datadir.SyncDirectory(filepath.Dir(path))
 }
 func (q *Queue) Availability() Availability {
 	var a Availability
@@ -980,7 +973,7 @@ func (w *Worker) publish(ctx context.Context, j *Job, o *outputWriter, c *csv.Wr
 	if e = os.Rename(w.Queue.Path(j.ID, ".csv.part"), w.Queue.Path(j.ID, ".csv")); e != nil {
 		return e
 	}
-	if e = syncDir(w.Queue.Dir); e != nil {
+	if e = datadir.SyncDirectory(w.Queue.Dir); e != nil {
 		return e
 	}
 	if e = w.fault("publish-after-rename"); e != nil {

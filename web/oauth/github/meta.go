@@ -1,8 +1,9 @@
 package github
 
 import (
+	"net/http"
+
 	"github.com/komari-monitor/komari/web/oauth/factory"
-	"github.com/patrickmn/go-cache"
 )
 
 func init() {
@@ -13,7 +14,10 @@ func init() {
 
 type Github struct {
 	Addition
-	stateCache *cache.Cache // 用于存储state和用户信息的映射
+	stateStore *factory.StateStore
+	httpClient *http.Client
+	tokenURL   string
+	userURL    string
 }
 
 type Addition struct {

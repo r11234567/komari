@@ -71,10 +71,11 @@ func (j *JavaScriptSender) ensureRuntime(script string) error {
 		return fmt.Errorf("create JavaScript notification directory: %w", err)
 	}
 	runtime, err := jsruntime.New(script, jsruntime.Options{
-		BaseDir:    datadir.Resolve(DataDir),
-		NodeJS:     true,
-		Timeout:    executionTimeout,
-		HTTPClient: outboundhttp.NewClient(executionTimeout),
+		BaseDir:         datadir.Resolve(DataDir),
+		NodeJS:          true,
+		Timeout:         executionTimeout,
+		HTTPClient:      outboundhttp.NewClient(executionTimeout),
+		AllowPrivateNet: strings.EqualFold(strings.TrimSpace(os.Getenv("KOMARI_JS_SENDER_ALLOW_PRIVATE_NET")), "true"),
 	})
 	if err != nil {
 		return err

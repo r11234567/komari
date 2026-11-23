@@ -40,7 +40,7 @@ func GetPublicInfo() (map[string]interface{}, error) {
 		cst.Description = "Komari Monitor, a simple server monitoring tool."
 	}
 	if !hasKey("theme") {
-		cst.Theme = "nezha"
+		cst.Theme = "default"
 	}
 	if !hasKey("o_auth_provider") {
 		cst.OAuthProvider = "github"

@@ -4,14 +4,13 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/internal/plugin"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/security"
 )
 
 // UploadPlugin installs a plugin ZIP package. The request body is the raw
@@ -72,20 +71,8 @@ func requirePluginAdministrator(c *gin.Context) bool {
 	return true
 }
 
-// ServePluginFile serves a static file from an installed plugin directory,
-// used by injected plugin admin pages.
+// ServePluginFile serves a declared iframe page asset from an installed plugin
+// directory inside a sandboxed origin without session cookie access.
 func ServePluginFile(c *gin.Context) {
-	name := strings.TrimPrefix(c.Param("filepath"), "/")
-	file, err := plugin.OpenFile(c.Param("short"), name)
-	if err != nil {
-		c.Status(http.StatusNotFound)
-		return
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		c.Status(http.StatusNotFound)
-		return
-	}
-	http.ServeContent(c.Writer, c.Request, filepath.Base(name), info.ModTime(), file)
+	security.ServeSandboxedPluginPage(c, plugin.OpenAdminPageFile, true)
 }

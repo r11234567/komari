@@ -157,6 +157,7 @@ type restoreSecurityCarryover struct {
 	controlPlaneKeys     []models.ControlPlaneKey
 	controlPlanePrivate  []models.ControlPlanePrivateKey
 	maxLiveSecurityEpoch uint64
+	primaryHasUsers      bool
 }
 
 type counterCarryKey struct {
@@ -267,6 +268,14 @@ func collectLiveSecurityStateFrom(dataDir, custom string) (restoreSecurityCarryo
 			return carry, 0, err
 		}
 		if sameRestoreDBPath(currentPath, primaryPath) {
+			hasUsersTable, err := sqliteTableExists(curDB, "users")
+			if err == nil && hasUsersTable {
+				err = curDB.QueryRow("SELECT EXISTS(SELECT 1 FROM users)").Scan(&carry.primaryHasUsers)
+			}
+			if err != nil {
+				_ = curDB.Close()
+				return carry, 0, fmt.Errorf("inspect current installation users: %w", err)
+			}
 			carry.agentCredentials, err = readLiveAgentCredentials(curDB)
 			if err != nil {
 				_ = curDB.Close()

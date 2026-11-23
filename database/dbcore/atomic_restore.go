@@ -397,10 +397,18 @@ func reconcileAtomicRestore(active datadir.Layout, stage, liveDB string) (uint64
 	if err != nil {
 		return 0, err
 	}
+	// The first-run guide may already have created an empty database and a
+	// signing key. Those bootstrap records do not replace the backed-up identity.
+	epoch := max(liveEpoch, rootEpoch, active.Pointer.Epoch)
+	if !carry.primaryHasUsers && len(carry.agentCredentials) == 0 && active.Pointer.Version == 0 && epoch <= 1 {
+		carry.agentCredentials = nil
+		carry.controlPlaneKeys = nil
+		carry.controlPlanePrivate = nil
+	}
 	if err := carry.rewrapAgentRecovery(active.Dir, stage); err != nil {
 		return 0, err
 	}
-	return applyRestoreSecurityStateToDB(path, max(liveEpoch, rootEpoch, active.Pointer.Epoch), carry)
+	return applyRestoreSecurityStateToDB(path, epoch, carry)
 }
 
 func readOnlyRestoreDSN(path string) string {

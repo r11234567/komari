@@ -35,24 +35,32 @@ func OriginMatchesRequest(origin string, r *http.Request) bool {
 }
 
 func OriginInAllowlist(origin, rawAllowlist string) bool {
+	explicit, wildcard := MatchAllowlistOrigin(origin, rawAllowlist)
+	return explicit || wildcard
+}
+
+// MatchAllowlistOrigin classifies whether origin matches an explicit entry
+// or only a legacy wildcard '*' entry in rawAllowlist.
+func MatchAllowlistOrigin(origin, rawAllowlist string) (explicit bool, wildcard bool) {
 	normalizedOrigin, _, ok := normalizeOrigin(origin)
 	if !ok {
-		return false
+		return false, false
 	}
 	allowlist, err := requestmeta.NormalizeAllowlist(rawAllowlist, true)
 	if err != nil {
-		return false
+		return false, false
 	}
 	for _, entry := range SplitAllowlist(allowlist) {
 		if entry == "*" {
-			return true
+			wildcard = true
+			continue
 		}
 		normalizedEntry, _, ok := normalizeOrigin(entry)
 		if ok && normalizedEntry == normalizedOrigin {
-			return true
+			return true, wildcard
 		}
 	}
-	return false
+	return false, wildcard
 }
 
 func WarnLegacyOrigins(kind, raw string) {

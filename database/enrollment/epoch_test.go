@@ -19,20 +19,20 @@ func TestEpochMismatchRejectedUntilSignedRefreshUpgrades(t *testing.T) {
 	issued1, err := rotateVerifiedDB(context.Background(), db, record, token, uuid.NewString(), nil, 2, func() time.Time { return now })
 	require.NoError(t, err)
 
-	clientID, err := resolveAccessTokenDB(db, issued1.AccessToken)
+	clientID, _, err := lookupAccessTokenDB(db, issued1.AccessToken, time.Now().UTC())
 	require.NoError(t, err)
 	require.Equal(t, record.Client, clientID)
 
 	// Simulate panel security epoch advance after backup restore.
 	dbcore.SetCurrentSecurityEpoch(2)
-	_, err = resolveAccessTokenDB(db, issued1.AccessToken)
+	_, _, err = lookupAccessTokenDB(db, issued1.AccessToken, time.Now().UTC())
 	require.ErrorIs(t, err, ErrEpochMismatch)
 
 	// Valid non-revoked agent refreshes with its RT/key proof and advances to epoch 2.
 	gen1 := issued1.Generation
 	issued2, err := rotateVerifiedDB(context.Background(), db, record, issued1.RefreshToken, uuid.NewString(), &gen1, 2, func() time.Time { return now.Add(time.Minute) })
 	require.NoError(t, err)
-	clientID, err = resolveAccessTokenDB(db, issued2.AccessToken)
+	clientID, _, err = lookupAccessTokenDB(db, issued2.AccessToken, time.Now().UTC())
 	require.NoError(t, err)
 	require.Equal(t, record.Client, clientID)
 

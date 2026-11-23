@@ -12,8 +12,11 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/historyexport"
+	"github.com/komari-monitor/komari/utils/secureconfig"
+	"github.com/stretchr/testify/require"
 )
 
 func newAtomicRestoreFixture(t *testing.T) (root, backupDB string) {
@@ -252,5 +255,77 @@ func TestAtomicRestoreCanApplyNextUploadAfterPriorArchiveWasPublished(t *testing
 	next, err := activateQueuedRestore(root)
 	if err != nil || next.Dir == first.Dir || next.Pointer.Epoch != 3 {
 		t.Fatalf("subsequent restore = %+v, err=%v", next, err)
+	}
+}
+
+func TestAtomicRestorePreservesBackupIdentityOnlyBeforeFirstRun(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		installed bool
+	}{
+		{name: "first-run guide"},
+		{name: "existing installation with no agents", installed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, backupDB := newAtomicRestoreFixture(t)
+			t.Setenv("KOMARI_SECRET_KEY", "synthetic restore fixture key")
+			sealed, err := secureconfig.EncryptString("test signing material")
+			require.NoError(t, err)
+			live, err := sql.Open("sqlite3", filepath.Join(root, "komari.db"))
+			require.NoError(t, err)
+			liveModel, err := restoreDBModel(live)
+			require.NoError(t, err)
+			require.NoError(t, liveModel.AutoMigrate(&models.User{}, &models.AgentCredential{}, &models.ControlPlaneKey{}, &models.ControlPlanePrivateKey{}))
+			if tc.installed {
+				require.NoError(t, liveModel.Create(&models.User{UUID: "owner", Username: "owner", Passwd: "synthetic-hash"}).Error)
+			}
+			require.NoError(t, liveModel.Create(&models.ControlPlaneKey{KeyID: "live-key", PublicKey: "live-key-public"}).Error)
+			require.NoError(t, liveModel.Create(&models.ControlPlanePrivateKey{KeyID: "live-key", Sealed: sealed}).Error)
+			require.NoError(t, live.Close())
+
+			snapshot, err := sql.Open("sqlite3", backupDB)
+			require.NoError(t, err)
+			backupModel, err := restoreDBModel(snapshot)
+			require.NoError(t, err)
+			require.NoError(t, backupModel.AutoMigrate(&models.AgentCredential{}, &models.ControlPlaneKey{}, &models.ControlPlanePrivateKey{}))
+			revokedAt := time.Now().UTC()
+			backupAgents := []models.AgentCredential{
+				{Client: "active", AgentPublicKey: "active-public", Generation: 7, RefreshTokenHash: "fixture-refresh", SecurityEpoch: 1},
+				{Client: "revoked", AgentPublicKey: "revoked-public", RevokedAt: &revokedAt, RevokedReason: "fixture revoked"},
+			}
+			require.NoError(t, backupModel.Create(&backupAgents).Error)
+			require.NoError(t, backupModel.Create(&models.ControlPlaneKey{KeyID: "backup-key", PublicKey: "backup-key-public"}).Error)
+			require.NoError(t, backupModel.Create(&models.ControlPlanePrivateKey{KeyID: "backup-key", Sealed: sealed}).Error)
+			require.NoError(t, snapshot.Close())
+			writeRestoreArchive(t, filepath.Join(root, backupArchiveFileName), backupDB)
+
+			layout, err := activateQueuedRestore(root)
+			require.NoError(t, err)
+			require.Greater(t, layout.Pointer.Epoch, uint64(1))
+			db, err := sql.Open("sqlite3", readOnlyRestoreDSN(filepath.Join(layout.Dir, "komari.db")))
+			require.NoError(t, err)
+			defer db.Close()
+			agents, err := readLiveAgentCredentials(db)
+			require.NoError(t, err)
+			require.NotNil(t, agents["revoked"].RevokedAt)
+			require.Equal(t, "fixture revoked", agents["revoked"].RevokedReason)
+			var keyID string
+			require.NoError(t, db.QueryRow("SELECT key_id FROM control_plane_keys").Scan(&keyID))
+			if tc.installed {
+				require.NotNil(t, agents["active"].RevokedAt)
+				require.Equal(t, "live-key", keyID)
+			} else {
+				require.Nil(t, agents["active"].RevokedAt)
+				require.Equal(t, uint64(7), agents["active"].Generation)
+				require.Equal(t, "fixture-refresh", agents["active"].RefreshTokenHash)
+				require.Less(t, agents["active"].SecurityEpoch, layout.Pointer.Epoch)
+				require.Equal(t, "backup-key", keyID)
+			}
+			var stored string
+			require.NoError(t, db.QueryRow("SELECT sealed FROM control_plane_private_keys WHERE key_id = ?", keyID).Scan(&stored))
+			plaintext, err := secureconfig.DecryptString(stored)
+			require.NoError(t, err)
+			require.Equal(t, "test signing material", plaintext)
+		})
 	}
 }

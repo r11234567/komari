@@ -1621,8 +1621,19 @@ func sortRecords(records []models.Record) {
 	})
 }
 
+const maxCompatibilityGPUPoints = 4000
+
 // GetGPURecordsByClientAndTime 从 metric store 查询 GPU 记录
 func GetGPURecordsByClientAndTime(ctx context.Context, clientUUID string, start, end time.Time) ([]models.GPURecord, error) {
+	return GetGPURecordsByClientAndTimeMaxPoints(ctx, clientUUID, start, end, maxCompatibilityGPUPoints)
+}
+
+// GetGPURecordsByClientAndTimeMaxPoints shares the point budget across devices.
+func GetGPURecordsByClientAndTimeMaxPoints(ctx context.Context, clientUUID string, start, end time.Time, maxPoints int) ([]models.GPURecord, error) {
+	maxPoints = min(maxPoints, maxCompatibilityGPUPoints)
+	if maxPoints <= 0 {
+		return []models.GPURecord{}, ctx.Err()
+	}
 	s, release, err := AcquireStore(ctx)
 	if err != nil {
 		return nil, err
@@ -1640,7 +1651,17 @@ func GetGPURecordsByClientAndTime(ctx context.Context, clientUUID string, start,
 	}
 	recordMap := make(map[gpuKey]*models.GPURecord)
 	now := time.Now().UTC()
-	interval := pingQueryInterval(end.Sub(start), 4000)
+	// The device index catalog is an upper estimate shared by nodes. Apply a
+	// hard cap after merging, since partial or renamed series can differ.
+	deviceIndices, err := s.MetricTagValues(ctx, MetricGPUDeviceUsage, "device_index")
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err != nil {
+		return nil, err
+	}
+	perDeviceBudget := max(1, maxPoints/max(1, len(deviceIndices)))
+	interval := pingQueryInterval(end.Sub(start), perDeviceBudget)
 	interval = s.CompatibleSeriesIntervalForMetric(ctx, gpuMetrics[0], start, now, interval)
 
 	for _, metricName := range gpuMetrics {
@@ -1657,6 +1678,9 @@ func GetGPURecordsByClientAndTime(ctx context.Context, clientUUID string, start,
 			PreserveSeries: true,
 		}, now)
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, err
+			}
 			continue // GPU 数据可能不存在
 		}
 
@@ -1717,6 +1741,27 @@ func GetGPURecordsByClientAndTime(ctx context.Context, clientUUID string, start,
 		return records[i].DeviceIndex < records[j].DeviceIndex
 	})
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(records) <= maxPoints {
+		return records, nil
+	}
+	type deviceKey struct {
+		client string
+		index  int
+	}
+	records = capGroupedHistoryPoints(records, maxPoints,
+		func(r models.GPURecord) deviceKey { return deviceKey{r.Client, r.DeviceIndex} },
+		func(a, b deviceKey) bool {
+			if a.client != b.client {
+				return a.client < b.client
+			}
+			return a.index < b.index
+		},
+	)
+	// Sampling preserves each device's chronology. Restore global chronology.
+	sort.SliceStable(records, func(i, j int) bool { return records[i].Time.Before(records[j].Time) })
 	return records, nil
 }
 
@@ -1849,42 +1894,48 @@ func pingPerSeriesMaxPoints(maxPoints, seriesCount int) int {
 }
 
 func capPingAggregatePoints(points []metric.AggregatePoint, maxPoints int) []metric.AggregatePoint {
-	if maxPoints <= 0 || len(points) <= maxPoints {
-		return points
-	}
 	type seriesKey struct {
 		entity string
 		taskID string
 	}
-	grouped := make(map[seriesKey][]metric.AggregatePoint)
-	keys := make([]seriesKey, 0)
+	return capGroupedHistoryPoints(points, maxPoints,
+		func(p metric.AggregatePoint) seriesKey { return seriesKey{p.EntityID, p.Tags["task_id"]} },
+		func(a, b seriesKey) bool {
+			if a.entity != b.entity {
+				return a.entity < b.entity
+			}
+			return a.taskID < b.taskID
+		},
+	)
+}
+
+func capGroupedHistoryPoints[T any, K comparable](points []T, maxPoints int, key func(T) K, less func(K, K) bool) []T {
+	if maxPoints <= 0 || len(points) <= maxPoints {
+		return points
+	}
+	grouped := make(map[K][]T)
+	keys := make([]K, 0)
 	for _, p := range points {
-		k := seriesKey{entity: p.EntityID, taskID: p.Tags["task_id"]}
+		k := key(p)
 		if _, exists := grouped[k]; !exists {
 			keys = append(keys, k)
 		}
 		grouped[k] = append(grouped[k], p)
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].entity != keys[j].entity {
-			return keys[i].entity < keys[j].entity
+	sort.Slice(keys, func(i, j int) bool { return less(keys[i], keys[j]) })
+	targets := make(map[K]int, len(keys))
+	allocated := min(maxPoints, len(keys))
+	for _, k := range keys[:allocated] {
+		targets[k] = 1
+	}
+	extraPoints := len(points) - len(keys)
+	remaining := maxPoints - allocated
+	if remaining > 0 && extraPoints > 0 {
+		for _, k := range keys {
+			extra := int(int64(len(grouped[k])-1) * int64(remaining) / int64(extraPoints))
+			targets[k] += extra
+			allocated += extra
 		}
-		return keys[i].taskID < keys[j].taskID
-	})
-	total := len(points)
-	targets := make(map[seriesKey]int, len(keys))
-	allocated := 0
-	for _, k := range keys {
-		n := len(grouped[k])
-		t := (n * maxPoints) / total
-		if t == 0 && n > 0 && allocated < maxPoints {
-			t = 1
-		}
-		if allocated+t > maxPoints {
-			t = maxPoints - allocated
-		}
-		targets[k] = t
-		allocated += t
 	}
 	for allocated < maxPoints {
 		progressed := false
@@ -1902,7 +1953,7 @@ func capPingAggregatePoints(points []metric.AggregatePoint, maxPoints int) []met
 			break
 		}
 	}
-	out := make([]metric.AggregatePoint, 0, maxPoints)
+	out := make([]T, 0, maxPoints)
 	for _, k := range keys {
 		in := grouped[k]
 		target := targets[k]

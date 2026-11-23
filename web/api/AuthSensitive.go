@@ -3,8 +3,8 @@ package api
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/komari-monitor/komari/web/security"
 	"io"
+	"mime"
 	"net/http"
 	"sync"
 	"time"
@@ -14,7 +14,10 @@ import (
 	"github.com/komari-monitor/komari/internal/credentialaction"
 	credential "github.com/komari-monitor/komari/internal/trustedcredential"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/web/security"
 )
+
+const max2FABodyBytes = 64 << 10
 
 var sensitive2FAReplayCache = struct {
 	sync.Mutex
@@ -143,12 +146,17 @@ func get2FACode(c *gin.Context) string {
 	if c.Request.Body == nil || c.Request.Method == http.MethodGet {
 		return ""
 	}
-	bodyBytes, err := io.ReadAll(c.Request.Body)
-	if err != nil {
+	mediaType, _, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
+	if err != nil || mediaType != "application/json" {
 		return ""
 	}
-	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	if len(bodyBytes) == 0 {
+	origBody := c.Request.Body
+	bodyBytes, err := io.ReadAll(io.LimitReader(origBody, max2FABodyBytes+1))
+	c.Request.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(bodyBytes), origBody), origBody}
+	if err != nil || len(bodyBytes) == 0 || len(bodyBytes) > max2FABodyBytes {
 		return ""
 	}
 	var body map[string]interface{}

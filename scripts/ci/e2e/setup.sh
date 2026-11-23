@@ -37,6 +37,20 @@ http {
     ssl_certificate $E2E_ROOT/tls/server.crt;
     ssl_certificate_key $E2E_ROOT/tls/server.key;
     client_max_body_size 8m;
+    location = /komari.enrollment.v1.EnrollmentService/RefreshCredentials {
+      default_type application/json;
+      if (-f "$E2E_ROOT/entry-deny-refresh") {
+        return 403 '{"code":"permission_denied","message":"synthetic entry denial"}';
+      }
+      proxy_pass http://127.0.0.1:29444;
+      proxy_http_version 1.1;
+      proxy_set_header Host \$http_host;
+      proxy_set_header X-Forwarded-Proto https;
+      proxy_set_header X-Forwarded-Host \$http_host;
+      proxy_set_header X-Forwarded-For \$remote_addr;
+      proxy_set_header X-Real-IP \$remote_addr;
+      proxy_set_header Forwarded '';
+    }
     location ~ ^/komari\\..*Service/(AttachSession|AttachFileOperations)\$ {
       grpc_pass grpc://127.0.0.1:29444;
       grpc_set_header Host \$http_host;

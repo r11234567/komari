@@ -6,6 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
 const { decodeMetricsRequest, decodeMetricsResponse } = require('./storage-metrics-wire.cjs');
+const { freshTOTP, invalidTOTP } = require('./totp.cjs');
 const { createRequire } = require('node:module');
 // Use the pinned Web's already-installed protobuf runtime for its wire format.
 const webRequire = createRequire(path.resolve(__dirname, '../../../third_party/komari-web/package.json'));
@@ -15,6 +16,9 @@ const root = process.env.E2E_ROOT;
 const artifacts = process.env.E2E_ARTIFACTS;
 const base = 'https://127.0.0.1:29443';
 const skipCSV = process.env.KOMARI_E2E_SKIP_CSV === '1';
+const enableTOTPStage = 'enable real TOTP for sensitive operations';
+const archiveStage = 'real reports archive and charts survive raw deletion';
+const backupStage = 'verify TOTP and download the complete cold-history backup';
 const databaseStages = new Set([
   'first-run setup, Secure admin cookie and actual Agent enrollment',
   'installed Agent performs a real TCP latency probe',
@@ -22,7 +26,9 @@ const databaseStages = new Set([
   'real raw and summary input ownership agrees and built charts expose source precision',
   'enabled rate limits allow 32 concurrent charts and Ping reads',
   'minute traffic trends and daily billing remain independently available',
-  'real reports archive, charts survive raw deletion, CSV and complete backup use cold history',
+  enableTOTPStage,
+  archiveStage,
+  backupStage,
 ]);
 const serviceUser = process.env.KOMARI_E2E_USER || process.env.USER;
 require('./guard.cjs');
@@ -52,21 +58,6 @@ function verificationResource(request) {
     else reader.skip(wireType);
   }
   return resource;
-}
-
-function totp(secret, counter = Math.floor(Date.now() / 30_000)) {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-  const bits = [...secret.toUpperCase().replace(/=+$/, '')].map(c => {
-    const n = alphabet.indexOf(c);
-    if (n < 0) throw new Error('Invalid fixture TOTP secret');
-    return n.toString(2).padStart(5, '0');
-  }).join('');
-  const key = Buffer.from((bits.match(/.{8}/g) || []).map(b => parseInt(b, 2)));
-  const time = Buffer.alloc(8);
-  time.writeBigUInt64BE(BigInt(counter));
-  const digest = crypto.createHmac('sha1', key).update(time).digest();
-  const offset = digest.at(-1) & 15;
-  return String((digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).padStart(6, '0');
 }
 
 test('real HTTPS panel and installed Agent: authorization, workspace and files', async ({ page, context }, info) => {
@@ -150,15 +141,26 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
     return response.json();
   }
   async function freshCode() {
-    // Real time only. Leave enough window for the request to reach the server.
-    while (true) {
-      const counter = Math.floor(Date.now() / 30_000);
-      if (counter > lastCounter && Date.now() % 30_000 < 25_000) {
-        lastCounter = counter;
-        return totp(secret, counter);
-      }
-      await delay(500);
-    }
+    const proof = await freshTOTP(secret, lastCounter);
+    lastCounter = proof.counter;
+    return proof.code;
+  }
+  const backupURL = '/api/admin/download/backup?scope=full';
+  async function downloadFullBackup() {
+    const code = await freshCode();
+    const backupTOTPCounter = lastCounter;
+    const backup = await request(backupURL, undefined, { method: 'GET', headers: { 'X-2FA-Code': code } });
+    expect(backup.headers()['content-type']).toBe('application/zip');
+    fs.writeFileSync(path.join(root, 'real-full-backup.zip'), await backup.body());
+    return backupTOTPCounter;
+  }
+  async function saveRestoreFixture(backupTOTPCounter) {
+    await context.storageState({ path: path.join(root, 'qualification-browser-state.json') });
+    fs.writeFileSync(path.join(root, 'qualification-scope.json'), JSON.stringify({ agentId, pingTaskId }));
+    // Keep credentials with the downloaded backup in the disposable fixture.
+    fs.writeFileSync(path.join(root, 'migration-credentials.json'), JSON.stringify({
+      username: 'e2e-user', password: fixturePassword, secret, backupTOTPCounter,
+    }), { mode: 0o600 });
   }
   async function mutate(method, args) {
     return rpc('file', method, { agentId, ...args });
@@ -429,12 +431,15 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       // file, history and backup assertions as an integration regression.
     });
 
-    await stage('enable real 2FA and apply a signed same-identity WebSSH grant', async () => {
+    await stage(enableTOTPStage, async () => {
       await request('/api/admin/2fa/generate', undefined, { method: 'POST' });
-      secret = (await context.cookies()).find(c => c.name === '2fa_secret')?.value;
+      secret = (await context.cookies()).find(c => c.name === '__Host-komari_2fa_secret' || c.name === '2fa_secret')?.value;
       expect(secret).toBeTruthy();
       console.log(`::add-mask::${secret}`);
       await request(`/api/admin/2fa/enable?code=${await freshCode()}`);
+    });
+
+    await stage('apply a signed same-identity WebSSH grant', async () => {
       let state;
       await expect.poll(async () => {
         state = await rpc('config', 'GetNodeConfigState', { agentId });
@@ -462,12 +467,8 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       const gate = page.locator('.km-account-2fa-gate');
       await expect(gate).toBeVisible();
       await beginVerification(gate);
-      const counter = Math.floor(Date.now() / 30_000);
-      const validCodes = [-1, 0, 1].map(n => totp(secret, counter + n));
-      let invalid = '000000';
-      while (validCodes.includes(invalid)) invalid = String(Number(invalid) + 1).padStart(6, '0');
       const rejected = page.waitForResponse(r => r.url().endsWith('.TrustedCredentialService/CompleteVerification'));
-      await verifyCredential(gate, invalid);
+      await verifyCredential(gate, invalidTOTP(secret));
       expect((await rejected).ok()).toBe(false);
       await expect(gate).toBeVisible();
       await expect(gate.getByRole('alert')).toBeVisible();
@@ -741,7 +742,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       fs.writeFileSync(path.join(artifacts, 'traffic-and-billing.json'), JSON.stringify({ trends: results, billing }, null, 2));
     });
 
-    await stage('real reports archive, charts survive raw deletion, CSV and complete backup use cold history', async () => {
+    await stage(archiveStage, async () => {
       // Public settings, not forged timestamps or seeded history, shorten the
       // fixture rotation. All samples still come from the installed Agent.
       await request('/api/admin/settings/', { metric_hot_window_minutes: 1, metric_hot_retention_minutes: 1, metric_archive_segment_minutes: 1 });
@@ -773,24 +774,21 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         fs.writeFileSync(path.join(artifacts, 'real-history.csv'), csv);
         csvBytes = csv.length;
       }
-      if (skipCSV) {
-        await request('/api/admin/2fa/generate');
-        secret = (await context.cookies()).find(cookie => cookie.name === '2fa_secret')?.value;
-        expect(secret).toBeTruthy();
-        console.log(`::add-mask::${secret}`);
-        await request(`/api/admin/2fa/enable?code=${await freshCode()}`);
-      }
-      const backup = await request('/api/admin/download/backup?scope=full', undefined, { method: 'GET', headers: { 'X-2FA-Code': await freshCode() } });
-      // Credentials stay inside the disposable fixture, outside uploaded artifacts.
-      fs.writeFileSync(path.join(root, 'real-full-backup.zip'), await backup.body());
       fs.writeFileSync(path.join(artifacts, 'real-storage-roundtrip.json'), JSON.stringify({ ...storage, csvBytes, csv_scenarios: !skipCSV }, null, 2));
+    });
+
+    await stage(backupStage, async () => {
+      const withoutCode = await request(backupURL, undefined, { method: 'GET', allowFailure: true });
+      expect(withoutCode.status()).toBe(401);
+      expect((await withoutCode.json()).message).toBe('2FA code is required');
+      const invalidCode = await request(backupURL, undefined, { method: 'GET', allowFailure: true, headers: { 'X-2FA-Code': 'invalid' } });
+      expect(invalidCode.status()).toBe(401);
+      const backupTOTPCounter = await downloadFullBackup();
       if (skipCSV) {
-        await context.storageState({ path: path.join(root, 'qualification-browser-state.json') });
-        fs.writeFileSync(path.join(root, 'qualification-scope.json'), JSON.stringify({ agentId, pingTaskId }));
-        fs.writeFileSync(path.join(root, 'migration-credentials.json'), JSON.stringify({ username: 'e2e-user', password: fixturePassword, restoreSecret: secret }), { mode: 0o600 });
+        await saveRestoreFixture(backupTOTPCounter);
         fs.writeFileSync(path.join(artifacts, 'database-scenario-scope.json'), JSON.stringify({
-          database_only: true, csv_scenarios: false,
-          completed: [...completedSteps, 'real reports archive, charts survive raw deletion, CSV and complete backup use cold history'],
+          database_only: true, csv_scenarios: false, totp_protected_backup: true,
+          completed: [...completedSteps, backupStage],
         }, null, 2));
       }
     });
@@ -907,19 +905,16 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       // so the backup never waits on a process frozen while holding its lock.
       await expect.poll(() => JSON.parse(fs.readFileSync(path.join(root, 'panel/data/exports-v2/worker.json'))).active_job || '').toBe('');
       execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGSTOP', 'komari-e2e-export.service']);
-      let pausedBackup;
+      let backupTOTPCounter;
       try {
-        pausedBackup = await create({ mode: 'raw', category: 'resource', end: new Date(end.getTime()-1000).toISOString() });
+        const pausedBackup = await create({ mode: 'raw', category: 'resource', end: new Date(end.getTime()-1000).toISOString() });
         expect(pausedBackup.id).toBeTruthy();
         await request(`/api/admin/history/export/${pausedBackup.id}/pause`, {});
         expect((await (await request(`/api/admin/history/export/${pausedBackup.id}`, undefined, { method: 'GET' })).json()).data.status).toBe('paused');
-        const backup = await request('/api/admin/download/backup?scope=full', undefined, { method: 'GET', headers: { 'X-2FA-Code': await freshCode() } });
-        fs.writeFileSync(path.join(root, 'real-full-backup.zip'), await backup.body());
+        backupTOTPCounter = await downloadFullBackup();
         fs.writeFileSync(path.join(root, 'export-restore-proof.json'), JSON.stringify({ ready: proofs.map(p=>p.job), paused: pausedBackup }));
       } finally { execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGCONT', 'komari-e2e-export.service']); }
-      await context.storageState({ path: path.join(root, 'qualification-browser-state.json') });
-      fs.writeFileSync(path.join(root, 'qualification-scope.json'), JSON.stringify({ agentId, pingTaskId }));
-      fs.writeFileSync(path.join(root, 'migration-credentials.json'), JSON.stringify({ username: 'e2e-user', password: fixturePassword, secret }), { mode: 0o600 });
+      await saveRestoreFixture(backupTOTPCounter);
     });
   } finally {
     fs.writeFileSync(path.join(artifacts, 'browser-events.json'), JSON.stringify(events, null, 2));

@@ -24,6 +24,10 @@ func GetGPURecordsByClientAndTime(uuid string, start, end time.Time) ([]models.G
 	return metricstore.GetGPURecordsByClientAndTime(context.Background(), uuid, start, end)
 }
 
+func GetGPURecordsByClientAndTimeMaxPointsContext(ctx context.Context, uuid string, start, end time.Time, maxPoints int) ([]models.GPURecord, error) {
+	return metricstore.GetGPURecordsByClientAndTimeMaxPoints(ctx, uuid, start, end, maxPoints)
+}
+
 func GetRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.Record, error) {
 	return metricstore.GetRecordsByClientAndTime(context.Background(), uuid, start, end)
 }

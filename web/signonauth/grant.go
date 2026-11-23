@@ -16,7 +16,10 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
-const CookieName = "komari_sign_on_grant"
+const (
+	CookieName       = "__Host-komari_sign_on_grant"
+	LegacyCookieName = "komari_sign_on_grant"
+)
 const Lifetime = 30 * time.Minute
 
 var ErrLocked = errors.New("login settings locked: fresh interactive 2FA is required")

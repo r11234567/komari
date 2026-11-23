@@ -466,10 +466,9 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
-	r.Use(backup.RejectMutationsWhileRestarting())
-	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
-		WithTrustedOrigins(flags.EffectivePanelOrigin())
+	cors := a.newUpgradeCorsController()
 	r.Use(cors.Middleware())
+	r.Use(backup.RejectMutationsWhileRestarting())
 	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 	r.Use(api.IdentityMiddleware())
 	r.Use(func(c *gin.Context) {
@@ -547,10 +546,9 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
-	r.Use(backup.RejectMutationsWhileRestarting())
-	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
-		WithTrustedOrigins(flags.EffectivePanelOrigin())
+	cors := a.newUpgradeCorsController()
 	r.Use(cors.Middleware())
+	r.Use(backup.RejectMutationsWhileRestarting())
 	r.Use(api.IdentityMiddleware())
 	r.Use(func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, "/api") {
@@ -723,7 +721,6 @@ func configureBaseEngine(r *gin.Engine, canonicalOrigin string) error {
 	r.Use(diagnostics.Default.Middleware())
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
-	r.Use(backup.RejectMutationsWhileRestarting())
 	if err := security.ConfigureRequestMetadataForOrigin(r, canonicalOrigin); err != nil {
 		return fmt.Errorf("invalid request metadata policy: %w", err)
 	}
@@ -751,6 +748,15 @@ func apiNoStoreMiddleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func (a *App) newUpgradeCorsController() *security.CorsController {
+	if flags.SplitPanelEnabled() {
+		return security.NewCorsController(true, "").
+			WithTrustedOrigins(flags.EffectivePanelOrigin())
+	}
+	return security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
+		WithTrustedOrigins(flags.EffectivePublicOrigin(), flags.EffectivePanelOrigin())
 }
 
 // BuildRouter 构建 Gin 引擎、中间件与全部路由，并登记热重载处理器。
@@ -809,13 +815,20 @@ func (a *App) BuildRouter() error {
 	publicCors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
 		WithTrustedOrigins(flags.EffectivePublicOrigin())
 	publicEngine.Use(publicCors.Middleware())
+	publicEngine.Use(backup.RejectMutationsWhileRestarting())
 	publicEngine.Use(api.PublicViewerMiddleware())
 	publicRateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)
 	publicEngine.Use(publicRateLimiter.Middleware())
 	publicEngine.Use(foregroundHistoryObserverMiddleware())
 	publicEngine.Use(api.PublicPrivateSiteMiddleware())
 	publicEngine.Use(apiNoStoreMiddleware())
-	router.MountPublicRoutes(publicEngine)
+	publicOrigin := flags.EffectivePublicOrigin()
+	router.MountPublicRoutes(publicEngine, func(r *http.Request, document []byte) []byte {
+		if !security.OriginMatchesRequest(publicOrigin, r) {
+			return document
+		}
+		return plugin.InjectPublicThemeHTML(r, document)
+	})
 	plugin.Init(publicEngine)
 	if err := plugin.LoadAll(); err != nil {
 		logger.ErrorArgs("server", "Failed to load some plugins:", err)
@@ -830,7 +843,8 @@ func (a *App) BuildRouter() error {
 		c.Set("panel_listener", true)
 		c.Next()
 	})
-	panelCors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
+	// The public site's mutable CORS allowlist must not govern the Panel.
+	panelCors := security.NewCorsController(true, "").
 		WithTrustedOrigins(flags.EffectivePanelOrigin())
 	panelEngine.Use(panelCors.Middleware())
 	panelEngine.Use(backup.RejectMutationsWhileRestarting())
@@ -844,7 +858,7 @@ func (a *App) BuildRouter() error {
 	closeExports := router.MountPanelRoutes(panelEngine)
 	a.addCleanup("history-export-queue", func(context.Context) error { return closeExports() })
 
-	a.registerReloadHandlers(publicCors, panelCors)
+	a.registerReloadHandlers(publicCors)
 	a.reload.Register("rate-limit", func(event config.ConfigEvent) {
 		publicRateLimiter.Update(event)
 		panelRateLimiter.Update(event)
@@ -858,10 +872,11 @@ func (a *App) BuildRouter() error {
 
 // Run 启动 HTTP 服务并阻塞直到收到中断信号或服务异常退出。
 func (a *App) Run() error {
+	publicHandler := plugin.WrapHandler(a.engine)
 	httpsSettings, err := httpsserver.LoadSettings()
 	if err != nil {
 		logger.Errorf("https", "Failed to load built-in HTTPS settings: %v", err)
-	} else if err := httpsserver.Default.Start(plugin.HTMLInjectHandler(plugin.WrapHandler(a.engine)), httpsSettings, flags.Listen); err != nil {
+	} else if err := httpsserver.Default.Start(publicHandler, httpsSettings, flags.Listen); err != nil {
 		// Keep HTTP available so an invalid certificate or occupied HTTPS port
 		// can still be corrected from the admin page.
 		logger.Errorf("https", "Built-in HTTPS did not start: %v", err)
@@ -902,7 +917,7 @@ func (a *App) Run() error {
 	}
 	baseContextFn := func(net.Listener) context.Context { return baseCtx }
 
-	rootHandler := httpsserver.Default.HTTPRedirectHandler(plugin.HTMLInjectHandler(plugin.WrapHandler(a.engine)))
+	rootHandler := httpsserver.Default.HTTPRedirectHandler(publicHandler)
 	a.server = &http.Server{
 		Addr:        a.PublicAddr(),
 		Handler:     h2c.NewHandler(rootHandler, &http2.Server{}),

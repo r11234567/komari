@@ -155,9 +155,30 @@ func TestSplitListenersStartServeAndShutdownWithoutPortLeak(t *testing.T) {
 	if err := app.Bootstrap(); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
+	app.settings.CorsOriginCheckEnabled = false
+	app.settings.CorsAllowedOrigins = flags.PublicOrigin
 	if err := app.BuildRouter(); err != nil {
 		_ = app.Shutdown()
 		t.Fatalf("BuildRouter: %v", err)
+	}
+
+	for _, check := range []struct {
+		origin string
+		status int
+	}{
+		{flags.PublicOrigin, http.StatusForbidden},
+		{flags.PanelOrigin, http.StatusNoContent},
+	} {
+		request := httptest.NewRequest(http.MethodOptions, flags.PanelOrigin+"/api/login", nil)
+		request.Header.Set("Origin", check.origin)
+		request.Header.Set("Access-Control-Request-Method", http.MethodPost)
+		request.Header.Set("Access-Control-Request-Headers", "Content-Type")
+		response := httptest.NewRecorder()
+		app.panelEngine.ServeHTTP(response, request)
+		if response.Code != check.status {
+			_ = app.Shutdown()
+			t.Fatalf("Panel preflight from %s = %d, want %d", check.origin, response.Code, check.status)
+		}
 	}
 
 	runErr := make(chan error, 1)
@@ -286,5 +307,64 @@ func TestSplitListenersStartServeAndShutdownWithoutPortLeak(t *testing.T) {
 			t.Fatalf("socket %s remained bound after Shutdown: %v", addr, err)
 		}
 		_ = rebind.Close()
+	}
+}
+
+func TestUpgradeCorsControllerIsolatesSplitPanelMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	origListen, origPanel, origPanelOrigin, origPublicOrigin := flags.Listen, flags.PanelListen, flags.PanelOrigin, flags.PublicOrigin
+	t.Cleanup(func() {
+		flags.Listen, flags.PanelListen, flags.PanelOrigin, flags.PublicOrigin = origListen, origPanel, origPanelOrigin, origPublicOrigin
+	})
+
+	flags.Listen = "127.0.0.1:0"
+	flags.PanelListen = "127.0.0.1:0"
+	flags.PublicOrigin = "https://public.example"
+	flags.PanelOrigin = "https://panel.example"
+
+	app := NewApp()
+	app.settings = &config.Settings{
+		CorsOriginCheckEnabled: false,
+		CorsAllowedOrigins:     "https://public.example",
+	}
+
+	r := gin.New()
+	r.Use(app.newUpgradeCorsController().Middleware())
+	r.GET("/api/upgrade", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	for _, tc := range []struct {
+		origin string
+		want   int
+		acao   string
+	}{
+		{origin: "https://public.example", want: http.StatusForbidden},
+		{origin: "https://panel.example", want: http.StatusOK, acao: "https://panel.example"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "https://panel.example/api/upgrade", nil)
+		req.Host = "panel.example"
+		req.Header.Set("Origin", tc.origin)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Fatalf("split-panel origin %q status = %d, want %d", tc.origin, rec.Code, tc.want)
+		}
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != tc.acao {
+			t.Fatalf("split-panel origin %q ACAO = %q, want %q", tc.origin, got, tc.acao)
+		}
+	}
+
+	// Non-split upgrade mode preserves configured CorsAllowedOrigins when enabled.
+	flags.PanelListen = ""
+	app.settings.CorsOriginCheckEnabled = true
+	rSingle := gin.New()
+	rSingle.Use(app.newUpgradeCorsController().Middleware())
+	rSingle.GET("/api/upgrade", func(c *gin.Context) { c.Status(http.StatusOK) })
+	reqPublic := httptest.NewRequest(http.MethodGet, "https://panel.example/api/upgrade", nil)
+	reqPublic.Host = "panel.example"
+	reqPublic.Header.Set("Origin", "https://public.example")
+	recPublic := httptest.NewRecorder()
+	rSingle.ServeHTTP(recPublic, reqPublic)
+	if recPublic.Code != http.StatusOK {
+		t.Fatalf("single-listener upgrade public origin status = %d, want 200", recPublic.Code)
 	}
 }

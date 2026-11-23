@@ -2,6 +2,7 @@ package jsonrpc
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"time"
 
@@ -140,22 +141,22 @@ func isHiddenClient(uuid string) bool {
 }
 
 func publicGetRecordsByUUID(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	ctx, cancel := context.WithTimeout(ctx, historicalQueryTimeout)
+	defer cancel()
 	var params struct {
 		UUID     string `json:"uuid"`
 		LoadType string `json:"load_type"`
 		Hours    string `json:"hours"`
 	}
-	req.BindParams(&params)
-	if params.UUID == "" || isHiddenClient(params.UUID) {
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
+	}
+	if params.UUID == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "UUID is required", nil)
 	}
-	hours := params.Hours
-	if hours == "" {
-		hours = "4"
-	}
-	hoursInt, err := strconv.Atoi(hours)
-	if err != nil {
-		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid hours parameter", nil)
+	window, rpcErr := parsePublicHistoryHours(params.Hours)
+	if rpcErr != nil {
+		return nil, rpcErr
 	}
 	validLoadTypes := map[string]bool{
 		"cpu": true, "gpu": true, "ram": true, "swap": true,
@@ -165,10 +166,29 @@ func publicGetRecordsByUUID(ctx context.Context, req *rpc.JsonRpcRequest) (any, 
 	if !validLoadTypes[params.LoadType] {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid load_type parameter", nil)
 	}
-	now := time.Now().UTC()
-	clientRecords, err := records.GetRecordsByClientAndTimeForLoadType(params.UUID, now.Add(-time.Duration(hoursInt)*time.Hour), now, params.LoadType)
+	release, rpcErr := acquireLongCompatibilityHistory(ctx, window)
+	if rpcErr != nil {
+		return nil, rpcErr
+	}
+	defer release()
+
+	hidden, err := loadHiddenClientMapContext(ctx)
 	if err != nil {
-		return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch records: "+err.Error(), nil)
+		return nil, metricQueryError(err, "Failed to load client visibility")
+	}
+	if hidden[params.UUID] {
+		return nil, rpc.MakeError(rpc.InvalidParams, "UUID is required", nil)
+	}
+
+	const maxPublicLoadPoints = 500
+	end := time.Now().UTC()
+	start := end.Add(-window)
+	clientRecords, err := records.GetRecordsByClientAndTimeForLoadTypeMaxPointsContext(ctx, params.UUID, start, end, params.LoadType, maxPublicLoadPoints)
+	if err != nil {
+		return nil, metricQueryError(err, "Failed to fetch records")
+	}
+	if len(clientRecords) > maxPublicLoadPoints {
+		clientRecords = sampleEvenly(clientRecords, maxPublicLoadPoints)
 	}
 	if usage, ok := calibratedUsageForClient(ctx, params.UUID); ok && len(clientRecords) > 0 {
 		newestUp := clientRecords[len(clientRecords)-1].NetTotalUp
@@ -191,7 +211,10 @@ func publicGetRecordsByUUID(ctx context.Context, req *rpc.JsonRpcRequest) (any, 
 		}
 	}
 	if params.LoadType == "" || params.LoadType == "all" || params.LoadType == "gpu" {
-		gpuRecords, err := records.GetGPURecordsByClientAndTime(params.UUID, now.Add(-time.Duration(hoursInt)*time.Hour), now)
+		gpuRecords, err := records.GetGPURecordsByClientAndTimeMaxPointsContext(ctx, params.UUID, start, end, maxCompatibilityRecordPoints-len(clientRecords))
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, metricQueryError(err, "Failed to fetch GPU records")
+		}
 		if err == nil && len(gpuRecords) > 0 {
 			gpuDevices := make(map[string]any)
 			for _, record := range gpuRecords {
@@ -214,6 +237,9 @@ func publicGetRecordsByUUID(ctx context.Context, req *rpc.JsonRpcRequest) (any, 
 			response["has_gpu_data"] = false
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, metricQueryError(err, "Failed to fetch records")
+	}
 	return response, nil
 }
 
@@ -228,10 +254,14 @@ func filterVisiblePingTaskClients(clientIDs []string, hidden map[string]bool) []
 }
 
 func loadHiddenClientMap() (map[string]bool, error) {
+	return loadHiddenClientMapContext(context.Background())
+}
+
+func loadHiddenClientMapContext(ctx context.Context) (map[string]bool, error) {
 	hidden := map[string]bool{}
 	var hiddenClients []models.Client
 	db := dbcore.GetDBInstance()
-	if err := db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error; err != nil {
+	if err := db.WithContext(ctx).Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error; err != nil {
 		return nil, err
 	}
 	for _, cli := range hiddenClients {
@@ -322,18 +352,37 @@ func filterPublicRecordsByLoadType(recs []models.Record, loadType string) []map[
 	return out
 }
 
-// PUBLIC_PING_RECORDS_PLACEHOLDER
-
 func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	ctx, cancel := context.WithTimeout(ctx, historicalQueryTimeout)
+	defer cancel()
 	var params struct {
 		UUID   string `json:"uuid"`
 		TaskID string `json:"task_id"`
 		Hours  string `json:"hours"`
 	}
-	req.BindParams(&params)
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
+	}
 	if params.UUID == "" && params.TaskID == "" {
 		return nil, rpc.MakeError(rpc.InvalidParams, "UUID or task_id is required", nil)
 	}
+	window, rpcErr := parsePublicHistoryHours(params.Hours)
+	if rpcErr != nil {
+		return nil, rpcErr
+	}
+	taskId := -1
+	if params.TaskID != "" {
+		value, err := strconv.Atoi(params.TaskID)
+		if err != nil {
+			return nil, rpc.MakeError(rpc.InvalidParams, "Invalid task_id parameter", nil)
+		}
+		taskId = value
+	}
+	release, rpcErr := acquireLongCompatibilityHistory(ctx, window)
+	if rpcErr != nil {
+		return nil, rpcErr
+	}
+	defer release()
 
 	type recordsResp struct {
 		TaskId uint      `json:"task_id,omitempty"`
@@ -356,45 +405,30 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 
 	response := &resp{Count: 0, Records: []recordsResp{}}
 
-	hiddenMap, err := loadHiddenClientMap()
+	hiddenMap, err := loadHiddenClientMapContext(ctx)
 	if err != nil {
-		return nil, rpc.MakeError(rpc.InternalError, "Failed to load client visibility: "+err.Error(), nil)
+		return nil, metricQueryError(err, "Failed to load client visibility")
 	}
 	if params.UUID != "" && hiddenMap[params.UUID] {
 		return response, nil
 	}
 
-	hours := params.Hours
-	if hours == "" {
-		hours = "4"
-	}
-	hoursInt, err := strconv.Atoi(hours)
-	if err != nil {
-		hoursInt = 4
-	}
 	endTime := time.Now().UTC()
-	startTime := endTime.Add(-time.Duration(hoursInt) * time.Hour)
-
-	taskId := -1
-	if params.TaskID != "" {
-		taskId, err = strconv.Atoi(params.TaskID)
-		if err != nil {
-			return nil, rpc.MakeError(rpc.InvalidParams, "Invalid task_id parameter", nil)
-		}
-	}
-
-	recs, err := tasks.GetPingRecords(params.UUID, taskId, startTime, endTime)
+	startTime := endTime.Add(-window)
+	recs, err := tasks.GetPingRecordsMaxPointsContext(ctx, params.UUID, taskId, startTime, endTime, maxCompatibilityRecordPoints)
 	if err != nil {
-		return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch ping records: "+err.Error(), nil)
+		return nil, metricQueryError(err, "Failed to fetch ping records")
 	}
 
 	clientStats := make(map[string]struct {
 		total, loss, min, max int
 	})
+	recordsByTask := make(map[uint][]models.PingRecord)
 	for _, r := range recs {
 		if r.Client != "" && hiddenMap[r.Client] {
 			continue
 		}
+		recordsByTask[r.TaskId] = append(recordsByTask[r.TaskId], r)
 		rec := recordsResp{Time: r.Time.UTC(), Value: r.Value, Client: r.Client, TaskId: r.TaskId}
 		stats := clientStats[r.Client]
 		stats.total++
@@ -427,12 +461,15 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	}
 
 	if params.UUID != "" || taskId != -1 {
-		pingTasks, err := tasks.GetAllPingTasks()
+		pingTasks, err := tasks.GetAllPingTasksContext(ctx)
 		if err != nil {
-			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch ping tasks: "+err.Error(), nil)
+			return nil, metricQueryError(err, "Failed to fetch ping tasks")
 		}
 		tasksList := make([]map[string]any, 0, len(pingTasks))
 		for _, t := range pingTasks {
+			if err := ctx.Err(); err != nil {
+				return nil, metricQueryError(err, "Failed to summarize ping tasks")
+			}
 			if taskId != -1 && t.Id != uint(taskId) {
 				continue
 			}
@@ -440,13 +477,7 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 				continue
 			}
 			totalCount, lossCount, minLatency, maxLatency, sumLatency, validCount := 0, 0, 0, 0, 0, 0
-			for _, r := range recs {
-				if r.Client != "" && hiddenMap[r.Client] {
-					continue
-				}
-				if r.TaskId != t.Id {
-					continue
-				}
+			for _, r := range recordsByTask[t.Id] {
 				if params.UUID != "" && r.Client != params.UUID {
 					continue
 				}

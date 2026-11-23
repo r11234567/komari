@@ -6,9 +6,22 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// SetSensitiveCookie applies the same transport and browser protections to
-// short-lived OAuth, 2FA, and sharing cookies.
-func SetSensitiveCookie(c *gin.Context, name, value string, maxAge int) {
+const (
+	SessionCookieName               = "__Host-komari_session"
+	LegacySessionCookieName         = "session_token"
+	OAuthStateCookieName            = "__Host-komari_oauth_state"
+	LegacyOAuthStateCookieName      = "oauth_state"
+	OAuthReturnToCookieName         = "__Host-komari_oauth_return_to"
+	LegacyOAuthReturnToCookieName   = "oauth_return_to"
+	OAuthBindCookieName             = "__Host-komari_oauth_bind"
+	LegacyOAuthBindCookieName       = "binding_external_account"
+	TwoFactorSecretCookieName       = "__Host-komari_2fa_secret"
+	LegacyTwoFactorSecretCookieName = "2fa_secret"
+	TempShareCookieName             = "__Host-komari_temp_key"
+	LegacyTempShareCookieName       = "temp_key"
+)
+
+func setCookie(c *gin.Context, name, value string, maxAge int, sameSite http.SameSite) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     name,
 		Value:    value,
@@ -16,14 +29,28 @@ func SetSensitiveCookie(c *gin.Context, name, value string, maxAge int) {
 		MaxAge:   maxAge,
 		Secure:   true,
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: sameSite,
 	})
 }
 
-const (
-	SessionCookieName       = "__Host-komari_session"
-	LegacySessionCookieName = "session_token"
-)
+// SetSensitiveCookie applies the same transport and browser protections to
+// short-lived OAuth and sharing cookies that must survive top-level GET redirects.
+func SetSensitiveCookie(c *gin.Context, name, value string, maxAge int) {
+	setCookie(c, name, value, maxAge, http.SameSiteLaxMode)
+}
+
+// SetStrictSensitiveCookie issues a host-scoped SameSite=Strict cookie for
+// same-origin control-plane ceremonies such as TOTP enrollment.
+func SetStrictSensitiveCookie(c *gin.Context, name, value string, maxAge int) {
+	setCookie(c, name, value, maxAge, http.SameSiteStrictMode)
+}
+
+// ClearCookie expires one or more root-scoped cookies.
+func ClearCookie(c *gin.Context, names ...string) {
+	for _, name := range names {
+		setCookie(c, name, "", -1, http.SameSiteLaxMode)
+	}
+}
 
 // Lax permits top-level OAuth GET callbacks to retain the signed-in session for account binding.
 func SetSessionCookie(headers http.Header, value string, maxAge int) {

@@ -282,8 +282,12 @@ func (ctrl *RateLimitController) keyAndBudget(c *gin.Context) (string, float64, 
 // A visitor dashboard never pays for enrollment, login or refresh attempts.
 func ceremonyBudget(path string) (string, [2]float64, bool) {
 	switch path {
-	case "/api/login", "/komari.credential.v1.PasswordLoginService/BeginPasswordLogin", "/komari.credential.v1.PasskeyLoginService/BeginPasskeyLogin", "/komari.credential.v1.PasskeyLoginService/CompletePasskeyLogin":
+	case "/api/login", "/komari.credential.v1.PasswordLoginService/BeginPasswordLogin":
 		return "login", [2]float64{0.2, 5}, true
+	case "/komari.credential.v1.PasskeyLoginService/BeginPasskeyLogin":
+		return "passkey-begin", [2]float64{0.2, 5}, true
+	case "/komari.credential.v1.PasskeyLoginService/CompletePasskeyLogin":
+		return "passkey-complete", [2]float64{0.2, 5}, true
 	case "/komari.credential.v1.PasswordLoginService/BeginLoginVerification", "/komari.credential.v1.PasswordLoginService/CompletePasswordLogin", "/komari.credential.v1.PasswordLoginService/CancelPasswordLogin":
 		return "login-ceremony", [2]float64{2, 10}, true
 	case "/komari.enrollment.v1.EnrollmentService/BeginEnrollment":

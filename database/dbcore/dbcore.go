@@ -20,6 +20,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/internal/diagnostics"
+	"github.com/komari-monitor/komari/internal/restorearchive"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/historyexport"
 	"github.com/komari-monitor/komari/pkg/metric"
@@ -54,6 +55,13 @@ func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}, o
 	normExclude[out.Name()] = struct{}{}
 
 	zw := zip.NewWriter(out)
+	marker, err := zw.Create(restorearchive.MarkupName)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(marker, "full"); err != nil {
+		return err
+	}
 
 	addFile := func(path string, info os.FileInfo, zipName string) error {
 		if info.IsDir() {
@@ -106,6 +114,7 @@ func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}, o
 			return nil
 		}
 		_, excluded := normExclude[path]
+		excluded = excluded || rel == restorearchive.MarkupName
 		_, replaced := overlay[rel]
 		if excluded || replaced {
 			if info.IsDir() {
@@ -242,7 +251,7 @@ func snapshotExternalDatabaseForBackup(customPath string) (string, error) {
 
 // unzipToDir 将 zipPath 解压到 dstDir，包含路径遍历保护
 func unzipToDir(zipPath, dstDir string) error {
-	zr, err := zip.OpenReader(zipPath)
+	zr, err := restorearchive.Open(zipPath)
 	if err != nil {
 		return err
 	}
@@ -421,7 +430,7 @@ func prepareStagedGeneration(backupZipPath, stageDir, publishDir string, reconci
 	} else if !os.IsNotExist(err) {
 		return 0, fmt.Errorf("inspect restored metrics.db: %w", err)
 	}
-	_ = os.Remove(filepath.Join(stageDir, "komari-backup-markup"))
+	_ = os.Remove(filepath.Join(stageDir, restorearchive.MarkupName))
 	queueDir := filepath.Join(stageDir, "exports-v2")
 	if _, err := os.Stat(queueDir); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)

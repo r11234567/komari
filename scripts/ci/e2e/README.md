@@ -52,6 +52,11 @@ The single sequential Playwright scenario tests:
   download cookies; a fresh browser verification restores file access.
 
 Each credential verification waits for a genuinely new 30-second TOTP window.
+The `skip_csv` browser run also enables TOTP and checks that complete backup
+download rejects missing or invalid codes and accepts a fresh code. The
+storage-upgrade browser uses those credentials and waits for a TOTP window
+after the one consumed during backup download.
+The separate 1.2.7 monitoring wizard uses a password-only legacy fixture.
 File operations reuse the actual UI-authorized workspace identity and grant;
 they do not require a separate OTP for each file. No
 future codes, clock changes, replay resets or mock transports are used. This

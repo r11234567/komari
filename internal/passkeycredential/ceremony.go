@@ -31,10 +31,11 @@ const (
 	loginBudgetWindow                  = 5 * time.Minute
 	loginIPBudgetLimit                 = 30
 	loginUserBudgetLimit               = 15
-	maxLoginPending                    = 256
+	maxLoginPendingPerFlow             = 128
 	maxRegisterPending                 = 128
 	maxPendingPerSource                = 8
-	maxBudgetBuckets                   = 4096
+	maxBeginBudgetBuckets              = 1536
+	maxCompleteBudgetBuckets           = 1024
 	accountFirstDefaultCredentialLen   = 32
 	maxAccountFirstCredentialIDBytes   = 1024
 	maxAccountFirstEnvelopeDescriptors = 256
@@ -48,17 +49,18 @@ type ceremony struct {
 	name, origin, source string
 	synced               bool
 	register             bool
+	accountFirst         bool
 }
 
 type ceremonyPool struct {
-	mu      sync.Mutex
-	maxAll  int
-	records map[string]ceremony
+	mu         sync.Mutex
+	maxPending int
+	records    map[string]ceremony
 }
 
 var (
-	loginPool    = &ceremonyPool{maxAll: maxLoginPending, records: make(map[string]ceremony)}
-	registerPool = &ceremonyPool{maxAll: maxRegisterPending, records: make(map[string]ceremony)}
+	loginPool    = &ceremonyPool{maxPending: maxLoginPendingPerFlow, records: make(map[string]ceremony)}
+	registerPool = &ceremonyPool{maxPending: maxRegisterPending, records: make(map[string]ceremony)}
 )
 
 type rateBucket struct {
@@ -66,12 +68,40 @@ type rateBucket struct {
 	expires time.Time
 }
 
-var loginLimiter = struct {
+type loginRateLimiter struct {
 	mu      sync.Mutex
 	buckets map[string]rateBucket
-}{buckets: make(map[string]rateBucket)}
+	max     int
+}
 
-func reserveLoginBudget(ip, username string) bool {
+type loginAdmission struct {
+	rate  loginRateLimiter
+	slots chan struct{}
+}
+
+var (
+	discoverableLogin = newLoginAdmission(maxBeginBudgetBuckets, 8)
+	accountFirstLogin = newLoginAdmission(maxBeginBudgetBuckets, 4)
+	completeLogin     = newLoginAdmission(maxCompleteBudgetBuckets, 8)
+)
+
+func newLoginAdmission(maxBuckets, maxInFlight int) *loginAdmission {
+	return &loginAdmission{
+		rate:  loginRateLimiter{buckets: make(map[string]rateBucket), max: maxBuckets},
+		slots: make(chan struct{}, maxInFlight),
+	}
+}
+
+func (a *loginAdmission) acquire() (func(), error) {
+	select {
+	case a.slots <- struct{}{}:
+		return func() { <-a.slots }, nil
+	default:
+		return nil, credential.ErrLimit
+	}
+}
+
+func (l *loginRateLimiter) reserve(ip, username string) bool {
 	keys := make([]string, 0, 2)
 	limits := make([]int, 0, 2)
 	if ip != "" {
@@ -86,16 +116,16 @@ func reserveLoginBudget(ip, username string) bool {
 		return true
 	}
 	now := time.Now()
-	loginLimiter.mu.Lock()
-	defer loginLimiter.mu.Unlock()
-	for k, b := range loginLimiter.buckets {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for k, b := range l.buckets {
 		if !now.Before(b.expires) {
-			delete(loginLimiter.buckets, k)
+			delete(l.buckets, k)
 		}
 	}
 	missing := 0
 	for i, k := range keys {
-		b, ok := loginLimiter.buckets[k]
+		b, ok := l.buckets[k]
 		if ok && b.count >= limits[i] {
 			return false
 		}
@@ -103,16 +133,16 @@ func reserveLoginBudget(ip, username string) bool {
 			missing++
 		}
 	}
-	if len(loginLimiter.buckets)+missing > maxBudgetBuckets {
+	if len(l.buckets)+missing > l.max {
 		return false
 	}
 	for _, k := range keys {
-		b, ok := loginLimiter.buckets[k]
+		b, ok := l.buckets[k]
 		if !ok {
 			b.expires = now.Add(loginBudgetWindow)
 		}
 		b.count++
-		loginLimiter.buckets[k] = b
+		l.buckets[k] = b
 	}
 	return true
 }
@@ -124,6 +154,25 @@ func poolFor(reg bool) *ceremonyPool {
 	return loginPool
 }
 
+// roomFor prunes expired records and checks the limit while holding the pool lock.
+func (pool *ceremonyPool) roomFor(c ceremony, replaceToken string, now time.Time) bool {
+	total, sameSource := 0, 0
+	for token, existing := range pool.records {
+		if !existing.session.Expires.After(now) {
+			delete(pool.records, token)
+			continue
+		}
+		if (token == replaceToken && existing.source == c.source) || existing.accountFirst != c.accountFirst {
+			continue
+		}
+		total++
+		if existing.source == c.source {
+			sameSource++
+		}
+	}
+	return total < pool.maxPending && sameSource < maxPendingPerSource
+}
+
 func remember(c ceremony, replaceToken string) (string, error) {
 	var nonce [32]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -133,21 +182,11 @@ func remember(c ceremony, replaceToken string) (string, error) {
 	now := time.Now()
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
-	if replaceToken != "" {
-		if existing, ok := pool.records[replaceToken]; ok && existing.source == c.source {
-			delete(pool.records, replaceToken)
-		}
-	}
-	same := 0
-	for k, v := range pool.records {
-		if !v.session.Expires.After(now) {
-			delete(pool.records, k)
-		} else if v.source == c.source {
-			same++
-		}
-	}
-	if same >= maxPendingPerSource || len(pool.records) >= pool.maxAll {
+	if !pool.roomFor(c, replaceToken, now) {
 		return "", credential.ErrLimit
+	}
+	if existing, ok := pool.records[replaceToken]; ok && existing.source == c.source {
+		delete(pool.records, replaceToken)
 	}
 	c.session.Expires = now.Add(CeremonyLifetime)
 	token := base64.RawURLEncoding.EncodeToString(nonce[:])
@@ -575,7 +614,20 @@ func BeginLoginWithPrior(ctx context.Context, username, ip, priorToken string) (
 	if len(username) > 255 {
 		return nil, "", credential.ErrInvalidArgument
 	}
-	if !reserveLoginBudget(ip, username) {
+	c := ceremony{origin: origin, synced: synced, source: ip, accountFirst: username != ""}
+	admission := discoverableLogin
+	if c.accountFirst {
+		admission = accountFirstLogin
+	}
+	release, err := admission.acquire()
+	if err != nil {
+		return nil, "", err
+	}
+	defer release()
+	loginPool.mu.Lock()
+	room := loginPool.roomFor(c, priorToken, time.Now())
+	loginPool.mu.Unlock()
+	if !room || !admission.rate.reserve(ip, username) {
 		return nil, "", credential.ErrLimit
 	}
 	var options *protocol.CredentialAssertion
@@ -630,7 +682,8 @@ func BeginLoginWithPrior(ctx context.Context, username, ip, priorToken string) (
 	if err != nil {
 		return nil, "", err
 	}
-	token, err := remember(ceremony{session: session, origin: origin, synced: synced, source: ip}, priorToken)
+	c.session = session
+	token, err := remember(c, priorToken)
 	return options, token, err
 }
 
@@ -639,14 +692,19 @@ func CompleteLogin(ctx context.Context, token string, raw []byte) (string, error
 }
 
 func CompleteLoginWithIP(ctx context.Context, ip, token string, raw []byte) (string, error) {
-	if ip != "" && !reserveLoginBudget(ip, "") {
+	release, err := completeLogin.acquire()
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	if ip != "" && !completeLogin.rate.reserve(ip, "") {
 		return "", credential.ErrLimit
 	}
 	c, err := take(token, false)
 	if err != nil {
 		return "", err
 	}
-	if ip == "" && c.source != "" && !reserveLoginBudget(c.source, "") {
+	if ip == "" && c.source != "" && !completeLogin.rate.reserve(c.source, "") {
 		return "", credential.ErrLimit
 	}
 	w, origin, synced, err := nativeVerifier(ctx)

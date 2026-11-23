@@ -1,18 +1,18 @@
-// Actual restricted listener + built browser + native password login.
-// Full-feature runs may also exercise configured TOTP; database-only runs do not.
+// Actual restricted listener + built browser + native password and TOTP.
 // Only the historical metric input is explicitly synthetic legacy test data.
 const { chromium, expect } = require('@playwright/test');
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const {execFileSync,spawn}=require('node:child_process');
+const {freshTOTP,invalidTOTP}=require('./totp.cjs');
 const root=process.env.E2E_ROOT,artifacts=process.env.E2E_ARTIFACTS,base='https://127.0.0.1:29443';
 const skipCSV=process.env.KOMARI_E2E_SKIP_CSV==='1';
 require('./guard.cjs');
-const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const system=(...args)=>execFileSync('sudo',['systemctl',...args],{timeout:30000});
 const source=path.join(root,'migration-panel/data/metrics.db');
 const credentials=JSON.parse(fs.readFileSync(path.join(root,'migration-credentials.json')));
-if(skipCSV&&credentials.secret)throw Error('Database-only migration fixture must use password login without TOTP');
-function totp(secret){const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';const bits=[...secret.toUpperCase().replace(/=+$/,'')].map(c=>alphabet.indexOf(c).toString(2).padStart(5,'0')).join('');const key=Buffer.from((bits.match(/.{8}/g)||[]).map(b=>parseInt(b,2)));const t=Buffer.alloc(8);t.writeBigUInt64BE(BigInt(Math.floor(Date.now()/30000)));const h=crypto.createHmac('sha1',key).update(t).digest();return String((h.readUInt32BE(h.at(-1)&15)&0x7fffffff)%1000000).padStart(6,'0');}
+if (!credentials.secret || !Number.isSafeInteger(credentials.backupTOTPCounter)) {
+  throw new Error('The migration fixture requires the credentials and TOTP counter from the downloaded backup');
+}
 function startPanel(directory){execFileSync('sudo',['systemd-run','--unit=komari-e2e-panel','--collect','--slice=komari-e2e.slice',`--property=User=${process.env.KOMARI_E2E_USER || process.env.USER}`,`--property=WorkingDirectory=${directory}`,'--property=CPUQuota=100%','--property=MemoryMax=1G',path.join(root,'bin/komari'),'server','--listen','127.0.0.1:29444'],{timeout:30000});}
 function startWorker(directory=path.join(root,'panel')){execFileSync('sudo',['systemd-run','--unit=komari-e2e-export','--collect','--slice=komari-e2e.slice',`--property=User=${process.env.KOMARI_E2E_USER || process.env.USER}`,`--property=WorkingDirectory=${directory}`,'--property=CPUQuota=4%','--property=CPUQuotaPeriodSec=100ms','--property=MemoryMax=128M','--property=MemorySwapMax=0','--setenv=GOMEMLIMIT=90MiB','--setenv=GOMAXPROCS=1',path.join(root,'bin/komari'),'export-worker','--queue',path.join(directory,'data/exports-v2'),`--instance-cgroup=/sys/fs/cgroup${execFileSync('systemctl',['show','komari-e2e-panel.service','--property=ControlGroup','--value'],{encoding:'utf8'}).trim()}`],{timeout:30000});}
 let browser,context,locker;
@@ -43,19 +43,22 @@ async function run(){
  await page.locator('#restricted-login-username').fill(credentials.username);
  await page.locator('#restricted-login-password').fill(credentials.password);
  await page.locator('.km-restricted-login-form button[type=submit]').click();
- if(credentials.secret){
  const code=page.getByRole('textbox',{name:'Enter verification code',exact:true});
  await expect(code).toBeVisible();
- const wrong=totp(credentials.secret);await code.fill(String((Number(wrong)+1)%1000000).padStart(6,'0'));
- await page.locator('.km-password-credential-step').getByRole('button',{name:'Continue',exact:true}).click();
+ const submit = page.locator('.km-password-credential-step').getByRole('button', { name: 'Continue', exact: true });
+ const completeLogin = response => new URL(response.url()).pathname.endsWith('.PasswordLoginService/CompletePasswordLogin');
+ const rejected = page.waitForResponse(completeLogin);
+ await code.fill(invalidTOTP(credentials.secret));
+ await submit.click();
+ expect((await rejected).status()).toBe(401);
  await expect(page.locator('.km-restricted-login-dialog')).toBeVisible();
- // A rejected proof may consume the current challenge. Reset and begin the
- // actual login again through the shipped controls if that provider requires it.
- if(!(await code.isVisible()))throw Error('OTP challenge disappeared after rejection');
- if(Date.now()%30000>27000)await sleep(3100);
- await code.fill(totp(credentials.secret));
- await page.locator('.km-password-credential-step').getByRole('button',{name:'Continue',exact:true}).click();
- }
+ await expect(code).toBeEnabled();
+ // The backup itself contains the database-backed record of the spent code.
+ const proof = await freshTOTP(credentials.secret, credentials.backupTOTPCounter);
+ const accepted = page.waitForResponse(completeLogin);
+ await code.fill(proof.code);
+ await submit.click();
+ expect((await accepted).status()).toBe(200);
  await expect(page.locator('.km-restricted-login-dialog')).toBeHidden({timeout:15000});
  await expect(page.getByRole('heading',{name:'Migration stopped; original history preserved',exact:true})).toBeVisible({timeout:20000});
  await page.screenshot({path:path.join(artifacts,'storage-upgrade-failed.png'),fullPage:true});
@@ -83,7 +86,7 @@ async function run(){
  await expect(page.getByRole('heading',{name:'Telemetry storage upgrade',exact:true})).toHaveCount(0);
  await page.screenshot({path:path.join(artifacts,'storage-upgrade-complete.png'),fullPage:true});
  await require('./storage-curves.cjs').verifyRealtimeRetention({context,page,root,artifacts,base,agentId:fixtureManifest.agentId,phase:'after-migration'});
- fs.writeFileSync(path.join(artifacts,'storage-upgrade.json'),JSON.stringify({checks,responses,final_url:page.url(),synthetic_input:true,native_password:true,totp:!!credentials.secret,restarted_after_failure:true},null,2));
+ fs.writeFileSync(path.join(artifacts,'storage-upgrade.json'),JSON.stringify({checks,responses,final_url:page.url(),synthetic_input:true,native_password:true,totp:true,restarted_after_failure:true},null,2));
  // Now exercise the server's actual staged ZIP restore, not just an in-process
  // reader. The downloaded package contains real Agent history and output.
  system('stop','komari-e2e-panel.service');

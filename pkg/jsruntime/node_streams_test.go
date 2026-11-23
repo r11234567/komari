@@ -186,7 +186,7 @@ func TestHTTPServerRequestResponseStreams(t *testing.T) {
 				});
 			});
 		}
-	`, Options{NodeJS: true, AllowListen: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 8 * time.Second})
+	`, Options{NodeJS: true, AllowListen: true, AllowPrivateNet: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 8 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

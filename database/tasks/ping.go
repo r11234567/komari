@@ -127,9 +127,13 @@ func normalizePingClients(clients models.StringArray) models.StringArray {
 }
 
 func GetAllPingTasks() ([]models.PingTask, error) {
+	return GetAllPingTasksContext(context.Background())
+}
+
+func GetAllPingTasksContext(ctx context.Context) ([]models.PingTask, error) {
 	db := dbcore.GetDBInstance()
 	var tasks []models.PingTask
-	if err := db.Order("weight ASC").Order("id ASC").Find(&tasks).Error; err != nil {
+	if err := db.WithContext(ctx).Order("weight ASC").Order("id ASC").Find(&tasks).Error; err != nil {
 		return nil, err
 	}
 	return tasks, nil
