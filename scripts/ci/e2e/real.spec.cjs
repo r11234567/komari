@@ -6,6 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
 const { decodeMetricsRequest, decodeMetricsResponse } = require('./storage-metrics-wire.cjs');
+const { freshTOTP, invalidTOTP } = require('./totp.cjs');
 const { createRequire } = require('node:module');
 // Use the pinned Web's already-installed protobuf runtime for its wire format.
 const webRequire = createRequire(path.resolve(__dirname, '../../../third_party/komari-web/package.json'));
@@ -57,21 +58,6 @@ function verificationResource(request) {
     else reader.skip(wireType);
   }
   return resource;
-}
-
-function totp(secret, counter = Math.floor(Date.now() / 30_000)) {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-  const bits = [...secret.toUpperCase().replace(/=+$/, '')].map(c => {
-    const n = alphabet.indexOf(c);
-    if (n < 0) throw new Error('Invalid fixture TOTP secret');
-    return n.toString(2).padStart(5, '0');
-  }).join('');
-  const key = Buffer.from((bits.match(/.{8}/g) || []).map(b => parseInt(b, 2)));
-  const time = Buffer.alloc(8);
-  time.writeBigUInt64BE(BigInt(counter));
-  const digest = crypto.createHmac('sha1', key).update(time).digest();
-  const offset = digest.at(-1) & 15;
-  return String((digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).padStart(6, '0');
 }
 
 test('real HTTPS panel and installed Agent: authorization, workspace and files', async ({ page, context }, info) => {
@@ -155,28 +141,26 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
     return response.json();
   }
   async function freshCode() {
-    if (!secret) throw new Error('Enable fixture TOTP before requesting a fresh code');
-    // Real time only. Leave enough window for the request to reach the server.
-    while (true) {
-      const counter = Math.floor(Date.now() / 30_000);
-      if (counter > lastCounter && Date.now() % 30_000 < 25_000) {
-        lastCounter = counter;
-        return totp(secret, counter);
-      }
-      await delay(500);
-    }
+    const proof = await freshTOTP(secret, lastCounter);
+    lastCounter = proof.counter;
+    return proof.code;
   }
   const backupURL = '/api/admin/download/backup?scope=full';
   async function downloadFullBackup() {
-    const backup = await request(backupURL, undefined, { method: 'GET', headers: { 'X-2FA-Code': await freshCode() } });
+    const code = await freshCode();
+    const backupTOTPCounter = lastCounter;
+    const backup = await request(backupURL, undefined, { method: 'GET', headers: { 'X-2FA-Code': code } });
     expect(backup.headers()['content-type']).toBe('application/zip');
     fs.writeFileSync(path.join(root, 'real-full-backup.zip'), await backup.body());
+    return backupTOTPCounter;
   }
-  async function saveRestoreFixture() {
+  async function saveRestoreFixture(backupTOTPCounter) {
     await context.storageState({ path: path.join(root, 'qualification-browser-state.json') });
     fs.writeFileSync(path.join(root, 'qualification-scope.json'), JSON.stringify({ agentId, pingTaskId }));
     // Keep credentials with the downloaded backup in the disposable fixture.
-    fs.writeFileSync(path.join(root, 'migration-credentials.json'), JSON.stringify({ username: 'e2e-user', password: fixturePassword, secret }), { mode: 0o600 });
+    fs.writeFileSync(path.join(root, 'migration-credentials.json'), JSON.stringify({
+      username: 'e2e-user', password: fixturePassword, secret, backupTOTPCounter,
+    }), { mode: 0o600 });
   }
   async function mutate(method, args) {
     return rpc('file', method, { agentId, ...args });
@@ -483,12 +467,8 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       const gate = page.locator('.km-account-2fa-gate');
       await expect(gate).toBeVisible();
       await beginVerification(gate);
-      const counter = Math.floor(Date.now() / 30_000);
-      const validCodes = [-1, 0, 1].map(n => totp(secret, counter + n));
-      let invalid = '000000';
-      while (validCodes.includes(invalid)) invalid = String(Number(invalid) + 1).padStart(6, '0');
       const rejected = page.waitForResponse(r => r.url().endsWith('.TrustedCredentialService/CompleteVerification'));
-      await verifyCredential(gate, invalid);
+      await verifyCredential(gate, invalidTOTP(secret));
       expect((await rejected).ok()).toBe(false);
       await expect(gate).toBeVisible();
       await expect(gate.getByRole('alert')).toBeVisible();
@@ -803,9 +783,9 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       expect((await withoutCode.json()).message).toBe('2FA code is required');
       const invalidCode = await request(backupURL, undefined, { method: 'GET', allowFailure: true, headers: { 'X-2FA-Code': 'invalid' } });
       expect(invalidCode.status()).toBe(401);
-      await downloadFullBackup();
+      const backupTOTPCounter = await downloadFullBackup();
       if (skipCSV) {
-        await saveRestoreFixture();
+        await saveRestoreFixture(backupTOTPCounter);
         fs.writeFileSync(path.join(artifacts, 'database-scenario-scope.json'), JSON.stringify({
           database_only: true, csv_scenarios: false, totp_protected_backup: true,
           completed: [...completedSteps, backupStage],
@@ -925,16 +905,16 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       // so the backup never waits on a process frozen while holding its lock.
       await expect.poll(() => JSON.parse(fs.readFileSync(path.join(root, 'panel/data/exports-v2/worker.json'))).active_job || '').toBe('');
       execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGSTOP', 'komari-e2e-export.service']);
-      let pausedBackup;
+      let backupTOTPCounter;
       try {
-        pausedBackup = await create({ mode: 'raw', category: 'resource', end: new Date(end.getTime()-1000).toISOString() });
+        const pausedBackup = await create({ mode: 'raw', category: 'resource', end: new Date(end.getTime()-1000).toISOString() });
         expect(pausedBackup.id).toBeTruthy();
         await request(`/api/admin/history/export/${pausedBackup.id}/pause`, {});
         expect((await (await request(`/api/admin/history/export/${pausedBackup.id}`, undefined, { method: 'GET' })).json()).data.status).toBe('paused');
-        await downloadFullBackup();
+        backupTOTPCounter = await downloadFullBackup();
         fs.writeFileSync(path.join(root, 'export-restore-proof.json'), JSON.stringify({ ready: proofs.map(p=>p.job), paused: pausedBackup }));
       } finally { execFileSync('sudo', ['systemctl', 'kill', '--kill-whom=all', '--signal=SIGCONT', 'komari-e2e-export.service']); }
-      await saveRestoreFixture();
+      await saveRestoreFixture(backupTOTPCounter);
     });
   } finally {
     fs.writeFileSync(path.join(artifacts, 'browser-events.json'), JSON.stringify(events, null, 2));
