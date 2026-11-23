@@ -45,6 +45,7 @@ func (passkeyService) BeginPasskeyLogin(ctx context.Context, r *connect.Request[
 	}
 	options, err := passkeyOptions(opt)
 	if err != nil {
+		passkeycredential.CancelLogin(token, ip)
 		return nil, credentialConnectError(err)
 	}
 	res := credentialResponse(&v1.BeginPasskeyLoginResponse{Options: options})
