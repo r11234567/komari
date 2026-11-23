@@ -83,10 +83,10 @@ type Options struct {
 	// AllowListen allows net and http servers to bind local ports. Outbound
 	// client connections do not require this permission.
 	AllowListen bool
-	// BlockPrivateNet blocks outbound net, tls, fetch, XMLHttpRequest, and
-	// HTTP client connections to loopback, private (RFC1918/ULA/CGNAT),
-	// link-local, and non-global-unicast addresses.
-	BlockPrivateNet bool
+	// AllowPrivateNet permits outbound net, tls, fetch, XMLHttpRequest, and HTTP
+	// client connections to loopback, private (RFC1918/ULA/CGNAT), link-local,
+	// NAT64, and non-global-unicast addresses. The default (false) blocks them.
+	AllowPrivateNet bool
 	// AllowAllFileAccess allows require and fs paths to escape BaseDir. The
 	// default confines both module and filesystem access to BaseDir.
 	AllowAllFileAccess bool
@@ -156,7 +156,7 @@ func New(script string, options Options) (*Runtime, error) {
 	if client == nil {
 		client = &http.Client{Timeout: timeout}
 	}
-	if options.BlockPrivateNet {
+	if !options.AllowPrivateNet {
 		client = cloneClientWithPrivateNetBlock(client)
 	}
 
@@ -246,7 +246,7 @@ func New(script string, options Options) (*Runtime, error) {
 			runtime.consoleMod.WriteError(vm, values, false)
 		})
 		runtime.childProcessModule = childprocess.New(host, filesystem, options.AllowExec, maxChildOutputBytes)
-		runtime.netModule = netmodule.New(host, options.AllowListen, options.BlockPrivateNet)
+		runtime.netModule = netmodule.New(host, options.AllowListen, !options.AllowPrivateNet)
 		runtime.tlsModule = tlsmodule.New(host, runtime.netModule)
 		runtime.httpModule = httpmodule.New(host, options.AllowListen, maxHTTPBodyBytes)
 		runtime.cryptoModule = cryptomodule.New(host)

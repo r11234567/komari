@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/oauth"
 	"github.com/komari-monitor/komari/web/security"
 )
 
@@ -20,7 +21,12 @@ func BindingExternalAccount(c *gin.Context) {
 		api.RespondError(c, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
-	security.SetSensitiveCookie(c, "binding_external_account", user.UUID, 300)
+	nonce, err := oauth.IssueBindingToken(user.UUID, session)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to initiate OAuth binding")
+		return
+	}
+	security.SetSensitiveCookie(c, security.OAuthBindCookieName, nonce, 300)
 	api.RespondSuccess(c, gin.H{"redirect_url": "/api/oauth"})
 }
 

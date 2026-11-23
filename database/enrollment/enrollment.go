@@ -181,6 +181,7 @@ var (
 type cachedPollResult struct {
 	attempt   Attempt
 	issued    Issued
+	epoch     uint64
 	expiresAt time.Time
 }
 
@@ -216,7 +217,7 @@ func Poll(deviceCode string) (Attempt, *Issued, error) {
 	// return the same issued credentials to handle network packet loss on the initial response.
 	if val, ok := pollGraceCache.Load(code); ok {
 		cached := val.(*cachedPollResult)
-		if time.Now().UTC().Before(cached.expiresAt) {
+		if time.Now().UTC().Before(cached.expiresAt) && cached.epoch == dbcore.CurrentSecurityEpoch() {
 			issuedCopy := cached.issued
 			return cached.attempt, &issuedCopy, nil
 		}
@@ -268,6 +269,7 @@ func Poll(deviceCode string) (Attempt, *Issued, error) {
 		pollGraceCache.Store(code, &cachedPollResult{
 			attempt:   attempt,
 			issued:    credentials,
+			epoch:     dbcore.CurrentSecurityEpoch(),
 			expiresAt: now.Add(60 * time.Second),
 		})
 		// Atomic single-use invalidation: once credentials have been issued, the attempt row is deleted
@@ -429,33 +431,58 @@ func Revoke(clientUUID, reason string) error {
 		}).Error
 }
 
-// ResolveAccessToken identifies the machine presenting an access token.
-func ResolveAccessToken(accessToken string) (string, error) {
+// ErrEpochMismatch indicates the panel's security epoch advanced (e.g. after a
+// backup restore) and the agent must re-negotiate credentials via signed refresh.
+var ErrEpochMismatch = errors.New("credential security epoch requires refresh")
+
+// LookupAccessToken performs a single database lookup for accessToken,
+// returning knownRecord=true even when a matching Agent credential is expired
+// or revoked so rate-limit lanes classify known Agents without querying twice.
+func LookupAccessToken(accessToken string) (clientUUID string, knownRecord bool, err error) {
+	return LookupAccessTokenContext(context.Background(), accessToken)
+}
+
+func LookupAccessTokenContext(ctx context.Context, accessToken string) (clientUUID string, knownRecord bool, err error) {
+	return lookupAccessTokenDB(dbcore.GetDBInstance().WithContext(ctx), accessToken, time.Now().UTC())
+}
+
+func lookupAccessTokenDB(db *gorm.DB, accessToken string, now time.Time) (string, bool, error) {
 	digest := hashToken(accessToken)
 	if digest == "" {
-		return "", errors.New("an access token is required")
+		return "", false, errors.New("an access token is required")
+	}
+	if db == nil {
+		return "", false, errors.New("database unavailable")
 	}
 	var row models.AgentCredential
-	now := time.Now().UTC()
-	if err := dbcore.GetDBInstance().Where("access_token_hash = ? OR previous_access_hash = ?", digest, digest).First(&row).Error; err != nil {
-		return "", err
+	if err := db.Where("access_token_hash = ? OR previous_access_hash = ?", digest, digest).First(&row).Error; err != nil {
+		return "", false, err
 	}
 	// SQLite stores datetime offsets in text. Comparing a legacy local-offset
 	// expiry to UTC text can accept an expired handoff. Compare actual instants
 	// after decoding, independently of the host timezone or persisted offset.
 	if digest != row.AccessTokenHash && (row.PreviousAccessExpires == nil || !now.Before(*row.PreviousAccessExpires)) {
-		return "", errors.New("the access token handoff has expired")
+		return "", true, errors.New("the access token handoff has expired")
 	}
 	if row.RevokedAt != nil {
-		return "", errors.New("these credentials were revoked")
+		return "", true, errors.New("these credentials were revoked")
 	}
 	if (row.EnrollmentExpiresAt != nil && !now.Before(*row.EnrollmentExpiresAt)) || (row.LifecycleVersion > 0 && !now.Before(row.RefreshExpiresAt)) {
-		return "", errors.New("machine authorization expired; administrator reapproval required")
+		return "", true, errors.New("machine authorization expired; administrator reapproval required")
 	}
 	if !now.Before(row.AccessExpiresAt) {
-		return "", errors.New("the access token has expired")
+		return "", true, errors.New("the access token has expired")
 	}
-	return row.Client, nil
+	if curEpoch := dbcore.CurrentSecurityEpoch(); curEpoch > 1 && row.SecurityEpoch < curEpoch {
+		return "", true, ErrEpochMismatch
+	}
+	return row.Client, true, nil
+}
+
+// ResolveAccessToken identifies the machine presenting an access token.
+func ResolveAccessToken(accessToken string) (string, error) {
+	clientUUID, _, err := LookupAccessToken(accessToken)
+	return clientUUID, err
 }
 
 // HasAccessTokenRecord reports whether accessToken matches a stored (possibly
@@ -466,21 +493,8 @@ func HasAccessTokenRecord(accessToken string) bool {
 }
 
 func hasAccessTokenRecordDB(db *gorm.DB, accessToken string) bool {
-	if db == nil {
-		return false
-	}
-	digest := hashToken(accessToken)
-	if digest == "" {
-		return false
-	}
-	var count int64
-	if err := db.Model(&models.AgentCredential{}).
-		Where("access_token_hash = ? OR previous_access_hash = ?", digest, digest).
-		Limit(1).
-		Count(&count).Error; err != nil {
-		return false
-	}
-	return count > 0
+	_, known, _ := lookupAccessTokenDB(db, accessToken, time.Now().UTC())
+	return known
 }
 
 // GetCredential returns the stored credential record for a machine, which is
@@ -506,9 +520,8 @@ func ResolveAgentPublicKey(clientUUID string) (ed25519.PublicKey, error) {
 
 // issueLocked mints a pair inside an open transaction.
 func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int32, scopes []string, now time.Time) (Issued, error) {
-	accessToken := utils.GenerateRandomString(43)
 	refreshToken := utils.GenerateRandomString(43)
-	if accessToken == "" || refreshToken == "" {
+	if refreshToken == "" {
 		return Issued{}, errors.New("failed to generate credentials")
 	}
 	policy, err := loadCredentialPolicy(tx)
@@ -517,6 +530,10 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 	}
 	absoluteExpiry := now.Add(time.Duration(policy.AbsoluteDays) * credentialDay)
 	accessExpiry := minDeadline(now.Add(AccessTokenLifetime), absoluteExpiry)
+	accessToken, err := mintAccessToken(accessExpiry)
+	if err != nil {
+		return Issued{}, fmt.Errorf("mint access token: %w", err)
+	}
 	refreshExpiry := minDeadline(now.Add(time.Duration(policy.IdleDays)*credentialDay), absoluteExpiry)
 	graceExpiry := now.Add(refreshGracePeriod)
 
@@ -543,6 +560,7 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 			"agent_key_id":             keyID,
 			"key_algorithm":            algorithm,
 			"scopes":                   encodeScopes(scopes),
+			"security_epoch":           dbcore.CurrentSecurityEpoch(),
 			"updated_at":               now,
 		}
 		if err := tx.Where("client = ?", clientUUID).Delete(&models.AgentRefreshUse{}).Error; err != nil {
@@ -568,6 +586,7 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 			AgentKeyID:       keyID,
 			KeyAlgorithm:     algorithm,
 			Scopes:           encodeScopes(scopes),
+			SecurityEpoch:    dbcore.CurrentSecurityEpoch(),
 			CreatedAt:        now,
 		}
 		if err := tx.Create(&row).Error; err != nil {

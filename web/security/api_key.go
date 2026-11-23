@@ -12,10 +12,16 @@ func AuthSourceIP(c *gin.Context) string {
 	return requestmeta.ClientIP(c.Request)
 }
 
-type APIKeyAttemptLimiter struct{ budget *RateLimitController }
+type APIKeyAttemptLimiter struct {
+	budget     *RateLimitController
+	probeTotal *RateLimitController
+}
 
 func NewAPIKeyAttemptLimiter() *APIKeyAttemptLimiter {
-	return &APIKeyAttemptLimiter{budget: NewRateLimitController(true)}
+	return &APIKeyAttemptLimiter{
+		budget:     NewRateLimitController(true),
+		probeTotal: NewRateLimitController(true),
+	}
 }
 
 // Ten failures can burst; one failure replenishes every six seconds. This
@@ -36,6 +42,15 @@ func (l *APIKeyAttemptLimiter) Allow(source string, now time.Time) (bool, time.D
 
 func (l *APIKeyAttemptLimiter) Failure(source string, now time.Time) {
 	l.budget.allow("api-auth:"+source, 1.0/6, 10, now)
+}
+
+// AllowUnknownAgentProbe charges both budgets before an unclassified token
+// can reach the credential table. The global budget also bounds rotating IPs.
+func (l *APIKeyAttemptLimiter) AllowUnknownAgentProbe(sourceIP string, now time.Time) (bool, time.Duration) {
+	if ok, retry := l.budget.allow("agent-probe:"+sourceIP, 1.0/3, 20, now); !ok {
+		return false, retry
+	}
+	return l.probeTotal.allow("agent-probe-total", 8, 40, now)
 }
 
 type APITokenUsageLimiter struct{ budget *RateLimitController }

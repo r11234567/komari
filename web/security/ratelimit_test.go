@@ -195,6 +195,36 @@ func TestRateLimitMiddlewareServesHonestRetryAfterHeader(t *testing.T) {
 	}
 }
 
+func TestPasskeyBeginDoesNotSpendCompleteOrPasswordBudget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(NewRateLimitController(false).Middleware())
+	const begin = "/komari.credential.v1.PasskeyLoginService/BeginPasskeyLogin"
+	const complete = "/komari.credential.v1.PasskeyLoginService/CompletePasskeyLogin"
+	const password = "/komari.credential.v1.PasswordLoginService/BeginPasswordLogin"
+	for _, path := range []string{begin, complete, password} {
+		router.POST(path, func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	}
+	post := func(path string) int {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+		return rec.Code
+	}
+	for range 5 {
+		if status := post(begin); status != http.StatusNoContent {
+			t.Fatalf("unexpected begin status %d", status)
+		}
+	}
+	if status := post(begin); status != http.StatusTooManyRequests {
+		t.Fatalf("begin should be throttled, got %d", status)
+	}
+	for _, path := range []string{complete, password} {
+		if status := post(path); status != http.StatusNoContent {
+			t.Fatalf("%s shared the saturated begin budget, got %d", path, status)
+		}
+	}
+}
+
 func TestRateLimitBoundsStreamOpeningsButSkipsPreflight(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	controller := NewRateLimitController(true)

@@ -1,7 +1,9 @@
 package public
 
 import (
+	"crypto/subtle"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -13,8 +15,6 @@ import (
 	"github.com/komari-monitor/komari/web/oauth"
 	"github.com/komari-monitor/komari/web/security"
 )
-
-const oauthReturnToCookie = "oauth_return_to"
 
 func safeOAuthReturnTo(value string) string {
 	value = strings.TrimSpace(value)
@@ -51,28 +51,40 @@ func OAuth(c *gin.Context) {
 		return
 	}
 
-	security.SetSensitiveCookie(c, "oauth_state", state, 3600)
-	security.SetSensitiveCookie(c, oauthReturnToCookie, safeOAuthReturnTo(c.Query("returnTo")), 3600)
+	security.SetSensitiveCookie(c, security.OAuthStateCookieName, state, 3600)
+	security.SetSensitiveCookie(c, security.OAuthReturnToCookieName, safeOAuthReturnTo(c.Query("returnTo")), 3600)
 
 	c.Redirect(302, authURL)
 }
 
 // /api/oauth_callback
 func OAuthCallback(c *gin.Context) {
-
-	// 验证state防止CSRF攻击
-	state, _ := c.Cookie("oauth_state")
-	security.SetSensitiveCookie(c, "oauth_state", "", -1)
-
+	state, _ := c.Cookie(security.OAuthStateCookieName)
 	returnTo := safeOAuthReturnTo("")
-	if destination, err := c.Cookie(oauthReturnToCookie); err == nil {
+	if destination, err := c.Cookie(security.OAuthReturnToCookieName); err == nil {
 		returnTo = safeOAuthReturnTo(destination)
 	}
-	security.SetSensitiveCookie(c, oauthReturnToCookie, "", -1)
+	bindNonce, _ := c.Cookie(security.OAuthBindCookieName)
+	security.ClearCookie(
+		c,
+		security.OAuthStateCookieName,
+		security.LegacyOAuthStateCookieName,
+		security.OAuthReturnToCookieName,
+		security.LegacyOAuthReturnToCookieName,
+		security.OAuthBindCookieName,
+		security.LegacyOAuthBindCookieName,
+	)
+
+	oauthEnabled, _ := config.GetAs[bool](config.OAuthEnabledKey, false)
+	if !oauthEnabled {
+		c.JSON(http.StatusForbidden, gin.H{"status": "error", "error": "OAuth is not enabled"})
+		return
+	}
 
 	// 严格验证所有 OAuth 提供商的 state 匹配，防止跨站登录/账号绑定 CSRF
-	if state == "" || state != c.Query("state") {
-		c.JSON(400, gin.H{"status": "error", "error": "Invalid state"})
+	queryState := c.Query("state")
+	if state == "" || subtle.ConstantTimeCompare([]byte(state), []byte(queryState)) != 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Invalid state"})
 		return
 	}
 
@@ -84,33 +96,29 @@ func OAuthCallback(c *gin.Context) {
 	}
 	callbackURL, err := utils.GetCallbackURL(c)
 	if err != nil {
-		c.JSON(400, gin.H{"status": "error", "error": "Failed to resolve OAuth callback URL: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to resolve OAuth callback URL: " + err.Error()})
 		return
 	}
 	oidcUser, err := oauth.CurrentProvider().OnCallback(c, state, queries, callbackURL)
 	if err != nil {
-		c.JSON(500, gin.H{"status": "error", "error": "Failed to get user info: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "Failed to get user info: " + err.Error()})
 		return
 	}
 
 	// ID作为SSO ID
 	sso_id := fmt.Sprintf("%s_%s", oauth.CurrentProvider().GetName(), oidcUser.UserId)
 
-	// 如果cookie中有binding_external_account，说明是绑定外部账号
-	// 否则是登录
-	uuid, _ := c.Cookie("binding_external_account")
-	security.SetSensitiveCookie(c, "binding_external_account", "", -1)
-	if uuid != "" {
-		// 绑定外部账号
+	// 若持有服务端登记且绑定当前会话的 bindNonce，则执行外部账号绑定；否则执行登录
+	if bindNonce != "" {
 		session, _ := c.Cookie(security.SessionCookieName)
 		user, err := accounts.GetUserBySession(session)
-		if err != nil || user.UUID != uuid {
-			c.JSON(500, gin.H{"status": "error", "message": "Binding failed"})
+		if err != nil || !oauth.ConsumeBindingToken(bindNonce, user.UUID, session) {
+			c.JSON(http.StatusForbidden, gin.H{"status": "error", "message": "Binding failed"})
 			return
 		}
 		err = accounts.BindingExternalAccount(user.UUID, sso_id)
 		if err != nil {
-			c.JSON(500, gin.H{"status": "error", "message": "Binding failed"})
+			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Binding failed"})
 			return
 		}
 		auditlog.Log(c.ClientIP(), user.UUID, "bound external account (OAuth)"+fmt.Sprintf(",sso_id: %s", sso_id), "login")

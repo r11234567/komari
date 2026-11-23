@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/metric"
 )
 
@@ -70,7 +71,7 @@ func migrateFromPreviousStore(prevFingerprint string, cfg *MetricStoreConfig, ds
 	// A fresh custom target has no inferred default source to move. Do not
 	// create one just to run the retired raw-only copy routine.
 	if prevFingerprint == defaultSQLiteFingerprint() {
-		if _, err := os.Stat("./data/metrics.db"); os.IsNotExist(err) {
+		if _, err := os.Stat(datadir.Resolve("./data/metrics.db")); os.IsNotExist(err) {
 			return nil
 		} else if err != nil {
 			return fmt.Errorf("inspect previous metrics store: %w", err)

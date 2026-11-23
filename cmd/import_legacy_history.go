@@ -15,6 +15,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/datadir"
 	appconfig "github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/migrations"
 	"github.com/spf13/cobra"
@@ -47,7 +48,18 @@ var ImportLegacyHistoryCmd = &cobra.Command{
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("source database is not a regular file")
 		}
-		targetPath, err := filepath.Abs(flagsDatabaseFile())
+		pending, err := dbcore.PendingRestore(datadir.Root)
+		if err != nil {
+			return err
+		}
+		if pending {
+			return fmt.Errorf("complete the queued restore before importing legacy history")
+		}
+		layout, err := datadir.Open(datadir.Root)
+		if err != nil {
+			return err
+		}
+		targetPath, err := filepath.Abs(layout.Resolve(flagsDatabaseFile()))
 		if err != nil {
 			return fmt.Errorf("resolve target database: %w", err)
 		}

@@ -127,15 +127,26 @@ func (ctrl *CorsController) Middleware() gin.HandlerFunc {
 		varyBy(c.Writer.Header(), "Origin")
 		origin := c.GetHeader("Origin")
 		allowOrigin := ""
-		if len(c.Request.Header.Values("Origin")) == 1 && origin != "" && (OriginMatchesRequest(origin, c.Request) ||
-			OriginInAllowlist(origin, corsAllowedOrigins) ||
-			(extraOrigins != "" && OriginInAllowlist(origin, extraOrigins))) {
-			allowOrigin = origin
+		allowCredentials := false
+		if len(c.Request.Header.Values("Origin")) == 1 && origin != "" {
+			explicitMain, wildcardMain := MatchAllowlistOrigin(origin, corsAllowedOrigins)
+			var explicitExtra, wildcardExtra bool
+			if extraOrigins != "" {
+				explicitExtra, wildcardExtra = MatchAllowlistOrigin(origin, extraOrigins)
+			}
+			if OriginMatchesRequest(origin, c.Request) || explicitMain || explicitExtra {
+				allowOrigin = origin
+				allowCredentials = true
+			} else if wildcardMain || wildcardExtra {
+				allowOrigin = "*"
+			}
 		}
 
 		if allowOrigin != "" {
 			c.Header("Access-Control-Allow-Origin", allowOrigin)
-			c.Header("Access-Control-Allow-Credentials", "true")
+			if allowCredentials {
+				c.Header("Access-Control-Allow-Credentials", "true")
+			}
 			c.Header("Access-Control-Expose-Headers", corsResponseHeaders)
 		}
 

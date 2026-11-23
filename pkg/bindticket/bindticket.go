@@ -43,6 +43,7 @@ type Claims struct {
 	Type  string `json:"type"`
 	Aud   string `json:"aud"`
 	Scope string `json:"scope"`
+	Epoch uint64 `json:"epoch,omitempty"`
 	Jti   string `json:"jti"`
 	Iat   int64  `json:"iat"`
 	Exp   int64  `json:"exp"`
@@ -56,13 +57,21 @@ func Issue(userUUID string, key []byte) (string, int64, error) {
 // IssueWithDuration creates a ticket whose lifetime cannot exceed the standard
 // two-minute authorization window.
 func IssueWithDuration(userUUID string, key []byte, duration time.Duration) (string, int64, error) {
+	return IssueWithDurationAndEpoch(userUUID, key, duration, 1)
+}
+
+// IssueWithDurationAndEpoch creates a ticket bound to a specific security epoch.
+func IssueWithDurationAndEpoch(userUUID string, key []byte, duration time.Duration, epoch uint64) (string, int64, error) {
 	if duration <= 0 || duration > TicketDuration {
 		return "", 0, ErrInvalidDuration
 	}
-	return issueAt(userUUID, key, time.Now().UTC(), duration)
+	if epoch == 0 {
+		epoch = 1
+	}
+	return issueAt(userUUID, key, time.Now().UTC(), duration, epoch)
 }
 
-func issueAt(userUUID string, key []byte, now time.Time, duration time.Duration) (string, int64, error) {
+func issueAt(userUUID string, key []byte, now time.Time, duration time.Duration, epoch uint64) (string, int64, error) {
 	if len(key) == 0 {
 		return "", 0, ErrMissingKey
 	}
@@ -90,6 +99,7 @@ func issueAt(userUUID string, key []byte, now time.Time, duration time.Duration)
 		Type:  TicketType,
 		Aud:   TicketAudience,
 		Scope: TicketScope,
+		Epoch: epoch,
 		Jti:   jti,
 		Iat:   now.Unix(),
 		Exp:   exp,
@@ -113,6 +123,12 @@ func issueAt(userUUID string, key []byte, now time.Time, duration time.Duration)
 // Verify validates all ticket claims. Tickets remain valid until their expiry
 // and may authorize multiple enrollment operations during that window.
 func Verify(token string, key []byte) (*Claims, error) {
+	return VerifyWithEpoch(token, key, 0)
+}
+
+// VerifyWithEpoch validates all ticket claims and requires claims.Epoch to
+// match expectedEpoch when expectedEpoch > 0.
+func VerifyWithEpoch(token string, key []byte, expectedEpoch uint64) (*Claims, error) {
 	claims, _, err := parseAndVerifySignature(token, key)
 	if err != nil {
 		return nil, err
@@ -135,6 +151,9 @@ func Verify(token string, key []byte) (*Claims, error) {
 	}
 	if claims.Scope != TicketScope {
 		return nil, ErrInvalidScope
+	}
+	if expectedEpoch > 0 && claims.Epoch != expectedEpoch {
+		return nil, ErrInvalidToken
 	}
 	return claims, nil
 }

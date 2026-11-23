@@ -34,6 +34,7 @@ import (
 	"github.com/Calcium-Ion/moejs"
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/corn"
 	"github.com/komari-monitor/komari/pkg/jsruntime"
 	"github.com/komari-monitor/komari/pkg/jsruntime/require"
@@ -239,20 +240,11 @@ func OwnsHTTPRoute(method, pattern string) bool {
 	return false
 }
 
-// HTMLInjectHandler installs plugin HTML injection around the application
-// handler. Every text/html response is buffered and gets the fragments
-// registered through server.injectHTML inserted before </head> and </body>;
-// all other responses (JSON, assets, streams, downloads...) pass through to
-// the client unmodified.
-func HTMLInjectHandler(next http.Handler) http.Handler {
-	return global.htmlInjectHandler(next)
-}
-
 func (m *Manager) stateStore() *State {
 	m.stateMu.Lock()
 	defer m.stateMu.Unlock()
-	if m.state == nil || m.state.path != filepath.Join(DataDir, stateFileName) {
-		m.state = openState(filepath.Join(DataDir, stateFileName))
+	if m.state == nil || m.state.path != filepath.Join(datadir.Resolve(DataDir), stateFileName) {
+		m.state = openState(filepath.Join(datadir.Resolve(DataDir), stateFileName))
 	}
 	return m.state
 }
@@ -299,7 +291,7 @@ func (m *Manager) load(short string) error {
 	if isLegacyPasskeyPlugin(short) {
 		return fmt.Errorf("legacy Passkey plugin is retired; configure native Passkey instead")
 	}
-	dir := filepath.Join(DataDir, short)
+	dir := filepath.Join(datadir.Resolve(DataDir), short)
 	info, err := readManifest(short)
 	if err != nil {
 		return err
@@ -329,7 +321,7 @@ func (m *Manager) load(short string) error {
 	m.instances[short] = inst
 	m.mu.Unlock()
 
-	storageDir := filepath.Join(StorageDir, short)
+	storageDir := filepath.Join(datadir.Resolve(StorageDir), short)
 	if err := os.MkdirAll(storageDir, 0755); err != nil {
 		m.dropInstance(short, inst)
 		return fmt.Errorf("create plugin storage dir: %w", err)
@@ -341,7 +333,7 @@ func (m *Manager) load(short string) error {
 		NodeJS:              info.Permissions.Node,
 		AllowExec:           info.Permissions.AllowExec,
 		AllowListen:         info.Permissions.AllowListen,
-		BlockPrivateNet:     !strings.EqualFold(strings.TrimSpace(os.Getenv("KOMARI_PLUGIN_ALLOW_PRIVATE_NET")), "true"),
+		AllowPrivateNet:     strings.EqualFold(strings.TrimSpace(os.Getenv("KOMARI_PLUGIN_ALLOW_PRIVATE_NET")), "true"),
 		AllowAllFileAccess:  info.Permissions.AllowAllFileAccess,
 		MaxHTTPBodyBytes:    info.Permissions.MaxHTTPBodyBytes,
 		MaxChildOutputBytes: info.Permissions.MaxChildOutputBytes,
@@ -408,7 +400,7 @@ func (m *Manager) dropInstance(short string, inst *Instance) {
 	inst.runtime = nil
 	inst.host = nil
 	clear(inst.handlers)
-	clear(inst.statics)
+	inst.closeStaticRoots()
 	clear(inst.rpcMethods)
 	inst.cronJobs = nil
 	inst.mu.Unlock()
@@ -467,7 +459,7 @@ func (m *Manager) unload(short string) error {
 	inst.runtime = nil
 	inst.host = nil
 	clear(inst.handlers)
-	clear(inst.statics)
+	inst.closeStaticRoots()
 	clear(inst.rpcMethods)
 	inst.cronJobs = nil
 	inst.mu.Unlock()
@@ -572,7 +564,7 @@ func (m *Manager) setEnabled(short string, enabled, approved bool) error {
 }
 
 func (m *Manager) loadAll() error {
-	entries, err := os.ReadDir(DataDir)
+	entries, err := os.ReadDir(datadir.Resolve(DataDir))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -650,7 +642,7 @@ func (m *Manager) reload(short string) error {
 // the load failure for the startup error summary.
 func (m *Manager) disableWithError(short string, st PluginState, err error) error {
 	st.Enabled = false
-	if short == legacyPasskeyPluginShort {
+	if isLegacyPasskeyPlugin(short) {
 		st.ApprovedPermissionsHash = ""
 		st.ApprovedPackageDigest = ""
 	}
@@ -660,7 +652,7 @@ func (m *Manager) disableWithError(short string, st PluginState, err error) erro
 }
 
 func (m *Manager) list() []Info {
-	entries, err := os.ReadDir(DataDir)
+	entries, err := os.ReadDir(datadir.Resolve(DataDir))
 	if err != nil {
 		return []Info{}
 	}
@@ -696,7 +688,7 @@ func (m *Manager) delete(short string) error {
 	if !validShort(short) {
 		return fmt.Errorf("invalid plugin short %q", short)
 	}
-	dir := filepath.Join(DataDir, short)
+	dir := filepath.Join(datadir.Resolve(DataDir), short)
 	if _, err := os.Stat(dir); err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("%w: %q", ErrNotInstalled, short)
@@ -706,7 +698,7 @@ func (m *Manager) delete(short string) error {
 	if err := os.RemoveAll(dir); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(filepath.Join(StorageDir, short)); err != nil {
+	if err := os.RemoveAll(filepath.Join(datadir.Resolve(StorageDir), short)); err != nil {
 		return err
 	}
 	m.stateStore().delete(short)
@@ -736,7 +728,16 @@ func ResolvePublicFile(short, name string) (string, error) {
 
 // OpenPublicFile securely opens a public plugin file beneath DataDir.
 func OpenPublicFile(short, name string) (*os.File, error) {
-	if err := validatePublicFile(short, name); err != nil {
+	if err := validateDeclaredPageFile(short, name, false); err != nil {
+		return nil, err
+	}
+	return OpenFile(short, name)
+}
+
+// OpenAdminPageFile securely opens a declared admin or public iframe page asset
+// beneath DataDir for authenticated administrator requests.
+func OpenAdminPageFile(short, name string) (*os.File, error) {
+	if err := validateDeclaredPageFile(short, name, true); err != nil {
 		return nil, err
 	}
 	return OpenFile(short, name)
@@ -778,6 +779,10 @@ var allowedRootPublicAssetExtensions = map[string]struct{}{
 }
 
 func validatePublicFile(short, name string) error {
+	return validateDeclaredPageFile(short, name, false)
+}
+
+func validateDeclaredPageFile(short, name string, allowAdmin bool) error {
 	if !validShort(short) {
 		return fmt.Errorf("invalid plugin short %q", short)
 	}
@@ -810,8 +815,18 @@ func validatePublicFile(short, name string) error {
 	if _, blocked := blockedPublicPluginExtensions[ext]; blocked {
 		return fmt.Errorf("plugin file %q is not public", name)
 	}
+	if !allowAdmin {
+		for _, page := range info.Pages {
+			if page.Visibility != models.PageVisibilityPublic && name == filepath.Clean(strings.TrimPrefix(page.File, "/")) {
+				return fmt.Errorf("plugin page %q is not public", name)
+			}
+		}
+	}
 	for _, page := range info.Pages {
-		if page.Visibility != models.PageVisibilityPublic || page.Type != models.PageTypeIframe {
+		if page.Type != models.PageTypeIframe {
+			continue
+		}
+		if page.Visibility != models.PageVisibilityPublic && (!allowAdmin || page.Visibility != models.PageVisibilityAdmin) {
 			continue
 		}
 		pageFile := filepath.Clean(strings.TrimPrefix(page.File, "/"))
@@ -831,7 +846,7 @@ func validatePublicFile(short, name string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("plugin page %q is not public", name)
+	return fmt.Errorf("plugin page %q is not declared", name)
 }
 
 // ResolveFile returns the absolute path of a file inside an installed plugin
@@ -842,7 +857,7 @@ func ResolveFile(short, name string) (string, error) {
 		return "", err
 	}
 	_ = file.Close()
-	return filepath.Join(DataDir, short, name), nil
+	return filepath.Join(datadir.Resolve(DataDir), short, name), nil
 }
 
 // OpenFile securely opens a regular file below an installed plugin directory.
@@ -855,7 +870,7 @@ func OpenFile(short, name string) (*os.File, error) {
 	if !filepath.IsLocal(name) {
 		return nil, fmt.Errorf("invalid plugin file path %q", name)
 	}
-	root, err := os.OpenRoot(filepath.Join(DataDir, short))
+	root, err := os.OpenRoot(filepath.Join(datadir.Resolve(DataDir), short))
 	if err != nil {
 		return nil, err
 	}

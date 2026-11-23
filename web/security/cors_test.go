@@ -182,6 +182,32 @@ func TestCorsMiddlewareSkipsNonAPIPaths(t *testing.T) {
 	}
 }
 
+func TestCorsMiddlewareLegacyWildcardNeverSendsCredentials(t *testing.T) {
+	router := setupCORSRouter(true, "*")
+
+	foreign := performCORSRequest(router, http.MethodGet, "https://api.example/api/ping", "api.example", "https://foreign.example")
+	if foreign.Code != http.StatusOK {
+		t.Fatalf("foreign status = %d, want %d", foreign.Code, http.StatusOK)
+	}
+	if got := foreign.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("foreign Access-Control-Allow-Origin = %q, want *", got)
+	}
+	if got := foreign.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Fatalf("wildcard match leaked Access-Control-Allow-Credentials = %q", got)
+	}
+
+	sameOrigin := performCORSRequest(router, http.MethodGet, "https://api.example/api/ping", "api.example", "https://api.example")
+	if sameOrigin.Code != http.StatusOK {
+		t.Fatalf("same-origin status = %d, want %d", sameOrigin.Code, http.StatusOK)
+	}
+	if got := sameOrigin.Header().Get("Access-Control-Allow-Origin"); got != "https://api.example" {
+		t.Fatalf("same-origin Access-Control-Allow-Origin = %q", got)
+	}
+	if got := sameOrigin.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("same-origin Access-Control-Allow-Credentials = %q, want true", got)
+	}
+}
+
 func setupCORSRouter(enabled bool, allowlist string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()

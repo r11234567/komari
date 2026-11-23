@@ -25,9 +25,10 @@ func GetAllSessions() (sessions []models.Session, err error) {
 		return nil, err
 	}
 	now := time.Now().UTC()
+	curEpoch := dbcore.CurrentSecurityEpoch()
 	sessions = make([]models.Session, 0, len(all))
 	for _, s := range all {
-		if s.Expires.UTC().After(now) {
+		if s.Expires.UTC().After(now) && (curEpoch <= 1 || s.SecurityEpoch >= curEpoch) {
 			sessions = append(sessions, s)
 		}
 	}
@@ -40,13 +41,14 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 	session := utils.GenerateRandomString(32)
 
 	sessionRecord := models.Session{
-		UUID:         uuid,
-		Session:      SessionIDForCookie(session),
-		Expires:      time.Now().UTC().Add(time.Duration(expires) * time.Second),
-		UserAgent:    userAgent,
-		Ip:           ip,
-		LoginMethod:  login_method,
-		LatestOnline: time.Now().UTC(),
+		UUID:          uuid,
+		Session:       SessionIDForCookie(session),
+		SecurityEpoch: dbcore.CurrentSecurityEpoch(),
+		Expires:       time.Now().UTC().Add(time.Duration(expires) * time.Second),
+		UserAgent:     userAgent,
+		Ip:            ip,
+		LoginMethod:   login_method,
+		LatestOnline:  time.Now().UTC(),
 	}
 	err := db.Create(&sessionRecord).Error
 	if err != nil {
@@ -123,6 +125,9 @@ func findSessionRecord(cookie string) (models.Session, error) {
 		return models.Session{}, err
 	}
 	if !record.Expires.UTC().After(time.Now().UTC()) {
+		return models.Session{}, gorm.ErrRecordNotFound
+	}
+	if curEpoch := dbcore.CurrentSecurityEpoch(); curEpoch > 1 && record.SecurityEpoch < curEpoch {
 		return models.Session{}, gorm.ErrRecordNotFound
 	}
 	return record, nil

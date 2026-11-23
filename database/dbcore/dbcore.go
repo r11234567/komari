@@ -18,12 +18,13 @@ import (
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/billing"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/internal/diagnostics"
+	"github.com/komari-monitor/komari/internal/restorearchive"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/historyexport"
 	"github.com/komari-monitor/komari/pkg/metric"
 	"github.com/komari-monitor/komari/pkg/migrations"
-	"github.com/komari-monitor/komari/utils/fsmove"
 	logger "github.com/komari-monitor/komari/utils/log"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -38,14 +39,29 @@ func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}, o
 		normExclude[abs] = struct{}{}
 	}
 
-	out, err := os.Create(dstZip)
+	absZip, err := filepath.Abs(dstZip)
 	if err != nil {
 		return err
 	}
+	// Keep sensitive backup contents private even in existing backup directories
+	// with wider permissions. Publish the complete archive by replacing the entry.
+	out, err := os.CreateTemp(filepath.Dir(absZip), ".komari-backup-*.zip")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(out.Name())
 	defer out.Close()
+	normExclude[absZip] = struct{}{}
+	normExclude[out.Name()] = struct{}{}
 
 	zw := zip.NewWriter(out)
-	defer zw.Close()
+	marker, err := zw.Create(restorearchive.MarkupName)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(marker, "full"); err != nil {
+		return err
+	}
 
 	addFile := func(path string, info os.FileInfo, zipName string) error {
 		if info.IsDir() {
@@ -98,6 +114,7 @@ func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}, o
 			return nil
 		}
 		_, excluded := normExclude[path]
+		excluded = excluded || rel == restorearchive.MarkupName
 		_, replaced := overlay[rel]
 		if excluded || replaced {
 			if info.IsDir() {
@@ -127,13 +144,26 @@ func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}, o
 			return err
 		}
 	}
-	return zw.Close()
+	if err := zw.Close(); err != nil {
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	if err := datadir.Rename(out.Name(), absZip); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(absZip))
 }
 
 // Automatic upgrade/pre-restore packages use the same portable queue snapshot
 // as explicit full backups. The panel is stopped here; an old standalone
 // worker may still be alive, so its mutations must be excluded as well.
 func backupDataDirectory(dataDir, destination string, exclude map[string]struct{}, exportLocked bool, extraOverlays ...map[string]string) error {
+	exclude = mergeReservedDataExcludes(dataDir, exclude)
 	queueDir := filepath.Join(dataDir, "exports-v2")
 	if _, err := os.Stat(filepath.Join(queueDir, "queue.db")); os.IsNotExist(err) {
 		return zipDirectoryExcluding(dataDir, destination, exclude, extraOverlays...)
@@ -156,9 +186,13 @@ func backupDataDirectory(dataDir, destination string, exclude map[string]struct{
 		}
 		defer release()
 	}
-	temp, err := os.MkdirTemp(filepath.Dir(dataDir), ".komari-export-backup-*")
+	tempParent := filepath.Dir(destination)
+	temp, err := os.MkdirTemp(tempParent, ".komari-export-backup-*")
 	if err != nil {
-		return err
+		temp, err = os.MkdirTemp("", ".komari-export-backup-*")
+		if err != nil {
+			return err
+		}
 	}
 	defer os.RemoveAll(temp)
 	snapshot := filepath.Join(temp, "exports-v2")
@@ -215,36 +249,9 @@ func snapshotExternalDatabaseForBackup(customPath string) (string, error) {
 	return snapDir, nil
 }
 
-// removeAllInDirExcept 删除 dir 下除 exclude 指定绝对路径外的所有文件和文件夹
-func removeAllInDirExcept(dir string, exclude map[string]struct{}) error {
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		return err
-	}
-	normExclude := make(map[string]struct{}, len(exclude))
-	for p := range exclude {
-		abs, _ := filepath.Abs(p)
-		normExclude[abs] = struct{}{}
-	}
-	entries, err := os.ReadDir(absDir)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		full := filepath.Join(absDir, e.Name())
-		if _, ok := normExclude[full]; ok {
-			continue
-		}
-		if err := os.RemoveAll(full); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // unzipToDir 将 zipPath 解压到 dstDir，包含路径遍历保护
 func unzipToDir(zipPath, dstDir string) error {
-	zr, err := zip.OpenReader(zipPath)
+	zr, err := restorearchive.Open(zipPath)
 	if err != nil {
 		return err
 	}
@@ -290,9 +297,12 @@ func unzipToDir(zipPath, dstDir string) error {
 			rc.Close()
 			return err
 		}
-		_ = out.Chmod(perm)
-		out.Close()
-		rc.Close()
+		if err := errors.Join(out.Chmod(perm), out.Close(), rc.Close()); err != nil {
+			return err
+		}
+		if err := atomicRestoreCheckpoint("extract-entry"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -332,11 +342,14 @@ func validateRestoredSQLite(path, label string) error {
 	return nil
 }
 
-// restoreStagedBackup extracts and validates the entire archive before it
-// replaces data/. Directory renames keep the previous data intact if the new
-// package cannot be prepared or published.
+// restoreStagedBackup extracts and validates the entire archive inside the same
+// volume under dataDir/generations/ before switching entries via atomic
+// same-filesystem renames and current.json manifest checkpoints.
 func restoreStagedBackup(dataDir string) error {
-	backupZipPath := filepath.Join(dataDir, "backup.zip")
+	if err := RecoverPendingGeneration(dataDir); err != nil {
+		return fmt.Errorf("recover pending generation: %w", err)
+	}
+	backupZipPath := filepath.Join(dataDir, backupArchiveFileName)
 	if _, err := os.Stat(backupZipPath); err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -344,59 +357,28 @@ func restoreStagedBackup(dataDir string) error {
 		return fmt.Errorf("inspect staged backup: %w", err)
 	}
 
-	stageDir, err := os.MkdirTemp(filepath.Dir(dataDir), ".komari-restore-*")
-	if err != nil {
+	genRoot := filepath.Join(dataDir, generationsDirName)
+	if err := os.MkdirAll(genRoot, 0o700); err != nil {
+		return fmt.Errorf("create generations directory: %w", err)
+	}
+	stageDir := filepath.Join(genRoot, newGenerationID("gen"))
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
 		return fmt.Errorf("create restore staging directory: %w", err)
 	}
-	stagePublished := false
+	manifestCommitted := false
 	defer func() {
-		if !stagePublished {
+		if !manifestCommitted {
 			_ = os.RemoveAll(stageDir)
 		}
 	}()
-	if err := unzipToDir(backupZipPath, stageDir); err != nil {
-		return fmt.Errorf("extract backup into staging directory: %w", err)
-	}
-	if err := validateRestoredSQLite(filepath.Join(stageDir, "komari.db"), "komari.db"); err != nil {
+	newEpoch, err := prepareStagedGeneration(backupZipPath, stageDir, dataDir, func(stageDir string) (uint64, error) {
+		_, epoch, err := reconcileRestoreSecurityState(dataDir, stageDir)
+		return epoch, err
+	})
+	if err != nil {
 		return err
-	}
-	if err := retireRestoredLegacyPasskeyPlugin(stageDir); err != nil {
-		return fmt.Errorf("retire legacy passkey plugin state in backup: %w", err)
-	}
-	if err := preservePasskeySecurityStateForRestore(dataDir, stageDir); err != nil {
-		return fmt.Errorf("preserve passkey security state across restore: %w", err)
-	}
-	metricsPath := filepath.Join(stageDir, "metrics.db")
-	if _, err := os.Stat(metricsPath); err == nil {
-		if err := validateRestoredSQLite(metricsPath, "metrics.db"); err != nil {
-			return err
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-		err := metric.ValidateTelemetryBackup(ctx, metricsPath, filepath.Join(stageDir, "telemetry"))
-		cancel()
-		if err != nil {
-			return fmt.Errorf("validate restored telemetry bundle: %w", err)
-		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("inspect restored metrics.db: %w", err)
-	}
-	_ = os.Remove(filepath.Join(stageDir, "komari-backup-markup"))
-	queueDir := filepath.Join(stageDir, "exports-v2")
-	if _, err := os.Stat(queueDir); err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-		err = historyexport.ValidateAndRebindBackup(ctx, queueDir, dataDir)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("validate restored export queue: %w", err)
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Join(stageDir, "theme"), 0o755); err != nil {
-		return fmt.Errorf("prepare restored theme directory: %w", err)
 	}
 
-	backupDir := filepath.Join(filepath.Dir(dataDir), "backup")
 	if _, err := os.Stat(filepath.Join(dataDir, "exports-v2")); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		release, err := historyexport.LockMaintenance(ctx, filepath.Join(dataDir, "exports-v2"))
@@ -408,61 +390,136 @@ func restoreStagedBackup(dataDir string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.MkdirAll(backupDir, 0o755); err != nil {
-		return fmt.Errorf("create pre-restore backup directory: %w", err)
+
+	preRestorePath, err := writePreRestoreSnapshot(dataDir, backupZipPath)
+	if err != nil {
+		return err
 	}
+	if err := commitStagedGeneration(dataDir, stageDir, newEpoch, &manifestCommitted); err != nil {
+		return err
+	}
+	logger.Infof("dbcore", "[restore] verified generation published (epoch=%d); previous data saved to %s", newEpoch, preRestorePath)
+	return nil
+}
+
+func prepareStagedGeneration(backupZipPath, stageDir, publishDir string, reconcileSecurity func(string) (uint64, error)) (uint64, error) {
+	if err := unzipToDir(backupZipPath, stageDir); err != nil {
+		return 0, fmt.Errorf("extract backup into staging directory: %w", err)
+	}
+	if err := validateRestoredSQLite(filepath.Join(stageDir, "komari.db"), "komari.db"); err != nil {
+		return 0, err
+	}
+	if err := retireRestoredLegacyPasskeyPlugin(stageDir); err != nil {
+		return 0, fmt.Errorf("retire legacy passkey plugin state in backup: %w", err)
+	}
+	newEpoch, err := reconcileSecurity(stageDir)
+	if err != nil {
+		return 0, fmt.Errorf("reconcile security state across restore: %w", err)
+	}
+	metricsPath := filepath.Join(stageDir, "metrics.db")
+	if _, err := os.Stat(metricsPath); err == nil {
+		if err := validateRestoredSQLite(metricsPath, "metrics.db"); err != nil {
+			return 0, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		err := metric.ValidateTelemetryBackup(ctx, metricsPath, filepath.Join(stageDir, "telemetry"))
+		cancel()
+		if err != nil {
+			return 0, fmt.Errorf("validate restored telemetry bundle: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return 0, fmt.Errorf("inspect restored metrics.db: %w", err)
+	}
+	_ = os.Remove(filepath.Join(stageDir, restorearchive.MarkupName))
+	queueDir := filepath.Join(stageDir, "exports-v2")
+	if _, err := os.Stat(queueDir); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		err = historyexport.ValidateAndRebindBackup(ctx, queueDir, publishDir)
+		cancel()
+		if err != nil {
+			return 0, fmt.Errorf("validate restored export queue: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return 0, err
+	}
+	if err := os.MkdirAll(filepath.Join(stageDir, "theme"), 0o755); err != nil {
+		return 0, fmt.Errorf("prepare restored theme directory: %w", err)
+	}
+
+	return newEpoch, nil
+}
+
+func writePreRestoreSnapshot(dataDir, backupZipPath string) (string, error) {
+	return writePreRestoreSnapshotFrom(dataDir, dataDir, backupZipPath, configuredSQLiteFilePath())
+}
+
+func writePreRestoreSnapshotFrom(dataDir, activeDir, backupZipPath, custom string) (string, error) {
 	timestamp := time.Now().UTC().Format("20060102-150405")
-	preRestorePath := filepath.Join(backupDir, fmt.Sprintf("pre-restore-%s.zip", timestamp))
+	filename := fmt.Sprintf("pre-restore-%s-%d.zip", timestamp, time.Now().UnixNano())
+
 	var preRestoreOverlays []map[string]string
-	if custom := configuredSQLiteFilePath(); isCustomConfiguredSQLitePath(dataDir, custom) {
+	if isCustomConfiguredSQLitePath(activeDir, custom) {
 		extSnapDir, err := snapshotExternalDatabaseForBackup(custom)
 		if err != nil {
-			return fmt.Errorf("snapshot configured database before restore: %w", err)
+			return "", fmt.Errorf("snapshot configured database before restore: %w", err)
 		}
 		if extSnapDir != "" {
 			defer os.RemoveAll(extSnapDir)
 			preRestoreOverlays = append(preRestoreOverlays, map[string]string{"external-database": extSnapDir})
 		}
 	}
-	if err := backupDataDirectory(dataDir, preRestorePath, map[string]struct{}{backupZipPath: {}}, true, preRestoreOverlays...); err != nil {
-		return fmt.Errorf("preserve current data before restore: %w", err)
+
+	primaryDir := filepath.Join(filepath.Dir(dataDir), "backup")
+	primaryPath := filepath.Join(primaryDir, filename)
+	if mkErr := os.MkdirAll(primaryDir, 0o700); mkErr == nil {
+		if err := backupDataDirectory(activeDir, primaryPath, map[string]struct{}{backupZipPath: {}}, true, preRestoreOverlays...); err == nil {
+			return primaryPath, nil
+		} else {
+			_ = os.Remove(primaryPath)
+			// Fall back into the same volume when the parent mount is read-only.
+			fallbackDir := filepath.Join(dataDir, fallbackPreRestoreDir)
+			if fbMkErr := os.MkdirAll(fallbackDir, 0o700); fbMkErr != nil {
+				return "", fmt.Errorf("preserve current data before restore: %w", err)
+			}
+			fallbackPath := filepath.Join(fallbackDir, filename)
+			if fbErr := backupDataDirectory(activeDir, fallbackPath, map[string]struct{}{backupZipPath: {}}, true, preRestoreOverlays...); fbErr != nil {
+				_ = os.Remove(fallbackPath)
+				return "", fmt.Errorf("preserve current data before restore (primary: %v; fallback: %w)", err, fbErr)
+			}
+			return fallbackPath, nil
+		}
 	}
 
-	oldDir, err := os.MkdirTemp(filepath.Dir(dataDir), ".komari-restore-old-*")
-	if err != nil {
-		return fmt.Errorf("reserve previous data path: %w", err)
+	fallbackDir := filepath.Join(dataDir, fallbackPreRestoreDir)
+	if err := os.MkdirAll(fallbackDir, 0o700); err != nil {
+		return "", fmt.Errorf("create pre-restore backup directory: %w", err)
 	}
-	if err := os.RemoveAll(oldDir); err != nil {
-		return fmt.Errorf("prepare previous data path: %w", err)
+	fallbackPath := filepath.Join(fallbackDir, filename)
+	if err := backupDataDirectory(activeDir, fallbackPath, map[string]struct{}{backupZipPath: {}}, true, preRestoreOverlays...); err != nil {
+		_ = os.Remove(fallbackPath)
+		return "", fmt.Errorf("preserve current data before restore: %w", err)
 	}
-	// data/ is usually a bind mount or volume, so a plain rename fails with
-	// EXDEV/EBUSY on exactly the deployments that need restore to work - and the
-	// rollback below, written the same way, would fail with it.
-	if err := fsmove.Directory(dataDir, oldDir); err != nil {
-		return fmt.Errorf("move current data aside: %w", err)
+	return fallbackPath, nil
+}
+
+// NormalizePortableMetricConfig binds restored history to the generation that
+// holds the files, even when an older backup used absolute paths or a DSN.
+func NormalizePortableMetricConfig(ctx context.Context, db *sql.DB) error {
+	if exists, err := sqliteTableExists(db, "configs"); err != nil || !exists {
+		return err
 	}
-	if err := fsmove.Directory(stageDir, dataDir); err != nil {
-		rollbackErr := fsmove.Directory(oldDir, dataDir)
-		if rollbackErr != nil {
-			return fmt.Errorf("publish restored data: %v; restore previous data: %w", err, rollbackErr)
+	values := map[string]string{
+		"metric_archive_directory": `"./data/telemetry"`,
+		"metric_db_driver":         `"sqlite"`,
+		"metric_db_dsn":            `"./data/metrics.db"`,
+		"metric_migration_target":  `"sqlite|./data/metrics.db"`,
+	}
+	for key, value := range values {
+		if _, err := db.ExecContext(ctx, `INSERT INTO configs (key, value) VALUES (?, ?)
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value); err != nil {
+			return fmt.Errorf("normalize portable metric config %s: %w", key, err)
 		}
-		return fmt.Errorf("publish restored data: %w", err)
 	}
-	if err := publishRestoredCustomDatabase(dataDir); err != nil {
-		rollbackErr := errors.Join(
-			os.RemoveAll(dataDir),
-			fsmove.Directory(oldDir, dataDir),
-		)
-		if rollbackErr != nil {
-			return fmt.Errorf("publish restored custom database: %v; restore previous data: %w", err, rollbackErr)
-		}
-		return fmt.Errorf("publish restored custom database: %w", err)
-	}
-	stagePublished = true
-	if err := os.RemoveAll(oldDir); err != nil {
-		logger.Errorf("dbcore", "[restore] restored data is active, but old staging directory could not be removed: %v", err)
-	}
-	logger.Infof("dbcore", "[restore] backup restored atomically; previous data saved to %s", preRestorePath)
 	return nil
 }
 
@@ -676,271 +733,40 @@ func atomicCopySQLiteFile(srcPath, dstPath string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	_ = os.Remove(dstPath + "-wal")
-	_ = os.Remove(dstPath + "-shm")
+	if err := checkpointRestoreDestination(dstPath); err != nil {
+		return err
+	}
 	if err := os.Rename(tmpName, dstPath); err != nil {
 		return err
 	}
 	removeTmp = false
-	return nil
+	return syncDir(filepath.Dir(dstPath))
 }
 
-func preservePasskeySecurityStateForRestore(dataDir, stageDir string) error {
-	sources := []string{filepath.Join(dataDir, "komari.db")}
-	if custom := configuredSQLiteFilePath(); isCustomConfiguredSQLitePath(dataDir, custom) {
-		sources = append(sources, custom)
-		if base := filepath.Base(custom); base != "" && base != "komari.db" {
-			sources = append(sources, filepath.Join(dataDir, base))
-		}
-	}
-	stagedKomari := filepath.Join(stageDir, "komari.db")
-	if err := preservePasskeySecurityStateFromSources(sources, stagedKomari); err != nil {
-		return err
-	}
-	if custom := configuredSQLiteFilePath(); isCustomConfiguredSQLitePath(dataDir, custom) {
-		if base := filepath.Base(custom); base != "" && base != "komari.db" {
-			stagedCustom := filepath.Join(stageDir, base)
-			if _, err := os.Stat(stagedCustom); err == nil {
-				if err := preservePasskeySecurityStateFromSources(sources, stagedCustom); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// preservePasskeySecurityState carries forward passkey counter high-water marks
-// and explicit passkey revocations from the current primary SQLite database into
-// the staged restored database before the directory swap occurs.
-func preservePasskeySecurityState(currentPath, stagedPath string) error {
-	return preservePasskeySecurityStateFromSources([]string{currentPath}, stagedPath)
-}
-
-func preservePasskeySecurityStateFromSources(currentPaths []string, stagedPath string) error {
-	type counterKey struct {
-		userUUID  string
-		keyDigest string
-	}
-	type counterRow struct {
-		userUUID  string
-		keyDigest string
-		counter   uint32
-	}
-	type revocationRow struct {
-		credentialHash string
-		userUUID       string
-		rpID           string
-		revokedAt      string
-	}
-
-	counterMap := make(map[counterKey]uint32)
-	revocationMap := make(map[string]revocationRow)
-	seenPaths := make(map[string]bool, len(currentPaths))
-
-	for _, currentPath := range currentPaths {
-		if strings.TrimSpace(currentPath) == "" {
-			continue
-		}
-		absPath, err := filepath.Abs(currentPath)
-		if err != nil {
-			absPath = filepath.Clean(currentPath)
-		}
-		if seenPaths[absPath] {
-			continue
-		}
-		seenPaths[absPath] = true
-
-		if _, err := os.Stat(currentPath); err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return err
-		}
-		if err := validateRestoredSQLite(currentPath, "current komari.db"); err != nil {
-			continue
-		}
-
-		curDB, err := sql.Open("sqlite3", currentPath)
-		if err != nil {
-			return err
-		}
-		hasCounters, err := sqliteTableExists(curDB, "passkey_counters")
-		if err != nil {
-			curDB.Close()
-			return err
-		}
-		if hasCounters {
-			rows, err := curDB.Query(`SELECT user_uuid, key_digest, counter FROM passkey_counters`)
-			if err != nil {
-				curDB.Close()
-				return err
-			}
-			for rows.Next() {
-				var r counterRow
-				if err := rows.Scan(&r.userUUID, &r.keyDigest, &r.counter); err != nil {
-					rows.Close()
-					curDB.Close()
-					return err
-				}
-				k := counterKey{userUUID: r.userUUID, keyDigest: r.keyDigest}
-				if r.counter > counterMap[k] {
-					counterMap[k] = r.counter
-				}
-			}
-			if err := rows.Err(); err != nil {
-				rows.Close()
-				curDB.Close()
-				return err
-			}
-			rows.Close()
-		}
-
-		hasRevocations, err := sqliteTableExists(curDB, "passkey_revocations")
-		if err != nil {
-			curDB.Close()
-			return err
-		}
-		if hasRevocations {
-			rows, err := curDB.Query(`SELECT credential_hash, user_uuid, rp_id, COALESCE(CAST(revoked_at AS TEXT), '') FROM passkey_revocations`)
-			if err != nil {
-				curDB.Close()
-				return err
-			}
-			for rows.Next() {
-				var r revocationRow
-				if err := rows.Scan(&r.credentialHash, &r.userUUID, &r.rpID, &r.revokedAt); err != nil {
-					rows.Close()
-					curDB.Close()
-					return err
-				}
-				if r.revokedAt == "" {
-					r.revokedAt = time.Now().UTC().Format(time.RFC3339Nano)
-				}
-				revocationMap[r.credentialHash] = r
-			}
-			if err := rows.Err(); err != nil {
-				rows.Close()
-				curDB.Close()
-				return err
-			}
-			rows.Close()
-		}
-		curDB.Close()
-	}
-
-	counters := make([]counterRow, 0, len(counterMap))
-	for k, c := range counterMap {
-		counters = append(counters, counterRow{userUUID: k.userUUID, keyDigest: k.keyDigest, counter: c})
-	}
-	revocations := make([]revocationRow, 0, len(revocationMap))
-	for _, r := range revocationMap {
-		revocations = append(revocations, r)
-	}
-
-	if len(counters) == 0 && len(revocations) == 0 {
+func checkpointRestoreDestination(path string) error {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil
+	} else if err != nil {
+		return err
 	}
-
-	stagedDB, err := sql.Open("sqlite3", stagedPath)
+	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		return err
 	}
-	stagedClosed := false
-	defer func() {
-		if !stagedClosed {
-			_ = stagedDB.Close()
-		}
-	}()
-
-	stagedHasUsers, err := sqliteTableExists(stagedDB, "users")
-	if err != nil {
-		return err
+	var busy, logPages, flushed int
+	checkpointErr := db.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logPages, &flushed)
+	if err := errors.Join(checkpointErr, db.Close()); err != nil {
+		return fmt.Errorf("checkpoint configured database before restore: %w", err)
 	}
-	stagedHasPasskeys, err := sqliteTableExists(stagedDB, "user_passkeys")
-	if err != nil {
-		return err
+	if busy != 0 {
+		return errors.New("configured database has an active SQLite writer")
 	}
-	stagedHasCounters, err := sqliteTableExists(stagedDB, "passkey_counters")
-	if err != nil {
-		return err
-	}
-	stagedHasRevocations, err := sqliteTableExists(stagedDB, "passkey_revocations")
-	if err != nil {
-		return err
-	}
-
-	tx, err := stagedDB.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if len(counters) > 0 {
-		if !stagedHasCounters {
-			if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS passkey_counters (
-				user_uuid varchar(36),
-				key_digest varchar(64),
-				counter integer,
-				PRIMARY KEY (user_uuid, key_digest)
-			)`); err != nil {
-				return err
-			}
-		}
-		for _, c := range counters {
-			if stagedHasUsers {
-				var exists int
-				if err := tx.QueryRow(`SELECT 1 FROM users WHERE uuid = ? LIMIT 1`, c.userUUID).Scan(&exists); err == sql.ErrNoRows {
-					continue
-				} else if err != nil {
-					return err
-				}
-			}
-			if _, err := tx.Exec(`INSERT OR IGNORE INTO passkey_counters (user_uuid, key_digest, counter) VALUES (?, ?, ?)`, c.userUUID, c.keyDigest, c.counter); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(`UPDATE passkey_counters SET counter = ? WHERE user_uuid = ? AND key_digest = ? AND counter < ?`, c.counter, c.userUUID, c.keyDigest, c.counter); err != nil {
-				return err
-			}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
+			return err
 		}
 	}
-
-	if len(revocations) > 0 {
-		if !stagedHasRevocations {
-			if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS passkey_revocations (
-				credential_hash char(64) PRIMARY KEY,
-				user_uuid varchar(36) NOT NULL,
-				rp_id varchar(253) NOT NULL,
-				revoked_at datetime NOT NULL
-			)`); err != nil {
-				return err
-			}
-		}
-		for _, rev := range revocations {
-			if _, err := tx.Exec(`INSERT OR IGNORE INTO passkey_revocations (credential_hash, user_uuid, rp_id, revoked_at) VALUES (?, ?, ?, ?)`, rev.credentialHash, rev.userUUID, rev.rpID, rev.revokedAt); err != nil {
-				return err
-			}
-			if stagedHasPasskeys {
-				if _, err := tx.Exec(`DELETE FROM user_passkeys WHERE credential_hash = ?`, rev.credentialHash); err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	if _, err := stagedDB.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-		return fmt.Errorf("checkpoint staged database: %w", err)
-	}
-	stagedClosed = true
-	if err := stagedDB.Close(); err != nil {
-		return fmt.Errorf("close staged database after checkpoint: %w", err)
-	}
-	_ = os.Remove(stagedPath + "-wal")
-	_ = os.Remove(stagedPath + "-shm")
-	return nil
+	return syncDir(filepath.Dir(path))
 }
 
 var (
@@ -987,7 +813,7 @@ func resolveDatabaseFile() string {
 	if dbFile == "" {
 		dbFile = "./data/komari.db"
 	}
-	return dbFile
+	return datadir.ResolveSQLite(dbFile)
 }
 
 // backupOnVersionUpgrade 在检测到版本升级时，把当前 ./data 打包到
@@ -1031,14 +857,14 @@ func backupOnVersionUpgrade() {
 		instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 	}
 
-	if err := os.MkdirAll("./backup", 0755); err != nil {
+	if err := os.MkdirAll("./backup", 0o700); err != nil {
 		logger.Errorf("dbcore", "[upgrade-backup] failed to create backup dir: %v", err)
 		return
 	}
 	tsName := time.Now().UTC().Format("20060102-150405")
 	bakPath := filepath.Join("./backup", fmt.Sprintf("upgrade-%s.zip", tsName))
 	backupZipPath := filepath.Join(".", "data", "backup.zip")
-	if zipErr := backupDataDirectory("./data", bakPath, map[string]struct{}{backupZipPath: {}}, false); zipErr != nil {
+	if zipErr := backupDataDirectory(datadir.Resolve(datadir.Root), bakPath, map[string]struct{}{backupZipPath: {}}, false); zipErr != nil {
 		logger.Errorf("dbcore", "[upgrade-backup] failed to backup ./data before upgrade (from %q to %q): %v", prevVersion, versionID, zipErr)
 		return
 	}
@@ -1082,7 +908,9 @@ func buildSQLiteDSN(databaseFile string) string {
 func Initialize() error {
 	once.Do(func() {
 		initErr = doInitialize()
-		if initErr == nil {
+		if initErr != nil {
+			closeDataOwner()
+		} else {
 			if pool, err := instance.DB(); err == nil {
 				diagnosticPool.Store(pool)
 			}
@@ -1127,8 +955,12 @@ func TryGetDBInstance() *gorm.DB {
 
 // Close 关闭底层数据库连接，供关闭流程调用。
 func Close() error {
+	defer closeDataOwner()
 	if instance == nil {
 		return nil
+	}
+	if flags.IsSQLite() {
+		instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 	}
 	sqlDB, err := instance.DB()
 	if err != nil {
@@ -1141,7 +973,7 @@ func doInitialize() error {
 	var err error
 
 	// 在数据库连接创建前完整校验并原子恢复，失败时保留原 data/ 不动。
-	if err := restoreStagedBackup(filepath.Join(".", "data")); err != nil {
+	if err := initializeDataLayout(); err != nil {
 		return fmt.Errorf("restore staged backup: %w", err)
 	}
 
@@ -1170,7 +1002,7 @@ func doInitialize() error {
 		//     的锁升级在并发写入下产生死锁式的立即 SQLITE_BUSY。
 		//   - _journal_mode=WAL / _synchronous=NORMAL：与下方 PRAGMA 保持一致，
 		//     在 DSN 层为所有连接预设。
-		dsn := buildSQLiteDSN(flags.DatabaseFile)
+		dsn := buildSQLiteDSN(resolveDatabaseFile())
 		instance, err = gorm.Open(sqlite.Open(dsn), logConfig)
 		if err != nil {
 			return fmt.Errorf("failed to connect to SQLite3 database: %w", err)
@@ -1278,6 +1110,7 @@ func doInitialize() error {
 		&models.BillingFXSnapshot{},
 		&models.BillingEntry{},
 		&models.TwoFactorCounter{},
+		&models.SecurityEpochState{},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create tables: %w", err)
@@ -1310,6 +1143,9 @@ func doInitialize() error {
 	// Only exact lowercase v1 HMAC rows survive upgrades and restores.
 	if err := retireLegacySessionRows(instance); err != nil {
 		return fmt.Errorf("retire legacy session rows: %w", err)
+	}
+	if _, err := reconcileStartupSecurityEpoch(filepath.Join(".", "data"), instance); err != nil {
+		return fmt.Errorf("reconcile security epoch: %w", err)
 	}
 	if err := instance.AutoMigrate(
 		&models.Task{},

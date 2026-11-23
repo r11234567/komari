@@ -281,7 +281,7 @@ func TestHTTPClientRequestErrorWithoutListenerStillCloses(t *testing.T) {
 				request.on("close", () => resolve(true));
 			});
 		}
-	`, Options{NodeJS: true, BaseDir: t.TempDir(), Console: &output, Timeout: 3 * time.Second})
+	`, Options{NodeJS: true, AllowPrivateNet: true, BaseDir: t.TempDir(), Console: &output, Timeout: 3 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,7 +626,7 @@ func TestFetchResponseBodyLimit(t *testing.T) {
 				return error.name === "TypeError" && String(error).includes("HTTP body exceeds 8 bytes");
 			}
 		}
-	`, Options{Console: io.Discard, Timeout: time.Second, MaxHTTPBodyBytes: 8})
+	`, Options{AllowPrivateNet: true, Console: io.Discard, Timeout: time.Second, MaxHTTPBodyBytes: 8})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -841,7 +841,7 @@ func TestNodeNetAndHTTPServers(t *testing.T) {
 				});
 			});
 		}
-	`, Options{NodeJS: true, AllowListen: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 8 * time.Second})
+	`, Options{NodeJS: true, AllowListen: true, AllowPrivateNet: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 8 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -952,7 +952,7 @@ func TestChildProcessDefaultEnvDoesNotLeakHostSecretsAndBlockPrivateNetBlocksLoo
 		t.Fatalf("child_process default env leaked host secret: %v", err)
 	}
 
-	// BlockPrivateNet must forbid outbound TCP connections to loopback/private IPs.
+	// Default AllowPrivateNet=false must forbid outbound TCP connections to loopback/private IPs.
 	netRT, err := New(`
 		async function verify() {
 			const net = require("net");
@@ -962,16 +962,16 @@ func TestChildProcessDefaultEnvDoesNotLeakHostSecretsAndBlockPrivateNetBlocksLoo
 				sock.on("error", (err) => resolve(String(err).includes("forbidden")));
 			});
 		}
-	`, Options{NodeJS: true, BlockPrivateNet: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 5 * time.Second})
+	`, Options{NodeJS: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer netRT.Close()
 	if err := netRT.Call("verify"); err != nil {
-		t.Fatalf("BlockPrivateNet did not block loopback TCP: %v", err)
+		t.Fatalf("default private-net block did not reject loopback TCP: %v", err)
 	}
 
-	// BlockPrivateNet must also block fetch and XMLHttpRequest to loopback/private hosts.
+	// Default AllowPrivateNet=false must also block fetch and XMLHttpRequest to loopback/private hosts.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("secret-local-response"))
 	}))
@@ -994,13 +994,13 @@ func TestChildProcessDefaultEnvDoesNotLeakHostSecretsAndBlockPrivateNetBlocksLoo
 			});
 			return fetchBlocked && xhrBlocked;
 		}
-	`, Options{NodeJS: true, BlockPrivateNet: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 5 * time.Second})
+	`, Options{NodeJS: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer httpBlockedRT.Close()
 	if err := httpBlockedRT.Call("verifyFetchAndXHR", server.URL); err != nil {
-		t.Fatalf("BlockPrivateNet did not block loopback fetch/XHR: %v", err)
+		t.Fatalf("default private-net block did not reject loopback fetch/XHR: %v", err)
 	}
 }
 

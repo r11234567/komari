@@ -76,24 +76,15 @@ func TestInjectSurvivesBareConnectionUpgradeHeader(t *testing.T) {
 	}
 	defer func() { _ = SetEnabled("guard", false, false) }()
 
-	handler := HTMLInjectHandler(engine)
-
-	// 仅 Connection: upgrade（反代常见行为）→ 公开页面注入照常生效
+	document := []byte("<!DOCTYPE html><html><head></head><body></body></html>")
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Connection", "upgrade")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if !strings.Contains(rec.Body.String(), "__guard") {
-		t.Fatalf("bare Connection: upgrade must not skip injection, body = %q", rec.Body.String())
+	if rendered := InjectPublicThemeHTML(req, document); !strings.Contains(string(rendered), "__guard") {
+		t.Fatalf("bare Connection: upgrade must not skip injection, body = %q", rendered)
 	}
 
-	// 两个头齐全的真实升级 → 放行，不注入
-	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
-	req2.Header.Set("Connection", "upgrade")
-	req2.Header.Set("Upgrade", "websocket")
-	rec2 := httptest.NewRecorder()
-	handler.ServeHTTP(rec2, req2)
-	if strings.Contains(rec2.Body.String(), "__guard") {
-		t.Fatalf("real upgrade must skip injection, body = %q", rec2.Body.String())
+	req.Header.Set("Upgrade", "websocket")
+	if rendered := InjectPublicThemeHTML(req, document); string(rendered) != string(document) {
+		t.Fatalf("WebSocket upgrade must bypass HTML injection, body = %q", rendered)
 	}
 }

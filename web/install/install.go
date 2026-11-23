@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -98,22 +97,23 @@ func (c *Controller) status(ctx *gin.Context) {
 
 // restore stages a verified backup before the guide creates any new data.
 func (c *Controller) restore(ctx *gin.Context) {
-	file, header, err := ctx.Request.FormFile("backup")
+	restoreLock, status, err := backup.StageHTTPUpload(ctx.Writer, ctx.Request)
 	if err != nil {
-		api.RespondError(ctx, http.StatusBadRequest, fmt.Sprintf("get uploaded backup: %v", err))
+		api.RespondError(ctx, status, err.Error())
 		return
 	}
-	defer file.Close()
-	if err := backup.SaveUploadedBackup(file, header.Filename); err != nil {
-		api.RespondError(ctx, http.StatusBadRequest, err.Error())
-		return
-	}
+	backup.MarkRestartPending()
 
-	api.RespondSuccessMessage(ctx, "backup uploaded; restarting to restore", gin.H{})
+	api.RespondSuccessMessage(ctx, "backup uploaded; server is shutting down cleanly to restore on startup", gin.H{
+		"restart_required":    true,
+		"manual_restart_note": "If running outside a container or process supervisor, restart Komari manually after shutdown completes.",
+	})
 	go func() {
-		logger.InfoArgs("install", "Backup uploaded, restarting service to restore it on startup...")
-		time.Sleep(2 * time.Second)
-		os.Exit(0)
+		// Keep restoreLock held through shutdown so no concurrent upload can race.
+		_ = restoreLock
+		logger.InfoArgs("install", "Backup uploaded; requesting graceful shutdown to restore on startup...")
+		time.Sleep(300 * time.Millisecond)
+		backup.RequestGracefulRestart("install_backup_restore")
 	}()
 }
 

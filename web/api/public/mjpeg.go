@@ -21,6 +21,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/datadir"
 	conf "github.com/komari-monitor/komari/pkg/config"
 	jsonRpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
 	"golang.org/x/image/font"
@@ -238,7 +239,7 @@ func loadFont() {
 	defer fontMutex.Unlock()
 
 	// 检查字体文件是否存在
-	if _, err := os.Stat(fontPath); err == nil {
+	if _, err := os.Stat(datadir.Resolve(fontPath)); err == nil {
 		if err := loadFontFromFile(); err != nil {
 			fontError = err
 			return
@@ -253,7 +254,7 @@ func loadFont() {
 
 // loadFontFromFile 从文件加载字体
 func loadFontFromFile() error {
-	fontData, err := os.ReadFile(fontPath)
+	fontData, err := os.ReadFile(datadir.Resolve(fontPath))
 	if err != nil {
 		fmt.Printf("[MJPEG] Failed to read font file: %v\n", err)
 		return fmt.Errorf("failed to read font file: %w", err)
@@ -317,7 +318,7 @@ func downloadFont() {
 	}()
 
 	// 创建目录
-	if err := os.MkdirAll(filepath.Dir(fontPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(datadir.Resolve(fontPath)), 0755); err != nil {
 		fontMutex.Lock()
 		fontError = fmt.Errorf("failed to create directory: %w", err)
 		fontMutex.Unlock()
@@ -439,7 +440,7 @@ func downloadFont() {
 	}
 
 	// 保存字体文件
-	if err := os.WriteFile(fontPath, fontData, 0644); err != nil {
+	if err := os.WriteFile(datadir.Resolve(fontPath), fontData, 0644); err != nil {
 		fontMutex.Lock()
 		fontError = fmt.Errorf("failed to save font file: %w", err)
 		fontMutex.Unlock()

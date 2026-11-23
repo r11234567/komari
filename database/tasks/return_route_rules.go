@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/datadir"
 	logger "github.com/komari-monitor/komari/utils/log"
 )
 
@@ -177,7 +178,7 @@ func GetReturnRouteRules() ReturnRouteRuleView {
 func ReloadReturnRouteRules() (ReturnRouteRuleView, error) {
 	ensureReturnRouteRules()
 	now := time.Now().UTC()
-	data, err := os.ReadFile(returnRouteRuleExternalPath)
+	data, err := os.ReadFile(datadir.Resolve(returnRouteRuleExternalPath))
 	if errors.Is(err, os.ErrNotExist) {
 		activateReturnRouteBaseRules(returnRouteRuleState.builtin, "builtin", now)
 		return GetReturnRouteRules(), nil
@@ -385,7 +386,7 @@ func refreshReturnRouteBGPRules(ctx context.Context) error {
 }
 
 func reloadCachedReturnRouteBGPRules() error {
-	data, err := os.ReadFile(returnRouteBGPExternalPath)
+	data, err := os.ReadFile(datadir.Resolve(returnRouteBGPExternalPath))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}

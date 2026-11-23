@@ -2,21 +2,26 @@
 package backup
 
 import (
-	"archive/zip"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/internal/datadir"
+	"github.com/komari-monitor/komari/internal/restorearchive"
 )
 
 var restoreMutex sync.Mutex
 
 const (
-	MaxArchiveSize    int64 = 4 << 30
-	maxArchiveEntries       = 100_000
+	MaxArchiveSize       = restorearchive.MaxSize
+	maxMultipartBodySize = MaxArchiveSize + (1 << 20)
 )
 
 // RestoreLock prevents a second upload from replacing the already validated
@@ -36,16 +41,51 @@ func (l *RestoreLock) Release() {
 	l.once.Do(restoreMutex.Unlock)
 }
 
-func SaveUploadedBackup(file io.Reader, filename string) error {
+// StageHTTPUpload stages a multipart backup and returns the lock to the
+// caller on success. Hold it until restart so another upload cannot replace it.
+func StageHTTPUpload(w http.ResponseWriter, r *http.Request) (*RestoreLock, int, error) {
+	tooLarge := func() error {
+		return fmt.Errorf("backup upload exceeds the %d byte request limit", maxMultipartBodySize)
+	}
+	if r.ContentLength > maxMultipartBodySize {
+		return nil, http.StatusRequestEntityTooLarge, tooLarge()
+	}
+
 	lock, err := AcquireRestoreLock()
 	if err != nil {
-		return err
+		return nil, http.StatusConflict, err
 	}
-	defer lock.Release()
-	return lock.SaveUploadedBackup(file, filename)
+	staged := false
+	defer func() {
+		if !staged {
+			lock.Release()
+		}
+	}()
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxMultipartBodySize)
+	file, header, err := r.FormFile("backup")
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	if err != nil {
+		var limit *http.MaxBytesError
+		if errors.As(err, &limit) {
+			return nil, http.StatusRequestEntityTooLarge, tooLarge()
+		}
+		return nil, http.StatusBadRequest, fmt.Errorf("get uploaded backup: %w", err)
+	}
+	defer file.Close()
+	if err := lock.SaveUploadedBackup(file, header.Filename); err != nil {
+		return nil, http.StatusBadRequest, err
+	}
+	staged = true
+	return lock, http.StatusOK, nil
 }
 
 func (l *RestoreLock) SaveUploadedBackup(file io.Reader, filename string) error {
+	if err := dbcore.SupportsAtomicRestore(); err != nil {
+		return err
+	}
 	if !strings.HasSuffix(strings.ToLower(filename), ".zip") {
 		return fmt.Errorf("uploaded file must be a ZIP archive")
 	}
@@ -68,6 +108,10 @@ func (l *RestoreLock) SaveUploadedBackup(file io.Reader, filename string) error 
 		tempFile.Close()
 		return fmt.Errorf("backup archive exceeds the %d byte limit", MaxArchiveSize)
 	}
+	if err := tempFile.Sync(); err != nil {
+		_ = tempFile.Close()
+		return fmt.Errorf("sync uploaded backup: %w", err)
+	}
 	if err := tempFile.Close(); err != nil {
 		return fmt.Errorf("close uploaded backup: %w", err)
 	}
@@ -76,29 +120,10 @@ func (l *RestoreLock) SaveUploadedBackup(file io.Reader, filename string) error 
 	}
 
 	finalPath := filepath.Join(".", "data", "backup.zip")
-	if err := os.Remove(finalPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove previous backup: %w", err)
+	if err := datadir.Rename(tempPath, finalPath); err != nil {
+		return fmt.Errorf("publish uploaded backup: %w", err)
 	}
-	if err := os.Rename(tempPath, finalPath); err == nil {
-		return nil
-	}
-	source, err := os.Open(tempPath)
-	if err != nil {
-		return fmt.Errorf("prepare backup file: %w", err)
-	}
-	defer source.Close()
-	destination, err := os.Create(finalPath)
-	if err != nil {
-		return fmt.Errorf("create backup file: %w", err)
-	}
-	if _, err := io.Copy(destination, source); err != nil {
-		destination.Close()
-		return fmt.Errorf("write backup file: %w", err)
-	}
-	if err := destination.Close(); err != nil {
-		return fmt.Errorf("close backup file: %w", err)
-	}
-	return nil
+	return datadir.SyncDirectory(filepath.Dir(finalPath))
 }
 
 func normalizedArchivePath(name string) (string, error) {
@@ -115,16 +140,11 @@ func normalizedArchivePath(name string) (string, error) {
 // ValidateArchive requires the upstream-compatible root layout and bounds all
 // archive entries before the startup path is allowed to replace current data.
 func ValidateArchive(archivePath string) error {
-	reader, err := zip.OpenReader(archivePath)
+	reader, err := restorearchive.Open(archivePath)
 	if err != nil {
 		return fmt.Errorf("open backup archive: %w", err)
 	}
 	defer reader.Close()
-	if len(reader.File) > maxArchiveEntries {
-		return fmt.Errorf("backup archive has too many files: %d", len(reader.File))
-	}
-
-	var expandedSize uint64
 	hasMarkup := false
 	hasMainDatabase := false
 	seen := make(map[string]struct{}, len(reader.File))
@@ -140,16 +160,12 @@ func ValidateArchive(archivePath string) error {
 		if entry.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("backup archive contains unsupported symbolic link %q", name)
 		}
-		if name == "komari-backup-markup" {
+		if name == restorearchive.MarkupName && entry.Mode().IsRegular() {
 			hasMarkup = true
 		}
 		if name == "komari.db" && !entry.FileInfo().IsDir() {
 			hasMainDatabase = true
 		}
-		if entry.UncompressedSize64 > uint64(MaxArchiveSize) || expandedSize > uint64(MaxArchiveSize)-entry.UncompressedSize64 {
-			return fmt.Errorf("backup archive expands beyond the %d byte limit", MaxArchiveSize)
-		}
-		expandedSize += entry.UncompressedSize64
 	}
 	if !hasMarkup {
 		return fmt.Errorf("invalid backup file: missing komari-backup-markup file")

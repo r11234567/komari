@@ -43,11 +43,25 @@ func New(runtime *bridge.Runtime, allowListen bool, blockPrivateNet bool) *Modul
 	return &Module{runtime: runtime, allowListen: allowListen, blockPrivateNet: blockPrivateNet}
 }
 
-var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
+var blockedPrivatePrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),  // CGNAT
+	netip.MustParsePrefix("0.0.0.0/8"),      // "This network" / Linux loopback alias
+	netip.MustParsePrefix("64:ff9b::/96"),   // Well-known NAT64 prefix (RFC 6052)
+	netip.MustParsePrefix("64:ff9b:1::/48"), // Local-use NAT64 prefix (RFC 8215)
+}
+
+func isBlockedPrivatePrefix(addr netip.Addr) bool {
+	for _, prefix := range blockedPrivatePrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
 
 // RejectPrivateAddress is a net.Dialer.Control callback that blocks outbound
-// connections to loopback, RFC1918/ULA private, CGNAT, link-local, multicast,
-// and unspecified addresses.
+// connections to loopback, RFC1918/ULA private, CGNAT, NAT64, link-local,
+// multicast, and unspecified addresses.
 func RejectPrivateAddress(_, address string, _ syscall.RawConn) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
@@ -58,7 +72,7 @@ func RejectPrivateAddress(_, address string, _ syscall.RawConn) error {
 		return fmt.Errorf("outbound connection blocked: invalid target IP")
 	}
 	addr = addr.Unmap()
-	if !addr.IsGlobalUnicast() || addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() || cgnatPrefix.Contains(addr) {
+	if !addr.IsGlobalUnicast() || addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() || isBlockedPrivatePrefix(addr) {
 		return fmt.Errorf("outbound connection to private or loopback address %s is forbidden", addr)
 	}
 	return nil

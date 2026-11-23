@@ -6,13 +6,16 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/internal/credentialaction"
 	credential "github.com/komari-monitor/komari/internal/trustedcredential"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/connection"
 	"github.com/komari-monitor/komari/web/security"
 	"github.com/komari-monitor/komari/web/signonauth"
 )
@@ -161,34 +164,86 @@ func serveWebSocket(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 		return
 	}
-	defer conn.Close()
-
 	wsCtx, cancel := context.WithCancel(c.Request.Context())
-	defer cancel()
-
 	meta := buildContextMeta(c)
+	conn.SetReadLimit(maxJSONRPCPostBytes)
+
+	// Read control frames and detect disconnects while a query is in progress.
+	// Dispatch and writes remain sequential so replies stay in request order.
+	requests := make(chan compatibilityWSRequest, 32)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		defer cancel()
+		readCompatibilityWSRequests(wsCtx, conn, requests)
+	}()
+	defer func() {
+		cancel()
+		conn.Close()
+		<-readerDone
+	}()
+
 	for {
-		var req rpc.JsonRpcRequest
-		if err := conn.ReadJSON(&req); err != nil {
-			var se *json.SyntaxError
-			var ute *json.UnmarshalTypeError
-			if errors.As(err, &se) || errors.As(err, &ute) {
-				conn.WriteJSON(rpc.ErrorResponse(nil, rpc.InvalidRequest, "bad request: "+err.Error(), nil))
-				continue
+		select {
+		case <-wsCtx.Done():
+			return
+		case message := <-requests:
+			if wsCtx.Err() != nil {
+				return
 			}
-			// 其它视为连接/IO 错误，结束循环
-			break
+			var response *rpc.JsonRpcResponse
+			req := &message.request
+			switch {
+			case message.parseError != nil:
+				response = rpc.ErrorResponse(nil, rpc.InvalidRequest, "bad request: "+message.parseError.Error(), nil)
+			default:
+				if jerr := req.Validate(); jerr != nil {
+					response = jerr.ResponseWithID(req.ID)
+				} else if !rpc2TransportAllowed(req.Method) {
+					response = rpc2DeniedResponse(req)
+				} else {
+					response = dispatchWithSensitive(wsCtx, c, meta, req)
+				}
+			}
+			if wsCtx.Err() != nil {
+				return
+			}
+			if err := conn.GetConn().SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+				return
+			}
+			if err := conn.WriteJSON(response); err != nil {
+				return
+			}
 		}
-		if jerr := req.Validate(); jerr != nil {
-			conn.WriteJSON(jerr.ResponseWithID(req.ID))
-			continue
+	}
+}
+
+type compatibilityWSRequest struct {
+	request    rpc.JsonRpcRequest
+	parseError error
+}
+
+func readCompatibilityWSRequests(ctx context.Context, conn *connection.SafeConn, queue chan<- compatibilityWSRequest) {
+	for ctx.Err() == nil {
+		var message compatibilityWSRequest
+		if err := conn.ReadJSON(&message.request); err != nil {
+			var syntaxErr *json.SyntaxError
+			var typeErr *json.UnmarshalTypeError
+			if !errors.As(err, &syntaxErr) && !errors.As(err, &typeErr) {
+				return
+			}
+			message.parseError = err
 		}
-		if !rpc2TransportAllowed(req.Method) {
-			conn.WriteJSON(rpc2DeniedResponse(&req))
-			continue
+		select {
+		case <-ctx.Done():
+			return
+		case queue <- message:
+		default:
+			// A full queue must not prevent the reader from ending the session.
+			closeFrame := websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "too many pending RPC requests")
+			_ = conn.WriteControl(websocket.CloseMessage, closeFrame, time.Now().Add(time.Second))
+			return
 		}
-		// 同步写：SafeConn 内部有锁，串行写避免响应乱序与并发竞态。
-		conn.WriteJSON(dispatchWithSensitive(wsCtx, c, meta, &req))
 	}
 }
 

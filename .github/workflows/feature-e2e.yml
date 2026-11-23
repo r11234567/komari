@@ -81,7 +81,7 @@ jobs:
         run: |
           bash scripts/ci/run-audit-check.sh e2e-browser \
             "$E2E_TOOLS/node_modules/.bin/playwright" test --config scripts/ci/e2e/playwright.config.cjs
-      - name: Database charts, concurrent reads, ledgers, archives and backup with password login
+      - name: Database charts, concurrent reads, ledgers, archives and TOTP-protected backup
         if: inputs.skip_csv
         env:
           NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
@@ -112,7 +112,7 @@ jobs:
           NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
           NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
         run: bash scripts/ci/run-audit-check.sh e2e-storage-upgrade node scripts/ci/e2e/storage-upgrade.cjs
-      - name: Database startup migration, failure recovery and ZIP restore with password login
+      - name: Database startup migration, failure recovery and ZIP restore with password and TOTP
         if: inputs.skip_csv
         env:
           NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules

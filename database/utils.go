@@ -12,6 +12,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/config"
 )
 
@@ -39,7 +40,7 @@ func GetPublicInfo() (map[string]interface{}, error) {
 		cst.Description = "Komari Monitor, a simple server monitoring tool."
 	}
 	if !hasKey("theme") {
-		cst.Theme = "nezha"
+		cst.Theme = "default"
 	}
 	if !hasKey("o_auth_provider") {
 		cst.OAuthProvider = "github"
@@ -72,7 +73,7 @@ func GetPublicInfo() (map[string]interface{}, error) {
 	// Try to load theme declaration file and merge defaults for managed configuration
 	// Theme declarations live in ./data/theme/<short>/komari-theme.json
 	if cst.Theme != "" && cst.Theme != "default" {
-		themeConfigPath := filepath.Join("./data/theme", cst.Theme, "komari-theme.json")
+		themeConfigPath := filepath.Join(datadir.Resolve("./data/theme"), cst.Theme, "komari-theme.json")
 		if _, err := os.Stat(themeConfigPath); err == nil {
 			b, err := os.ReadFile(themeConfigPath)
 			if err == nil {

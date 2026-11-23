@@ -16,10 +16,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/utils/fsmove"
 	websecurity "github.com/komari-monitor/komari/web/security"
@@ -32,7 +32,7 @@ var legacyDefaultFaviconSHA256 = [32]byte{
 	0x29, 0x4b, 0xf3, 0x38, 0x85, 0xc7, 0x1a, 0x69,
 }
 
-//go:embed systemUI rescueTheme bundledThemes
+//go:embed systemUI bundledThemes
 var PublicFS embed.FS
 
 // 常量定义
@@ -49,7 +49,10 @@ const (
 	IndexFile = "index.html" // 相对于 DistDir
 )
 
-const themeBundleMigrationKey = "theme_bundle_migration_v1"
+const (
+	defaultThemeBundle      = "bundledThemes/default"
+	themeBundleMigrationKey = "theme_bundle_migration_v1"
+)
 
 // Increment whenever the embedded official default theme must replace an
 // already-installed bundle. Version 12 ships the billing-cycle display and
@@ -120,9 +123,9 @@ func renderPublicDocumentTitle(htmlStr, title string) string {
 }
 
 func init() {
-	_ = os.MkdirAll("./data/theme", 0755)
+	_ = os.MkdirAll(datadir.Resolve("./data/theme"), 0755)
 	if _, err := removeFaviconIfHashMatches(
-		filepath.Join(DataDir, FaviconFile),
+		filepath.Join(datadir.Resolve(DataDir), FaviconFile),
 		legacyDefaultFaviconSHA256,
 	); err != nil {
 		log.Printf("Failed to migrate legacy default favicon: %v", err)
@@ -215,7 +218,7 @@ func localThemeFileContent(themeID, relativePath string) ([]byte, string, bool) 
 	if !validThemeID(themeID) {
 		return nil, "", false
 	}
-	themeBasePath := filepath.Join(DataDir, ThemesDir, themeID)
+	themeBasePath := filepath.Join(datadir.Resolve(DataDir), ThemesDir, themeID)
 	themeRoot, err := os.OpenRoot(themeBasePath)
 	if err != nil {
 		return nil, "", false
@@ -242,7 +245,7 @@ func IsLocalThemeUsable(themeID string) bool {
 	if !validThemeID(themeID) {
 		return false
 	}
-	base := filepath.Join(DataDir, ThemesDir, themeID)
+	base := filepath.Join(datadir.Resolve(DataDir), ThemesDir, themeID)
 	for _, relativePath := range []string{"komari-theme.json", filepath.Join(DistDir, IndexFile)} {
 		info, err := os.Stat(filepath.Join(base, relativePath))
 		if err != nil || info.IsDir() {
@@ -260,7 +263,7 @@ func installEmbeddedThemeWithReplace(root, themeID string, replace bool) error {
 	if !replace && IsLocalThemeUsable(themeID) {
 		return nil
 	}
-	themesDir := filepath.Join(DataDir, ThemesDir)
+	themesDir := filepath.Join(datadir.Resolve(DataDir), ThemesDir)
 	if err := os.MkdirAll(themesDir, 0o755); err != nil {
 		return err
 	}
@@ -313,13 +316,17 @@ func localThemeFallback() string {
 	if IsLocalThemeUsable(DefaultTheme) {
 		return DefaultTheme
 	}
-	entries, err := os.ReadDir(filepath.Join(DataDir, ThemesDir))
+	entries, err := os.ReadDir(filepath.Join(datadir.Resolve(DataDir), ThemesDir))
 	if err != nil {
 		return ""
 	}
 	for _, entry := range entries {
-		if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") && IsLocalThemeUsable(entry.Name()) {
-			return entry.Name()
+		themeID := entry.Name()
+		if themeID == LegacyLiteDefaultTheme || strings.HasPrefix(themeID, ".") {
+			continue
+		}
+		if entry.IsDir() && IsLocalThemeUsable(themeID) {
+			return themeID
 		}
 	}
 	return ""
@@ -341,17 +348,11 @@ func EnsureBundledThemes() error {
 	}
 	if migrated < currentThemeBundleMigration {
 		replaceDefault := migrated > 0 && IsLocalThemeUsable(DefaultTheme)
-		if err := installEmbeddedThemeWithReplace("bundledThemes/default", DefaultTheme, replaceDefault); err != nil {
+		if err := installEmbeddedThemeWithReplace(defaultThemeBundle, DefaultTheme, replaceDefault); err != nil {
 			return fmt.Errorf("install bundled default theme: %w", err)
 		}
-		if migrated < 1 {
-			if err := installEmbeddedTheme("bundledThemes/nezha", LegacyLiteDefaultTheme); err != nil {
-				return fmt.Errorf("install bundled Nezha theme: %w", err)
-			}
-		}
 		// Snapshots up to migration 3 selected Nezha automatically. Move those
-		// installations back to the official Komari theme while retaining Nezha
-		// as an optional managed theme.
+		// installations to the official Komari theme.
 		if migrated < 4 && currentTheme == LegacyLiteDefaultTheme {
 			currentTheme = DefaultTheme
 		}
@@ -359,7 +360,7 @@ func EnsureBundledThemes() error {
 	if !IsLocalThemeUsable(currentTheme) {
 		currentTheme = localThemeFallback()
 		if currentTheme == "" {
-			if err := installEmbeddedTheme("bundledThemes/default", DefaultTheme); err != nil {
+			if err := installEmbeddedTheme(defaultThemeBundle, DefaultTheme); err != nil {
 				return fmt.Errorf("restore bundled default theme: %w", err)
 			}
 			currentTheme = DefaultTheme
@@ -369,6 +370,13 @@ func EnsureBundledThemes() error {
 		config.ThemeKey:         currentTheme,
 		themeBundleMigrationKey: currentThemeBundleMigration,
 	})
+}
+
+func publicThemeFileContent(themeID, relativePath string) ([]byte, string, bool) {
+	if IsLocalThemeUsable(themeID) {
+		return localThemeFileContent(themeID, relativePath)
+	}
+	return embeddedFileContent(defaultThemeBundle, relativePath)
 }
 
 // Static 注册静态资源和 SPA 路由处理
@@ -382,13 +390,6 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			config.ThemeKey:       DefaultTheme,
 		})
 		return cfg
-	}
-
-	getPublicFileContent := func(themeID, relativePath string) ([]byte, string, bool) {
-		if IsLocalThemeUsable(themeID) {
-			return localThemeFileContent(themeID, relativePath)
-		}
-		return embeddedFileContent("rescueTheme", relativePath)
 	}
 
 	// 核心逻辑：渲染 Index.html
@@ -405,7 +406,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		if privateApplication {
 			content, _, exists = embeddedFileContent("systemUI", targetFile)
 		} else {
-			content, _, exists = getPublicFileContent(cfg[config.ThemeKey].(string), targetFile)
+			content, _, exists = publicThemeFileContent(cfg[config.ThemeKey].(string), targetFile)
 		}
 
 		if !exists {
@@ -456,7 +457,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		c.Header("Expires", "0")
 
 		// 优先：./data/favicon.ico
-		localFavicon := filepath.Join(DataDir, FaviconFile)
+		localFavicon := filepath.Join(datadir.Resolve(DataDir), FaviconFile)
 		if _, err := os.Stat(localFavicon); err == nil {
 			c.Header("Content-Type", contentTypeForPath(localFavicon))
 			c.File(localFavicon)
@@ -467,7 +468,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		// 通常构建后的资源在 dist 中，这里假设优先找 dist 内的，如果你的 favicon 在根目录，去掉 DistDir 拼接即可
 		cfg := getConfig()
 		themeFaviconPath := path.Join(DistDir, FaviconFile)
-		content, mimeType, exists := getPublicFileContent(cfg[config.ThemeKey].(string), themeFaviconPath)
+		content, mimeType, exists := publicThemeFileContent(cfg[config.ThemeKey].(string), themeFaviconPath)
 		if exists {
 			c.Data(http.StatusOK, mimeType, content)
 			return
@@ -517,34 +518,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		//
-		func() {
-			tempKey := c.Query("temp_key")
-			if tempKey == "" {
-				return
-			}
-
-			tempKeyExpireTime, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
-			if err != nil {
-				return
-			}
-			allowTempKey, err := config.GetAs[string]("tempory_share_token", "")
-			if err != nil {
-				return
-			}
-
-			if allowTempKey == "" || tempKey != allowTempKey {
-				return
-			}
-			now := time.Now().Unix()
-			if tempKeyExpireTime < now {
-				return
-			}
-			expireSeconds := int(tempKeyExpireTime - now)
-			if expireSeconds > 0 {
-				websecurity.SetSensitiveCookie(c, "temp_key", tempKey, expireSeconds)
-			}
-		}()
+		websecurity.RedeemTempShareQuery(c)
 		reqPath := c.Request.URL.Path
 		if isUnmountedAPIOrConnectPath(reqPath) {
 			c.Status(http.StatusNotFound)
@@ -565,7 +539,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		var mimeType string
 		var exists bool
 		if !isPrivateApplicationPath(reqPath) {
-			content, mimeType, exists = getPublicFileContent(cfg[config.ThemeKey].(string), distPath)
+			content, mimeType, exists = publicThemeFileContent(cfg[config.ThemeKey].(string), distPath)
 		}
 		if exists {
 			setStaticCacheHeaders(c, reqPath)
@@ -605,26 +579,7 @@ func isPrivateApplicationPath(requestPath string) bool {
 }
 
 func redeemOrCheckTempShare(c *gin.Context) bool {
-	expireAt, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
-	if err != nil {
-		return false
-	}
-	allowKey, err := config.GetAs[string]("tempory_share_token", "")
-	if err != nil || allowKey == "" {
-		return false
-	}
-	now := time.Now().Unix()
-	if expireAt < now {
-		return false
-	}
-	if queryKey := strings.TrimSpace(c.Query("temp_key")); queryKey != "" && queryKey == allowKey {
-		if expireSeconds := int(expireAt - now); expireSeconds > 0 {
-			websecurity.SetSensitiveCookie(c, "temp_key", queryKey, expireSeconds)
-		}
-		return true
-	}
-	cookieKey, err := c.Cookie("temp_key")
-	return err == nil && cookieKey == allowKey
+	return websecurity.RedeemTempShareQuery(c) || websecurity.HasTempAccess(c)
 }
 
 func renderPrivateSitePublicNotice(sitename, panelOrigin string) []byte {
@@ -647,7 +602,7 @@ func renderPrivateSitePublicNotice(sitename, panelOrigin string) []byte {
 // StaticPublic mounts only public theme assets and SPA routes on the dedicated
 // Public Listener. Management routes (/admin, /login, /terminal, /bind, etc.)
 // and /system-assets/* are intentionally unmounted and return 404.
-func StaticPublic(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
+func StaticPublic(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc), decorateTheme func(*http.Request, []byte) []byte) {
 	getConfig := func() map[string]any {
 		cfg, _ := config.GetMany(map[string]any{
 			config.DescriptionKey: "A simple server monitor tool.",
@@ -658,13 +613,6 @@ func StaticPublic(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc))
 			config.PrivateSiteKey: false,
 		})
 		return cfg
-	}
-
-	getPublicFileContent := func(themeID, relativePath string) ([]byte, string, bool) {
-		if IsLocalThemeUsable(themeID) {
-			return localThemeFileContent(themeID, relativePath)
-		}
-		return embeddedFileContent("rescueTheme", relativePath)
 	}
 
 	servePublicIndex := func(c *gin.Context, cfg map[string]any, tempShareValid bool) {
@@ -679,7 +627,7 @@ func StaticPublic(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc))
 		}
 
 		themeName, _ := cfg[config.ThemeKey].(string)
-		content, _, exists := getPublicFileContent(themeName, path.Join(DistDir, IndexFile))
+		content, _, exists := publicThemeFileContent(themeName, path.Join(DistDir, IndexFile))
 		if !exists {
 			c.String(http.StatusNotFound, "Application index is unavailable.")
 			return
@@ -701,13 +649,16 @@ func StaticPublic(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc))
 		)
 		// Never inject native_login_bridge.js on the Public Listener: public
 		// status origins never accept passwords or Passkeys.
-		c.Data(http.StatusOK, "text/html; charset=utf-8",
-			[]byte(injectHTTPErrorNotice(injectThemeChangeReload(rendered))))
+		document := []byte(injectHTTPErrorNotice(injectThemeChangeReload(rendered)))
+		if decorateTheme != nil {
+			document = decorateTheme(c.Request, document)
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", document)
 	}
 
 	r.GET("/favicon.ico", func(c *gin.Context) {
 		setNoStoreHeaders(c)
-		localFavicon := filepath.Join(DataDir, FaviconFile)
+		localFavicon := filepath.Join(datadir.Resolve(DataDir), FaviconFile)
 		if _, err := os.Stat(localFavicon); err == nil {
 			c.Header("Content-Type", contentTypeForPath(localFavicon))
 			c.File(localFavicon)
@@ -716,7 +667,7 @@ func StaticPublic(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc))
 		cfg := getConfig()
 		themeName, _ := cfg[config.ThemeKey].(string)
 		themeFaviconPath := path.Join(DistDir, FaviconFile)
-		if content, mimeType, exists := getPublicFileContent(themeName, themeFaviconPath); exists {
+		if content, mimeType, exists := publicThemeFileContent(themeName, themeFaviconPath); exists {
 			c.Data(http.StatusOK, mimeType, content)
 			return
 		}
@@ -755,7 +706,7 @@ func StaticPublic(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc))
 			return
 		}
 		themeName, _ := cfg[config.ThemeKey].(string)
-		if content, mimeType, exists := getPublicFileContent(themeName, path.Join(DistDir, reqPath)); exists {
+		if content, mimeType, exists := publicThemeFileContent(themeName, path.Join(DistDir, reqPath)); exists {
 			setStaticCacheHeaders(c, reqPath)
 			c.Data(http.StatusOK, mimeType, content)
 			return
@@ -788,7 +739,7 @@ func StaticPanel(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) 
 
 	r.GET("/favicon.ico", func(c *gin.Context) {
 		setNoStoreHeaders(c)
-		localFavicon := filepath.Join(DataDir, FaviconFile)
+		localFavicon := filepath.Join(datadir.Resolve(DataDir), FaviconFile)
 		if _, err := os.Stat(localFavicon); err == nil {
 			c.Header("Content-Type", contentTypeForPath(localFavicon))
 			c.File(localFavicon)

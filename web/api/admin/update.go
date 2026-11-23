@@ -10,6 +10,7 @@ import (
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/internal/credentialaction"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/utils/geoip"
 	"github.com/komari-monitor/komari/web/api"
 )
@@ -85,7 +86,7 @@ func UploadFavicon(c *gin.Context) {
 		}
 		return
 	}
-	if err := os.WriteFile("./data/favicon.ico", data, 0644); err != nil {
+	if err := os.WriteFile(datadir.Resolve("./data/favicon.ico"), data, 0644); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save favicon: "+err.Error())
 		return
 	}
@@ -95,7 +96,7 @@ func UploadFavicon(c *gin.Context) {
 }
 
 func DeleteFavicon(c *gin.Context) {
-	if err := os.Remove("./data/favicon.ico"); err != nil {
+	if err := os.Remove(datadir.Resolve("./data/favicon.ico")); err != nil {
 		if !os.IsNotExist(err) {
 			api.RespondError(c, http.StatusInternalServerError, "Failed to delete favicon: "+err.Error())
 			return

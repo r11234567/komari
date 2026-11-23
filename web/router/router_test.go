@@ -2,13 +2,16 @@ package router
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -21,6 +24,47 @@ import (
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/security"
 )
+
+func TestLegacyAgentRoutesRejectEnrolledBearerWithoutBreakingTransferTickets(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := dbcore.GetDBInstance()
+	agentID := uuid.NewString()
+	token := uuid.NewString()
+	credential := models.AgentCredential{
+		Client: agentID, AgentPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		AccessTokenHash: fmt.Sprintf("%x", sha256.Sum256([]byte(token))),
+		AccessExpiresAt: time.Now().Add(time.Hour),
+	}
+	if err := db.Create(&credential).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Delete(&credential) })
+
+	engine := gin.New()
+	engine.Use(api.APIAuthenticationMiddleware(), api.IdentityMiddleware())
+	registerAgentRoutes(engine)
+	for _, route := range []struct{ method, path string }{
+		{http.MethodGet, "/api/clients/report"},
+		{http.MethodPost, "/api/clients/report"},
+		{http.MethodPost, "/api/clients/uploadBasicInfo"},
+		{http.MethodPost, "/api/clients/task/result"},
+		{http.MethodGet, "/api/clients/ping/tasks"},
+		{http.MethodPost, "/api/clients/ping/result"},
+		{http.MethodPost, "/api/clients/transfer/unissued"},
+	} {
+		req := httptest.NewRequest(route.method, route.path, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		res := httptest.NewRecorder()
+		engine.ServeHTTP(res, req)
+		want := http.StatusForbidden
+		if strings.Contains(route.path, "/transfer/") {
+			want = http.StatusUnauthorized
+		}
+		if res.Code != want {
+			t.Errorf("%s %s = %d, want %d: %s", route.method, route.path, res.Code, want, res.Body)
+		}
+	}
+}
 
 func TestRegisterDoesNotExposeHTTPSCertificateUpload(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -228,7 +272,20 @@ func TestSplitPublicAndPanelListenersEnforceHardBoundaries(t *testing.T) {
 	publicEngine := gin.New()
 	publicEngine.Use(api.PublicViewerMiddleware())
 	publicEngine.Use(api.PublicPrivateSiteMiddleware())
-	MountPublicRoutes(publicEngine)
+	const themeMarker = "<!-- public theme decorator -->"
+	MountPublicRoutes(publicEngine, func(_ *http.Request, document []byte) []byte {
+		return append(document, themeMarker...)
+	})
+	publicIndex := httptest.NewRecorder()
+	publicEngine.ServeHTTP(publicIndex, httptest.NewRequest(http.MethodGet, "/", nil))
+	if publicIndex.Code != http.StatusOK || !strings.Contains(publicIndex.Body.String(), themeMarker) {
+		t.Fatalf("public theme document was not decorated: %d", publicIndex.Code)
+	}
+	rawTheme := httptest.NewRecorder()
+	publicEngine.ServeHTTP(rawTheme, httptest.NewRequest(http.MethodGet, "/themes/"+themeShort+"/dist/index.html", nil))
+	if rawTheme.Code != http.StatusOK || strings.Contains(rawTheme.Body.String(), themeMarker) {
+		t.Fatalf("raw theme asset should bypass decoration: %d", rawTheme.Code)
+	}
 
 	panelEngine := gin.New()
 	panelEngine.Use(api.IdentityMiddleware())
@@ -338,7 +395,8 @@ func TestSplitPublicAndPanelListenersEnforceHardBoundaries(t *testing.T) {
 	privPageReq.AddCookie(&http.Cookie{Name: security.SessionCookieName, Value: session})
 	privPageRec := httptest.NewRecorder()
 	publicEngine.ServeHTTP(privPageRec, privPageReq)
-	if privPageRec.Code != http.StatusOK || !strings.Contains(privPageRec.Body.String(), "https://panel.example.com/login") {
+	if privPageRec.Code != http.StatusOK || !strings.Contains(privPageRec.Body.String(), "https://panel.example.com/login") ||
+		strings.Contains(privPageRec.Body.String(), themeMarker) {
 		t.Fatalf("Public private-site notice missing panel login link: code=%d body=%s", privPageRec.Code, privPageRec.Body.String())
 	}
 	privNodesReq := httptest.NewRequest(http.MethodGet, "/api/nodes", nil)

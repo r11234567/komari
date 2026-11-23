@@ -6,12 +6,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/web/oauth/factory"
-	"github.com/patrickmn/go-cache"
 )
 
 func (g *Generic) GetName() string {
@@ -22,9 +20,15 @@ func (g *Generic) GetConfiguration() factory.Configuration {
 }
 
 func (g *Generic) GetAuthorizationURL(redirectURI string) (string, string) {
+	if g.stateStore == nil {
+		return "", ""
+	}
 	state := utils.GenerateRandomString(16)
+	if !g.stateStore.Issue(state) {
+		return "", ""
+	}
 
-	// 构建GitHub OAuth授权URL
+	// 构建通用 OAuth 授权 URL
 	authURL := fmt.Sprintf(
 		"%s?client_id=%s&state=%s&scope=%s&redirect_uri=%s&response_type=code",
 		g.Addition.AuthURL,
@@ -33,24 +37,19 @@ func (g *Generic) GetAuthorizationURL(redirectURI string) (string, string) {
 		url.QueryEscape(g.Addition.Scope),
 		url.QueryEscape(redirectURI),
 	)
-	g.stateCache.Set(state, true, cache.DefaultExpiration)
 	return authURL, state
 }
 func (g *Generic) OnCallback(ctx *gin.Context, state string, query map[string]string, callbackURI string) (factory.OidcCallback, error) {
 	code := query["code"]
 
-	// 验证state防止CSRF攻击
-	if g.stateCache == nil {
+	// 验证并原子消费 state 防止 CSRF 与重放攻击
+	if g.stateStore == nil {
 		return factory.OidcCallback{}, fmt.Errorf("state cache not initialized")
 	}
-	if _, ok := g.stateCache.Get(state); !ok {
-		return factory.OidcCallback{}, fmt.Errorf("invalid state")
-	}
-	if state == "" {
+	if !g.stateStore.Consume(state) {
 		return factory.OidcCallback{}, fmt.Errorf("invalid state")
 	}
 
-	// 获取code
 	if code == "" {
 		return factory.OidcCallback{}, fmt.Errorf("no code provided")
 	}
@@ -64,53 +63,70 @@ func (g *Generic) OnCallback(ctx *gin.Context, state string, query map[string]st
 		"grant_type":    {"authorization_code"},
 	}
 
-	req, _ := http.NewRequest("POST", g.Addition.TokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequest(http.MethodPost, g.Addition.TokenURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return factory.OidcCallback{}, fmt.Errorf("failed to build token request")
+	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	status, tokenBody, err := factory.DoBoundedRequest(g.httpClient, req, factory.MaxResponseBodyBytes)
 	if err != nil {
 		return factory.OidcCallback{}, fmt.Errorf("failed to get access token: %s", utils.DataMasking(err.Error(), []string{g.Addition.ClientSecret, g.Addition.ClientId}))
 	}
-	defer resp.Body.Close()
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
+		return factory.OidcCallback{}, fmt.Errorf("failed to get access token: HTTP %d", status)
+	}
 
 	var tokenResp struct {
 		AccessToken string `json:"access_token"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+	if err := json.Unmarshal(tokenBody, &tokenResp); err != nil {
 		return factory.OidcCallback{}, fmt.Errorf("failed to parse access token response: %s", utils.DataMasking(err.Error(), []string{g.Addition.ClientSecret, g.Addition.ClientId}))
+	}
+	if tokenResp.AccessToken == "" {
+		return factory.OidcCallback{}, fmt.Errorf("empty access token returned")
 	}
 
 	// 获取用户信息
-	userReq, _ := http.NewRequest("GET", g.Addition.UserInfoURL, nil)
+	userReq, err := http.NewRequest(http.MethodGet, g.Addition.UserInfoURL, nil)
+	if err != nil {
+		return factory.OidcCallback{}, fmt.Errorf("failed to build user info request")
+	}
 	userReq.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
 	userReq.Header.Set("Accept", "application/json")
 
-	userResp, err := http.DefaultClient.Do(userReq)
+	userStatus, userBody, err := factory.DoBoundedRequest(g.httpClient, userReq, factory.MaxResponseBodyBytes)
 	if err != nil {
 		return factory.OidcCallback{}, fmt.Errorf("failed to get user info: %v", err)
 	}
-	defer userResp.Body.Close()
+	if userStatus < http.StatusOK || userStatus >= http.StatusMultipleChoices {
+		return factory.OidcCallback{}, fmt.Errorf("failed to get user info: HTTP %d", userStatus)
+	}
 
 	var user map[string]interface{}
-	if err := json.NewDecoder(userResp.Body).Decode(&user); err != nil {
+	if err := json.Unmarshal(userBody, &user); err != nil {
 		return factory.OidcCallback{}, fmt.Errorf("failed to parse user info response: %v", err)
 	}
 
 	userId, ok := user[g.Addition.UserIDField]
-	if !ok {
+	if !ok || userId == nil || fmt.Sprintf("%v", userId) == "" {
 		return factory.OidcCallback{}, fmt.Errorf("user id field '%s' not found in user info response", g.Addition.UserIDField)
 	}
 
 	return factory.OidcCallback{UserId: fmt.Sprintf("%v", userId)}, nil
 }
 func (g *Generic) Init() error {
-	g.stateCache = cache.New(time.Minute*5, time.Minute*10)
+	g.stateStore = factory.NewStateStore(0, 0)
+	g.httpClient = factory.NewHTTPClient()
 	return nil
 }
 func (g *Generic) Destroy() error {
-	g.stateCache.Flush()
+	if g.stateStore != nil {
+		g.stateStore.Reset()
+		g.stateStore = nil
+	}
 	return nil
 }
 

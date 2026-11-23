@@ -12,7 +12,9 @@ const base = process.env.E2E_URL || 'https://127.0.0.1:29443';
 const root = process.env.E2E_ROOT;
 const artifacts = process.env.E2E_ARTIFACTS;
 const checks = [];
-let admin, guest, browser, context, login;
+let admin, guest, browser, context, login, daemon;
+const credentialsPath = path.join(root, 'entry-agent-credentials.json');
+const denyRefresh = path.join(root, 'entry-deny-refresh');
 
 async function rpc(client, service, method, data = {}, headers = {}) {
   const response = await client.post(`/komari.${service}/${method}`, {
@@ -128,7 +130,7 @@ async function run() {
   console.log(`::add-mask::${ticket}`);
   const log = fs.openSync(path.join(root, 'entry-agent-private.log'), 'w', 0o600);
   try {
-    login = spawn('/usr/lib/komari/komari-e2e/komari-agent', ['login', '--endpoint', base], {
+    login = spawn('/usr/lib/komari/komari-e2e/komari-agent', ['login', '--endpoint', base, '--credentials-file', credentialsPath], {
       stdio: ['ignore', log, log],
     });
   } finally {
@@ -156,6 +158,44 @@ async function run() {
   }, code => code === 0, 90000);
   fs.unlinkSync(path.join(root, 'login.pid'));
   checks.push('installed-agent-begins-polls-and-enrolls-without-access-token');
+
+  const initial = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
+  assert(initial.access_token && initial.refresh_token, 'enrollment did not persist usable credentials');
+  fs.writeFileSync(credentialsPath, JSON.stringify({
+    ...initial, access_token_expires_at: new Date(Date.now() - 60000).toISOString(),
+  }), { mode: 0o600 });
+  const nginxLog = path.join(artifacts, 'nginx-access.log');
+  const accessOffset = fs.statSync(nginxLog).size;
+  const newAccessEntries = () => fs.readFileSync(nginxLog).subarray(accessOffset).toString();
+  fs.writeFileSync(denyRefresh, '', { mode: 0o600 });
+  const daemonLog = fs.openSync(path.join(root, 'entry-agent-run.log'), 'w', 0o600);
+  try {
+    daemon = spawn('/usr/lib/komari/komari-e2e/komari-agent', [
+      '--endpoint', base, '--credentials-file', credentialsPath,
+      '--runtime-state-file', path.join(root, 'entry-agent-runtime.json'),
+      '--privileged-state-file', path.join(root, 'entry-agent-privileged.json'),
+      '--replay-state-file', path.join(root, 'entry-agent-replay.json'),
+    ], { stdio: ['ignore', daemonLog, daemonLog] });
+  } finally {
+    fs.closeSync(daemonLog);
+  }
+  daemon.on('error', error => { spawnError = error; });
+  await until('installed Agent received a native entry 403 on refresh', async () => {
+    if (spawnError) throw spawnError;
+    assert.equal(daemon.exitCode, null, 'Agent exited during refresh');
+    return /POST \/komari\.enrollment\.v1\.EnrollmentService\/RefreshCredentials 403 upstream=-/.test(newAccessEntries());
+  }, Boolean, 30000);
+  fs.unlinkSync(denyRefresh);
+  await until('same Agent process rotates and persists credentials', async () => {
+    assert.equal(daemon.exitCode, null, 'Agent stopped after the entry refusal');
+    const identity = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
+    return identity.access_token !== initial.access_token && identity.refresh_token !== initial.refresh_token &&
+      Date.parse(identity.access_token_expires_at) > Date.now();
+  }, Boolean, 90000);
+  await until('successful upstream refresh recorded by Nginx', async () =>
+    /POST \/komari\.enrollment\.v1\.EnrollmentService\/RefreshCredentials 200 upstream=200/.test(newAccessEntries()), Boolean);
+  checks.push('installed-agent-with-expired-access-retries-after-entry-403-and-persists-rotation');
+  daemon.kill();
 
   const { publicKey } = crypto.generateKeyPairSync('ed25519');
   const rawKey = publicKey.export({ type: 'spki', format: 'der' }).subarray(-32).toString('base64');
@@ -291,6 +331,9 @@ run().then(() => {
   console.error(error);
   process.exitCode = 1;
 }).finally(async () => {
+  if (daemon && daemon.exitCode === null) daemon.kill();
+  fs.rmSync(denyRefresh, { force: true });
+  fs.rmSync(credentialsPath, { force: true });
   if (login && login.exitCode === null) login.kill();
   if (context) await context.close();
   if (browser) await browser.close();

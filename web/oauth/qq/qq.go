@@ -3,15 +3,12 @@ package qq
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/web/oauth/factory"
-	"github.com/patrickmn/go-cache"
 )
 
 func (q *QQ) GetName() string {
@@ -22,11 +19,10 @@ func (q *QQ) GetConfiguration() factory.Configuration {
 	return &q.Addition
 }
 
-var qqHTTPClient = &http.Client{Timeout: 15 * time.Second}
-
-const maxQQResponseBytes = 1 << 20
-
 func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
+	if q.stateStore == nil {
+		return "", ""
+	}
 	state := utils.GenerateRandomString(16)
 
 	callbackTarget := redirectURI
@@ -47,18 +43,13 @@ func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
 		url.QueryEscape(callbackTarget),
 	)
 
-	// 向聚合登录平台发送请求
-	resp, err := qqHTTPClient.Get(requestURL)
+	req, err := http.NewRequest(http.MethodGet, requestURL, nil)
 	if err != nil {
-		// 如果请求失败，返回错误信息
-		return "", state
+		return "", ""
 	}
-	defer resp.Body.Close()
-
-	// 读取响应内容（限制大小防止内存耗尽）
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQQResponseBytes))
-	if err != nil {
-		return "", state
+	status, body, err := factory.DoBoundedRequest(q.httpClient, req, factory.MaxResponseBodyBytes)
+	if err != nil || status < http.StatusOK || status >= http.StatusMultipleChoices {
+		return "", ""
 	}
 
 	// 解析响应JSON
@@ -69,38 +60,24 @@ func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
 	}
 
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", state
+		return "", ""
 	}
 
 	// 检查响应状态
-	if result.Code != 0 {
-		return "", state
+	if result.Code != 0 || result.URL == "" {
+		return "", ""
 	}
 
-	q.stateMu.Lock()
-	if q.stateCache != nil {
-		q.stateCache.Set(state, true, cache.DefaultExpiration)
+	if !q.stateStore.Issue(state) {
+		return "", ""
 	}
-	q.stateMu.Unlock()
 	return result.URL, state
 }
 
 // consumeState atomically verifies and removes a pending OAuth state token so
 // concurrent callbacks cannot replay the same state.
 func (q *QQ) consumeState(state string) bool {
-	if state == "" {
-		return false
-	}
-	q.stateMu.Lock()
-	defer q.stateMu.Unlock()
-	if q.stateCache == nil {
-		return false
-	}
-	if _, ok := q.stateCache.Get(state); !ok {
-		return false
-	}
-	q.stateCache.Delete(state)
-	return true
+	return q.stateStore != nil && q.stateStore.Consume(state)
 }
 
 // OnCallback 处理QQ OAuth回调
@@ -117,7 +94,7 @@ func (q *QQ) OnCallback(ctx *gin.Context, state string, query map[string]string,
 	}
 
 	// 验证state防止CSRF攻击，并原子消费防并发重放
-	if q.stateCache == nil {
+	if q.stateStore == nil {
 		return factory.OidcCallback{}, fmt.Errorf("state cache not initialized")
 	}
 	if !q.consumeState(state) {
@@ -140,21 +117,18 @@ func (q *QQ) OnCallback(ctx *gin.Context, state string, query map[string]string,
 		url.QueryEscape(code),
 	)
 
-	resp, err := qqHTTPClient.Get(callbackURL)
+	req, err := http.NewRequest(http.MethodGet, callbackURL, nil)
+	if err != nil {
+		return factory.OidcCallback{}, fmt.Errorf("failed to build callback request")
+	}
+	status, body, err := factory.DoBoundedRequest(q.httpClient, req, factory.MaxResponseBodyBytes)
 	if err != nil {
 		return factory.OidcCallback{}, fmt.Errorf("failed to get user info: %v", err)
 	}
-	defer resp.Body.Close()
 
 	// 检查HTTP响应状态
-	if resp.StatusCode != http.StatusOK {
-		return factory.OidcCallback{}, fmt.Errorf("HTTP request failed with status code: %d", resp.StatusCode)
-	}
-
-	// 读取响应（限制大小）
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQQResponseBytes))
-	if err != nil {
-		return factory.OidcCallback{}, fmt.Errorf("failed to read response: %v", err)
+	if status != http.StatusOK {
+		return factory.OidcCallback{}, fmt.Errorf("HTTP request failed with status code: %d", status)
 	}
 
 	// 解析响应
@@ -172,17 +146,17 @@ func (q *QQ) OnCallback(ctx *gin.Context, state string, query map[string]string,
 	}
 
 	if err := json.Unmarshal(body, &result); err != nil {
-		return factory.OidcCallback{}, fmt.Errorf("failed to parse callback response: %v, response body: %s", err, string(body))
+		return factory.OidcCallback{}, fmt.Errorf("failed to parse callback response: %v", err)
 	}
 
 	// 检查返回状态码
 	if result.Code != 0 {
-		return factory.OidcCallback{}, fmt.Errorf("QQ login callback failed with code %d: %s", result.Code, result.Msg)
+		return factory.OidcCallback{}, fmt.Errorf("QQ login callback failed with code %d", result.Code)
 	}
 
 	// 检查是否返回了用户唯一标识
 	if result.SocialUid == "" {
-		return factory.OidcCallback{}, fmt.Errorf("empty social_uid returned, full response: %s", string(body))
+		return factory.OidcCallback{}, fmt.Errorf("empty social_uid returned")
 	}
 
 	// 返回用户唯一标识
@@ -190,18 +164,15 @@ func (q *QQ) OnCallback(ctx *gin.Context, state string, query map[string]string,
 }
 
 func (q *QQ) Init() error {
-	q.stateMu.Lock()
-	defer q.stateMu.Unlock()
-	q.stateCache = cache.New(time.Minute*5, time.Minute*10)
+	q.stateStore = factory.NewStateStore(0, 0)
+	q.httpClient = factory.NewHTTPClient()
 	return nil
 }
 
 func (q *QQ) Destroy() error {
-	q.stateMu.Lock()
-	defer q.stateMu.Unlock()
-	if q.stateCache != nil {
-		q.stateCache.Flush()
-		q.stateCache = nil
+	if q.stateStore != nil {
+		q.stateStore.Reset()
+		q.stateStore = nil
 	}
 	return nil
 }
