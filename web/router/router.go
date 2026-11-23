@@ -82,6 +82,7 @@ func MountPanelRoutes(r *gin.Engine) func() error {
 
 func registerHealthRoute(r *gin.Engine) {
 	r.Any("/ping", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
 		connectapi.AdvertiseAgentProof(c)
 		c.String(200, "pong")
 	})

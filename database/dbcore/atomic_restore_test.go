@@ -258,6 +258,33 @@ func TestAtomicRestoreCanApplyNextUploadAfterPriorArchiveWasPublished(t *testing
 	}
 }
 
+func TestAtomicRestoreReclaimsSupersededGenerations(t *testing.T) {
+	root, backupDB := newAtomicRestoreFixture(t)
+	first, err := activateQueuedRestore(root)
+	require.NoError(t, err)
+	require.Empty(t, first.Pointer.PreviousGeneration)
+
+	writeRestoreArchive(t, filepath.Join(root, backupArchiveFileName), backupDB)
+	second, err := activateQueuedRestore(root)
+	require.NoError(t, err)
+	require.Equal(t, first.Pointer.Generation, second.Pointer.PreviousGeneration)
+
+	manual := filepath.Join(root, datadir.Generations, "manual-copy")
+	require.NoError(t, os.Mkdir(manual, 0o700))
+	writeRestoreArchive(t, filepath.Join(root, backupArchiveFileName), backupDB)
+	require.NoError(t, pruneSupersededGenerations(second))
+	require.DirExists(t, first.Dir)
+
+	third, err := activateQueuedRestore(root)
+	require.NoError(t, err)
+	require.Equal(t, second.Pointer.Generation, third.Pointer.PreviousGeneration)
+	require.NoError(t, pruneSupersededGenerations(third))
+	require.NoDirExists(t, first.Dir)
+	require.DirExists(t, manual)
+	assertRestoreValue(t, second.Dir, "restored")
+	assertRestoreValue(t, third.Dir, "restored")
+}
+
 func TestAtomicRestorePreservesBackupIdentityOnlyBeforeFirstRun(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

@@ -24,10 +24,11 @@ var ErrPendingLegacyRestore = errors.New("previous restore must finish before op
 // Pointer is the only publication record for a generation. Legacy version 2
 // journals are read for transition from installations that used flat paths.
 type Pointer struct {
-	Version    int    `json:"version"`
-	Generation string `json:"active_generation"`
-	Epoch      uint64 `json:"security_epoch"`
-	State      string `json:"state,omitempty"`
+	Version            int    `json:"version"`
+	Generation         string `json:"active_generation"`
+	PreviousGeneration string `json:"previous_generation,omitempty"`
+	Epoch              uint64 `json:"security_epoch"`
+	State              string `json:"state,omitempty"`
 }
 
 type Layout struct {
@@ -61,6 +62,9 @@ func Open(root string) (Layout, error) {
 	case Version:
 		if p.State != "" || p.Epoch == 0 || !ValidGeneration(p.Generation) {
 			return Layout{}, errors.New("invalid active data generation")
+		}
+		if p.PreviousGeneration != "" && (!ValidGeneration(p.PreviousGeneration) || p.PreviousGeneration == p.Generation) {
+			return Layout{}, errors.New("invalid previous data generation")
 		}
 		layout.Dir = filepath.Join(root, Generations, p.Generation)
 		for _, dir := range []string{filepath.Dir(layout.Dir), layout.Dir} {

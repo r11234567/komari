@@ -101,6 +101,7 @@ type App struct {
 	sigCh        chan os.Signal
 	shutdownOnce sync.Once
 	shutdownDone chan struct{}
+	shutdownErr  error
 
 	cleanups []cleanupFunc
 }
@@ -158,9 +159,7 @@ func (a *App) Bootstrap() error {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
 	a.dbReady = true
-	a.addCleanup("database", func(context.Context) error {
-		return dbcore.Close()
-	})
+	a.addCleanup("database", dbcore.CloseContext)
 	if err := os.MkdirAll(datadir.Resolve("./data/theme"), os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create theme directory: %w", err)
 	}
@@ -438,7 +437,7 @@ func (a *App) RunInstallGuide() (bool, error) {
 		if a.shutdownDone != nil {
 			<-a.shutdownDone
 		}
-		return false, nil
+		return false, a.shutdownErr
 	case <-controller.Done():
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -965,7 +964,7 @@ func (a *App) Run() error {
 		if a.shutdownDone != nil {
 			<-a.shutdownDone
 		}
-		return nil
+		return a.shutdownErr
 	}
 }
 
@@ -990,35 +989,51 @@ func (a *App) Shutdown() error {
 		}
 		connection.CloseAll()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		// 先关闭 HTTP 服务，停止接收新请求。
-		if a.panelServer != nil {
-			if err := a.panelServer.Shutdown(ctx); err != nil {
-				logger.Infof("server", "Panel HTTP server forced to shutdown: %v", err)
-			}
-		}
-		if a.server != nil {
-			if err := a.server.Shutdown(ctx); err != nil {
-				logger.Infof("server", "HTTP server forced to shutdown: %v", err)
-			}
-		}
+		a.shutdownErr = a.stopHTTPServers()
 		// 再次排空可能正处于升级临界区的 WebSocket 连接。
 		connection.CloseAll()
 
 		// 反序释放资源（后进先出）。
 		for i := len(a.cleanups) - 1; i >= 0; i-- {
 			c := a.cleanups[i]
-			if err := c.fn(ctx); err != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			err := c.fn(ctx)
+			cancel()
+			if err != nil {
 				logger.Errorf("server", "cleanup %q failed: %v", c.name, err)
+				a.shutdownErr = errors.Join(a.shutdownErr, fmt.Errorf("cleanup %q: %w", c.name, err))
 			}
 		}
 	})
 	if a.shutdownDone != nil {
 		<-a.shutdownDone
 	}
-	return nil
+	return a.shutdownErr
+}
+
+func (a *App) stopHTTPServers() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	servers := []struct {
+		name string
+		http *http.Server
+	}{{"panel", a.panelServer}, {"public", a.server}}
+	results := make(chan error, len(servers))
+	for _, server := range servers {
+		if server.http == nil {
+			results <- nil
+			continue
+		}
+		go func() {
+			err := server.http.Shutdown(ctx)
+			if err != nil {
+				logger.Infof("server", "%s HTTP server forced to shut down: %v", server.name, err)
+				err = errors.Join(fmt.Errorf("shut down %s HTTP server: %w", server.name, err), server.http.Close())
+			}
+			results <- err
+		}()
+	}
+	return errors.Join(<-results, <-results)
 }
 
 // onFatal 处理 HTTP 服务致命错误：尽力释放已登记资源。
@@ -1026,24 +1041,7 @@ func (a *App) onFatal(err error) {
 	if a.dbReady {
 		auditlog.Log("", "", "server encountered a fatal error: "+err.Error(), "error")
 	}
-	if a.serverCancel != nil {
-		a.serverCancel()
-	}
-	connection.CloseAll()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if a.panelServer != nil {
-		_ = a.panelServer.Shutdown(ctx)
-	}
-	if a.server != nil {
-		_ = a.server.Shutdown(ctx)
-	}
-	for i := len(a.cleanups) - 1; i >= 0; i-- {
-		c := a.cleanups[i]
-		if cerr := c.fn(ctx); cerr != nil {
-			logger.Errorf("server", "cleanup %q failed: %v", c.name, cerr)
-		}
-	}
+	_ = a.Shutdown()
 }
 
 // registerScheduledWork 注册所有定时任务与首启动同步逻辑。
