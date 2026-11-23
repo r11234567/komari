@@ -949,6 +949,7 @@ func adoptDeploymentRuntimeConfig(db *gorm.DB, clientUUID, platform string, conf
 // PrivilegedCapabilityAllowed applies both the actual snapshot and pending
 // revocations. A desired grant never enables access before a daemon ACK.
 // Legacy nodes retain their existing deployment policy until v2 is negotiated.
+// Rescue retains its independent approval so an operator can recover a protected node.
 func PrivilegedCapabilityAllowed(clientUUID, feature string) (bool, error) {
 	return PrivilegedCapabilityAllowedWithDB(dbcore.GetDBInstance(), clientUUID, feature)
 }

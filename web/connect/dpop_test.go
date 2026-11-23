@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func dpopTestAgent(t *testing.T) (string, string, ed25519.PrivateKey) {
@@ -108,6 +110,29 @@ func TestDPoPFailsClosedOnCorruptedPublicKey(t *testing.T) {
 
 	ctx := makeDPoPContext(http.MethodPost, "/komari.report.v1.ReportService/ReportBasicInfo", []byte(`{}`), accessToken, "nonce-"+uuid.NewString(), priv, false)
 	require.Error(t, verifyDPoP(ctx, rpc.NewAgentPrincipal(agentID)))
+}
+
+func TestDPoPRejectsBodyOverUnaryLimit(t *testing.T) {
+	agentID, accessToken, key := dpopTestAgent(t)
+	body := make([]byte, maxDPoPBodyBytes+1)
+	ctx := makeDPoPContext(http.MethodPost, "/komari.report.v1.AgentReportService/SubmitReport", body, accessToken, uuid.NewString(), key, false)
+	require.ErrorContains(t, verifyDPoP(ctx, rpc.NewAgentPrincipal(agentID)), "request body exceeds maximum size")
+}
+
+func TestDPoPFailsClosedOnUnsignedAgentKeyLookupError(t *testing.T) {
+	callback := dbcore.GetDBInstance().Callback().Query()
+	const callbackName = "test:inject_agent_key_lookup_error"
+	lookupErr := errors.New("synthetic database lookup failure")
+	require.NoError(t, callback.Before("gorm:query").Register(callbackName, func(db *gorm.DB) {
+		if _, ok := db.Statement.Model.(*models.AgentCredential); ok {
+			_ = db.AddError(lookupErr)
+		}
+	}))
+	t.Cleanup(func() { require.NoError(t, callback.Remove(callbackName)) })
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/komari.report.v1.AgentReportService/SubmitReport", nil)
+	require.ErrorIs(t, verifyDPoP(ctx, rpc.NewAgentPrincipal(uuid.NewString())), lookupErr)
 }
 
 func TestVerifyRefreshProofRejectsPermissiveFallbacks(t *testing.T) {

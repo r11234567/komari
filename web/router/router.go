@@ -122,7 +122,7 @@ func registerPanelAuthAndSystemRoutes(r *gin.Engine) {
 	r.GET("/api/oauth", public_api.OAuth)
 	r.GET("/api/oauth_callback", public_api.OAuthCallback)
 	// Office Online and image/video previews fetch this URL directly. Access is
-	// gated by the one-shot preview token created below.
+	// gated by a short-lived preview token with a bounded use count.
 	r.GET("/api/preview/client/:uuid/file/download", filemanager.PreviewDownload)
 	r.HEAD("/api/preview/client/:uuid/file/download", filemanager.PreviewDownload)
 }

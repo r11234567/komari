@@ -9,7 +9,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"golang.org/x/image/font/basicfont"
+	"golang.org/x/image/font/gofont/goregular"
+	"golang.org/x/image/font/opentype"
 )
 
 func TestMJPEGConcurrentDrawingAndStreamLimit(t *testing.T) {
@@ -21,7 +22,17 @@ func TestMJPEGConcurrentDrawingAndStreamLimit(t *testing.T) {
 		t.Fatalf("fontHTTPClient.Timeout = %s, want 15s", fontHTTPClient.Timeout)
 	}
 
-	// Concurrent drawing against a shared font.Face must be race-free under -race.
+	parsed, err := opentype.Parse(goregular.TTF)
+	if err != nil {
+		t.Fatal(err)
+	}
+	face, err := opentype.NewFace(parsed, &opentype.FaceOptions{Size: 13, DPI: 72})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer face.Close()
+
+	// Concurrent drawing against a shared OpenType face must be race-free.
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
 		wg.Add(1)
@@ -29,9 +40,9 @@ func TestMJPEGConcurrentDrawingAndStreamLimit(t *testing.T) {
 			defer wg.Done()
 			img := image.NewRGBA(image.Rect(0, 0, 320, 80))
 			for j := 0; j < 20; j++ {
-				drawString(img, "Komari Node 01", 10, 20, color.White, basicfont.Face7x13)
-				drawCenteredString(img, "Online 99.9%", 160, 50, color.White, basicfont.Face7x13)
-				drawProgressBar(img, 10, 60, 100, 14, 42.5, basicfont.Face7x13)
+				drawString(img, "Komari Node 01", 10, 20, color.White, face)
+				drawCenteredString(img, "Online 99.9%", 160, 50, color.White, face)
+				drawProgressBar(img, 10, 60, 100, 14, 42.5, face)
 				_ = renderDownloadProgress(DownloadProgress{Total: 1000, Downloaded: 425, Speed: 100})
 			}
 		}()
