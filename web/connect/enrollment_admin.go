@@ -24,6 +24,7 @@ import (
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/pkg/bindticket"
 	"github.com/komari-monitor/komari/pkg/rpc"
@@ -84,7 +85,7 @@ func verifyBindTicket(reqHeader http.Header, principal *rpc.Principal) (*bindtic
 		)
 	}
 	key := accounts.SessionDigestKey()
-	claims, err := bindticket.Verify(ticket, key)
+	claims, err := bindticket.VerifyWithEpoch(ticket, key, dbcore.CurrentSecurityEpoch())
 	if err != nil {
 		switch {
 		case errors.Is(err, bindticket.ErrTicketExpired):

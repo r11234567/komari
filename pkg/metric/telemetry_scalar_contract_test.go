@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 )
@@ -87,6 +88,53 @@ func TestScalarFreshInputDoesNotGenerateAncestors(t *testing.T) {
 	promoteTelemetryAll(t, e, at.Add(time.Hour+telemetryTierGrace+10*time.Second))
 	if err := e.s.db.QueryRow("SELECT MAX(resolution) FROM " + e.table("rollup")).Scan(&resolution); err != nil || resolution != 60 || telemetryCount(t, e, "rollup") != 1 {
 		t.Fatal(resolution, err)
+	}
+}
+
+func TestMinuteChartKeepsPopulationThroughFirstTierPromotion(t *testing.T) {
+	_, e := telemetryFixture(t, "")
+	ctx := context.Background()
+	at := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Minute)
+	batch := telemetryBatch("promotion-pair", at.Add(time.Minute), 0.1, 0.2, 0.3)
+	for i := range batch.Points {
+		batch.Points[i].Timestamp = at.Add(time.Minute + time.Duration(1+5*i)*time.Second)
+	}
+	if _, err := e.Accept(ctx, batch, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	summarizeAll(t, e)
+
+	start := at.Add(2 * time.Second)
+	query := Query{MetricName: "cpu", EntityID: "node", Start: start, End: start.Add(time.Hour)}
+	read := func(now time.Time) (Query, time.Duration, TelemetryQueryResult) {
+		t.Helper()
+		planned, interval, err := e.PlanChart(ctx, query, now, 60, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := e.Chart(ctx, AggregateQuery{Query: planned, Interval: interval, Aggregation: AggAvg}, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Points) != 1 || len(result.Gaps) != 0 {
+			t.Fatalf("incomplete chart: %+v", result)
+		}
+		return planned, interval, result
+	}
+	promotionTime := at.Add(time.Hour + telemetryTierGrace + time.Minute + 10*time.Second)
+	beforeWindow, beforeInterval, before := read(promotionTime.Add(-time.Second))
+	promoteTelemetryAll(t, e, promotionTime)
+	afterWindow, afterInterval, after := read(promotionTime.Add(time.Second))
+	if beforeInterval != time.Minute || afterInterval != beforeInterval ||
+		!beforeWindow.Start.Equal(afterWindow.Start) || !beforeWindow.End.Equal(afterWindow.End) {
+		t.Fatalf("chart grid changed: before %+v/%v after %+v/%v", beforeWindow, beforeInterval, afterWindow, afterInterval)
+	}
+	if before.Resolution != 10*time.Second || after.Resolution != time.Minute {
+		t.Fatalf("source resolution did not promote: %v -> %v", before.Resolution, after.Resolution)
+	}
+	a, b := before.Points[0], after.Points[0]
+	if !a.Bucket.Equal(b.Bucket) || a.Count != 3 || b.Count != a.Count || math.Abs(a.Value-b.Value) > 1e-14 {
+		t.Fatalf("population changed during promotion: %+v -> %+v", a, b)
 	}
 }
 

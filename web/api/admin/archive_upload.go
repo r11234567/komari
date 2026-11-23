@@ -40,17 +40,23 @@ func finalizeBackupUpload(session upload.Session) (upload.Result, error) {
 		restoreLock.Release()
 		return upload.Result{}, fmt.Errorf("close merged backup: %w", err)
 	}
+	backup.MarkRestartPending()
 
 	go func() {
-		logger.InfoArgs("admin-api", "Backup uploaded, restarting service in 2 seconds to apply on startup...")
-		time.Sleep(2 * time.Second)
-		restoreLock.Release()
-		os.Exit(0)
+		// Keep restoreLock held through shutdown so no concurrent upload can race.
+		_ = restoreLock
+		logger.InfoArgs("admin-api", "Backup uploaded; requesting graceful shutdown to apply backup on startup...")
+		time.Sleep(300 * time.Millisecond)
+		backup.RequestGracefulRestart("admin_archive_backup_upload")
 	}()
 
 	return upload.Result{
-		Message: "Backup uploaded successfully. The service will restart and apply the backup.",
-		Data:    map[string]string{"path": filepath.Join(".", "data", "backup.zip")},
+		Message: "Backup uploaded successfully. The server is shutting down cleanly to apply the backup on startup (restart the process if not supervised).",
+		Data: map[string]any{
+			"path":                filepath.Join(".", "data", "backup.zip"),
+			"restart_required":    true,
+			"manual_restart_note": "If running outside a container or process supervisor, restart Komari manually after shutdown completes.",
+		},
 	}, nil
 }
 

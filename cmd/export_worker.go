@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/signal"
 	"syscall"
@@ -22,19 +23,26 @@ func init() {
 		if _, e = historyexport.VerifyResources(self, instance); e != nil {
 			return e
 		}
-		q, e := historyexport.Open(dir)
-		if e != nil {
-			return e
-		}
-		defer q.Close()
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
-		w := historyexport.Worker{Queue: q, InstanceCgroup: instance, IOBytesPerSecond: ioRate}
-		e = w.Run(ctx)
-		if e == context.Canceled {
-			return nil
+		for {
+			q, err := historyexport.OpenWorkerQueue(ctx, dir)
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			w := historyexport.Worker{Queue: q, InstanceCgroup: instance, IOBytesPerSecond: ioRate}
+			err = w.Run(ctx)
+			closeErr := q.Close()
+			if errors.Is(err, context.Canceled) {
+				return closeErr
+			}
+			if !errors.Is(err, historyexport.ErrQueueReplaced) || closeErr != nil {
+				return errors.Join(err, closeErr)
+			}
 		}
-		return e
 	}}
 	cmd.Flags().StringVar(&dir, "queue", "./data/exports-v2", "Private shared export queue directory")
 	cmd.Flags().StringVar(&instance, "instance-cgroup", "", "Absolute cgroup-v2 directory of the main Komari instance (not the export worker)")

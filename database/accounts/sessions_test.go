@@ -156,3 +156,54 @@ func TestSessionExpiryHandlesNonUTCTimezoneOffsets(t *testing.T) {
 		t.Fatalf("post-purge counts expired=%d valid=%d, want 0/1", expiredCount, validCount)
 	}
 }
+
+func TestSessionInvalidatedWhenSecurityEpochAdvances(t *testing.T) {
+	t.Cleanup(func() { dbcore.SetCurrentSecurityEpoch(1) })
+	user, err := CreateAccount("sess-epoch-"+uuid.NewString(), "Strong-Password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := dbcore.GetDBInstance()
+	t.Cleanup(func() {
+		db.Where("uuid = ?", user.UUID).Delete(&models.Session{})
+		db.Where("uuid = ?", user.UUID).Delete(&models.User{})
+	})
+
+	dbcore.SetCurrentSecurityEpoch(1)
+	oldSession, err := CreateSession(user.UUID, 3600, "ua-1", "127.0.0.1", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := GetSession(oldSession); err != nil || got != user.UUID {
+		t.Fatalf("epoch-1 session failed before epoch change: (%q, %v)", got, err)
+	}
+
+	dbcore.SetCurrentSecurityEpoch(2)
+	if _, err := GetSession(oldSession); err == nil {
+		t.Fatal("stale epoch-1 session remained valid after security epoch advanced to 2")
+	}
+	if _, _, err := GetSessionIdentity(oldSession); err == nil {
+		t.Fatal("GetSessionIdentity accepted stale epoch-1 session")
+	}
+	if _, err := GetUserBySession(oldSession); err == nil {
+		t.Fatal("GetUserBySession accepted stale epoch-1 session")
+	}
+	all, err := GetAllSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldID := SessionIDForCookie(oldSession)
+	for _, s := range all {
+		if s.Session == oldID {
+			t.Fatal("GetAllSessions returned stale epoch-1 session")
+		}
+	}
+
+	newSession, err := CreateSession(user.UUID, 3600, "ua-2", "127.0.0.1", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := GetSession(newSession); err != nil || got != user.UUID {
+		t.Fatalf("epoch-2 session failed: (%q, %v)", got, err)
+	}
+}

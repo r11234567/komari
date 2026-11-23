@@ -16,6 +16,7 @@ import (
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/historyexport"
 	"github.com/komari-monitor/komari/web/api"
 	_ "github.com/mattn/go-sqlite3"
@@ -33,6 +34,8 @@ var backupPersistentPaths = []string{
 	"font.ttf",
 	"secret.key",
 	"theme",
+	"tls",
+	"notification",
 }
 
 // backupFullExtraPersistentPaths are included in complete backups so installed
@@ -147,7 +150,7 @@ func copyDir(srcDir, destDir string) error {
 }
 
 func copyPersistentFiles(contentDir string, scope backupScope) error {
-	return copyPersistentFilesFrom(filepath.Join(".", "data"), contentDir, scope)
+	return copyPersistentFilesFrom(datadir.Resolve(datadir.Root), contentDir, scope)
 }
 
 func copyPersistentFilesFrom(dataDir, contentDir string, scope backupScope) error {
@@ -259,25 +262,6 @@ func quoteSQLiteIdentifier(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
 
-func normalizePortableMetricConfig(ctx context.Context, db *sql.DB, objects map[string]string) error {
-	if objects["configs"] != "table" {
-		return nil
-	}
-	values := map[string]string{
-		"metric_archive_directory": `"./data/telemetry"`,
-		"metric_db_driver":         `"sqlite"`,
-		"metric_db_dsn":            `"./data/metrics.db"`,
-		"metric_migration_target":  `"sqlite|./data/metrics.db"`,
-	}
-	for key, value := range values {
-		if _, err := db.ExecContext(ctx, `INSERT INTO configs (key, value) VALUES (?, ?)
-			ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value); err != nil {
-			return fmt.Errorf("normalize portable metric config %s: %w", key, err)
-		}
-	}
-	return nil
-}
-
 func sanitizeConfigSnapshot(ctx context.Context, path string, scope backupScope) error {
 	db, err := openSnapshotDatabase(path)
 	if err != nil {
@@ -289,7 +273,7 @@ func sanitizeConfigSnapshot(ctx context.Context, path string, scope backupScope)
 	if err != nil {
 		return fmt.Errorf("inspect main database snapshot: %w", err)
 	}
-	if err := normalizePortableMetricConfig(ctx, db, objects); err != nil {
+	if err := dbcore.NormalizePortableMetricConfig(ctx, db); err != nil {
 		return err
 	}
 	if scope == backupScopeConfig {
@@ -461,7 +445,7 @@ func DownloadBackup(c *gin.Context) {
 	snapshot := func() error { return backupMainSQLite(mainSnapshot) }
 	if scope == backupScopeFull {
 		snapshot = func() error {
-			queue, err := historyexport.Open("./data/exports-v2")
+			queue, err := historyexport.Open(datadir.Resolve("./data/exports-v2"))
 			if err != nil {
 				return err
 			}

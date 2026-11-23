@@ -321,6 +321,7 @@ func TestFullBackupIncludesPluginsAndRestoresPasskeyCredentials(t *testing.T) {
 	}
 
 	// Run the REAL startup restore path (SQLite header validation + unzip + atomic swap).
+	t.Cleanup(func() { dbcore.SetCurrentSecurityEpoch(1) })
 	if err := dbcore.RestoreStagedBackup(restoredData); err != nil {
 		t.Fatalf("real startup restore failed: %v", err)
 	}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -103,13 +102,18 @@ func (c *Controller) restore(ctx *gin.Context) {
 		api.RespondError(ctx, status, err.Error())
 		return
 	}
+	backup.MarkRestartPending()
 
-	api.RespondSuccessMessage(ctx, "backup uploaded; restarting to restore", gin.H{})
+	api.RespondSuccessMessage(ctx, "backup uploaded; server is shutting down cleanly to restore on startup", gin.H{
+		"restart_required":    true,
+		"manual_restart_note": "If running outside a container or process supervisor, restart Komari manually after shutdown completes.",
+	})
 	go func() {
-		logger.InfoArgs("install", "Backup uploaded, restarting service to restore it on startup...")
-		time.Sleep(2 * time.Second)
-		restoreLock.Release()
-		os.Exit(0)
+		// Keep restoreLock held through shutdown so no concurrent upload can race.
+		_ = restoreLock
+		logger.InfoArgs("install", "Backup uploaded; requesting graceful shutdown to restore on startup...")
+		time.Sleep(300 * time.Millisecond)
+		backup.RequestGracefulRestart("install_backup_restore")
 	}()
 }
 

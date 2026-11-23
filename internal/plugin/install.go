@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/datadir"
 )
 
 // InstallZip validates a plugin ZIP and extracts it into DataDir/<short>.
@@ -72,7 +73,7 @@ func InstallZip(zipPath string) (models.Plugin, error) {
 		return info, fmt.Errorf("failed to unload running plugin %q before reinstall: %w", info.Short, err)
 	}
 
-	dir := filepath.Join(DataDir, info.Short)
+	dir := filepath.Join(datadir.Resolve(DataDir), info.Short)
 	if err := os.RemoveAll(dir); err != nil {
 		return info, fmt.Errorf("failed to remove existing plugin directory: %v", err)
 	}

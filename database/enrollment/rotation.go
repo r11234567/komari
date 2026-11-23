@@ -182,7 +182,8 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 					// AccessToken expired (while RefreshToken and recovery window remain valid),
 					// mint a fresh AccessToken for the SAME generation & RefreshToken and
 					// re-seal so Agent response validation succeeds across the entire 24h window.
-					if !recovered.AccessTokenExpiresAt.After(now.Add(30 * time.Second)) {
+					curEpoch := dbcore.CurrentSecurityEpoch()
+					if !recovered.AccessTokenExpiresAt.After(now.Add(30*time.Second)) || (curEpoch > 1 && cur.SecurityEpoch < curEpoch) {
 						recovered.AccessTokenExpiresAt = minDeadline(now.Add(AccessTokenLifetime), *cur.EnrollmentExpiresAt)
 						freshAccess, err := mintAccessToken(recovered.AccessTokenExpiresAt)
 						if err != nil {
@@ -209,6 +210,7 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 							"access_token_hash":       hashToken(freshAccess),
 							"access_expires_at":       recovered.AccessTokenExpiresAt,
 							"refresh_recovery_sealed": reSealed,
+							"security_epoch":          curEpoch,
 							"updated_at":              now,
 						})
 						if res.Error != nil {
@@ -309,7 +311,9 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 				"refresh_token_hash": hashToken(refresh), "refresh_expires_at": issued.RefreshTokenExpiresAt,
 				"previous_refresh_hash": digest, "previous_refresh_expires": until,
 				"previous_access_hash": cur.AccessTokenHash, "previous_access_expires": previousAccessUntil,
-				"refresh_recovery_request": requestHash, "refresh_recovery_sealed": sealed, "refresh_recovery_until": until, "updated_at": now,
+				"refresh_recovery_request": requestHash, "refresh_recovery_sealed": sealed, "refresh_recovery_until": until,
+				"security_epoch": dbcore.CurrentSecurityEpoch(),
+				"updated_at":     now,
 			})
 			if result.Error != nil {
 				return result.Error

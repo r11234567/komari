@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/metric"
 )
@@ -151,7 +152,7 @@ func buildMetricConfig(cfg *MetricStoreConfig, autoMigrate bool) (metric.Config,
 			metric.WithSQLiteReadPool(resources.ReadPoolSize),
 			metric.WithSQLiteHeavyReadConcurrency(resources.HeavyReadConcurrent),
 		)
-		return metric.SQLite(dsn, opts...), nil
+		return metric.SQLite(datadir.ResolveSQLite(dsn), opts...), nil
 	case metric.DriverMySQL:
 		opts = append(opts,
 			metric.WithMaxOpenConns(cfg.MaxOpenConns),

@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/oschwald/maxminddb-golang"
 )
 
@@ -48,7 +49,7 @@ func (s *MaxMindGeoIPService) Name() string {
 // NewMaxMindGeoIPService 创建并返回一个 MaxMindGeoIPService 实例。
 // 它负责初始化服务，包括尝试加载或下载数据库。
 func NewMaxMindGeoIPService() (*MaxMindGeoIPService, error) {
-	dbFilePath := GeoIpFilePath
+	dbFilePath := datadir.Resolve(GeoIpFilePath)
 	service := &MaxMindGeoIPService{
 		dbFilePath: dbFilePath,
 	}
