@@ -3,11 +3,16 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	adminv1 "github.com/r11234567/komari-proto/gen/go/komari/admin/v1"
 	credentialv1connect "github.com/r11234567/komari-proto/gen/go/komari/credential/v1/credentialv1connect"
 	metricsv1connect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
 	networkv1connect "github.com/r11234567/komari-proto/gen/go/komari/network/v1/networkv1connect"
@@ -208,5 +213,25 @@ func TestRequireAgentRejectsSpoofedAgentID(t *testing.T) {
 	}
 	if got, err := requireAgent(meta, "node-a"); err != nil || got != "node-a" {
 		t.Fatalf("authenticated agent rejected: id=%q err=%v", got, err)
+	}
+}
+
+func TestMaintenanceProceduresRejectAnonymousRequests(t *testing.T) {
+	router := gin.New()
+	Register(router)
+	service := adminv1.File_komari_admin_v1_maintenance_proto.Services().ByName("MaintenanceService")
+	for i := 0; i < service.Methods().Len(); i++ {
+		method := service.Methods().Get(i)
+		t.Run(string(method.Name()), func(t *testing.T) {
+			procedure := "/" + string(service.FullName()) + "/" + string(method.Name())
+			request := httptest.NewRequest(http.MethodPost, procedure, strings.NewReader("{}"))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Connect-Protocol-Version", "1")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("anonymous access to %s: %d %s", procedure, response.Code, response.Body.String())
+			}
+		})
 	}
 }

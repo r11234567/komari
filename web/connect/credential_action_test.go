@@ -91,6 +91,16 @@ func TestTrustedActionRESTConsumers(t *testing.T) {
 			} else {
 				router.POST(path, api.RequireSensitive2FA(), handler)
 			}
+			if name == "password" {
+				rejected := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+				rejected.Header.Set("Content-Type", "application/json")
+				rejected.AddCookie(&http.Cookie{Name: "__Host-komari_session", Value: session})
+				response := httptest.NewRecorder()
+				router.ServeHTTP(response, rejected)
+				if response.Code != http.StatusUnauthorized {
+					t.Fatalf("password update without step-up: %d %s", response.Code, response.Body.String())
+				}
+			}
 			req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set(credentialaction.Header, token)
