@@ -395,6 +395,67 @@ func TestGetGPURecordsReadsRollupsAfterRawCompaction(t *testing.T) {
 	}
 }
 
+func TestGPURecordsMaxPointsAcrossDevices(t *testing.T) {
+	ctx := context.Background()
+	end := time.Now().UTC().Truncate(time.Minute)
+	start := end.Add(-time.Hour)
+	s, err := metric.Open(ctx, metric.SQLite(":memory:", metric.WithMaxOpenConns(1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := createMetricDefinitions(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	for minute := range 60 {
+		var points []metric.Point
+		for device := range 4 {
+			tags := map[string]string{"device_index": fmt.Sprint(device), "device_name": fmt.Sprintf("GPU %d", device)}
+			for _, name := range []string{MetricGPUDeviceUsage, MetricGPUMem, MetricGPUMemTotal, MetricGPUTemp} {
+				points = append(points, metric.Point{
+					MetricName: name, EntityID: "gpu-budget", Tags: tags,
+					Timestamp: start.Add(time.Duration(minute) * time.Minute), Value: float64(device + 1),
+				})
+			}
+		}
+		if err := s.WriteBatch(ctx, points); err != nil {
+			t.Fatal(err)
+		}
+	}
+	storeMu.Lock()
+	oldStore := store
+	store = s
+	storeMu.Unlock()
+	defer func() {
+		storeMu.Lock()
+		store = oldStore
+		storeMu.Unlock()
+	}()
+
+	const maxPoints = 11
+	records, err := GetGPURecordsByClientAndTimeMaxPoints(ctx, "gpu-budget", start, end, maxPoints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) < 4 || len(records) > maxPoints {
+		t.Fatalf("got %d total records, want between 4 and %d", len(records), maxPoints)
+	}
+	devices := map[int]bool{}
+	for i, rec := range records {
+		if i > 0 && rec.Time.Before(records[i-1].Time) {
+			t.Fatalf("record %d is out of order", i)
+		}
+		devices[rec.DeviceIndex] = true
+		value := rec.DeviceIndex + 1
+		if rec.Utilization != float32(value) || rec.MemUsed != int64(value) || rec.Temperature == nil || *rec.Temperature != float64(value) {
+			t.Fatalf("device metrics did not stay aligned: %+v", rec)
+		}
+	}
+	if len(devices) != 4 {
+		t.Fatalf("lost devices while sampling: %v", devices)
+	}
+}
+
 func TestCreateMetricDefinitionsUsesExplicitRetentionAndPreservesOverrides(t *testing.T) {
 	if defaultBuiltinMetricRetentionDays != 1 {
 		t.Fatalf("default built-in metric retention = %d, want 1 day", defaultBuiltinMetricRetentionDays)

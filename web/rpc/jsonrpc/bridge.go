@@ -119,6 +119,10 @@ func rpcErrorHTTPStatus(code int) int {
 		return http.StatusUnauthorized
 	case rpc.NotFound:
 		return http.StatusNotFound
+	case rpc.Unavailable:
+		return http.StatusServiceUnavailable
+	case rpc.DeadlineExceeded:
+		return http.StatusGatewayTimeout
 	default:
 		return http.StatusInternalServerError
 	}

@@ -6,7 +6,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	recordsdb "github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
@@ -64,23 +63,30 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		}
 	} else {
 		hours := params.Hours
-		if hours <= 0 {
+		if hours == 0 {
 			hours = 1 // default 1 hour
 		}
+		window, rpcErr := compatibilityHistoryHours(hours)
+		if rpcErr != nil {
+			return nil, rpcErr
+		}
 		endTime = time.Now().UTC()
-		startTime = endTime.Add(-time.Duration(hours) * time.Hour)
+		startTime = endTime.Add(-window)
 	}
+	if endTime.Before(startTime) || endTime.Sub(startTime) > maxCompatibilityHistoryHours*time.Hour ||
+		!time.Unix(0, startTime.UnixNano()).Equal(startTime) || !time.Unix(0, endTime.UnixNano()).Equal(endTime) {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid history time range (maximum 7 days)", nil)
+	}
+	release, rpcErr := acquireLongCompatibilityHistory(ctx, endTime.Sub(startTime))
+	if rpcErr != nil {
+		return nil, rpcErr
+	}
+	defer release()
 
 	// PublicViewer invariant: always exclude Hidden nodes regardless of session cookies.
-	hidden := map[string]bool{}
-	cinfo, err := clients.GetAllClientBasicInfo()
+	hidden, err := loadHiddenClientMapContext(ctx)
 	if err != nil {
-		return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", err.Error())
-	}
-	for _, c := range cinfo {
-		if c.Hidden {
-			hidden[c.UUID] = true
-		}
+		return nil, metricQueryError(err, "Failed to load client visibility")
 	}
 	if params.UUID != "" && hidden[params.UUID] {
 		return nil, rpc.MakeError(rpc.InvalidParams, "UUID not found", params.UUID)
@@ -221,7 +227,9 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			max   int
 		})
 
+		recordsByTask := make(map[uint][]models.PingRecord)
 		for _, r := range recs {
+			recordsByTask[r.TaskId] = append(recordsByTask[r.TaskId], r)
 			rr := RecordsResp{
 				TaskId: r.TaskId,
 				Time:   r.Time,
@@ -264,12 +272,15 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		}
 
 		// tasks summary (always included for ping type; do not expose target field)
-		pingTasks, err := tasks.GetAllPingTasks()
+		pingTasks, err := tasks.GetAllPingTasksContext(ctx)
 		if err != nil {
-			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch ping tasks", err.Error())
+			return nil, metricQueryError(err, "Failed to fetch ping tasks")
 		}
 		toList := make([]map[string]any, 0, len(pingTasks))
 		for _, t := range pingTasks {
+			if err := ctx.Err(); err != nil {
+				return nil, metricQueryError(err, "Failed to summarize ping tasks")
+			}
 			if taskId != -1 && t.Id != uint(taskId) {
 				continue
 			}
@@ -288,10 +299,7 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			var latestTs time.Time
 			// 收集该任务的所有有效(非丢包)延迟值以计算百分位
 			latencies := make([]int, 0, 64)
-			for _, r := range recs {
-				if r.TaskId != t.Id {
-					continue
-				}
+			for _, r := range recordsByTask[t.Id] {
 				if params.UUID != "" && r.Client != params.UUID {
 					continue
 				}
