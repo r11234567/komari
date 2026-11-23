@@ -15,6 +15,19 @@ if (!credentials.secret || !Number.isSafeInteger(credentials.backupTOTPCounter))
 }
 function startPanel(directory){execFileSync('sudo',['systemd-run','--unit=komari-e2e-panel','--collect','--slice=komari-e2e.slice',`--property=User=${process.env.KOMARI_E2E_USER || process.env.USER}`,`--property=WorkingDirectory=${directory}`,'--property=CPUQuota=100%','--property=MemoryMax=1G',path.join(root,'bin/komari'),'server','--listen','127.0.0.1:29444'],{timeout:30000});}
 function startWorker(directory=path.join(root,'panel')){execFileSync('sudo',['systemd-run','--unit=komari-e2e-export','--collect','--slice=komari-e2e.slice',`--property=User=${process.env.KOMARI_E2E_USER || process.env.USER}`,`--property=WorkingDirectory=${directory}`,'--property=CPUQuota=4%','--property=CPUQuotaPeriodSec=100ms','--property=MemoryMax=128M','--property=MemorySwapMax=0','--setenv=GOMEMLIMIT=90MiB','--setenv=GOMAXPROCS=1',path.join(root,'bin/komari'),'export-worker','--queue',path.join(directory,'data/exports-v2'),`--instance-cgroup=/sys/fs/cgroup${execFileSync('systemctl',['show','komari-e2e-panel.service','--property=ControlGroup','--value'],{encoding:'utf8'}).trim()}`],{timeout:30000});}
+function verificationCode(page) {
+  return page.getByRole('textbox', { name: 'Enter verification code', exact: true });
+}
+
+async function submitTOTP(page, code, status) {
+  await verificationCode(page).fill(code);
+  const [response] = await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname.endsWith('.PasswordLoginService/CompletePasswordLogin')),
+    page.locator('.km-password-credential-step').getByRole('button', { name: 'Continue', exact: true }).click(),
+  ]);
+  expect(response.status()).toBe(status);
+}
+
 let browser,context,locker;
 async function run(){
  // This oracle describes a closed synthetic population. The migration panel
@@ -43,22 +56,14 @@ async function run(){
  await page.locator('#restricted-login-username').fill(credentials.username);
  await page.locator('#restricted-login-password').fill(credentials.password);
  await page.locator('.km-restricted-login-form button[type=submit]').click();
- const code=page.getByRole('textbox',{name:'Enter verification code',exact:true});
+ const code=verificationCode(page);
  await expect(code).toBeVisible();
- const submit = page.locator('.km-password-credential-step').getByRole('button', { name: 'Continue', exact: true });
- const completeLogin = response => new URL(response.url()).pathname.endsWith('.PasswordLoginService/CompletePasswordLogin');
- const rejected = page.waitForResponse(completeLogin);
- await code.fill(invalidTOTP(credentials.secret));
- await submit.click();
- expect((await rejected).status()).toBe(401);
+ await submitTOTP(page, invalidTOTP(credentials.secret), 401);
  await expect(page.locator('.km-restricted-login-dialog')).toBeVisible();
  await expect(code).toBeEnabled();
  // The backup itself contains the database-backed record of the spent code.
  const proof = await freshTOTP(credentials.secret, credentials.backupTOTPCounter);
- const accepted = page.waitForResponse(completeLogin);
- await code.fill(proof.code);
- await submit.click();
- expect((await accepted).status()).toBe(200);
+ await submitTOTP(page, proof.code, 200);
  await expect(page.locator('.km-restricted-login-dialog')).toBeHidden({timeout:15000});
  await expect(page.getByRole('heading',{name:'Migration stopped; original history preserved',exact:true})).toBeVisible({timeout:20000});
  await page.screenshot({path:path.join(artifacts,'storage-upgrade-failed.png'),fullPage:true});
@@ -162,14 +167,10 @@ print(json.dumps({'source_rows':source.execute('SELECT COUNT(*) FROM metric_poin
   await loginPage.locator('.km-login-form input[name=username]').fill(credentials.username);
   await loginPage.locator('.km-login-form input[name=password]').fill(credentials.password);
   await loginPage.locator('.km-login-form button[type=submit]').click();
-  const restoreSecret=credentials.restoreSecret??credentials.secret;
-  if(restoreSecret){
-   const code=loginPage.getByRole('textbox',{name:'Enter verification code',exact:true});
-   await expect(code).toBeVisible({timeout:15000});
-   if(Date.now()%30000>27000)await sleep(3100);
-   await code.fill(totp(restoreSecret));
-   await loginPage.locator('.km-password-credential-step').getByRole('button',{name:'Continue',exact:true}).click();
-  }
+  await expect(verificationCode(loginPage)).toBeVisible();
+  // This instance restores the original ZIP, with its own replay state.
+  const restoredProof = await freshTOTP(credentials.secret, credentials.backupTOTPCounter);
+  await submitTOTP(loginPage, restoredProof.code, 200);
   await expect(loginPage).toHaveURL(`${base}/admin/dashboard`,{timeout:30000});
   await loginPage.close();
 
