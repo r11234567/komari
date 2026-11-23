@@ -3,8 +3,10 @@ package backup
 
 import (
 	"archive/zip"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -15,8 +17,9 @@ import (
 var restoreMutex sync.Mutex
 
 const (
-	MaxArchiveSize    int64 = 4 << 30
-	maxArchiveEntries       = 100_000
+	MaxArchiveSize       int64 = 4 << 30
+	maxMultipartBodySize       = MaxArchiveSize + (1 << 20)
+	maxArchiveEntries          = 100_000
 )
 
 // RestoreLock prevents a second upload from replacing the already validated
@@ -36,13 +39,45 @@ func (l *RestoreLock) Release() {
 	l.once.Do(restoreMutex.Unlock)
 }
 
-func SaveUploadedBackup(file io.Reader, filename string) error {
+// StageHTTPUpload stages a multipart backup and returns the lock to the
+// caller on success. Hold it until restart so another upload cannot replace it.
+func StageHTTPUpload(w http.ResponseWriter, r *http.Request) (*RestoreLock, int, error) {
+	tooLarge := func() error {
+		return fmt.Errorf("backup upload exceeds the %d byte request limit", maxMultipartBodySize)
+	}
+	if r.ContentLength > maxMultipartBodySize {
+		return nil, http.StatusRequestEntityTooLarge, tooLarge()
+	}
+
 	lock, err := AcquireRestoreLock()
 	if err != nil {
-		return err
+		return nil, http.StatusConflict, err
 	}
-	defer lock.Release()
-	return lock.SaveUploadedBackup(file, filename)
+	staged := false
+	defer func() {
+		if !staged {
+			lock.Release()
+		}
+	}()
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxMultipartBodySize)
+	file, header, err := r.FormFile("backup")
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	if err != nil {
+		var limit *http.MaxBytesError
+		if errors.As(err, &limit) {
+			return nil, http.StatusRequestEntityTooLarge, tooLarge()
+		}
+		return nil, http.StatusBadRequest, fmt.Errorf("get uploaded backup: %w", err)
+	}
+	defer file.Close()
+	if err := lock.SaveUploadedBackup(file, header.Filename); err != nil {
+		return nil, http.StatusBadRequest, err
+	}
+	staged = true
+	return lock, http.StatusOK, nil
 }
 
 func (l *RestoreLock) SaveUploadedBackup(file io.Reader, filename string) error {

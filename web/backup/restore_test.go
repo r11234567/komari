@@ -2,6 +2,8 @@ package backup
 
 import (
 	"archive/zip"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -69,4 +71,24 @@ func TestValidateArchiveRejectsPackagesThatCouldWipeCurrentData(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStageHTTPUploadRejectsOversizedRequestBeforeParsing(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+	request.ContentLength = maxMultipartBodySize + 1
+	lock, status, err := StageHTTPUpload(httptest.NewRecorder(), request)
+	if lock != nil || status != http.StatusRequestEntityTooLarge || err == nil {
+		t.Fatalf("oversized upload: lock=%v status=%d err=%v", lock, status, err)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/", nil)
+	lock, status, err = StageHTTPUpload(httptest.NewRecorder(), request)
+	if lock != nil || status != http.StatusBadRequest || err == nil {
+		t.Fatalf("invalid upload: lock=%v status=%d err=%v", lock, status, err)
+	}
+	next, err := AcquireRestoreLock()
+	if err != nil {
+		t.Fatalf("failed upload retained restore lock: %v", err)
+	}
+	next.Release()
 }

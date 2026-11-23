@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 	"time"
@@ -14,20 +13,9 @@ import (
 
 // UploadBackup receives a backup and applies it after the service restarts.
 func UploadBackup(c *gin.Context) {
-	file, header, err := c.Request.FormFile("backup")
+	restoreLock, status, err := backup.StageHTTPUpload(c.Writer, c.Request)
 	if err != nil {
-		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("get uploaded backup: %v", err))
-		return
-	}
-	defer file.Close()
-	restoreLock, err := backup.AcquireRestoreLock()
-	if err != nil {
-		api.RespondError(c, http.StatusConflict, err.Error())
-		return
-	}
-	if err := restoreLock.SaveUploadedBackup(file, header.Filename); err != nil {
-		restoreLock.Release()
-		api.RespondError(c, http.StatusBadRequest, err.Error())
+		api.RespondError(c, status, err.Error())
 		return
 	}
 
