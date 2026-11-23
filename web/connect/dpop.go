@@ -222,9 +222,10 @@ type dpopJWTHeader struct {
 }
 
 type dpopJWTJWK struct {
-	Kty string `json:"kty"`
-	Crv string `json:"crv"`
-	X   string `json:"x"`
+	Kty string          `json:"kty"`
+	Crv string          `json:"crv"`
+	X   string          `json:"x"`
+	D   json.RawMessage `json:"d,omitempty"`
 }
 
 type dpopJWTClaims struct {
@@ -236,6 +237,7 @@ type dpopJWTClaims struct {
 	Nonce string `json:"nonce"`
 	BH    string `json:"bh"`
 	BM    string `json:"bm"`
+	QSH   string `json:"qsh"`
 }
 
 func normalizeDPoPHTU(raw string) (string, error) {
@@ -258,6 +260,10 @@ func normalizeDPoPHTU(raw string) (string, error) {
 }
 
 func verifyDPoP(c *gin.Context, principal *rpc.Principal) error {
+	proofHeaders := c.Request.Header.Values("DPoP")
+	if len(proofHeaders) > 1 || (len(proofHeaders) == 1 && strings.Contains(proofHeaders[0], ",")) {
+		return errors.New("dpop: multiple proof values are forbidden")
+	}
 	dpopProof := strings.TrimSpace(c.GetHeader("DPoP"))
 	legacySig := strings.TrimSpace(c.GetHeader("X-Komari-Signature"))
 	auth := strings.Fields(c.GetHeader("Authorization"))
@@ -267,8 +273,9 @@ func verifyDPoP(c *gin.Context, principal *rpc.Principal) error {
 	}
 
 	var pubKey ed25519.PublicKey
+	var requireJWT bool
 	if principal != nil && principal.Type == rpc.PrincipalAgent && principal.ClientUUID != "" {
-		pk, err := enrollment.ResolveAgentPublicKey(principal.ClientUUID)
+		pk, pinned, err := enrollment.ResolveAgentProofKey(principal.ClientUUID)
 		if err != nil {
 			// Legacy un-enrolled agents have no row in agent_credentials; only
 			// allow unsigned passthrough when no credential row exists AND no
@@ -285,6 +292,7 @@ func verifyDPoP(c *gin.Context, principal *rpc.Principal) error {
 			return errors.New("dpop: invalid stored agent public key")
 		}
 		pubKey = pk
+		requireJWT = pinned
 		if dpopProof == "" && legacySig == "" {
 			c.Header("DPoP-Nonce", currentDPoPNonce(principal.ClientUUID, time.Now()))
 			c.Header("WWW-Authenticate", `DPoP error="invalid_dpop_proof"`)
@@ -297,7 +305,18 @@ func verifyDPoP(c *gin.Context, principal *rpc.Principal) error {
 	}
 
 	if dpopProof != "" {
-		return verifyRFC9449DPoP(c, principal.ClientUUID, pubKey, dpopProof)
+		if err := verifyRFC9449DPoP(c, principal.ClientUUID, pubKey, dpopProof); err != nil {
+			return err
+		}
+		if !requireJWT {
+			return enrollment.RequireAgentDPoPJWT(c.Request.Context(), principal.ClientUUID, pubKey)
+		}
+		return nil
+	}
+	if requireJWT || c.Request.URL.RawQuery != "" {
+		c.Header("DPoP-Nonce", currentDPoPNonce(principal.ClientUUID, time.Now()))
+		c.Header("WWW-Authenticate", `DPoP error="invalid_dpop_proof"`)
+		return errors.New("dpop: enrolled agent must use a JWT proof for this request")
 	}
 	return verifyLegacyDPoP(c, principal.ClientUUID, pubKey, legacySig)
 }
@@ -339,7 +358,7 @@ func verifyRFC9449DPoP(c *gin.Context, agentID string, pubKey ed25519.PublicKey,
 		return errors.New("dpop: malformed JWS header JSON")
 	}
 	if !strings.EqualFold(hdr.Typ, "dpop+jwt") || hdr.Alg != "EdDSA" ||
-		hdr.JWK.Kty != "OKP" || hdr.JWK.Crv != "Ed25519" {
+		hdr.JWK.Kty != "OKP" || hdr.JWK.Crv != "Ed25519" || len(hdr.JWK.D) != 0 {
 		return errors.New("dpop: unsupported JWS header parameters")
 	}
 	jwkPub, err := base64.RawURLEncoding.DecodeString(hdr.JWK.X)
@@ -376,6 +395,15 @@ func verifyRFC9449DPoP(c *gin.Context, agentID string, pubKey ed25519.PublicKey,
 	gotHTU, err := normalizeDPoPHTU(claims.HTU)
 	if err != nil || gotHTU != expectedOrigin+reqPath {
 		return errors.New("dpop: htu claim mismatch")
+	}
+	// RFC 9449 leaves the query out of htu. Bind Connect query data separately.
+	expectedQSH := ""
+	if rawQuery := c.Request.URL.RawQuery; rawQuery != "" {
+		queryDigest := sha256.Sum256([]byte(rawQuery))
+		expectedQSH = base64.RawURLEncoding.EncodeToString(queryDigest[:])
+	}
+	if subtle.ConstantTimeCompare([]byte(claims.QSH), []byte(expectedQSH)) != 1 {
+		return errors.New("dpop: query hash mismatch")
 	}
 	if math.Abs(float64(now.Unix()-claims.IAT)) > 120 {
 		return errors.New("dpop: iat drift exceeds allowed window (120s)")

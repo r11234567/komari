@@ -262,9 +262,11 @@ func TestAtomicRestorePreservesBackupIdentityOnlyBeforeFirstRun(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		installed bool
+		sameAgent bool
 	}{
 		{name: "first-run guide"},
 		{name: "existing installation with no agents", installed: true},
+		{name: "existing installation with an upgraded agent", installed: true, sameAgent: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, backupDB := newAtomicRestoreFixture(t)
@@ -278,6 +280,12 @@ func TestAtomicRestorePreservesBackupIdentityOnlyBeforeFirstRun(t *testing.T) {
 			require.NoError(t, liveModel.AutoMigrate(&models.User{}, &models.AgentCredential{}, &models.ControlPlaneKey{}, &models.ControlPlanePrivateKey{}))
 			if tc.installed {
 				require.NoError(t, liveModel.Create(&models.User{UUID: "owner", Username: "owner", Passwd: "synthetic-hash"}).Error)
+			}
+			if tc.sameAgent {
+				require.NoError(t, liveModel.Create(&models.AgentCredential{
+					Client: "active", AgentPublicKey: "active-public", Generation: 8,
+					RefreshTokenHash: "live-refresh", DPoPJWTRequired: true, SecurityEpoch: 1,
+				}).Error)
 			}
 			require.NoError(t, liveModel.Create(&models.ControlPlaneKey{KeyID: "live-key", PublicKey: "live-key-public"}).Error)
 			require.NoError(t, liveModel.Create(&models.ControlPlanePrivateKey{KeyID: "live-key", Sealed: sealed}).Error)
@@ -311,10 +319,19 @@ func TestAtomicRestorePreservesBackupIdentityOnlyBeforeFirstRun(t *testing.T) {
 			require.Equal(t, "fixture revoked", agents["revoked"].RevokedReason)
 			var keyID string
 			require.NoError(t, db.QueryRow("SELECT key_id FROM control_plane_keys").Scan(&keyID))
-			if tc.installed {
+			switch {
+			case tc.sameAgent:
+				active := agents["active"]
+				require.Nil(t, active.RevokedAt)
+				require.True(t, active.DPoPJWTRequired)
+				require.Equal(t, uint64(8), active.Generation)
+				require.Equal(t, "live-refresh", active.RefreshTokenHash)
+				require.Less(t, active.SecurityEpoch, layout.Pointer.Epoch)
+				require.Equal(t, "live-key", keyID)
+			case tc.installed:
 				require.NotNil(t, agents["active"].RevokedAt)
 				require.Equal(t, "live-key", keyID)
-			} else {
+			default:
 				require.Nil(t, agents["active"].RevokedAt)
 				require.Equal(t, uint64(7), agents["active"].Generation)
 				require.Equal(t, "fixture-refresh", agents["active"].RefreshTokenHash)

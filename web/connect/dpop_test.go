@@ -279,6 +279,14 @@ func TestRFC9449DPoPNonceChallengeReplayAndBindings(t *testing.T) {
 	okCtx, okRec := makeRFC9449Context(t, http.MethodPost, unaryURL, body, "DPoP "+accessToken, okProof)
 	require.NoError(t, verifyDPoP(okCtx, principal))
 	require.NotEmpty(t, okRec.Header().Get("DPoP-Nonce"))
+	var credential models.AgentCredential
+	require.NoError(t, dbcore.GetDBInstance().Where("client = ?", agentID).First(&credential).Error)
+	require.True(t, credential.DPoPJWTRequired)
+	legacyCtx := makeDPoPContext(http.MethodPost, "/komari.report.v1.AgentReportService/SubmitReport", body, accessToken, uuid.NewString(), priv, false)
+	require.ErrorContains(t, verifyDPoP(legacyCtx, principal), "must use a JWT proof")
+	duplicateCtx, _ := makeRFC9449Context(t, http.MethodPost, unaryURL, body, "DPoP "+accessToken, okProof)
+	duplicateCtx.Request.Header.Add("DPoP", okProof)
+	require.ErrorContains(t, verifyDPoP(duplicateCtx, principal), "multiple proof values")
 
 	replayCtx, _ := makeRFC9449Context(t, http.MethodPost, unaryURL, body, "DPoP "+accessToken, okProof)
 	require.Error(t, verifyDPoP(replayCtx, principal))

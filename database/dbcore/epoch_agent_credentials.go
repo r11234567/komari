@@ -156,6 +156,11 @@ func reconcileLiveAgentCredentials(tx *sql.Tx, current map[string]models.AgentCr
 			}
 			continue
 		}
+		if live.DPoPJWTRequired {
+			if _, err := tx.Exec(`UPDATE agent_credentials SET dpop_jwt_required = 1 WHERE client = ?`, record.id); err != nil {
+				return err
+			}
+		}
 		if live.RefreshTokenHash == "" {
 			// Older credential rows may predate refresh support. Preserve their
 			// enrollment metadata and keep them subject to the epoch check.

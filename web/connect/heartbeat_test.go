@@ -13,10 +13,14 @@ import (
 	"github.com/komari-monitor/komari/web/workspace"
 	agentv1 "github.com/r11234567/komari-proto/gen/go/komari/agent/v1"
 	agentv1connect "github.com/r11234567/komari-proto/gen/go/komari/agent/v1/agentv1connect"
+	browserv1 "github.com/r11234567/komari-proto/gen/go/komari/browser/v1"
+	browserv1connect "github.com/r11234567/komari-proto/gen/go/komari/browser/v1/browserv1connect"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	configv1connect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
 	filev1 "github.com/r11234567/komari-proto/gen/go/komari/file/v1"
 	filev1connect "github.com/r11234567/komari-proto/gen/go/komari/file/v1/filev1connect"
+	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
+	metricsv1connect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,6 +51,37 @@ func wrapAgentMux(t *testing.T, agentID, path string, handler http.Handler) *htt
 
 func TestStreamHeartbeatsEmittedWhenIdle(t *testing.T) {
 	withShortStreamHeartbeat(t, 25*time.Millisecond)
+	t.Run("WatchAgentStatus", func(t *testing.T) {
+		_, handler := browserv1connect.NewBrowserServiceHandler(&browserService{})
+		srv := httptest.NewServer(handler)
+		defer srv.Close()
+		client := browserv1connect.NewBrowserServiceClient(srv.Client(), srv.URL)
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		req := connect.NewRequest(&browserv1.WatchAgentStatusRequest{AgentIds: []string{"no-matching-agent"}})
+		req.Header().Set(streamHeartbeatHeader, "1")
+		stream, err := client.WatchAgentStatus(ctx, req)
+		require.NoError(t, err)
+		defer stream.Close()
+		require.True(t, stream.Receive(), "expected idle heartbeat: %v", stream.Err())
+		require.Nil(t, stream.Msg().GetAgent())
+	})
+
+	t.Run("WatchMetrics", func(t *testing.T) {
+		_, handler := metricsv1connect.NewMetricsServiceHandler(&metricsService{})
+		srv := httptest.NewServer(handler)
+		defer srv.Close()
+		client := metricsv1connect.NewMetricsServiceClient(srv.Client(), srv.URL)
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		req := connect.NewRequest(&metricsv1.WatchMetricsRequest{Metrics: []string{"no-matching-metric"}})
+		req.Header().Set(streamHeartbeatHeader, "1")
+		stream, err := client.WatchMetrics(ctx, req)
+		require.NoError(t, err)
+		defer stream.Close()
+		require.True(t, stream.Receive(), "expected idle heartbeat: %v", stream.Err())
+		require.Nil(t, stream.Msg().GetPoint())
+	})
 
 	t.Run("LeaseFileOperations", func(t *testing.T) {
 		agentID := "hb-file-agent"

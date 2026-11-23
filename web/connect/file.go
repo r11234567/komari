@@ -425,15 +425,25 @@ func (s *fileService) AttachFileOperations(ctx context.Context, stream *connect.
 	}
 	resultCh := make(chan received, 1)
 	go func() { msg, err := stream.Receive(); resultCh <- received{msg, err} }()
+	ticks, stopHeartbeat := heartbeatTicks(stream.RequestHeader())
+	defer stopHeartbeat()
 	var event *filev1.AttachFileOperationsRequest
-	select {
-	case <-bounded.Done():
-		return connectError(connect.CodeUnauthenticated, workspace.ErrLocked)
-	case value := <-resultCh:
-		if value.err != nil {
-			return value.err
+waitForEvent:
+	for {
+		select {
+		case <-bounded.Done():
+			return connectError(connect.CodeUnauthenticated, workspace.ErrLocked)
+		case <-ticks:
+			if err := stream.Send(&filev1.AttachFileOperationsResponse{}); err != nil {
+				return err
+			}
+		case value := <-resultCh:
+			if value.err != nil {
+				return value.err
+			}
+			event = value.msg
+			break waitForEvent
 		}
-		event = value.msg
 	}
 	result := event.GetEvent()
 	if result == nil {
