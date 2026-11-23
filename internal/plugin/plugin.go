@@ -239,15 +239,6 @@ func OwnsHTTPRoute(method, pattern string) bool {
 	return false
 }
 
-// HTMLInjectHandler installs plugin HTML injection around the application
-// handler. Every text/html response is buffered and gets the fragments
-// registered through server.injectHTML inserted before </head> and </body>;
-// all other responses (JSON, assets, streams, downloads...) pass through to
-// the client unmodified.
-func HTMLInjectHandler(next http.Handler) http.Handler {
-	return global.htmlInjectHandler(next)
-}
-
 func (m *Manager) stateStore() *State {
 	m.stateMu.Lock()
 	defer m.stateMu.Unlock()

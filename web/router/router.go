@@ -1,6 +1,7 @@
 package router
 
 import (
+	"net/http"
 	"os"
 	"strings"
 
@@ -52,13 +53,13 @@ func Register(r *gin.Engine) func() error {
 
 // MountPublicRoutes binds strictly the public theme, read-only public Connect,
 // and read-only compatibility RPC2/REST/WS surface onto the dedicated Public Listener.
-func MountPublicRoutes(r *gin.Engine) {
+func MountPublicRoutes(r *gin.Engine, decorateTheme func(*http.Request, []byte) []byte) {
 	registerHealthRoute(r)
 	registerPublicReadRoutes(r)
 	connectapi.RegisterPublic(r)
 	public.StaticPublic(r.Group("/"), func(handlers ...gin.HandlerFunc) {
 		r.NoRoute(handlers...)
-	})
+	}, decorateTheme)
 }
 
 // MountPanelRoutes binds strictly the built-in management UI, authentication,
