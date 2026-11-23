@@ -803,7 +803,13 @@ func (a *App) BuildRouter() error {
 	publicEngine.Use(foregroundHistoryObserverMiddleware())
 	publicEngine.Use(api.PublicPrivateSiteMiddleware())
 	publicEngine.Use(apiNoStoreMiddleware())
-	router.MountPublicRoutes(publicEngine)
+	publicOrigin := flags.EffectivePublicOrigin()
+	router.MountPublicRoutes(publicEngine, func(r *http.Request, document []byte) []byte {
+		if !security.OriginMatchesRequest(publicOrigin, r) {
+			return document
+		}
+		return plugin.InjectPublicThemeHTML(r, document)
+	})
 	plugin.Init(publicEngine)
 	if err := plugin.LoadAll(); err != nil {
 		logger.ErrorArgs("server", "Failed to load some plugins:", err)
@@ -846,10 +852,11 @@ func (a *App) BuildRouter() error {
 
 // Run 启动 HTTP 服务并阻塞直到收到中断信号或服务异常退出。
 func (a *App) Run() error {
+	publicHandler := plugin.WrapHandler(a.engine)
 	httpsSettings, err := httpsserver.LoadSettings()
 	if err != nil {
 		logger.Errorf("https", "Failed to load built-in HTTPS settings: %v", err)
-	} else if err := httpsserver.Default.Start(plugin.HTMLInjectHandler(plugin.WrapHandler(a.engine)), httpsSettings, flags.Listen); err != nil {
+	} else if err := httpsserver.Default.Start(publicHandler, httpsSettings, flags.Listen); err != nil {
 		// Keep HTTP available so an invalid certificate or occupied HTTPS port
 		// can still be corrected from the admin page.
 		logger.Errorf("https", "Built-in HTTPS did not start: %v", err)
@@ -890,7 +897,7 @@ func (a *App) Run() error {
 	}
 	baseContextFn := func(net.Listener) context.Context { return baseCtx }
 
-	rootHandler := httpsserver.Default.HTTPRedirectHandler(plugin.HTMLInjectHandler(plugin.WrapHandler(a.engine)))
+	rootHandler := httpsserver.Default.HTTPRedirectHandler(publicHandler)
 	a.server = &http.Server{
 		Addr:        a.PublicAddr(),
 		Handler:     h2c.NewHandler(rootHandler, &http2.Server{}),

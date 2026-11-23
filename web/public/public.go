@@ -600,7 +600,7 @@ func renderPrivateSitePublicNotice(sitename, panelOrigin string) []byte {
 // StaticPublic mounts only public theme assets and SPA routes on the dedicated
 // Public Listener. Management routes (/admin, /login, /terminal, /bind, etc.)
 // and /system-assets/* are intentionally unmounted and return 404.
-func StaticPublic(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
+func StaticPublic(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc), decorateTheme func(*http.Request, []byte) []byte) {
 	getConfig := func() map[string]any {
 		cfg, _ := config.GetMany(map[string]any{
 			config.DescriptionKey: "A simple server monitor tool.",
@@ -654,8 +654,11 @@ func StaticPublic(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc))
 		)
 		// Never inject native_login_bridge.js on the Public Listener: public
 		// status origins never accept passwords or Passkeys.
-		c.Data(http.StatusOK, "text/html; charset=utf-8",
-			[]byte(injectHTTPErrorNotice(injectThemeChangeReload(rendered))))
+		document := []byte(injectHTTPErrorNotice(injectThemeChangeReload(rendered)))
+		if decorateTheme != nil {
+			document = decorateTheme(c.Request, document)
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", document)
 	}
 
 	r.GET("/favicon.ico", func(c *gin.Context) {

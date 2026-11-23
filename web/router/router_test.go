@@ -272,7 +272,20 @@ func TestSplitPublicAndPanelListenersEnforceHardBoundaries(t *testing.T) {
 	publicEngine := gin.New()
 	publicEngine.Use(api.PublicViewerMiddleware())
 	publicEngine.Use(api.PublicPrivateSiteMiddleware())
-	MountPublicRoutes(publicEngine)
+	const themeMarker = "<!-- public theme decorator -->"
+	MountPublicRoutes(publicEngine, func(_ *http.Request, document []byte) []byte {
+		return append(document, themeMarker...)
+	})
+	publicIndex := httptest.NewRecorder()
+	publicEngine.ServeHTTP(publicIndex, httptest.NewRequest(http.MethodGet, "/", nil))
+	if publicIndex.Code != http.StatusOK || !strings.Contains(publicIndex.Body.String(), themeMarker) {
+		t.Fatalf("public theme document was not decorated: %d", publicIndex.Code)
+	}
+	rawTheme := httptest.NewRecorder()
+	publicEngine.ServeHTTP(rawTheme, httptest.NewRequest(http.MethodGet, "/themes/"+themeShort+"/dist/index.html", nil))
+	if rawTheme.Code != http.StatusOK || strings.Contains(rawTheme.Body.String(), themeMarker) {
+		t.Fatalf("raw theme asset should bypass decoration: %d", rawTheme.Code)
+	}
 
 	panelEngine := gin.New()
 	panelEngine.Use(api.IdentityMiddleware())
@@ -382,7 +395,8 @@ func TestSplitPublicAndPanelListenersEnforceHardBoundaries(t *testing.T) {
 	privPageReq.AddCookie(&http.Cookie{Name: security.SessionCookieName, Value: session})
 	privPageRec := httptest.NewRecorder()
 	publicEngine.ServeHTTP(privPageRec, privPageReq)
-	if privPageRec.Code != http.StatusOK || !strings.Contains(privPageRec.Body.String(), "https://panel.example.com/login") {
+	if privPageRec.Code != http.StatusOK || !strings.Contains(privPageRec.Body.String(), "https://panel.example.com/login") ||
+		strings.Contains(privPageRec.Body.String(), themeMarker) {
 		t.Fatalf("Public private-site notice missing panel login link: code=%d body=%s", privPageRec.Code, privPageRec.Body.String())
 	}
 	privNodesReq := httptest.NewRequest(http.MethodGet, "/api/nodes", nil)
