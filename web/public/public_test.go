@@ -269,8 +269,8 @@ func TestEnsureBundledThemesUsesOfficialDefaultForNewInstall(t *testing.T) {
 	if !IsLocalThemeUsable(DefaultTheme) {
 		t.Fatal("bundled official default theme was not installed")
 	}
-	if !IsLocalThemeUsable(LegacyLiteDefaultTheme) {
-		t.Fatal("bundled Nezha theme was not retained as an optional theme")
+	if IsLocalThemeUsable(LegacyLiteDefaultTheme) {
+		t.Fatal("a fresh installation installed Nezha")
 	}
 }
 
@@ -298,8 +298,8 @@ func TestEnsureBundledThemesMigratesLiteDefaultToOfficialTheme(t *testing.T) {
 	if !IsLocalThemeUsable(DefaultTheme) {
 		t.Fatal("Lite migration did not install the official default theme")
 	}
-	if !IsLocalThemeUsable(LegacyLiteDefaultTheme) {
-		t.Fatal("Lite migration did not retain Nezha as an optional theme")
+	if IsLocalThemeUsable(LegacyLiteDefaultTheme) {
+		t.Fatal("Lite migration installed Nezha")
 	}
 }
 
@@ -310,7 +310,14 @@ func TestEnsureBundledThemesRetainsDeliberatelySelectedNezha(t *testing.T) {
 		t.Fatal(err)
 	}
 	config.SetDb(db)
-	if err := EnsureBundledThemes(); err != nil {
+	themeDir := filepath.Join(DataDir, ThemesDir, LegacyLiteDefaultTheme)
+	if err := os.MkdirAll(filepath.Join(themeDir, DistDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(themeDir, "komari-theme.json"), []byte(`{"short":"nezha"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(themeDir, DistDir, IndexFile), []byte("manually installed Nezha"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := config.SetMany(map[string]any{
@@ -475,8 +482,22 @@ func TestStaticKeepsSystemUIAndPublicThemeResourcesIsolated(t *testing.T) {
 	if publicPage.Code != http.StatusOK || !strings.Contains(publicPage.Body.String(), "data-public-custom-head") {
 		t.Fatalf("public rescue page status=%d body=%q", publicPage.Code, publicPage.Body.String())
 	}
-	if !strings.Contains(publicPage.Body.String(), "font-logos") {
-		t.Fatal("missing public theme did not use the embedded Nezha rescue page")
+	officialEntries, err := fs.Glob(PublicFS, defaultThemeBundle+"/dist/assets/entry-*.js")
+	if err != nil || len(officialEntries) == 0 {
+		t.Fatalf("find embedded default theme entry: %v", err)
+	}
+	officialAssetPath := "/" + strings.TrimPrefix(officialEntries[0], defaultThemeBundle+"/dist/")
+	if !strings.Contains(publicPage.Body.String(), officialAssetPath) || request(officialAssetPath).Code != http.StatusOK {
+		t.Fatal("missing public theme did not serve the embedded default page and its script")
+	}
+	publicRouter := gin.New()
+	StaticPublic(publicRouter.Group("/"), publicRouter.NoRoute, nil)
+	for _, path := range []string{"/", officialAssetPath} {
+		recorder := httptest.NewRecorder()
+		publicRouter.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusOK || path == "/" && !strings.Contains(recorder.Body.String(), officialAssetPath) {
+			t.Fatalf("public fallback GET %s status=%d", path, recorder.Code)
+		}
 	}
 
 	adminPage := request("/admin/settings/theme")

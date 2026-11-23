@@ -30,6 +30,9 @@ type themeNavigationManifest struct {
 
 func ActiveThemeNavigation() ThemeNavigation {
 	themeID, _ := config.GetAs[string](config.ThemeKey, DefaultTheme)
+	if !IsLocalThemeUsable(themeID) {
+		themeID = DefaultTheme
+	}
 	if manifest, _, ok := localThemeFileContent(themeID, "komari-theme.json"); ok {
 		if navigation, valid := parseThemeNavigation(manifest); valid {
 			return navigation

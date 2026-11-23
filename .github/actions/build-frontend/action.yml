@@ -83,9 +83,6 @@ runs:
 
         grep -F '/assets/' web/public/bundledThemes/default/dist/index.html
         test -f web/public/bundledThemes/default/komari-theme.json
-        test -f web/public/bundledThemes/nezha/komari-theme.json
-        test -f web/public/bundledThemes/nezha/dist/index.html
-        test -f web/public/rescueTheme/dist/index.html
 
     - name: Pack frontend artifact
       if: ${{ inputs.artifact-name != '' }}

@@ -18,7 +18,7 @@ type Settings struct {
 	CorsAllowedOrigins     string `json:"cors_allowed_origins" default:""`                     // API 跨域允许列表
 	WsOriginCheckEnabled   bool   `json:"ws_origin_check_enabled" default:"true"`              // 是否校验 WebSocket Origin
 	WsAllowedOrigins       string `json:"ws_allowed_origins" default:""`                       // WebSocket Origin 允许列表
-	Theme                  string `json:"theme" default:"nezha"`                               // 新安装默认使用 Nezha 公共主题
+	Theme                  string `json:"theme" default:"default"`                             // 新安装默认使用官方公共主题
 	PrivateSite            bool   `json:"private_site" default:"false"`                        // 是否为私有站点，默认 false
 
 	AutoDiscoveryKey      string `json:"auto_discovery_key" default:""`          // Deprecated: 自动发现已被移除，保留以防旧配置反序列化错误
