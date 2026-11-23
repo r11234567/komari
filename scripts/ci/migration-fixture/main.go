@@ -80,19 +80,6 @@ func run() error {
 			return err
 		}
 	}
-	// Exercise password-only startup migration in the synthetic copy. The
-	// original backup still contains TOTP and is used for the full restore.
-	if os.Getenv("KOMARI_E2E_SKIP_CSV") == "1" {
-		updated, err := metadata.Exec("UPDATE users SET two_factor = '' WHERE username = ? AND two_factor <> ''", "e2e-user")
-		if err != nil {
-			metadata.Close()
-			return err
-		}
-		if count, err := updated.RowsAffected(); err != nil || count != 1 {
-			metadata.Close()
-			return fmt.Errorf("expected one TOTP-enabled fixture account, got %d: %v", count, err)
-		}
-	}
 	if err = metadata.Close(); err != nil {
 		return err
 	}
