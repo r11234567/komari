@@ -98,14 +98,9 @@ func (c *Controller) status(ctx *gin.Context) {
 
 // restore stages a verified backup before the guide creates any new data.
 func (c *Controller) restore(ctx *gin.Context) {
-	file, header, err := ctx.Request.FormFile("backup")
+	restoreLock, status, err := backup.StageHTTPUpload(ctx.Writer, ctx.Request)
 	if err != nil {
-		api.RespondError(ctx, http.StatusBadRequest, fmt.Sprintf("get uploaded backup: %v", err))
-		return
-	}
-	defer file.Close()
-	if err := backup.SaveUploadedBackup(file, header.Filename); err != nil {
-		api.RespondError(ctx, http.StatusBadRequest, err.Error())
+		api.RespondError(ctx, status, err.Error())
 		return
 	}
 
@@ -113,6 +108,7 @@ func (c *Controller) restore(ctx *gin.Context) {
 	go func() {
 		logger.InfoArgs("install", "Backup uploaded, restarting service to restore it on startup...")
 		time.Sleep(2 * time.Second)
+		restoreLock.Release()
 		os.Exit(0)
 	}()
 }
