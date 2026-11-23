@@ -272,6 +272,23 @@ func TestPluginBoundaryP1IsolationAndServerHardening(t *testing.T) {
 	if recLeak.Code != http.StatusNotFound {
 		t.Fatalf("static symlink escape status = %d, want 404", recLeak.Code)
 	}
+	t.Run("mount keeps the validated directory", func(t *testing.T) {
+		dist := filepath.Join(DataDir, "bnd", "dist")
+		if err := os.Rename(dist, dist+"-old"); err != nil {
+			t.Skipf("filesystem does not permit renaming the open static directory: %v", err)
+		}
+		if err := os.Mkdir(dist, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte("replacement"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/assets/index.html", nil))
+		if rec.Code != http.StatusOK || rec.Body.String() != "<h1>static-ok</h1>" {
+			t.Fatalf("static mount after directory replacement = %d %q", rec.Code, rec.Body.String())
+		}
+	})
 
 	// Request hook cannot overwrite Authorization, Cookie, or X-Forwarded-For.
 	hookReq := httptest.NewRequest(http.MethodGet, "/hook-check", nil)

@@ -3,6 +3,7 @@ package secureconfig
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -11,9 +12,23 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 const keyFilePath = "./data/secret.key"
+
+var keyFileMu sync.Mutex
+
+// DeriveKey separates a purpose-specific key from the configuration encryption key.
+func DeriveKey(purpose string) ([]byte, error) {
+	key, err := loadOrCreateKey()
+	if err != nil {
+		return nil, err
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(purpose))
+	return mac.Sum(nil), nil
+}
 
 func EncryptString(plaintext string) (string, error) {
 	key, err := loadOrCreateKey()
@@ -83,6 +98,8 @@ func loadOrCreateKey() ([]byte, error) {
 	if env := strings.TrimSpace(os.Getenv("KOMARI_SECRET_KEY")); env != "" {
 		return normalizeKey(env)
 	}
+	keyFileMu.Lock()
+	defer keyFileMu.Unlock()
 
 	if err := os.MkdirAll(filepath.Dir(keyFilePath), 0700); err != nil {
 		return nil, err

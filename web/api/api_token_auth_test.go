@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"gorm.io/gorm"
@@ -35,6 +37,7 @@ func sha256Hex(raw string) string {
 }
 
 func TestAPIAuthenticationMiddlewareRateLimitsUnknownBeforeSQLAndIsolatesLanes(t *testing.T) {
+	t.Setenv("KOMARI_SECRET_KEY", "api-token-test-key-not-for-deployment")
 	gin.SetMode(gin.TestMode)
 	db := dbcore.GetDBInstance()
 	now := time.Now().UTC()
@@ -86,7 +89,14 @@ func TestAPIAuthenticationMiddlewareRateLimitsUnknownBeforeSQLAndIsolatesLanes(t
 	})
 
 	r := gin.New()
-	r.Use(APIAuthenticationMiddleware())
+	r.Use(APIAuthenticationMiddleware(func(_, path string) bool { return path == "/plugin-probe" }), IdentityMiddleware())
+	r.GET("/plugin-probe", func(c *gin.Context) {
+		if GetPrincipal(c).Type != rpc.PrincipalAnonymous || c.GetHeader("Authorization") == "" {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	})
 	r.GET("/api/probe", func(c *gin.Context) {
 		p := GetPrincipal(c)
 		if p != nil && p.Type == rpc.PrincipalAgent {
@@ -136,6 +146,14 @@ func TestAPIAuthenticationMiddlewareRateLimitsUnknownBeforeSQLAndIsolatesLanes(t
 	if activeRec.Code != http.StatusOK || activeRec.Body.String() != activeClient {
 		t.Fatalf("uncached valid agent behind noisy NAT = %d %q, want 200 %q", activeRec.Code, activeRec.Body.String(), activeClient)
 	}
+	sqlQueries.Store(0)
+	foreign := httptest.NewRequest(http.MethodGet, "/plugin-probe", nil)
+	foreign.Header.Set("Authorization", "Bearer external-provider-credential")
+	foreignResponse := httptest.NewRecorder()
+	r.ServeHTTP(foreignResponse, foreign)
+	if foreignResponse.Code != http.StatusNoContent || sqlQueries.Load() != 0 {
+		t.Fatalf("foreign plugin bearer = %d with %d auth queries", foreignResponse.Code, sqlQueries.Load())
+	}
 
 	// (c) Sustained flood of >20 distinct random guesses exhausts unknownMissProbeBurst and serves 429 with 0 DB queries.
 	const distinctFloodIP = "198.51.100.22"
@@ -157,6 +175,30 @@ func TestAPIAuthenticationMiddlewareRateLimitsUnknownBeforeSQLAndIsolatesLanes(t
 	}
 	if q := sqlQueries.Load(); q != 0 {
 		t.Fatalf("expected 0 DB queries once distinct-miss probe budget exhausted, executed %d", q)
+	}
+	if rec := sendWithIP(distinctFloodIP, activeAT); rec.Code != http.StatusOK || rec.Body.String() != activeClient {
+		t.Fatalf("pre-upgrade agent after probe exhaustion = %d %q", rec.Code, rec.Body.String())
+	}
+
+	// The middleware already has its startup snapshot. A token issued by a
+	// subsequent rotation also bypasses the exhausted unknown-source budget.
+	refreshToken := "rt-" + activeClient
+	credential, err := enrollment.LookupRefresh(context.Background(), refreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued, err := enrollment.RotateVerified(context.Background(), credential, refreshToken, uuid.NewString(), nil, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := sendWithIP(distinctFloodIP, issued.AccessToken); rec.Code != http.StatusOK || rec.Body.String() != activeClient {
+		t.Fatalf("newly issued agent after probe exhaustion = %d %q", rec.Code, rec.Body.String())
+	}
+	if err := enrollment.Revoke(activeClient, "test revocation"); err != nil {
+		t.Fatal(err)
+	}
+	if rec := sendWithIP(distinctFloodIP, issued.AccessToken); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked agent after probe exhaustion = %d, want 401", rec.Code)
 	}
 
 	// (d) Expired Agent credentials hit 1 SQL query and spend agent: rather than unknown:.

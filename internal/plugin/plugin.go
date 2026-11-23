@@ -408,7 +408,7 @@ func (m *Manager) dropInstance(short string, inst *Instance) {
 	inst.runtime = nil
 	inst.host = nil
 	clear(inst.handlers)
-	clear(inst.statics)
+	inst.closeStaticRoots()
 	clear(inst.rpcMethods)
 	inst.cronJobs = nil
 	inst.mu.Unlock()
@@ -467,7 +467,7 @@ func (m *Manager) unload(short string) error {
 	inst.runtime = nil
 	inst.host = nil
 	clear(inst.handlers)
-	clear(inst.statics)
+	inst.closeStaticRoots()
 	clear(inst.rpcMethods)
 	inst.cronJobs = nil
 	inst.mu.Unlock()

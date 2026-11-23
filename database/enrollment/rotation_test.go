@@ -108,10 +108,10 @@ func TestCredentialRotationRecoversAfterDatabaseReopen(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, first, recovered)
 	_, err = rotateVerifiedDB(context.Background(), db, record, token, uuid.NewString(), &zero, 2, func() time.Time { return now.Add(30 * time.Second) })
-	require.ErrorIs(t, err, ErrRefreshConflict)
+	require.ErrorIs(t, err, ErrRefreshReuse)
 	var current models.AgentCredential
 	require.NoError(t, db.First(&current, "client = ?", record.Client).Error)
-	require.Nil(t, current.RevokedAt)
+	require.NotNil(t, current.RevokedAt)
 }
 
 func TestCredentialRotationAuthenticatedReuseRevokesChain(t *testing.T) {
@@ -193,6 +193,7 @@ func TestCredentialRotationLegacyConsumedRowWithoutRequestHashDoesNotRevokePrevi
 	require.NoError(t, err)
 	// Simulate a pre-upgrade AgentRefreshUse row that predates RequestHash recording.
 	require.NoError(t, db.Model(&models.AgentRefreshUse{}).Where("client = ?", record.Client).Update("request_hash", "").Error)
+	require.NoError(t, db.Model(&models.AgentCredential{}).Where("client = ?", record.Client).Update("refresh_recovery_request", "").Error)
 
 	// Late retry of the immediately previous generation must not revoke the active chain.
 	_, err = rotateVerifiedDB(context.Background(), db, record, token, uuid.NewString(), nil, 2, func() time.Time { return now.Add(RefreshRecoveryWindow + time.Minute) })
@@ -266,22 +267,16 @@ func TestCredentialRotationLegacyRecoveryDoesNotRotateAgain(t *testing.T) {
 	require.Equal(t, uint64(1), current.Generation)
 }
 
-func TestCredentialRotationConcurrentWindowExpiresToReuseRevocation(t *testing.T) {
+func TestCredentialRotationDifferentRequestImmediatelyRevokesChain(t *testing.T) {
 	db, token, record, now := rotationFixture(t)
 	id1 := uuid.NewString()
 	_, err := rotateVerifiedDB(context.Background(), db, record, token, id1, nil, 2, func() time.Time { return now })
 	require.NoError(t, err)
 
-	// Within 60s concurrent window, a different request ID returns ErrRefreshConflict without revoking.
-	_, err = rotateVerifiedDB(context.Background(), db, record, token, uuid.NewString(), nil, 2, func() time.Time { return now.Add(RefreshConcurrentConflictWindow - time.Second) })
-	require.ErrorIs(t, err, ErrRefreshConflict)
-	var cur models.AgentCredential
-	require.NoError(t, db.First(&cur, "client = ?", record.Client).Error)
-	require.Nil(t, cur.RevokedAt)
-
-	// Beyond 60s concurrent window (still within 24h recovery window), different request ID revokes the chain.
-	_, err = rotateVerifiedDB(context.Background(), db, record, token, uuid.NewString(), nil, 2, func() time.Time { return now.Add(RefreshConcurrentConflictWindow + time.Second) })
+	gen := record.Generation
+	_, err = rotateVerifiedDB(context.Background(), db, record, token, uuid.NewString(), &gen, 2, func() time.Time { return now })
 	require.ErrorIs(t, err, ErrRefreshReuse)
+	var cur models.AgentCredential
 	require.NoError(t, db.First(&cur, "client = ?", record.Client).Error)
 	require.NotNil(t, cur.RevokedAt)
 }

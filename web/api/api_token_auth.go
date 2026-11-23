@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"math"
@@ -16,34 +17,30 @@ import (
 	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/security"
+	"gorm.io/gorm"
 )
 
 const (
 	unknownMissCacheTTL        = 10 * time.Second
 	unknownMissCacheMaxEntries = 4096
-	unknownMissProbeBurst      = 20.0
-	unknownMissProbeRefillSec  = 3.0 // 1 distinct uncached miss probe replenishes every 3s
+	unknownProbeConcurrency    = 4
+	unknownProbeTimeout        = 250 * time.Millisecond
 )
 
-type unknownMissBucket struct {
-	tokens float64
-	seen   time.Time
-}
-
 type unknownMissGuard struct {
-	mu      sync.Mutex
-	misses  map[[32]byte]time.Time
-	buckets map[string]unknownMissBucket
+	mu     sync.Mutex
+	misses map[[sha256.Size]byte]time.Time
+	active chan struct{}
 }
 
 func newUnknownMissGuard() *unknownMissGuard {
 	return &unknownMissGuard{
-		misses:  make(map[[32]byte]time.Time),
-		buckets: make(map[string]unknownMissBucket),
+		misses: make(map[[sha256.Size]byte]time.Time),
+		active: make(chan struct{}, unknownProbeConcurrency),
 	}
 }
 
-func (g *unknownMissGuard) knownMiss(digest [32]byte, now time.Time) bool {
+func (g *unknownMissGuard) knownMiss(digest [sha256.Size]byte, now time.Time) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	exp, ok := g.misses[digest]
@@ -57,56 +54,32 @@ func (g *unknownMissGuard) knownMiss(digest [32]byte, now time.Time) bool {
 	return true
 }
 
-func (g *unknownMissGuard) allowMissProbe(sourceIP string, now time.Time) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	b, exists := g.buckets[sourceIP]
-	if !exists {
-		return true
-	}
-	tokens := min(unknownMissProbeBurst, b.tokens+max(0, now.Sub(b.seen).Seconds())/unknownMissProbeRefillSec)
-	return tokens >= 1
-}
-
-func (g *unknownMissGuard) recordMiss(sourceIP string, digest [32]byte, now time.Time) {
+func (g *unknownMissGuard) recordMiss(digest [sha256.Size]byte, now time.Time) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if len(g.misses) >= unknownMissCacheMaxEntries {
-		for k, exp := range g.misses {
-			if !now.Before(exp) {
-				delete(g.misses, k)
-			}
-		}
 		for k := range g.misses {
-			if len(g.misses) < unknownMissCacheMaxEntries {
-				break
-			}
 			delete(g.misses, k)
+			break
 		}
 	}
 	g.misses[digest] = now.Add(unknownMissCacheTTL)
+}
 
-	if len(g.buckets) >= unknownMissCacheMaxEntries {
-		if _, exists := g.buckets[sourceIP]; !exists {
-			for k, b := range g.buckets {
-				if now.Sub(b.seen) > time.Minute || len(g.buckets) >= unknownMissCacheMaxEntries {
-					delete(g.buckets, k)
-					if len(g.buckets) < unknownMissCacheMaxEntries {
-						break
-					}
-				}
-			}
-		}
+func (g *unknownMissGuard) lookup(ctx context.Context, limiter *security.APIKeyAttemptLimiter, sourceIP, token string, now time.Time) (string, bool, time.Duration, error) {
+	select {
+	case g.active <- struct{}{}:
+		defer func() { <-g.active }()
+	default:
+		return "", false, time.Second, nil
 	}
-	b, exists := g.buckets[sourceIP]
-	tokens := unknownMissProbeBurst
-	if exists {
-		tokens = min(unknownMissProbeBurst, b.tokens+max(0, now.Sub(b.seen).Seconds())/unknownMissProbeRefillSec)
+	if ok, retry := limiter.AllowUnknownAgentProbe(sourceIP, now); !ok {
+		return "", false, retry, nil
 	}
-	g.buckets[sourceIP] = unknownMissBucket{
-		tokens: max(0, tokens-1),
-		seen:   now,
-	}
+	ctx, cancel := context.WithTimeout(ctx, unknownProbeTimeout)
+	defer cancel()
+	uuid, known, err := enrollment.LookupAccessTokenContext(ctx, token)
+	return uuid, known, 0, err
 }
 
 func isPlausibleAgentAccessToken(secret string) bool {
@@ -132,23 +105,34 @@ func APIAuthenticationMiddleware(pluginRoute ...func(method, pattern string) boo
 	limiter := security.NewAPIKeyAttemptLimiter()
 	usage := security.NewAPITokenUsageLimiter()
 	missGuard := newUnknownMissGuard()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	storedDigests, _ := enrollment.StoredAccessTokenDigests(ctx)
+	cancel()
 	return func(c *gin.Context) {
 		secret, bearer := requestBearer(c.GetHeader("Authorization"))
 		if !bearer {
 			c.Next()
 			return
 		}
+		now := time.Now()
+		plausible := isPlausibleAgentAccessToken(secret)
+		var digest [sha256.Size]byte
+		var stored bool
+		if plausible {
+			digest = sha256.Sum256([]byte(secret))
+			_, stored = storedDigests[digest]
+		}
 		// Official plugins may implement their own Bearer authentication on
 		// their own routes. Do not reinterpret that foreign credential as a
-		// failed Komari key. Namespaced Komari credentials are never exempted.
+		// failed Komari key or hand it to the legacy identity lookup.
 		if len(pluginRoute) > 0 && pluginRoute[0](c.Request.Method, c.FullPath()) &&
-			!strings.HasPrefix(secret, apitokens.Prefix) && !strings.HasPrefix(secret, "komari-") {
+			!stored && !strings.HasPrefix(secret, apitokens.Prefix) && !strings.HasPrefix(secret, "komari-") {
+			SetPrincipal(c, rpc.NewAnonymousPrincipal())
 			c.Next()
 			return
 		}
 
 		sourceIP := security.AuthSourceIP(c)
-		now := time.Now()
 		isPAT := strings.HasPrefix(secret, apitokens.Prefix)
 		isInstall := !isPAT && enrollment.IsInstallToken(secret)
 
@@ -169,33 +153,37 @@ func APIAuthenticationMiddleware(pluginRoute ...func(method, pattern string) boo
 		}
 
 		if !isPAT {
-			digest := sha256.Sum256([]byte(secret))
-			skipSQL := !isPlausibleAgentAccessToken(secret) ||
-				missGuard.knownMiss(digest, now) ||
-				!missGuard.allowMissProbe(sourceIP, now)
-			if !skipSQL {
-				uuid, knownRecord, err := enrollment.LookupAccessToken(secret)
-				if err == nil && uuid != "" {
-					// Valid enrolled Agent credentials bypass unknown:<ip> limits
-					// even behind a noisy NAT, while invalid/expired keys below stay metered.
-					SetPrincipal(c, rpc.NewAgentPrincipal(uuid))
-					c.Next()
-					return
-				}
-				if knownRecord {
-					failureKey := "agent:" + sourceIP
-					if ok, retry := limiter.Allow(failureKey, now); !ok {
+			failureLane := "unknown:"
+			if plausible && !missGuard.knownMiss(digest, now) {
+				var uuid string
+				var known bool
+				var err error
+				if stored || enrollment.IsIssuedAccessToken(secret, now) {
+					uuid, known, err = enrollment.LookupAccessTokenContext(c.Request.Context(), secret)
+				} else {
+					var retry time.Duration
+					uuid, known, retry, err = missGuard.lookup(c.Request.Context(), limiter, sourceIP, secret, now)
+					if retry > 0 {
 						abortRateLimited(c, retry)
 						return
 					}
-					limiter.Failure(failureKey, now)
-					security.AbortRequest(c, http.StatusUnauthorized, "invalid API credential")
+				}
+				switch {
+				case err == nil && uuid != "":
+					SetPrincipal(c, rpc.NewAgentPrincipal(uuid))
+					c.Next()
+					return
+				case known:
+					failureLane = "agent:"
+				case errors.Is(err, gorm.ErrRecordNotFound):
+					missGuard.recordMiss(digest, now)
+				default:
+					security.AbortRequest(c, http.StatusServiceUnavailable, "API authentication unavailable")
 					return
 				}
-				missGuard.recordMiss(sourceIP, digest, now)
 			}
 
-			failureKey := "unknown:" + sourceIP
+			failureKey := failureLane + sourceIP
 			if ok, retry := limiter.Allow(failureKey, now); !ok {
 				abortRateLimited(c, retry)
 				return

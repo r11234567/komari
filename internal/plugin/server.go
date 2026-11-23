@@ -126,7 +126,7 @@ func (m *Manager) registerServerModule(host *jsruntime.Host, registry *require.R
 			if v, ok := opts["spa"]; ok {
 				spa, _ = v.(bool)
 			}
-			if err := m.registerStatic(inst.info.Short, mount, dir, spa); err != nil {
+			if err := m.registerStatic(inst, mount, dir, spa); err != nil {
 				return moejs.Undefined(), err
 			}
 			return moejs.Undefined(), nil
@@ -549,8 +549,8 @@ func (m *Manager) routeHandler(short string) gin.HandlerFunc {
 // stored on the Instance so the gin slot (which survives unload) always reads
 // the config of the latest load.
 type staticConfig struct {
-	dir string // absolute folder path inside the plugin directory
-	spa bool   // fall back to index.html for unmatched paths
+	root *os.Root // directory validated relative to the plugin root at registration
+	spa  bool     // fall back to index.html for unmatched paths
 }
 
 // registerStatic serves a folder from the plugin directory at a mount path.
@@ -558,14 +558,14 @@ type staticConfig struct {
 // so /ui and /ui/anything both reach the folder. Like registerRoute, the gin
 // slots survive unload (they return 404) and are reused on reload; the
 // handler always resolves the current config from the instance.
-func (m *Manager) registerStatic(short, mount, dir string, spa bool) (err error) {
+func (m *Manager) registerStatic(inst *Instance, mount, dir string, spa bool) (err error) {
 	if protectedWorkspacePath(mount) || normalizeBoundaryPath(mount) == "/api" {
 		return fmt.Errorf("plugin static mount %q is reserved for core application controls", mount)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	inst, ok := m.instances[short]
-	if !ok {
+	short := inst.info.Short
+	if m.instances[short] != inst {
 		return fmt.Errorf("plugin %q is not loaded", short)
 	}
 	if m.engine == nil {
@@ -575,46 +575,56 @@ func (m *Manager) registerStatic(short, mount, dir string, spa bool) (err error)
 	if cleanDir == "" || cleanDir == "." || !filepath.IsLocal(cleanDir) {
 		return fmt.Errorf("static folder %q must be a subdirectory inside the plugin directory", dir)
 	}
-	absDir := filepath.Join(inst.dir, cleanDir)
-	if !withinDir(absDir, inst.dir) {
-		return fmt.Errorf("static folder %q must be inside the plugin directory", dir)
-	}
 	pluginRoot, rootErr := os.OpenRoot(inst.dir)
 	if rootErr != nil {
 		return fmt.Errorf("static folder %q cannot be opened", dir)
 	}
+	defer pluginRoot.Close()
 	subRoot, subErr := pluginRoot.OpenRoot(cleanDir)
-	_ = pluginRoot.Close()
 	if subErr != nil {
 		return fmt.Errorf("static folder %q does not exist", dir)
 	}
-	_ = subRoot.Close()
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("register static %s: %v", mount, r)
+		}
+		if err != nil {
+			_ = subRoot.Close()
+		}
+	}()
+	pluginInfo, pluginErr := pluginRoot.Stat(".")
+	staticInfo, staticErr := subRoot.Stat(".")
+	if pluginErr != nil || staticErr != nil || os.SameFile(pluginInfo, staticInfo) {
+		return fmt.Errorf("static folder %q must be a subdirectory inside the plugin directory", dir)
+	}
 	if m.routes[short] == nil {
 		m.routes[short] = make(map[string]bool)
 	}
-	inst.mu.Lock()
-	inst.statics[mount] = &staticConfig{dir: absDir, spa: spa}
-	inst.mu.Unlock()
-
 	key := "STATIC " + mount
-	if m.routes[short][key] {
-		return nil // gin slots from an earlier load stay; the config was refreshed above
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			inst.mu.Lock()
-			delete(inst.statics, mount)
-			inst.mu.Unlock()
-			err = fmt.Errorf("register static %s: %v", mount, r)
+	if !m.routes[short][key] {
+		handler := m.staticHandler(short, mount)
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			m.engine.Handle(method, mount, handler)
+			m.engine.Handle(method, mount+"/*filepath", handler)
 		}
-	}()
-	handler := m.staticHandler(short, mount)
-	for _, method := range []string{http.MethodGet, http.MethodHead} {
-		m.engine.Handle(method, mount, handler)
-		m.engine.Handle(method, mount+"/*filepath", handler)
+		m.routes[short][key] = true
 	}
-	m.routes[short][key] = true
+	inst.mu.Lock()
+	if previous := inst.statics[mount]; previous != nil {
+		_ = previous.root.Close()
+	}
+	inst.statics[mount] = &staticConfig{root: subRoot, spa: spa}
+	inst.mu.Unlock()
 	return nil
+}
+
+// Call with the instance lock held. Requests racing with closure can only
+// finish an open already in progress or receive an error from os.Root.
+func (inst *Instance) closeStaticRoots() {
+	for _, cfg := range inst.statics {
+		_ = cfg.root.Close()
+	}
+	clear(inst.statics)
 }
 
 // staticHandler serves files from a static folder. Requests to the mount
@@ -637,7 +647,7 @@ func (m *Manager) staticHandler(short, mount string) gin.HandlerFunc {
 		}
 		name := strings.TrimPrefix(c.Request.URL.Path, mount)
 		name = strings.TrimPrefix(name, "/")
-		file, info, serveName, err := openStaticFile(cfg.dir, name, cfg.spa)
+		file, info, serveName, err := openStaticFile(cfg.root, name, cfg.spa)
 		if err != nil {
 			c.Status(http.StatusNotFound)
 			return
@@ -663,16 +673,9 @@ func writeSanitizedRouteHeaders(c *gin.Context, headers http.Header) {
 	}
 }
 
-// openStaticFile maps a request path inside a static folder using os.OpenRoot so
-// traversal and symlink escapes out of dir are always rejected, including for
-// directories and SPA fallbacks.
-func openStaticFile(dir, name string, spa bool) (*os.File, os.FileInfo, string, error) {
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	defer root.Close()
-
+// openStaticFile resolves files, directory indexes and SPA fallbacks under the
+// already validated root. The returned file stays open independently of it.
+func openStaticFile(root *os.Root, name string, spa bool) (*os.File, os.FileInfo, string, error) {
 	cleanReq := ""
 	if name != "" {
 		cleanReq = filepath.Clean(strings.TrimPrefix(name, "/"))

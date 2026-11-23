@@ -433,7 +433,11 @@ func Revoke(clientUUID, reason string) error {
 // returning knownRecord=true even when a matching Agent credential is expired
 // or revoked so rate-limit lanes classify known Agents without querying twice.
 func LookupAccessToken(accessToken string) (clientUUID string, knownRecord bool, err error) {
-	return lookupAccessTokenDB(dbcore.GetDBInstance(), accessToken, time.Now().UTC())
+	return LookupAccessTokenContext(context.Background(), accessToken)
+}
+
+func LookupAccessTokenContext(ctx context.Context, accessToken string) (clientUUID string, knownRecord bool, err error) {
+	return lookupAccessTokenDB(dbcore.GetDBInstance().WithContext(ctx), accessToken, time.Now().UTC())
 }
 
 func lookupAccessTokenDB(db *gorm.DB, accessToken string, now time.Time) (string, bool, error) {
@@ -507,9 +511,8 @@ func ResolveAgentPublicKey(clientUUID string) (ed25519.PublicKey, error) {
 
 // issueLocked mints a pair inside an open transaction.
 func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int32, scopes []string, now time.Time) (Issued, error) {
-	accessToken := utils.GenerateRandomString(43)
 	refreshToken := utils.GenerateRandomString(43)
-	if accessToken == "" || refreshToken == "" {
+	if refreshToken == "" {
 		return Issued{}, errors.New("failed to generate credentials")
 	}
 	policy, err := loadCredentialPolicy(tx)
@@ -518,6 +521,10 @@ func issueLocked(tx *gorm.DB, clientUUID, publicKey, keyID string, algorithm int
 	}
 	absoluteExpiry := now.Add(time.Duration(policy.AbsoluteDays) * credentialDay)
 	accessExpiry := minDeadline(now.Add(AccessTokenLifetime), absoluteExpiry)
+	accessToken, err := mintAccessToken(accessExpiry)
+	if err != nil {
+		return Issued{}, fmt.Errorf("mint access token: %w", err)
+	}
 	refreshExpiry := minDeadline(now.Add(time.Duration(policy.IdleDays)*credentialDay), absoluteExpiry)
 	graceExpiry := now.Add(refreshGracePeriod)
 
