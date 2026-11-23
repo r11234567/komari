@@ -32,9 +32,11 @@ func resetNativeTestState() {
 	registerPool.mu.Lock()
 	registerPool.records = make(map[string]ceremony)
 	registerPool.mu.Unlock()
-	loginLimiter.mu.Lock()
-	loginLimiter.buckets = make(map[string]rateBucket)
-	loginLimiter.mu.Unlock()
+	for _, admission := range []*loginAdmission{discoverableLogin, accountFirstLogin, completeLogin} {
+		admission.rate.mu.Lock()
+		clear(admission.rate.buckets)
+		admission.rate.mu.Unlock()
+	}
 	InvalidateAccountFirstEnvelopeCache()
 }
 
@@ -349,9 +351,9 @@ func TestNativeAccountFirstLoginUniformitySecurityAndRateLimits(t *testing.T) {
 		priorTok = tok
 	}
 
-	// Saturating anonymous login pool must NOT block authenticated BeginRegistration.
+	// Filling the discoverable flow leaves account-first login and registration available.
 	resetNativeTestState()
-	for i := 0; i < maxLoginPending; i++ {
+	for i := 0; i < maxLoginPendingPerFlow; i++ {
 		ip := fmt.Sprintf("198.51.100.%d", i/maxPendingPerSource+1)
 		if _, _, err := BeginLogin(ctx, "", ip); err != nil {
 			t.Fatalf("filling login pool at %d failed: %v", i, err)
@@ -360,10 +362,59 @@ func TestNativeAccountFirstLoginUniformitySecurityAndRateLimits(t *testing.T) {
 	if _, _, err := BeginLogin(ctx, "", "198.51.100.250"); !errors.Is(err, credential.ErrLimit) {
 		t.Fatalf("expected login pool full ErrLimit, got %v", err)
 	}
+	accountOptions, accountToken, err := BeginLogin(ctx, userA.Username, "198.51.100.250")
+	if err != nil {
+		t.Fatalf("account-first login with a full discoverable pool: %v", err)
+	}
+	if accountOptions == nil || accountToken == "" {
+		t.Fatal("account-first login returned no challenge")
+	}
+	// Consume the source's account-first begin budget while preserving the
+	// original challenge. It must still be possible to finish that login.
+	for i := 0; i < loginIPBudgetLimit; i++ {
+		accountFirstLogin.rate.reserve("198.51.100.250", "")
+	}
+	proof := signedAssertionFor(t, privA, idA, userA.UUID, "panel.example.test", "https://panel.example.test",
+		accountOptions.(*protocol.CredentialAssertion).Response.Challenge.String(), 6, 0x05)
+	if uid, err := CompleteLoginWithIP(ctx, "198.51.100.250", accountToken, proof); err != nil || uid != userA.UUID {
+		t.Fatalf("finish with begin budgets saturated: uid=%q err=%v", uid, err)
+	}
 	regOpt, regTok, err := BeginRegistration(ctx, credential.Binding{UserID: userA.UUID, SessionDigest: "s", SecurityVersion: "v"}, "Backup Key")
 	if err != nil || regTok == "" || regOpt == nil {
 		t.Fatalf("registration was starved by full login pool: %v", err)
 	}
+
+	// Account-first requests have an independent in-flight limit.
+	resetNativeTestState()
+	var accountWork []func()
+	for range cap(accountFirstLogin.slots) {
+		release, err := accountFirstLogin.acquire()
+		if err != nil {
+			t.Fatal(err)
+		}
+		accountWork = append(accountWork, release)
+	}
+	defer func() {
+		for _, release := range accountWork {
+			release()
+		}
+	}()
+	if _, _, err := BeginLogin(ctx, userA.Username, "198.51.100.240"); !errors.Is(err, credential.ErrLimit) {
+		t.Fatalf("expected bounded account-first concurrency, got %v", err)
+	}
+	opt, token, err := BeginLogin(ctx, "", "198.51.100.240")
+	if err != nil {
+		t.Fatalf("discoverable login while account-first is busy: %v", err)
+	}
+	proof = signedAssertionFor(t, privA, idA, userA.UUID, "panel.example.test", "https://panel.example.test",
+		opt.(*protocol.CredentialAssertion).Response.Challenge.String(), 7, 0x05)
+	if uid, err := CompleteLoginWithIP(ctx, "198.51.100.240", token, proof); err != nil || uid != userA.UUID {
+		t.Fatalf("discoverable login could not finish under load: uid=%q err=%v", uid, err)
+	}
+	for _, release := range accountWork {
+		release()
+	}
+	accountWork = nil
 
 	// Always-on rate limiting blocks Begin+Complete probe loop from one IP.
 	resetNativeTestState()
