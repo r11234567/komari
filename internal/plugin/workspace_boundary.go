@@ -61,10 +61,25 @@ func sanitizedPluginHeaders(src http.Header, allowForeignAuth bool) http.Header 
 
 func isReservedSessionCookieName(name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
-	return lower == "session_token" ||
-		strings.HasPrefix(lower, "komari_") ||
+	switch lower {
+	case "session_token", "oauth_state", "oauth_return_to", "binding_external_account", "2fa_secret", "temp_key", "komari_sign_on_grant":
+		return true
+	}
+	return strings.HasPrefix(lower, "komari_") ||
 		strings.HasPrefix(lower, "__host-komari_") ||
 		strings.HasPrefix(lower, "__secure-komari_")
+}
+
+func isRestrictedHookMutationHeader(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "authorization", "cookie", "host", "origin", "referer",
+		"x-forwarded-for", "x-forwarded-proto", "x-forwarded-host",
+		"forwarded", "x-real-ip",
+		"x-komari-credential-authorization", "x-komari-step-up", "dpop":
+		return true
+	default:
+		return false
+	}
 }
 
 // stripReservedSetCookies prevents plugin response hooks from issuing or
@@ -135,6 +150,7 @@ func protectedWorkspacePath(p string) bool {
 		"/database-recovery",
 		"/api/login",
 		"/api/logout",
+		"/api/me",
 		"/api/oauth",
 		"/api/oauth_callback",
 		"/api/bind/ticket",

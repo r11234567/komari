@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"golang.org/x/net/idna"
 )
 
 const (
@@ -118,6 +120,21 @@ func ValidateListenerConfig() error {
 	if panelAddr == "" {
 		return nil
 	}
+	publicOrigin, panelOrigin := EffectivePublicOrigin(), EffectivePanelOrigin()
+	if publicOrigin == "" || panelOrigin == "" {
+		return fmt.Errorf("split listeners require both KOMARI_PUBLIC_ORIGIN and KOMARI_PANEL_ORIGIN")
+	}
+	publicHost, err := originHostname(publicOrigin)
+	if err != nil {
+		return fmt.Errorf("KOMARI_PUBLIC_ORIGIN: %w", err)
+	}
+	panelOriginHost, err := originHostname(panelOrigin)
+	if err != nil {
+		return fmt.Errorf("KOMARI_PANEL_ORIGIN: %w", err)
+	}
+	if publicHost == panelOriginHost {
+		return fmt.Errorf("KOMARI_PUBLIC_ORIGIN and KOMARI_PANEL_ORIGIN must use distinct hostnames for cookie isolation")
+	}
 	panelHost, panelPort, err := net.SplitHostPort(panelAddr)
 	if err != nil {
 		return fmt.Errorf("KOMARI_PANEL_LISTEN %q: %w", panelAddr, err)
@@ -130,6 +147,22 @@ func ValidateListenerConfig() error {
 		}
 	}
 	return nil
+}
+
+func originHostname(origin string) (string, error) {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return "", err
+	}
+	host := strings.TrimSuffix(u.Hostname(), ".")
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String(), nil
+	}
+	if host == "" {
+		return "", fmt.Errorf("empty origin hostname")
+	}
+	ascii, err := idna.Lookup.ToASCII(host)
+	return strings.ToLower(ascii), err
 }
 
 func canonicalListenHost(host string) string {

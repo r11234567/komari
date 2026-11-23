@@ -451,8 +451,7 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
-	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
-		WithTrustedOrigins(flags.EffectivePanelOrigin())
+	cors := a.newUpgradeCorsController()
 	r.Use(cors.Middleware())
 	r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
 	r.Use(api.IdentityMiddleware())
@@ -531,8 +530,7 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 	}
 	r.Use(logger.GinLogger())
 	r.Use(logger.GinRecovery())
-	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
-		WithTrustedOrigins(flags.EffectivePanelOrigin())
+	cors := a.newUpgradeCorsController()
 	r.Use(cors.Middleware())
 	r.Use(api.IdentityMiddleware())
 	r.Use(func(c *gin.Context) {
@@ -735,6 +733,15 @@ func apiNoStoreMiddleware() gin.HandlerFunc {
 	}
 }
 
+func (a *App) newUpgradeCorsController() *security.CorsController {
+	if flags.SplitPanelEnabled() {
+		return security.NewCorsController(true, "").
+			WithTrustedOrigins(flags.EffectivePanelOrigin())
+	}
+	return security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
+		WithTrustedOrigins(flags.EffectivePublicOrigin(), flags.EffectivePanelOrigin())
+}
+
 // BuildRouter 构建 Gin 引擎、中间件与全部路由，并登记热重载处理器。
 // 当设置 KOMARI_PANEL_LISTEN 时，构建两个物理隔离的 Gin 引擎：
 //   - a.engine:      Public Listener（仅挂载公开主题与强制 PublicViewer 只读路由）
@@ -811,7 +818,8 @@ func (a *App) BuildRouter() error {
 		c.Set("panel_listener", true)
 		c.Next()
 	})
-	panelCors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
+	// The public site's mutable CORS allowlist must not govern the Panel.
+	panelCors := security.NewCorsController(true, "").
 		WithTrustedOrigins(flags.EffectivePanelOrigin())
 	panelEngine.Use(panelCors.Middleware())
 	panelEngine.Use(api.APIAuthenticationMiddleware())
@@ -824,7 +832,7 @@ func (a *App) BuildRouter() error {
 	closeExports := router.MountPanelRoutes(panelEngine)
 	a.addCleanup("history-export-queue", func(context.Context) error { return closeExports() })
 
-	a.registerReloadHandlers(publicCors, panelCors)
+	a.registerReloadHandlers(publicCors)
 	a.reload.Register("rate-limit", func(event config.ConfigEvent) {
 		publicRateLimiter.Update(event)
 		panelRateLimiter.Update(event)

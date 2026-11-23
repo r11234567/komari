@@ -230,6 +230,7 @@ func (m *Manager) wrapHandler(next http.Handler) http.Handler {
 // request body.
 func (m *Manager) runRequestHook(r *http.Request, body []byte, h *hookEntry) ([]byte, error) {
 	nextBody := body
+	origHeaders := r.Header.Clone()
 	var hookErr error
 	queued, timedOut := runHookTurn(h.host, "plugin request hook "+h.short, func(vm *moejs.Runtime) {
 		reqObj := hookRequestObject(vm, r, nextBody)
@@ -256,7 +257,18 @@ func (m *Manager) runRequestHook(r *http.Request, body []byte, h *hookEntry) ([]
 		if value := native.Get(vm, reqObj, "headers"); !value.IsUndefined() {
 			var raw map[string]any
 			if err := native.ExportTo(vm, value, &raw); err == nil {
-				r.Header = normalizeHeader(raw)
+				next := normalizeHeader(raw)
+				for name := range next {
+					if isRestrictedHookMutationHeader(name) {
+						delete(next, name)
+					}
+				}
+				for name, values := range origHeaders {
+					if isRestrictedHookMutationHeader(name) {
+						next[http.CanonicalHeaderKey(name)] = append([]string(nil), values...)
+					}
+				}
+				r.Header = next
 			}
 		}
 		if value := native.Get(vm, reqObj, "body"); !value.IsUndefined() {

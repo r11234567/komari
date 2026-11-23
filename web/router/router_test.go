@@ -2,13 +2,16 @@ package router
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -21,6 +24,47 @@ import (
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/security"
 )
+
+func TestLegacyAgentRoutesRejectEnrolledBearerWithoutBreakingTransferTickets(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := dbcore.GetDBInstance()
+	agentID := uuid.NewString()
+	token := uuid.NewString()
+	credential := models.AgentCredential{
+		Client: agentID, AgentPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		AccessTokenHash: fmt.Sprintf("%x", sha256.Sum256([]byte(token))),
+		AccessExpiresAt: time.Now().Add(time.Hour),
+	}
+	if err := db.Create(&credential).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Delete(&credential) })
+
+	engine := gin.New()
+	engine.Use(api.APIAuthenticationMiddleware(), api.IdentityMiddleware())
+	registerAgentRoutes(engine)
+	for _, route := range []struct{ method, path string }{
+		{http.MethodGet, "/api/clients/report"},
+		{http.MethodPost, "/api/clients/report"},
+		{http.MethodPost, "/api/clients/uploadBasicInfo"},
+		{http.MethodPost, "/api/clients/task/result"},
+		{http.MethodGet, "/api/clients/ping/tasks"},
+		{http.MethodPost, "/api/clients/ping/result"},
+		{http.MethodPost, "/api/clients/transfer/unissued"},
+	} {
+		req := httptest.NewRequest(route.method, route.path, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		res := httptest.NewRecorder()
+		engine.ServeHTTP(res, req)
+		want := http.StatusForbidden
+		if strings.Contains(route.path, "/transfer/") {
+			want = http.StatusUnauthorized
+		}
+		if res.Code != want {
+			t.Errorf("%s %s = %d, want %d: %s", route.method, route.path, res.Code, want, res.Body)
+		}
+	}
+}
 
 func TestRegisterDoesNotExposeHTTPSCertificateUpload(t *testing.T) {
 	gin.SetMode(gin.TestMode)

@@ -53,6 +53,13 @@ func TestPanelListenerAndOriginNormalization(t *testing.T) {
 	if got := EffectivePanelOrigin(); got != "" {
 		t.Fatalf("split EffectivePanelOrigin() without KOMARI_PANEL_ORIGIN = %q, want empty", got)
 	}
+	if err := ValidateListenerConfig(); err == nil {
+		t.Fatal("split listener accepted a missing external Panel origin")
+	}
+	t.Setenv("KOMARI_PANEL_ORIGIN", "https://status.example.com.:2443")
+	if err := ValidateListenerConfig(); err == nil {
+		t.Fatal("split listener accepted the same cookie hostname on two ports")
+	}
 	t.Setenv("KOMARI_PANEL_ORIGIN", "https://panel.example.com/")
 	if got := EffectivePanelOrigin(); got != "https://panel.example.com" {
 		t.Fatalf("split EffectivePanelOrigin() = %q, want https://panel.example.com", got)

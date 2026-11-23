@@ -3,6 +3,8 @@ package security
 import (
 	"fmt"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,6 +58,39 @@ func TestAPISourceIgnoresSpoofedForwardingWithoutExplicitProxyTrust(t *testing.T
 			router.ServeHTTP(response, request)
 			if response.Body.String() != "203.0.113.8" {
 				t.Fatalf("caller chose auth source: %s", response.Body.String())
+			}
+		})
+	}
+}
+
+func TestUnknownAgentProbeBudgetsAreChargedBeforeConcurrentLookups(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		uniqueIPs bool
+		admitted  int32
+	}{
+		{name: "shared source", admitted: 20},
+		{name: "multiple sources", uniqueIPs: true, admitted: 40},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			limiter := NewAPIKeyAttemptLimiter()
+			now := time.Now()
+			var count atomic.Int32
+			var wg sync.WaitGroup
+			for i := range 100 {
+				wg.Go(func() {
+					source := "shared"
+					if tc.uniqueIPs {
+						source = fmt.Sprint(i)
+					}
+					if ok, _ := limiter.AllowUnknownAgentProbe(source, now); ok {
+						count.Add(1)
+					}
+				})
+			}
+			wg.Wait()
+			if got := count.Load(); got != tc.admitted {
+				t.Fatalf("admitted %d concurrent probes, want %d", got, tc.admitted)
 			}
 		})
 	}

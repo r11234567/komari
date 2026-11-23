@@ -491,7 +491,7 @@ func TestFetchPromiseResolvesOnEventLoop(t *testing.T) {
 				.then((response) => response.json())
 				.then((body) => body.accepted === true);
 		}
-	`, Options{Console: io.Discard, Timeout: time.Second})
+	`, Options{AllowPrivateNet: true, Console: io.Discard, Timeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -523,7 +523,7 @@ func TestAsyncXHRCallbackRunsOnEventLoop(t *testing.T) {
 				request.send();
 			});
 		}
-	`, Options{Console: io.Discard, Timeout: time.Second})
+	`, Options{AllowPrivateNet: true, Console: io.Discard, Timeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

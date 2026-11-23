@@ -108,10 +108,10 @@ func TestCredentialRotationRecoversAfterDatabaseReopen(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, first, recovered)
 	_, err = rotateVerifiedDB(context.Background(), db, record, token, uuid.NewString(), &zero, 2, func() time.Time { return now.Add(30 * time.Second) })
-	require.ErrorIs(t, err, ErrRefreshConflict)
+	require.ErrorIs(t, err, ErrRefreshReuse)
 	var current models.AgentCredential
 	require.NoError(t, db.First(&current, "client = ?", record.Client).Error)
-	require.Nil(t, current.RevokedAt)
+	require.NotNil(t, current.RevokedAt)
 }
 
 func TestCredentialRotationAuthenticatedReuseRevokesChain(t *testing.T) {
@@ -193,6 +193,7 @@ func TestCredentialRotationLegacyConsumedRowWithoutRequestHashDoesNotRevokePrevi
 	require.NoError(t, err)
 	// Simulate a pre-upgrade AgentRefreshUse row that predates RequestHash recording.
 	require.NoError(t, db.Model(&models.AgentRefreshUse{}).Where("client = ?", record.Client).Update("request_hash", "").Error)
+	require.NoError(t, db.Model(&models.AgentCredential{}).Where("client = ?", record.Client).Update("refresh_recovery_request", "").Error)
 
 	// Late retry of the immediately previous generation must not revoke the active chain.
 	_, err = rotateVerifiedDB(context.Background(), db, record, token, uuid.NewString(), nil, 2, func() time.Time { return now.Add(RefreshRecoveryWindow + time.Minute) })
@@ -264,4 +265,58 @@ func TestCredentialRotationLegacyRecoveryDoesNotRotateAgain(t *testing.T) {
 	var current models.AgentCredential
 	require.NoError(t, db.First(&current, "client = ?", record.Client).Error)
 	require.Equal(t, uint64(1), current.Generation)
+}
+
+func TestCredentialRotationDifferentRequestImmediatelyRevokesChain(t *testing.T) {
+	db, token, record, now := rotationFixture(t)
+	id1 := uuid.NewString()
+	_, err := rotateVerifiedDB(context.Background(), db, record, token, id1, nil, 2, func() time.Time { return now })
+	require.NoError(t, err)
+
+	gen := record.Generation
+	_, err = rotateVerifiedDB(context.Background(), db, record, token, uuid.NewString(), &gen, 2, func() time.Time { return now })
+	require.ErrorIs(t, err, ErrRefreshReuse)
+	var cur models.AgentCredential
+	require.NoError(t, db.First(&cur, "client = ?", record.Client).Error)
+	require.NotNil(t, cur.RevokedAt)
+}
+
+func TestLookupAccessTokenSingleQueryAndImmediateRevocation(t *testing.T) {
+	db, _, record, _ := rotationFixture(t)
+	now := time.Now().UTC()
+	plainAT := "synthetic-at-" + uuid.NewString()
+	require.NoError(t, db.Model(&models.AgentCredential{}).Where("client = ?", record.Client).Updates(map[string]any{
+		"access_token_hash":  hashToken(plainAT),
+		"access_expires_at":  now.Add(time.Hour),
+		"refresh_expires_at": now.Add(24 * time.Hour),
+	}).Error)
+
+	// Valid active token returns client UUID and knownRecord=true.
+	clientUUID, known, err := lookupAccessTokenDB(db, plainAT, now)
+	require.NoError(t, err)
+	require.True(t, known)
+	require.Equal(t, record.Client, clientUUID)
+
+	// Direct SQL revocation takes effect immediately on the very next lookup.
+	require.NoError(t, db.Model(&models.AgentCredential{}).Where("client = ?", record.Client).Update("revoked_at", now).Error)
+	revokedUUID, knownRevoked, err := lookupAccessTokenDB(db, plainAT, now.Add(time.Second))
+	require.Error(t, err)
+	require.Empty(t, revokedUUID)
+	require.True(t, knownRevoked)
+
+	// Expired non-revoked access token still classifies knownRecord=true.
+	require.NoError(t, db.Model(&models.AgentCredential{}).Where("client = ?", record.Client).Updates(map[string]any{
+		"revoked_at":        nil,
+		"access_expires_at": now.Add(-time.Second),
+	}).Error)
+	expiredUUID, knownExpired, err := lookupAccessTokenDB(db, plainAT, now)
+	require.Error(t, err)
+	require.Empty(t, expiredUUID)
+	require.True(t, knownExpired)
+
+	// Unknown token returns knownRecord=false.
+	unknownUUID, knownUnknown, err := lookupAccessTokenDB(db, "unknown-at-"+uuid.NewString(), now)
+	require.Error(t, err)
+	require.Empty(t, unknownUUID)
+	require.False(t, knownUnknown)
 }

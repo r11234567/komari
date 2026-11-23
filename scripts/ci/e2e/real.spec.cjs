@@ -431,7 +431,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
 
     await stage('enable real 2FA and apply a signed same-identity WebSSH grant', async () => {
       await request('/api/admin/2fa/generate', undefined, { method: 'POST' });
-      secret = (await context.cookies()).find(c => c.name === '2fa_secret')?.value;
+      secret = (await context.cookies()).find(c => c.name === '__Host-komari_2fa_secret' || c.name === '2fa_secret')?.value;
       expect(secret).toBeTruthy();
       console.log(`::add-mask::${secret}`);
       await request(`/api/admin/2fa/enable?code=${await freshCode()}`);

@@ -162,10 +162,7 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 				return fmt.Errorf("%w: refresh expired", ErrCredentialRejected)
 			}
 			if digest != cur.RefreshTokenHash {
-				if digest == cur.PreviousRefreshHash && cur.RefreshRecoveryUntil != nil && now.Before(*cur.RefreshRecoveryUntil) {
-					if cur.RefreshRecoveryRequest != requestHash {
-						return ErrRefreshConflict
-					}
+				if digest == cur.PreviousRefreshHash && cur.RefreshRecoveryUntil != nil && now.Before(*cur.RefreshRecoveryUntil) && cur.RefreshRecoveryRequest == requestHash {
 					plaintext, err := secureconfig.DecryptString(cur.RefreshRecoverySealed)
 					if err != nil {
 						return errors.New("refresh recovery unavailable")
@@ -186,12 +183,12 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 					// mint a fresh AccessToken for the SAME generation & RefreshToken and
 					// re-seal so Agent response validation succeeds across the entire 24h window.
 					if !recovered.AccessTokenExpiresAt.After(now.Add(30 * time.Second)) {
-						freshAccess := utils.GenerateRandomString(43)
-						if freshAccess == "" {
-							return errors.New("credential random generation failed")
+						recovered.AccessTokenExpiresAt = minDeadline(now.Add(AccessTokenLifetime), *cur.EnrollmentExpiresAt)
+						freshAccess, err := mintAccessToken(recovered.AccessTokenExpiresAt)
+						if err != nil {
+							return fmt.Errorf("mint recovery access token: %w", err)
 						}
 						recovered.AccessToken = freshAccess
-						recovered.AccessTokenExpiresAt = minDeadline(now.Add(AccessTokenLifetime), *cur.EnrollmentExpiresAt)
 						var reSigned []byte
 						if seal != nil {
 							var sealErr error
@@ -239,12 +236,17 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 				if protocol < 2 {
 					return ErrCredentialRejected
 				}
-				// Distinguish a late idempotent retry of the same operation (or a
-				// pre-upgrade consumed row for the immediately previous generation that
-				// predates RequestHash recording) from genuine reuse of a consumed refresh
-				// token by a different operation.
-				if (consumed.RequestHash != "" && consumed.RequestHash == requestHash) ||
-					(consumed.RequestHash == "" && digest == cur.PreviousRefreshHash) {
+				// Old rows may only have the request hash on the credential. If
+				// neither saved it, the immediately previous operation cannot be
+				// identified and must recover without revoking the current chain.
+				originalRequest := consumed.RequestHash
+				if originalRequest == "" && digest == cur.PreviousRefreshHash {
+					originalRequest = cur.RefreshRecoveryRequest
+					if originalRequest == "" {
+						return ErrRefreshRecoveryRequired
+					}
+				}
+				if originalRequest == requestHash {
 					return ErrRefreshRecoveryRequired
 				}
 				result := tx.Model(&models.AgentCredential{}).Where("client = ? AND revoked_at IS NULL", cur.Client).Updates(map[string]any{
@@ -262,10 +264,14 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 			if protocol == 2 && cur.RefreshProtocol >= 2 && expected == nil {
 				return ErrRefreshConflict
 			}
-			access := utils.GenerateRandomString(43)
 			refresh := utils.GenerateRandomString(43)
-			if access == "" || refresh == "" {
+			if refresh == "" {
 				return errors.New("credential random generation failed")
+			}
+			accessExpiry := minDeadline(now.Add(AccessTokenLifetime), *cur.EnrollmentExpiresAt)
+			access, err := mintAccessToken(accessExpiry)
+			if err != nil {
+				return fmt.Errorf("mint access token: %w", err)
 			}
 			refreshExp := idleDeadline(cur, policy, now)
 			until := minDeadline(now.Add(refreshRecoveryWindow()), refreshExp)
@@ -276,7 +282,7 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 			if cur.AccessExpiresAt.Before(previousAccessUntil) {
 				previousAccessUntil = cur.AccessExpiresAt
 			}
-			issued = Issued{AgentID: cur.Client, AccessToken: access, AccessTokenExpiresAt: minDeadline(now.Add(AccessTokenLifetime), *cur.EnrollmentExpiresAt), RefreshToken: refresh,
+			issued = Issued{AgentID: cur.Client, AccessToken: access, AccessTokenExpiresAt: accessExpiry, RefreshToken: refresh,
 				RefreshTokenExpiresAt: refreshExp, Generation: cur.Generation + 1, RequestID: requestID, Scopes: decodeScopes(cur.Scopes)}
 			if seal != nil {
 				var sealErr error
