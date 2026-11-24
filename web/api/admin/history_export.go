@@ -407,5 +407,10 @@ func (a *backgroundExportAPI) retention(c *gin.Context) {
 		available.Available = false
 		available.Error = e.Error()
 	}
-	c.JSON(200, gin.H{"status": "success", "data": gin.H{"resource_hours": resource, "ping_hours": ping, "worker_available": available.Available, "worker_error": available.Error, "cpu_core_limit": available.CPUCoreLimit, "cpu_share_limit": .1, "format_version": historyexport.FormatVersion, "snapshot_policy": "fixed when background planning starts"}})
+	c.JSON(200, gin.H{"status": "success", "data": gin.H{
+		"resource_hours": resource, "ping_hours": ping,
+		"worker_available": available.Available, "worker_detected": available.Detected, "worker_error": available.Error,
+		"cpu_core_limit": available.CPUCoreLimit, "cpu_share_limit": .1,
+		"format_version": historyexport.FormatVersion, "snapshot_policy": "fixed when background planning starts",
+	}})
 }
