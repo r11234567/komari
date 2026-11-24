@@ -54,7 +54,7 @@ func TestTelemetryMinuteRealDriverIntervalsAndFixedEndpoints(t *testing.T) {
 		for i := 0; i < 180; i++ {
 			require.NoError(t, minuteEvent(db, int64(i+1), "client-a", at.Add(time.Duration(i)*20*time.Second), int64(i+1)))
 		}
-		for _, interval := range []time.Duration{10 * time.Minute, 20 * time.Minute, 30 * time.Minute} {
+		for _, interval := range []time.Duration{10 * time.Minute, 15 * time.Minute, 20 * time.Minute, 30 * time.Minute} {
 			for _, bounds := range [][2]time.Duration{{0, time.Hour - 1}, {5 * time.Minute, 45 * time.Minute}, {25 * time.Minute, 55 * time.Minute}, {25*time.Minute + time.Nanosecond, 45 * time.Minute}, {time.Second, 40 * time.Second}, {20 * time.Second, 20 * time.Second}} {
 				start, end := at.Add(bounds[0]), at.Add(bounds[1])
 				expected := map[int64]Usage{}
@@ -78,6 +78,44 @@ func TestTelemetryMinuteRealDriverIntervalsAndFixedEndpoints(t *testing.T) {
 				}
 			}
 		}
+	})
+}
+
+func TestTelemetryTrendKeepsCompleteRecentQuarters(t *testing.T) {
+	trafficBackends(t, func(t *testing.T, db *gorm.DB) {
+		start := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+		end := start.Add(56 * time.Minute)
+		interval := 15 * time.Minute
+		require.NoError(t, db.Create(&models.Client{UUID: "legacy", Token: "legacy"}).Error)
+		for i, event := range []struct {
+			client string
+			minute int
+			bytes  int64
+		}{{"client-a", 5, 10}, {"legacy", 17, 20}, {"client-a", 33, 30}, {"legacy", 36, 40}, {"legacy", 54, 50}} {
+			require.NoError(t, minuteEvent(db, int64(i+1), event.client, start.Add(time.Duration(event.minute)*time.Minute), event.bytes))
+		}
+		require.NoError(t, db.Model(&models.TelemetryTrafficState{}).Where("client = ?", "legacy").
+			Update("first_observed", start.Add(-time.Hour).UnixNano()).Error)
+
+		ids := []string{"client-a", "legacy"}
+		var info TelemetryReadInfo
+		_, groups, err := telemetryUsageBatch(t.Context(), db, ids, start, end, interval, &info, true)
+		require.NoError(t, err)
+		require.Equal(t, start.Add(30*time.Minute), info.CompleteSince)
+		require.Len(t, groups["client-a"], 1)
+		require.Equal(t, Usage{Up: 30, Down: 60}, groups["client-a"][0].Usage)
+		require.Len(t, groups["legacy"], 2)
+		require.Equal(t, start.Add(45*time.Minute), groups["legacy"][1].Hour.UTC())
+		require.Equal(t, Usage{Up: 50, Down: 100}, groups["legacy"][1].Usage)
+		_, _, err = TelemetryUsageBatch(t.Context(), db, ids, start, end, interval)
+		require.ErrorIs(t, err, metric.ErrTelemetryCoverage)
+
+		require.NoError(t, db.Model(&models.TelemetryTrafficState{}).Where("client = ?", "legacy").
+			Update("minute_since", 0).Error)
+		_, groups, err = telemetryUsageBatch(t.Context(), db, ids, start, end, interval, &info, true)
+		require.NoError(t, err)
+		require.Equal(t, start.Add(time.Hour), info.CompleteSince)
+		require.Empty(t, groups)
 	})
 }
 

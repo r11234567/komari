@@ -9,19 +9,25 @@ import (
 	"github.com/komari-monitor/komari/pkg/metric"
 )
 
-func TestLocalDatabaseTotalRequiresTwoKnownLocalSizes(t *testing.T) {
-	mainSize, monitoringSize := int64(10), int64(15)
-	main := databaseStorageStatus{Location: databaseLocationLocal, Size: &mainSize}
-	monitoring := databaseStorageStatus{Location: databaseLocationLocal, Size: &monitoringSize}
+func TestLocalDatabaseTotalIncludesColdArchives(t *testing.T) {
+	mainSize, monitoringSize, archiveSize := int64(10), int64(15), int64(7)
+	main := databaseStorageStatus{Driver: "sqlite", Location: databaseLocationLocal, Size: &mainSize}
+	monitoring := databaseStorageStatus{Driver: "sqlite", Location: databaseLocationLocal, Size: &monitoringSize, ArchiveSize: &archiveSize}
 
 	total := localDatabaseTotal(main, monitoring)
-	if total == nil || *total != 25 {
-		t.Fatalf("local total = %v, want 25", total)
+	if total == nil || *total != 32 {
+		t.Fatalf("local total = %v, want 32", total)
 	}
 
 	monitoring.Location = databaseLocationExternal
-	if total := localDatabaseTotal(main, monitoring); total != nil {
-		t.Fatalf("external monitoring database should not produce a local total: %d", *total)
+	monitoring.Driver = "postgres"
+	if total := localDatabaseTotal(main, monitoring); total == nil || *total != 17 {
+		t.Fatalf("external SQL should leave main and local archive bytes: %v", total)
+	}
+	main.Files = &databaseFileSizes{Database: 5, WAL: 3, SHM: 2}
+	storage := buildDashboardStorage(t.Context(), main, monitoring)
+	if storage.DatabaseFiles != 12 || storage.WAL != 3 || storage.SHM != 2 {
+		t.Fatalf("unexpected dashboard size breakdown: %#v", storage)
 	}
 
 	monitoring.Location = databaseLocationLocal

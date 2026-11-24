@@ -417,6 +417,7 @@ func buildDashboardReturnRoute() dashboardReturnRouteSummary {
 func buildDashboardStorage(ctx context.Context, statuses ...databaseStorageStatus) dashboardStorageSummary {
 	summary := dashboardStorageSummary{}
 	for _, status := range statuses {
+		summary.DatabaseFiles += valueOrZero(status.ArchiveSize)
 		if status.Location != databaseLocationLocal || status.Files == nil {
 			continue
 		}
