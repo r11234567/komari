@@ -18,7 +18,7 @@ import (
 
 const (
 	DefaultTrafficTrendWindow   = 24 * time.Hour
-	DefaultTrafficTrendInterval = 20 * time.Minute
+	DefaultTrafficTrendInterval = 15 * time.Minute
 	MinTrafficTrendInterval     = 10 * time.Minute
 	MaxTrafficTrendInterval     = 30 * time.Minute
 	maxTrafficTrendBuckets      = 2048
@@ -116,19 +116,7 @@ func loadTrafficTrendSnapshot(ctx context.Context, ids []string, now time.Time, 
 	}
 	end := now.UTC().Truncate(interval).Add(interval)
 	start := end.Add(-time.Duration(count) * interval)
-	_, perClient, info, err := trafficledger.TelemetryUsageSnapshot(ctx, ids, start, now.UTC(), interval)
-	if errors.Is(err, metric.ErrTelemetryCoverage) {
-		// Upgraded hourly-only history cannot be split into invented 20m points.
-		// Serve only complete historical hours and explicitly disclose precision
-		// and the earlier endpoint. New minute history restores the requested grid.
-		result.Interval = time.Hour
-		result.DataEnd = now.UTC().Truncate(time.Hour)
-		start = result.DataEnd.Add(-window).Truncate(time.Hour)
-		count = int(result.DataEnd.Sub(start) / time.Hour)
-		_, perClient, info, err = trafficledger.TelemetryUsageSnapshot(ctx, ids, start, result.DataEnd.Add(-time.Nanosecond), time.Hour)
-		result.Coverage = "coarse"
-		result.Warning = "minute_history_unavailable"
-	}
+	perClient, info, err := trafficledger.TelemetryTrendSnapshot(ctx, ids, start, now.UTC(), interval)
 	if errors.Is(err, metric.ErrTelemetryCoverage) {
 		result.Coverage = "unavailable"
 		result.Warning = "traffic_history_unavailable"
@@ -147,6 +135,16 @@ func loadTrafficTrendSnapshot(ctx context.Context, ids []string, now time.Time, 
 	if info.MissingClients > 0 {
 		result.Coverage = "partial"
 		result.Warning = "traffic_clients_missing"
+	}
+	if info.CompleteSince.After(start) {
+		start = info.CompleteSince
+		count = int(end.Sub(start) / interval)
+		result.Coverage = "partial"
+		result.Warning = "minute_history_unavailable"
+		if count <= 0 {
+			result.Coverage = "unavailable"
+			return result, nil
+		}
 	}
 	pending, pendingErr := metricstore.TelemetryTrafficPending(ctx)
 	if pendingErr != nil {
@@ -176,14 +174,16 @@ func loadTrafficTrendSnapshot(ctx context.Context, ids []string, now time.Time, 
 func loadTrafficTrendUncached(ctx context.Context, clientIDs []string, now time.Time, window, interval time.Duration, bucketCount int) ([]TrafficTrendBucket, error) {
 	end := now.In(trafficledger.BeijingLocation).Truncate(interval).Add(interval)
 	start := end.Add(-time.Duration(bucketCount) * interval)
-	_, perClient, err := trafficledger.MetricUsageByIntervalBatch(ctx, clientIDs, start.UTC(), now.UTC(), interval)
-	if err != nil {
-		return nil, err
-	}
-
 	buckets := make([]TrafficTrendBucket, bucketCount)
 	for index := range buckets {
 		buckets[index].Start = start.Add(time.Duration(index) * interval)
+	}
+	if len(clientIDs) == 0 {
+		return buckets, nil
+	}
+	_, perClient, err := trafficledger.MetricUsageByIntervalBatch(ctx, clientIDs, start.UTC(), now.UTC(), interval)
+	if err != nil {
+		return nil, err
 	}
 	for _, clientBuckets := range perClient {
 		for _, bucket := range clientBuckets {

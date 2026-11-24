@@ -17,10 +17,12 @@ var (
 // Size remains useful even when the store points at an external database because
 // pkg/metric limits its query to the three tables managed by this Store.
 type StorageInfo struct {
-	Driver metric.Driver
-	Action metric.MaintenanceAction
-	Size   int64
-	Files  *metric.SQLiteFileSizes
+	Driver       metric.Driver
+	Action       metric.MaintenanceAction
+	Size         int64
+	Files        *metric.SQLiteFileSizes
+	ArchiveSize  *int64
+	ArchiveError error
 }
 
 // MaintenanceResult keeps measurement failures separate from the maintenance
@@ -54,6 +56,11 @@ func InspectStorage(ctx context.Context) (StorageInfo, error) {
 		Driver: activeStore.Driver(),
 		Action: activeStore.MaintenanceAction(),
 	}
+	archiveSize, archiveErr := activeStore.Telemetry().ArchiveSize(ctx)
+	if archiveErr == nil {
+		info.ArchiveSize = &archiveSize
+	}
+	info.ArchiveError = archiveErr
 	if info.Driver == metric.DriverSQLite {
 		files, err := activeStore.SQLiteFiles(ctx)
 		info.Size = files.Total()

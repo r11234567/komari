@@ -41,7 +41,7 @@ func applyTelemetryMinute(tx *gorm.DB, client string, observed time.Time, delta 
 // whole-minute selection and output buckets use half-open intervals. No request
 // drains the cross-database outbox, scans metric raw or decodes cold archives.
 func TelemetryUsageBatch(ctx context.Context, db *gorm.DB, clients []string, start, end time.Time, interval time.Duration) (map[string]Usage, map[string][]HourlyUsage, error) {
-	return telemetryUsageBatch(ctx, db, clients, start, end, interval, nil)
+	return telemetryUsageBatch(ctx, db, clients, start, end, interval, nil, false)
 }
 
 // AccountingThrough is an observation watermark, not request generation time.
@@ -49,19 +49,31 @@ func TelemetryUsageBatch(ctx context.Context, db *gorm.DB, clients []string, sta
 type TelemetryReadInfo struct {
 	AccountingThrough time.Time
 	MissingClients    int
+	CompleteSince     time.Time
 }
 
 func TelemetryUsageSnapshot(ctx context.Context, clients []string, start, end time.Time, interval time.Duration) (map[string]Usage, map[string][]HourlyUsage, TelemetryReadInfo, error) {
+	return loadTelemetryUsageSnapshot(ctx, clients, start, end, interval, false)
+}
+
+// TelemetryTrendSnapshot keeps complete buckets after unavailable minute
+// history, without changing the exact-range contract of accounting callers.
+func TelemetryTrendSnapshot(ctx context.Context, clients []string, start, end time.Time, interval time.Duration) (map[string][]HourlyUsage, TelemetryReadInfo, error) {
+	_, groups, info, err := loadTelemetryUsageSnapshot(ctx, clients, start, end, interval, true)
+	return groups, info, err
+}
+
+func loadTelemetryUsageSnapshot(ctx context.Context, clients []string, start, end time.Time, interval time.Duration, allowMissingPrefix bool) (map[string]Usage, map[string][]HourlyUsage, TelemetryReadInfo, error) {
 	var info TelemetryReadInfo
 	db := telemetryMetadata.Load()
 	if db == nil {
 		return nil, nil, info, fmt.Errorf("telemetry metadata unavailable")
 	}
-	totals, groups, err := telemetryUsageBatch(ctx, db, clients, start, end, interval, &info)
+	totals, groups, err := telemetryUsageBatch(ctx, db, clients, start, end, interval, &info, allowMissingPrefix)
 	return totals, groups, info, err
 }
 
-func telemetryUsageBatch(ctx context.Context, db *gorm.DB, clients []string, start, end time.Time, interval time.Duration, info *TelemetryReadInfo) (map[string]Usage, map[string][]HourlyUsage, error) {
+func telemetryUsageBatch(ctx context.Context, db *gorm.DB, clients []string, start, end time.Time, interval time.Duration, info *TelemetryReadInfo, allowMissingPrefix bool) (map[string]Usage, map[string][]HourlyUsage, error) {
 	if db == nil || len(clients) > telemetryMaxClients || interval < time.Minute || interval%time.Minute != 0 || end.Before(start) || end.UnixNano() == math.MaxInt64 {
 		return nil, nil, metric.ErrInvalidArgument
 	}
@@ -95,6 +107,9 @@ func telemetryUsageBatch(ctx context.Context, db *gorm.DB, clients []string, sta
 		return nil
 	}
 	err := WithTelemetryReadSnapshot(ctx, db, func(tx *gorm.DB) error {
+		var trendClients []string
+		trendStates := make(map[string]models.TelemetryTrafficState)
+		trendStart := start
 		for offset := 0; offset < len(unique); offset += telemetryClientBatch {
 			ids := unique[offset:min(offset+telemetryClientBatch, len(unique))]
 			var states []models.TelemetryTrafficState
@@ -109,6 +124,14 @@ func telemetryUsageBatch(ctx context.Context, db *gorm.DB, clients []string, sta
 			for _, state := range states {
 				if info != nil && (info.AccountingThrough.IsZero() || state.LastObserved < info.AccountingThrough.UnixNano()) {
 					info.AccountingThrough = time.Unix(0, min(state.LastObserved, end.UnixNano())).UTC()
+				}
+				if allowMissingPrefix {
+					trendClients = append(trendClients, state.Client)
+					trendStates[state.Client] = state
+					if cutoff := telemetryTrendCoverageStart(state, interval); cutoff.After(trendStart) {
+						trendStart = cutoff
+					}
+					continue
 				}
 				byClient[state.Client] = state
 				if state.MinuteSince > 0 && (start.UnixNano() >= max(state.MinuteSince, state.MinutePrunedThrough) || state.MinuteSince == state.FirstObserved && state.MinutePrunedThrough <= state.FirstObserved) {
@@ -129,6 +152,15 @@ func telemetryUsageBatch(ctx context.Context, db *gorm.DB, clients []string, sta
 				return err
 			}
 		}
+		if allowMissingPrefix {
+			info.CompleteSince = trendStart
+			for offset := 0; !trendStart.After(end) && offset < len(trendClients); offset += telemetryClientBatch {
+				ids := trendClients[offset:min(offset+telemetryClientBatch, len(trendClients))]
+				if err := readTelemetryMinutes(tx, ids, trendStates, trendStart, end, interval, emit); err != nil {
+					return err
+				}
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -145,6 +177,23 @@ func telemetryUsageBatch(ctx context.Context, db *gorm.DB, clients []string, sta
 		}
 	}
 	return totals, result, nil
+}
+
+func telemetryTrendCoverageStart(state models.TelemetryTrafficState, interval time.Duration) time.Time {
+	if state.MinuteSince > 0 && state.MinuteSince == state.FirstObserved && state.MinutePrunedThrough <= state.FirstObserved {
+		return time.Time{}
+	}
+	cutoff := max(state.MinuteSince, state.MinutePrunedThrough)
+	// A quiet client has no accounted deltas beyond its last observation.
+	// With hourly-only history, leave its last observed bucket unavailable.
+	if state.MinuteSince == 0 || cutoff > state.LastObserved {
+		cutoff = state.LastObserved + 1
+	}
+	start := time.Unix(0, cutoff).UTC()
+	if bucket := start.Truncate(interval); bucket.Before(start) {
+		return bucket.Add(interval)
+	}
+	return start
 }
 
 func addUsageSaturated(a, b Usage) Usage {

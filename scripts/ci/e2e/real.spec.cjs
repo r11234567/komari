@@ -708,11 +708,11 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         path.join(root, 'traffic-observation.txt'),
         'https://raw.githubusercontent.com/r11234567/komari/cfed6d1f67abcd3316983095391728b88ae1652a/scripts/ci/e2e/real.spec.cjs']);
       await expect.poll(async () => {
-        const trend = await rpc('browser', 'GetTrafficTrend', { window: '86400s', interval: '1200s' });
+        const trend = await rpc('browser', 'GetTrafficTrend');
         return (trend.buckets || []).reduce((sum, b) => sum + BigInt(b.uploadBytes || 0) + BigInt(b.downloadBytes || 0), 0n) > 0n;
       }, { timeout: 120_000, intervals: [3000, 5000] }).toBe(true);
       const results = [];
-      for (const seconds of [600, 1200, 1800]) {
+      for (const seconds of [600, 900, 1200, 1800]) {
         const trend = await rpc('browser', 'GetTrafficTrend', { window: '86400s', interval: `${seconds}s` });
         expect(trend.requestedInterval).toBe(`${seconds}s`);
         expect(trend.interval).toBe(`${seconds}s`);
@@ -735,6 +735,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       const live = page.locator('section').filter({ has: page.getByText('Live traffic over the last 24 hours', { exact: true }) });
       const daily = page.locator('section').filter({ has: page.getByText('Daily billable traffic', { exact: true }) });
       await expect(live).toBeVisible();
+      await expect(live.getByText('Upload and download totals in 15-minute intervals')).toBeVisible();
       await expect(daily).toBeVisible();
       await expect(live.getByText('Data unavailable', { exact: true })).toHaveCount(0);
       await expect(daily.getByText('Data unavailable', { exact: true })).toHaveCount(0);

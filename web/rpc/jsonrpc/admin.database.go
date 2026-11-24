@@ -31,13 +31,15 @@ func (sizes databaseFileSizes) total() int64 {
 }
 
 type databaseStorageStatus struct {
-	Driver   string                 `json:"driver"`
-	Location string                 `json:"location"`
-	Size     *int64                 `json:"size"`
-	Files    *databaseFileSizes     `json:"files,omitempty"`
-	Runtime  *databaseRuntimeStatus `json:"runtime,omitempty"`
-	Action   string                 `json:"action"`
-	Error    string                 `json:"error,omitempty"`
+	Driver       string                 `json:"driver"`
+	Location     string                 `json:"location"`
+	Size         *int64                 `json:"size"`
+	Files        *databaseFileSizes     `json:"files,omitempty"`
+	Runtime      *databaseRuntimeStatus `json:"runtime,omitempty"`
+	Action       string                 `json:"action"`
+	Error        string                 `json:"error,omitempty"`
+	ArchiveSize  *int64                 `json:"archive_size,omitempty"`
+	archiveError error
 }
 
 type databaseDigestHandoffStatus struct {
@@ -175,8 +177,10 @@ func mainDatabaseStatus() databaseStorageStatus {
 func monitoringDatabaseStatus(ctx context.Context) databaseStorageStatus {
 	info, err := metricstore.InspectStorage(ctx)
 	status := databaseStorageStatus{
-		Driver: string(info.Driver),
-		Action: string(info.Action),
+		Driver:       string(info.Driver),
+		Action:       string(info.Action),
+		ArchiveSize:  info.ArchiveSize,
+		archiveError: info.ArchiveError,
 	}
 	status.Location = databaseLocationForDriver(info.Driver)
 	if info.Driver != "" {
@@ -194,6 +198,9 @@ func monitoringDatabaseStatus(ctx context.Context) databaseStorageStatus {
 		}
 	}
 	status.Size = int64Pointer(info.Size)
+	if info.ArchiveError != nil {
+		status.Error = appendMeasurementError(status.Error, "cold archive", info.ArchiveError)
+	}
 	return status
 }
 
@@ -293,10 +300,18 @@ func databaseLocationForDriver(driver metric.Driver) string {
 func localDatabaseTotal(statuses ...databaseStorageStatus) *int64 {
 	var total int64
 	for _, status := range statuses {
-		if status.Location != databaseLocationLocal || status.Size == nil {
+		if status.archiveError != nil {
 			return nil
 		}
-		total += *status.Size
+		total += valueOrZero(status.ArchiveSize)
+		if status.Location == databaseLocationLocal {
+			if status.Size == nil {
+				return nil
+			}
+			total += *status.Size
+		} else if status.Driver == "" {
+			return nil
+		}
 	}
 	return int64Pointer(total)
 }
