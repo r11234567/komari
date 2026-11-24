@@ -13,6 +13,7 @@ import (
 	"github.com/komari-monitor/komari/web/rescueapp"
 	rescuev1 "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestMachineAndPerformanceDiagnosticsRequireAdministratorButNotTwoFactor(t *testing.T) {
@@ -53,7 +54,12 @@ func TestMachineAndPerformanceDiagnosticsRequireAdministratorButNotTwoFactor(t *
 		rescuev1.RescueAction_RESCUE_ACTION_TEMPORARY_SSH_ACCESS,
 		rescuev1.RescueAction_RESCUE_ACTION_RESTORE_NETWORK,
 	} {
-		_, err := svc.CreateRescueSession(admin, connect.NewRequest(&rescuev1.CreateRescueSessionRequest{AgentId: id, Action: action}))
+		request := &rescuev1.CreateRescueSessionRequest{AgentId: id, Action: action}
+		if action == rescuev1.RescueAction_RESCUE_ACTION_TEMPORARY_SSH_ACCESS {
+			request.SshPort = proto.Uint32(8658)
+			request.SshWindow = &rescuev1.SSHWindowRequest{SourceIp: "192.0.2.6", EnrollmentKeyId: "synthetic"}
+		}
+		_, err := svc.CreateRescueSession(admin, connect.NewRequest(request))
 		require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err), action.String())
 	}
 }

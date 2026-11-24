@@ -86,6 +86,14 @@ func (s *privilegedDeliveryService) WatchPrivilegedDelivery(ctx context.Context,
 	}
 	after := req.Msg.GetAfterRevision()
 	sequence := req.Msg.GetAfterSequence()
+	token := extractAuthSchemeToken(req.Header().Get("Authorization"))
+	var windowEnrollmentKey string
+	if rescue && req.Header().Get("X-Komari-Rescue-SSH-Window") == "v1" {
+		windowEnrollmentKey, err = enrollment.RescueWatchEnrollmentKey(ctx, agentID, token)
+		if err != nil {
+			return connectError(connect.CodeUnauthenticated, err)
+		}
+	}
 	for {
 		changed, unsubscribe := privilegeddelivery.Subscribe(agentID)
 		var revision privilegeddelivery.Revision
@@ -93,10 +101,18 @@ func (s *privilegedDeliveryService) WatchPrivilegedDelivery(ctx context.Context,
 		if rescue {
 			// A live stream must not outlive revocation or replacement of the
 			// credential that opened it. Reauthentication uses current DB state.
-			token := extractAuthSchemeToken(req.Header().Get("Authorization"))
 			id, e := enrollment.ResolveAccessToken(token)
 			if e != nil || id != agentID {
 				unsubscribe()
+				if windowEnrollmentKey != "" {
+					withdrawn, checkErr := enrollment.RescueWatchEnrollmentWithdrawn(ctx, agentID, windowEnrollmentKey)
+					if checkErr != nil {
+						return connectError(connect.CodeInternal, checkErr)
+					}
+					if withdrawn {
+						return sendRescueEnrollmentWithdrawal(stream, agentID, windowEnrollmentKey)
+					}
+				}
 				return connectError(connect.CodeUnauthenticated, errors.New("rescue stream credential expired or revoked"))
 			}
 		}
@@ -147,6 +163,25 @@ func (s *privilegedDeliveryService) WatchPrivilegedDelivery(ctx context.Context,
 		}
 		unsubscribe()
 	}
+}
+
+func sendRescueEnrollmentWithdrawal(stream *connect.ServerStream[configv1.WatchPrivilegedDeliveryResponse], agentID, key string) error {
+	now := time.Now().UTC()
+	payload, err := proto.Marshal(&securityv1.SignedInstruction{
+		AgentId: agentID, Nonce: utils.GenerateRandomString(32), IssuedAt: timestamppb.New(now),
+		ExpiresAt:       timestamppb.New(now.Add(30 * time.Second)),
+		InstructionType: "rescue:ssh-enrollment-revoked:v1", Body: []byte(key),
+	})
+	if err != nil {
+		return connectError(connect.CodeInternal, err)
+	}
+	keyID, algorithm, signature, err := enrollment.Sign(payload)
+	if err != nil {
+		return connectError(connect.CodeInternal, err)
+	}
+	return stream.Send(&configv1.WatchPrivilegedDeliveryResponse{RescueEnrollmentRevoked: &securityv1.SignedEnvelope{
+		Payload: payload, Signatures: []*securityv1.Signature{{KeyId: keyID, Algorithm: securityv1.SignatureAlgorithm(algorithm), Value: signature}},
+	}})
 }
 
 func (s *privilegedDeliveryService) UpdatePrivilegedDelivery(ctx context.Context, req *connect.Request[configv1.UpdatePrivilegedDeliveryRequest]) (*connect.Response[configv1.UpdatePrivilegedDeliveryResponse], error) {

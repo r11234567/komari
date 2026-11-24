@@ -131,7 +131,7 @@ func ExecutionTargets(agentIDs []string, command string, arguments []string, env
 
 // RescueSpecDigest computes the canonical SHA-256 hex digest of a rescue
 // session specification using a positional JSON tuple identical to komari-web.
-func RescueSpecDigest(arguments []string, timeoutSeconds int64, maxOutputBytes uint64, sshPort uint32) string {
+func RescueSpecDigest(arguments []string, timeoutSeconds int64, maxOutputBytes uint64, sshPort uint32, sshWindow ...string) string {
 	args := arguments
 	if args == nil {
 		args = []string{}
@@ -143,6 +143,10 @@ func RescueSpecDigest(arguments []string, timeoutSeconds int64, maxOutputBytes u
 		maxOutputBytes,
 		sshPort,
 	}
+	if len(sshWindow) != 0 {
+		tuple[0] = "v2"
+		tuple = append(tuple, sshWindow)
+	}
 	var b bytes.Buffer
 	encoder := json.NewEncoder(&b)
 	encoder.SetEscapeHTML(false)
@@ -153,11 +157,11 @@ func RescueSpecDigest(arguments []string, timeoutSeconds int64, maxOutputBytes u
 
 // RescueTargets binds the rescue step-up authorization proof to target agent,
 // action, resolved SSH port, and the full canonical rescue specification.
-func RescueTargets(agentID string, action int32, arguments []string, timeoutSeconds int64, maxOutputBytes uint64, sshPort uint32) []string {
+func RescueTargets(agentID string, action int32, arguments []string, timeoutSeconds int64, maxOutputBytes uint64, sshPort uint32, sshWindow ...string) []string {
 	return []string{
 		agentID,
 		strconv.Itoa(int(action)),
 		strconv.Itoa(int(sshPort)),
-		"spec:" + RescueSpecDigest(arguments, timeoutSeconds, maxOutputBytes, sshPort),
+		"spec:" + RescueSpecDigest(arguments, timeoutSeconds, maxOutputBytes, sshPort, sshWindow...),
 	}
 }

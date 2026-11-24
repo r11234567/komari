@@ -49,20 +49,22 @@ func (s *rescueService) CreateRescueSession(ctx context.Context, req *connect.Re
 	if strings.TrimSpace(req.Msg.AgentId) == "" {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("agent ID is required"))
 	}
-	if err := rescueapp.ValidateTarget(req.Msg.AgentId); err != nil {
-		return nil, connectError(connect.CodeFailedPrecondition, err)
-	}
-	spec, err := rescueapp.NormalizeCreateSpec(req.Msg.Action, req.Msg.Arguments, req.Msg.Timeout, req.Msg.MaxOutputBytes, req.Msg.GetSshPort())
+	spec, err := rescueapp.NormalizeCreateSpec(req.Msg.Action, req.Msg.Arguments, req.Msg.Timeout, req.Msg.MaxOutputBytes, req.Msg.GetSshPort(), req.Msg.GetSshWindow())
 	if err != nil {
 		return nil, connectError(connect.CodeInvalidArgument, err)
 	}
+	if spec.SSHWindow == nil {
+		if err := rescueapp.ValidateTarget(req.Msg.AgentId); err != nil {
+			return nil, connectError(connect.CodeFailedPrecondition, err)
+		}
+	}
 	if rescueapp.RequiresTwoFactor(req.Msg.Action) {
-		targets := credentialaction.RescueTargets(req.Msg.AgentId, int32(req.Msg.Action), spec.Arguments, spec.TimeoutSeconds, spec.MaxOutputBytes, spec.SSHPort)
+		targets := credentialaction.RescueTargets(req.Msg.AgentId, int32(req.Msg.Action), spec.Arguments, spec.TimeoutSeconds, spec.MaxOutputBytes, spec.SSHPort, rescueapp.SSHWindowTarget(spec.SSHWindow)...)
 		if err := verifyConnectCredential(ctx, req.Msg.TwoFactor, "rescue:create", targets...); err != nil {
 			return nil, err
 		}
 	}
-	session, err := rescueapp.Create(req.Msg.AgentId, req.Msg.Action, req.Msg.Arguments, req.Msg.Timeout, req.Msg.MaxOutputBytes, req.Msg.IdempotencyKey, req.Msg.GetSshPort())
+	session, err := rescueapp.Create(req.Msg.AgentId, req.Msg.Action, req.Msg.Arguments, req.Msg.Timeout, req.Msg.MaxOutputBytes, req.Msg.IdempotencyKey, req.Msg.GetSshPort(), spec.SSHWindow)
 	if err != nil {
 		if errors.Is(err, rescueapp.ErrIdempotencyConflict) {
 			return nil, connectError(connect.CodeAborted, err)
@@ -79,6 +81,9 @@ func (s *rescueService) CreateRescueSession(ctx context.Context, req *connect.Re
 	detail := "create rescue session:" + session.SessionId + ", client:" + session.AgentId + ", action:" + session.Action.String()
 	if session.SshPort != nil {
 		detail += ", ssh_port:" + strconv.FormatUint(uint64(session.GetSshPort()), 10)
+	}
+	if window := session.GetSshWindow(); window != nil {
+		detail += ", ssh_source:" + window.GetSourceIp() + ", ssh_previous_grant:" + window.GetPreviousGrantId()
 	}
 	auditlog.Log(meta.RemoteIP, meta.Principal.UserUUID, detail, severity)
 	return connect.NewResponse(&rescuev1.CreateRescueSessionResponse{Session: session}), nil

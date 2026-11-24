@@ -6,18 +6,22 @@ import "time"
 // state. The ordinary Agent never implies these capabilities when it runs as
 // a standard user.
 type ClientRescueHelper struct {
-	Client            string    `json:"-" gorm:"type:varchar(36);primaryKey"`
-	Installed         bool      `json:"installed"`
-	GuardianRunning   bool      `json:"guardian_running"`
-	HelperRunning     bool      `json:"helper_running"`
-	NetworkIsolation  int32     `json:"network_isolation" gorm:"not null;default:0"`
-	BlockedInterfaces string    `json:"blocked_interfaces" gorm:"type:text;not null;default:''"`
-	Version           string    `json:"version" gorm:"type:varchar(100)"`
-	HelperInstanceID  string    `json:"helper_instance_id" gorm:"type:varchar(128)"`
-	ErrorCode         string    `json:"error_code" gorm:"type:varchar(64)"`
-	ErrorMessage      string    `json:"error_message" gorm:"type:varchar(512)"`
-	ObservedAt        time.Time `json:"observed_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	Client             string    `json:"-" gorm:"type:varchar(36);primaryKey"`
+	Installed          bool      `json:"installed"`
+	GuardianRunning    bool      `json:"guardian_running"`
+	HelperRunning      bool      `json:"helper_running"`
+	NetworkIsolation   int32     `json:"network_isolation" gorm:"not null;default:0"`
+	BlockedInterfaces  string    `json:"blocked_interfaces" gorm:"type:text;not null;default:''"`
+	SSHWindowSupported bool      `json:"-" gorm:"not null;default:false"`
+	SSHAccessPort      uint32    `json:"-" gorm:"not null;default:0"`
+	SSHEnrollmentKey   string    `json:"-" gorm:"type:varchar(64);not null;default:''"`
+	SSHAccess          []byte    `json:"-" gorm:"type:blob"`
+	Version            string    `json:"version" gorm:"type:varchar(100)"`
+	HelperInstanceID   string    `json:"helper_instance_id" gorm:"type:varchar(128)"`
+	ErrorCode          string    `json:"error_code" gorm:"type:varchar(64)"`
+	ErrorMessage       string    `json:"error_message" gorm:"type:varchar(512)"`
+	ObservedAt         time.Time `json:"observed_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 type RescueSession struct {
@@ -35,6 +39,9 @@ type RescueSession struct {
 	ErrorCode        string     `json:"-" gorm:"type:varchar(64)"`
 	ErrorMessage     string     `json:"-" gorm:"type:varchar(512)"`
 	SSHPort          uint32     `json:"-" gorm:"not null;default:0"`
+	SSHSourceIP      string     `json:"-" gorm:"type:varchar(45);not null;default:''"`
+	SSHPreviousGrant string     `json:"-" gorm:"type:varchar(64);not null;default:'';index"`
+	SSHEnrollmentKey string     `json:"-" gorm:"type:varchar(64);not null;default:''"`
 	CreatedAt        time.Time  `json:"-"`
 	StartedAt        *time.Time `json:"-"`
 	FinishedAt       *time.Time `json:"-"`

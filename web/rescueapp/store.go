@@ -37,7 +37,6 @@ const (
 	maximumOutput        = 1 << 20
 	maxArgumentCount     = 16
 	maxArgumentBytes     = 4096
-	defaultSSHPort       = 22
 )
 
 var signals = struct {
@@ -54,6 +53,7 @@ type CreateSpec struct {
 	TimeoutSeconds int64
 	MaxOutputBytes uint64
 	SSHPort        uint32
+	SSHWindow      *rescuev1.SSHWindowRequest
 	SpecDigest     string
 }
 
@@ -94,13 +94,19 @@ func requireReadyHelper(db *gorm.DB, agentID string) (models.ClientRescueHelper,
 	return helper, nil
 }
 
-func NormalizeCreateSpec(action rescuev1.RescueAction, arguments []string, timeout *durationpb.Duration, maxOutput uint64, sshPort uint32) (CreateSpec, error) {
+func NormalizeCreateSpec(action rescuev1.RescueAction, arguments []string, timeout *durationpb.Duration, maxOutput uint64, sshPort uint32, window *rescuev1.SSHWindowRequest) (CreateSpec, error) {
 	if !allowedAction(action) {
 		return CreateSpec{}, errors.New("unsupported rescue action")
 	}
 	resolvedPort, err := resolveSSHPort(action, sshPort)
 	if err != nil {
 		return CreateSpec{}, err
+	}
+	if err := validateSSHWindowSpec(action, window, sshPort); err != nil {
+		return CreateSpec{}, err
+	}
+	if window != nil && len(arguments) != 0 {
+		return CreateSpec{}, errors.New("temporary SSH accepts no extra arguments")
 	}
 	if len(arguments) > maxArgumentCount {
 		return CreateSpec{}, errors.New("too many rescue arguments")
@@ -136,7 +142,8 @@ func NormalizeCreateSpec(action rescuev1.RescueAction, arguments []string, timeo
 		TimeoutSeconds: timeoutSeconds,
 		MaxOutputBytes: maxOutput,
 		SSHPort:        resolvedPort,
-		SpecDigest:     credentialaction.RescueSpecDigest(normalizedArgs, timeoutSeconds, maxOutput, resolvedPort),
+		SSHWindow:      window,
+		SpecDigest:     credentialaction.RescueSpecDigest(normalizedArgs, timeoutSeconds, maxOutput, resolvedPort, SSHWindowTarget(window)...),
 	}, nil
 }
 
@@ -169,7 +176,14 @@ func GetStatus(agentID string) (*rescuev1.RescueHelperStatus, error) {
 	stored, err := loadFreshHelper(dbcore.GetDBInstance(), agentID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return status, nil
+			err = dbcore.GetDBInstance().Select("ssh_access", "ssh_enrollment_key").First(&stored, "client = ?", agentID).Error
+			if err == nil {
+				status.SshEnrollmentKeyId = stored.SSHEnrollmentKey
+				return status, readSSHWindowStatus(dbcore.GetDBInstance(), agentID, &stored, status)
+			}
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return status, nil
+			}
 		}
 		return nil, err
 	}
@@ -186,7 +200,10 @@ func GetStatus(agentID string) (*rescuev1.RescueHelperStatus, error) {
 	if stored.ErrorCode != "" || stored.ErrorMessage != "" {
 		status.Error = &commonv1.ErrorDetail{Code: stored.ErrorCode, Message: stored.ErrorMessage}
 	}
-	return status, nil
+	status.SshWindowSupported = stored.SSHWindowSupported
+	status.SshAccessPort = stored.SSHAccessPort
+	status.SshEnrollmentKeyId = stored.SSHEnrollmentKey
+	return status, readSSHWindowStatus(dbcore.GetDBInstance(), agentID, &stored, status)
 }
 
 func ReportStatus(agentID string, status *rescuev1.RescueHelperStatus) error {
@@ -216,10 +233,25 @@ func ReportStatus(agentID string, status *rescuev1.RescueHelperStatus) error {
 		Version: sanitize(status.Version, 100), HelperInstanceID: status.HelperInstanceId,
 		ErrorCode: errorCode, ErrorMessage: errorMessage, ObservedAt: observedAt,
 	}
-	return dbcore.GetDBInstance().Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "client"}},
-		UpdateAll: true,
-	}).Create(&row).Error
+	return dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
+		if err := recordSSHWindowStatus(tx, agentID, status, &row); err != nil {
+			return err
+		}
+		update := clause.OnConflict{Columns: []clause.Column{{Name: "client"}}, UpdateAll: true}
+		if row.SSHAccess == nil {
+			// A missing receipt means the helper could not read the current
+			// rule. Preserve the last confirmed expiry while it is unknown.
+			update.UpdateAll = false
+			update.DoUpdates = append(clause.AssignmentColumns([]string{
+				"installed", "guardian_running", "helper_running", "network_isolation", "blocked_interfaces",
+				"version", "helper_instance_id", "error_code", "error_message", "observed_at", "updated_at",
+				"ssh_window_supported", "ssh_access_port", "ssh_enrollment_key",
+			}), clause.Assignment{Column: clause.Column{Name: "ssh_access"}, Value: gorm.Expr(
+				"CASE WHEN client_rescue_helpers.ssh_enrollment_key = excluded.ssh_enrollment_key OR excluded.ssh_enrollment_key = '' THEN client_rescue_helpers.ssh_access ELSE NULL END",
+			)})
+		}
+		return tx.Clauses(update).Create(&row).Error
+	})
 }
 
 func ValidateHelper(agentID, helperInstanceID string) error {
@@ -251,13 +283,14 @@ func ClearConnectionError(agentID, helperInstanceID string) error {
 		}).Error
 }
 
-func Create(agentID string, action rescuev1.RescueAction, arguments []string, timeout *durationpb.Duration, maxOutput uint64, idempotencyKey string, sshPort uint32) (*rescuev1.RescueSession, error) {
+func Create(agentID string, action rescuev1.RescueAction, arguments []string, timeout *durationpb.Duration, maxOutput uint64, idempotencyKey string, sshPort uint32, windows ...*rescuev1.SSHWindowRequest) (*rescuev1.RescueSession, error) {
 	createMu.Lock()
 	defer createMu.Unlock()
-	if err := ValidateTarget(agentID); err != nil {
-		return nil, err
+	var window *rescuev1.SSHWindowRequest
+	if len(windows) != 0 {
+		window = windows[0]
 	}
-	spec, err := NormalizeCreateSpec(action, arguments, timeout, maxOutput, sshPort)
+	spec, err := NormalizeCreateSpec(action, arguments, timeout, maxOutput, sshPort, window)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +304,7 @@ func Create(agentID string, action rescuev1.RescueAction, arguments []string, ti
 				_ = json.Unmarshal([]byte(existing.Arguments), &existingArgs)
 				existingDigest = credentialaction.RescueSpecDigest(existingArgs, existing.TimeoutSeconds, existing.MaxOutputBytes, existing.SSHPort)
 			}
-			if existingDigest != spec.SpecDigest {
+			if existing.Action != int32(action) || existingDigest != spec.SpecDigest {
 				return nil, ErrIdempotencyConflict
 			}
 			return sessionToProto(existing), nil
@@ -293,8 +326,17 @@ func Create(agentID string, action rescuev1.RescueAction, arguments []string, ti
 		return nil, errors.New("failed to create rescue session ID")
 	}
 	if err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
-		if _, err := requireReadyHelper(tx, agentID); err != nil {
-			return err
+		if window == nil {
+			if _, err := requireReadyHelper(tx, agentID); err != nil {
+				return err
+			}
+		} else {
+			row.SSHSourceIP = window.GetSourceIp()
+			row.SSHPreviousGrant = window.GetPreviousGrantId()
+			row.SSHEnrollmentKey = window.GetEnrollmentKeyId()
+			if err := authorizeSSHWindow(tx, row); err != nil {
+				return err
+			}
 		}
 		return tx.Create(&row).Error
 	}); err != nil {
@@ -336,9 +378,7 @@ func allowedAction(action rescuev1.RescueAction) bool {
 // A port is meaningful only for the grant action. Rejecting it elsewhere keeps
 // a stored session from carrying a value that nothing will act on, which would
 // otherwise read as an exposure that is not actually configured. Revocation
-// deliberately takes no port: it closes whatever window is recorded on the
-// host, so accepting one here would invite a caller to believe they can close
-// a port other than the one that was opened.
+// deliberately takes no port because it identifies the exact grant by ID.
 func resolveSSHPort(action rescuev1.RescueAction, requested uint32) (uint32, error) {
 	if action != rescuev1.RescueAction_RESCUE_ACTION_TEMPORARY_SSH_ACCESS {
 		if requested != 0 {
@@ -346,10 +386,7 @@ func resolveSSHPort(action rescuev1.RescueAction, requested uint32) (uint32, err
 		}
 		return 0, nil
 	}
-	if requested == 0 {
-		return defaultSSHPort, nil
-	}
-	if requested > 65535 {
+	if requested == 0 || requested > 65535 {
 		return 0, errors.New("SSH port must be between 1 and 65535")
 	}
 	return requested, nil
@@ -407,6 +444,9 @@ func Cancel(sessionID, reason string) (*rescuev1.RescueSession, error) {
 		state := commonv1.OperationState(session.State)
 		agentID = session.Client
 		helperInstanceID = session.HelperInstanceID
+		if session.SSHEnrollmentKey != "" && rescuev1.RescueAction(session.Action) == revokeSSHAction {
+			return errors.New("a requested temporary SSH revocation cannot be cancelled")
+		}
 		if terminal(state) || state == commonv1.OperationState_OPERATION_STATE_CANCEL_REQUESTED {
 			return nil
 		}
@@ -425,6 +465,15 @@ func Cancel(sessionID, reason string) (*rescuev1.RescueSession, error) {
 		}
 		if err := tx.Model(&models.RescueSession{}).Where("id = ? AND state = ?", sessionID, session.State).Updates(updates).Error; err != nil {
 			return err
+		}
+		if state == commonv1.OperationState_OPERATION_STATE_RUNNING && session.SSHEnrollmentKey != "" && rescuev1.RescueAction(session.Action) == grantSSHAction {
+			// A grant may already have committed when cancellation races its final
+			// response. Keep a separate, exact revocation across that race.
+			return tx.Create(&models.RescueSession{
+				ID: utils.GenerateRandomString(32), Client: session.Client, Action: int32(revokeSSHAction), Arguments: "[]",
+				State: int32(commonv1.OperationState_OPERATION_STATE_QUEUED), TimeoutSeconds: int64(defaultTimeout / time.Second),
+				MaxOutputBytes: defaultOutput, SSHPreviousGrant: session.ID, SSHEnrollmentKey: session.SSHEnrollmentKey,
+			}).Error
 		}
 		if state == commonv1.OperationState_OPERATION_STATE_QUEUED {
 			return tx.Create(&models.RescueEvent{
@@ -446,10 +495,27 @@ func Cancel(sessionID, reason string) (*rescuev1.RescueSession, error) {
 }
 
 func NextAssignment(agentID, helperInstanceID, afterAssignmentID string) (*rescuev1.RescueAssignment, error) {
+	if afterAssignmentID != "" {
+		var previous models.RescueSession
+		err := dbcore.GetDBInstance().Select("id", "state", "started_at", "timeout_seconds").
+			First(&previous, "id = ? AND client = ? AND helper_instance_id = ?", afterAssignmentID, agentID, helperInstanceID).Error
+		if err == nil && previous.StartedAt != nil && !terminal(commonv1.OperationState(previous.State)) &&
+			!time.Now().Before(previous.StartedAt.Add(time.Duration(previous.TimeoutSeconds)*time.Second)) {
+			if _, _, err := ExpireIfOverdue(previous.ID); err != nil {
+				return nil, err
+			}
+		} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+	}
 	var row models.RescueSession
 	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
-		if err := validateHelper(tx, agentID, helperInstanceID); err != nil {
+		helper, err := requireReadyHelper(tx, agentID)
+		if err != nil {
 			return err
+		}
+		if helper.HelperInstanceID != helperInstanceID {
+			return errors.New("rescue helper instance does not match the active helper")
 		}
 		if afterAssignmentID != "" {
 			var previous models.RescueSession
@@ -465,8 +531,7 @@ func NextAssignment(agentID, helperInstanceID, afterAssignmentID string) (*rescu
 				return err
 			}
 		}
-		if err := tx.Where("client = ? AND state = ?", agentID, int32(commonv1.OperationState_OPERATION_STATE_QUEUED)).
-			Order("created_at ASC").First(&row).Error; err != nil {
+		if err := findRescueAssignment(tx, agentID, helper, &row); err != nil {
 			return err
 		}
 		now := time.Now().UTC()
@@ -510,12 +575,16 @@ func buildRescueEnvelope(agentID string, session *rescuev1.RescueSession, leaseE
 		return nil, err
 	}
 	now := time.Now().UTC()
+	kind := "rescue:v1"
+	if session.GetSshWindow() != nil {
+		kind = "rescue:ssh-window:v1"
+	}
 	instruction := &securityv1.SignedInstruction{
 		AgentId:         agentID,
 		Nonce:           uuid.NewString(),
 		IssuedAt:        timestamppb.New(now),
 		ExpiresAt:       timestamppb.New(leaseExpires),
-		InstructionType: "rescue:v1",
+		InstructionType: kind,
 		Body:            sessionBytes,
 	}
 	payloadBytes, err := proto.Marshal(instruction)
@@ -557,18 +626,26 @@ func ExpireIfOverdue(sessionID string) (*rescuev1.RescueSession, bool, error) {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&session, "id = ?", sessionID).Error; err != nil {
 			return err
 		}
-		if session.StartedAt == nil || terminal(commonv1.OperationState(session.State)) {
+		state := commonv1.OperationState(session.State)
+		if terminal(state) {
 			return nil
 		}
-		deadline := session.StartedAt.Add(time.Duration(session.TimeoutSeconds) * time.Second)
-		if time.Now().UTC().Before(deadline) {
+		now := time.Now().UTC()
+		var deadline time.Time
+		if session.StartedAt != nil {
+			deadline = session.StartedAt.Add(time.Duration(session.TimeoutSeconds) * time.Second)
+		} else if rescuev1.RescueAction(session.Action) == grantSSHAction {
+			deadline = session.CreatedAt.Add(defaultTimeout)
+		} else if rescuev1.RescueAction(session.Action) == revokeSSHAction {
+			deadline = session.CreatedAt.Add(sshWindowLifetime)
+		}
+		if deadline.IsZero() || now.Before(deadline) {
 			return nil
 		}
 		var latest uint64
 		if err := tx.Model(&models.RescueEvent{}).Where("session = ?", sessionID).Select("COALESCE(MAX(sequence), 0)").Scan(&latest).Error; err != nil {
 			return err
 		}
-		now := time.Now().UTC()
 		if err := tx.Create(&models.RescueEvent{
 			Session: sessionID, Sequence: latest + 1, OccurredAt: now,
 			State:     int32(commonv1.OperationState_OPERATION_STATE_DEADLINE_EXCEEDED),
@@ -707,6 +784,11 @@ func sessionToProto(row models.RescueSession) *rescuev1.RescueSession {
 	if row.SSHPort != 0 {
 		port := row.SSHPort
 		result.SshPort = &port
+	}
+	if row.SSHEnrollmentKey != "" {
+		result.SshWindow = &rescuev1.SSHWindowRequest{
+			SourceIp: row.SSHSourceIP, PreviousGrantId: row.SSHPreviousGrant, EnrollmentKeyId: row.SSHEnrollmentKey,
+		}
 	}
 	if row.StartedAt != nil {
 		result.StartedAt = timestamppb.New(*row.StartedAt)

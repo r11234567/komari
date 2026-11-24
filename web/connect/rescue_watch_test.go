@@ -2,6 +2,7 @@ package connectapi
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
@@ -17,12 +18,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/privilegeddelivery"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	configconnect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -107,6 +110,59 @@ func TestRescueWatchFreshSignedHeartbeatAndCredentialRevocation(t *testing.T) {
 	}
 	if connect.CodeOf(stream.Err()) != connect.CodeUnauthenticated {
 		t.Fatalf("revocation outcome: %v", stream.Err())
+	}
+}
+
+func TestSSHWindowWatchDistinguishesEnrollmentWithdrawalFromTokenRotation(t *testing.T) {
+	for _, change := range []string{"revoke", "replace", "rotate"} {
+		t.Run(change, func(t *testing.T) {
+			id, token, _, handler := rescueWatchFixture(t)
+			const enrollmentKey = "enrollment-before-change"
+			db := dbcore.GetDBInstance()
+			credentialRow := db.Model(&models.AgentCredential{}).Where("client = ?", id)
+			require.NoError(t, credentialRow.Update("agent_key_id", enrollmentKey).Error)
+			server := httptest.NewServer(handler)
+			defer server.Close()
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			client := configconnect.NewPrivilegedDeliveryServiceClient(server.Client(), server.URL)
+			req := connect.NewRequest(&configv1.WatchPrivilegedDeliveryRequest{AgentId: id, ProtocolVersion: 2})
+			req.Header().Set("Authorization", "Bearer "+token)
+			req.Header().Set(rescueWatchHeader, "v1")
+			req.Header().Set("X-Komari-Rescue-SSH-Window", "v1")
+			stream, err := client.WatchPrivilegedDelivery(ctx, req)
+			require.NoError(t, err)
+			defer stream.Close()
+			require.True(t, stream.Receive(), "opening heartbeat: %v", stream.Err())
+			require.NotNil(t, stream.Msg().GetRevision())
+			updates := map[string]any{"access_token_hash": "replacement-access-token-digest"}
+			switch change {
+			case "revoke":
+				updates["revoked_at"] = time.Now()
+			case "replace":
+				updates["agent_key_id"] = "enrollment-after-change"
+			}
+			require.NoError(t, credentialRow.Updates(updates).Error)
+			if change == "rotate" {
+				require.False(t, stream.Receive())
+				require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(stream.Err()))
+				return
+			}
+			require.True(t, stream.Receive(), "signed withdrawal: %v", stream.Err())
+			envelope := stream.Msg().GetRescueEnrollmentRevoked()
+			require.NotNil(t, envelope)
+			require.Len(t, envelope.Signatures, 1)
+			signer, err := enrollment.ActiveSigningKey()
+			require.NoError(t, err)
+			require.Equal(t, signer.KeyID, envelope.Signatures[0].KeyId)
+			require.True(t, ed25519.Verify(signer.PublicKey, envelope.Payload, envelope.Signatures[0].Value))
+			var instruction securityv1.SignedInstruction
+			require.NoError(t, proto.Unmarshal(envelope.Payload, &instruction))
+			require.Equal(t, id, instruction.AgentId)
+			require.Equal(t, "rescue:ssh-enrollment-revoked:v1", instruction.InstructionType)
+			require.Equal(t, enrollmentKey, string(instruction.Body))
+			require.False(t, stream.Receive())
+		})
 	}
 }
 
