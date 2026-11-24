@@ -33,6 +33,16 @@ func TestWorkbenchNginxFileLeaseAndDuplexAttach(t *testing.T) {
 	if os.Getenv("KOMARI_NGINX_COMPONENT_TEST") != "1" {
 		t.Skip("runs only on the disposable GitHub runner with Nginx installed")
 	}
+	t.Run("Connect", func(t *testing.T) {
+		runWorkbenchNginxFileLeaseAndDuplexAttach(t, "application/connect+proto")
+	})
+	t.Run("gRPC", func(t *testing.T) {
+		runWorkbenchNginxFileLeaseAndDuplexAttach(t, "application/grpc", connect.WithGRPC())
+	})
+}
+
+func runWorkbenchNginxFileLeaseAndDuplexAttach(t *testing.T, contentType string, options ...connect.ClientOption) {
+	t.Helper()
 	nginx, err := exec.LookPath("nginx")
 	if err != nil {
 		t.Fatal(err)
@@ -53,12 +63,19 @@ func TestWorkbenchNginxFileLeaseAndDuplexAttach(t *testing.T) {
 	defer filemanager.SetDispatcher(nil)
 	_, handler := filev1connect.NewFileServiceHandler(service, connect.WithInterceptors(newPolicyInterceptor()))
 	upstream := httptest.NewServer(h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == filev1connect.FileServiceAttachFileOperationsProcedure {
+			if r.ProtoMajor != 2 || r.Header.Get("Content-Type") != contentType {
+				t.Errorf("attach arrived as %s with content type %q, expected HTTP/2 and %s", r.Proto, r.Header.Get("Content-Type"), contentType)
+			}
+		}
 		meta := &rpc.ContextMeta{Principal: rpc.NewAgentPrincipal("fixture-agent"), ClientUUID: "fixture-agent"}
 		handler.ServeHTTP(w, r.WithContext(rpc.NewContextWithMeta(r.Context(), meta)))
 	}), &http2.Server{}))
 	defer upstream.Close()
 	endpoint := startWorkbenchNginx(t, nginx, strings.TrimPrefix(upstream.URL, "http://"))
-	client := filev1connect.NewFileServiceClient(workbenchHTTP2Client(t), endpoint)
+	httpClient := workbenchHTTP2Client(t)
+	client := filev1connect.NewFileServiceClient(httpClient, endpoint)
+	attachClient := filev1connect.NewFileServiceClient(httpClient, endpoint, options...)
 	leaseResult := make(chan *filev1.FileAssignment, 1)
 	leaseError := make(chan error, 1)
 	go func() {
@@ -115,7 +132,7 @@ func TestWorkbenchNginxFileLeaseAndDuplexAttach(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("small file assignment was buffered instead of delivered")
 	}
-	stream := client.AttachFileOperations(ctx)
+	stream := attachClient.AttachFileOperations(ctx)
 	stream.RequestHeader().Set(workspace.IdentityHeader, "v1")
 	stream.RequestHeader().Set(streamHeartbeatHeader, "1")
 	defer stream.CloseResponse()

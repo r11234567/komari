@@ -8,6 +8,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/agentevents"
 	deploymentapp "github.com/komari-monitor/komari/web/deployment"
@@ -20,6 +21,8 @@ import (
 type configService struct {
 	configv1connect.UnimplementedConfigServiceHandler
 }
+
+const agentDuplexProtocolHeader = "X-Komari-Agent-Duplex-Protocol"
 
 func (s *configService) GetDesiredConfig(ctx context.Context, req *connect.Request[configv1.GetDesiredConfigRequest]) (*connect.Response[configv1.GetDesiredConfigResponse], error) {
 	agentID, err := requireAgent(rpc.MetaFromContext(ctx), req.Msg.AgentId)
@@ -38,7 +41,11 @@ func (s *configService) GetDesiredConfig(ctx context.Context, req *connect.Reque
 		}
 		_, _ = clients.MarkDeploymentConfigSent(agentID, state.Revision)
 	}
-	return connect.NewResponse(response), nil
+	result := connect.NewResponse(response)
+	if enabled, _ := config.GetAs[bool](config.AgentCloudflareProxyKey); enabled {
+		result.Header().Set(agentDuplexProtocolHeader, "grpc")
+	}
+	return result, nil
 }
 
 func (s *configService) AcknowledgeConfig(ctx context.Context, req *connect.Request[configv1.AcknowledgeConfigRequest]) (*connect.Response[configv1.AcknowledgeConfigResponse], error) {
