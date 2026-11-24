@@ -13,8 +13,9 @@ Use this mode for a panel hostname proxied by Cloudflare (orange-cloud DNS).
    Run `nginx -t` before reloading. See [Workbench through Nginx](workbench-nginx.md)
    for complete upstream configuration.
 3. Update the panel, its bundled Web UI and the Agent. In the panel, open
-   **Settings → Network access → Cloudflare proxy for Agents**, enable it, and
-   restart the updated Agent. Start with one Agent and confirm terminal input,
+   **Settings → General → Network access → Cloudflare proxy for Agents**
+   (`/admin/settings/general`), enable it, and restart the updated Agent.
+   Start with one Agent and confirm terminal input,
    terminal output and a directory listing before restarting the rest.
 4. To restore Connect duplex, turn the setting off and restart the affected
    Agents. The same enrollment credentials and service configuration are used.
@@ -22,7 +23,8 @@ Use this mode for a panel hostname proxied by Cloudflare (orange-cloud DNS).
 ## Protocol selection and routing
 
 The panel advertises the selected transport on the authenticated
-`ConfigService/GetDesiredConfig` response, which the Agent reads at startup.
+`ConfigService/GetDesiredConfig` response. The Agent reads it at startup and
+during its regular configuration sync, then uses it on the next attachment.
 The default is Connect. With the setting enabled, updated Agents initiate native
 gRPC (`application/grpc` or `application/grpc+proto`) for
 `WebSSHService/AttachSession` and `FileService/AttachFileOperations`.
@@ -41,9 +43,9 @@ the origin's HTTP/2 requirement.
   zone can be configured with a lower cap. This is a request-body limit. Do not
   assume each gRPC message gets a new allowance. Cloudflare's gRPC documentation
   does not specify how it accounts for an indefinite stream. A 413 can also come
-  from Nginx, which applies its own request-body limit. File bytes on the Agent
-  path use separate HTTP transfer requests, so switching the file-operation
-  stream to gRPC does not change file upload limits.
+  from Nginx. The workbench attach locations set `client_max_body_size 4m`.
+  File bytes on the Agent path use separate HTTP transfer requests and follow
+  the body limit on their own locations.
 - The workbench Nginx include already sets `client_body_timeout`,
   `grpc_read_timeout` and `grpc_send_timeout` to 35 minutes on these duplex
   procedures. These cover inactivity between operations, not the maximum
