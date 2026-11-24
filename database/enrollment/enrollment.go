@@ -508,6 +508,36 @@ func ResolveAccessToken(accessToken string) (string, error) {
 	return clientUUID, err
 }
 
+// RescueWatchEnrollmentKey identifies the already authenticated enrollment that
+// opened a rescue stream, even when its access token is subsequently rotated.
+func RescueWatchEnrollmentKey(ctx context.Context, agentID, token string) (string, error) {
+	var row models.AgentCredential
+	digest := hashToken(token)
+	if digest == "" {
+		return "", errors.New("rescue watch requires an access token")
+	}
+	err := dbcore.GetDBInstance().WithContext(ctx).Select("agent_key_id").
+		First(&row, "client = ? AND (access_token_hash = ? OR previous_access_hash = ?)", agentID, digest, digest).Error
+	return row.AgentKeyID, err
+}
+
+func RescueWatchEnrollmentWithdrawn(ctx context.Context, agentID, key string) (bool, error) {
+	var row models.AgentCredential
+	err := dbcore.GetDBInstance().WithContext(ctx).
+		Select("agent_key_id", "revoked_at", "enrollment_expires_at", "lifecycle_version", "refresh_expires_at").
+		First(&row, "client = ?", agentID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	now := time.Now().UTC()
+	return row.AgentKeyID != key || row.RevokedAt != nil ||
+		row.EnrollmentExpiresAt != nil && !now.Before(*row.EnrollmentExpiresAt) ||
+		row.LifecycleVersion > 0 && !now.Before(row.RefreshExpiresAt), nil
+}
+
 // HasAccessTokenRecord reports whether accessToken matches a stored (possibly
 // expired or revoked) Agent access token digest so NAT rate-limit lanes can
 // separate legitimate expired Agents from PATs and unknown brute-force guesses.

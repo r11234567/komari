@@ -84,12 +84,18 @@ The helper verifies the existing signature, schema, machine and configuration
 binding, and then requires increasing issue times, non-regressing sequences
 and bounded freshness. A repeated state may be a fresh signed heartbeat; a
 replayed signed payload may not. EOF, malformed/replayed authorization, local
-policy denial or two seconds without a sufficiently fresh signed frame revokes
-the temporary SSH lease. The watchdog checks every 100 ms; scheduler delays
-can add to that bound. Local policy is still checked every 500 ms. Reconnects
+policy denial or ten seconds without a sufficiently fresh signed frame stops
+new rescue work. The watchdog checks every 100 ms and local policy is checked
+every 500 ms. Reconnects
 back off from 500 ms to 30 seconds and reload identity credentials; startup
 never restores authority from a status file. Status-file publication is reduced
 to every two seconds, within its existing ten-second stale limit.
+
+An existing [temporary inbound SSH window](temporary-ssh.md) keeps its original
+kernel deadline through a brief disconnect or helper restart. The source and
+previous grant ID are bound to the signed assignment and the current enrollment.
+An exact operator revoke, signed enrollment withdrawal, or confirmed invalid
+local credentials can end the window early.
 
 Stable privileged-state reads perform SQL reads without initialization INSERTs
 or a write transaction. A cursor reread detects concurrent state changes;
@@ -110,7 +116,7 @@ reviewable; merging the backend does **not** merge or publish Agent main.
 Deploy the updated backend before upgrading the Agent/rescue helper. A new
 helper against an old backend without heartbeat acknowledgement remains denied;
 this is deliberate fail-closed incompatibility, not transparent backward
-compatibility. Hosts and panel need synchronized clocks: frames older than two
+compatibility. Hosts and panel need synchronized clocks: frames older than ten
 seconds or over one second in the future are refused. Network buffering/stalls
 can disable rescue until a fresh valid stream recovers. Existing host policy,
 PAM authentication, ceilings and pending approval requirements remain in force.
