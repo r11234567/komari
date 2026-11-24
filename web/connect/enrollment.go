@@ -28,6 +28,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/utils"
+	agentRuntime "github.com/komari-monitor/komari/web/agent"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	enrollmentv1 "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1"
 	"github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1/enrollmentv1connect"
@@ -132,6 +133,10 @@ func (s *enrollmentService) PollEnrollment(ctx context.Context, req *connect.Req
 		}), nil
 	}
 
+	if attempt.Reenrolled {
+		agentRuntime.SetConnectInstallation(attempt.Client, 0, nil)
+		agentRuntime.SetConnectCapabilities(attempt.Client, nil)
+	}
 	response := &enrollmentv1.PollEnrollmentResponse{
 		State:        enrollmentStateToProto(attempt.State),
 		PollInterval: durationpb.New(enrollment.PollInterval),

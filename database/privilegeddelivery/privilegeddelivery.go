@@ -120,6 +120,9 @@ func SaveWithDB(db *gorm.DB, clientUUID string, settings Settings, expectedRevis
 		if err != nil {
 			return err
 		}
+		if state.ProtocolVersion == 2 && state.ServiceID == "" {
+			return errors.New("wait for the Agent service to negotiate before saving privileged configuration")
+		}
 		if expectedRevision != state.DesiredRevision {
 			return fmt.Errorf("privileged configuration conflict: expected %d, current %d", expectedRevision, state.DesiredRevision)
 		}
@@ -143,8 +146,7 @@ func SaveWithDB(db *gorm.DB, clientUUID string, settings Settings, expectedRevis
 		}
 		class, reasons, from, to := classify(tx, clientUUID, settings)
 		now := time.Now().UTC()
-		// A new desired revision invalidates old pending approvals atomically.
-		if err := tx.Model(&models.ClientPrivilegedRevision{}).Where("client = ? AND state IN ?", clientUUID, []int32{StateNeedsConfirmation, StateNeedsManualAuthorization, StateAwaitingAgent, StateApplying, StateExpired}).Updates(map[string]any{"state": StateSuperseded, "superseded_at": now, "nonce": "", "update_sequence": state.UpdateSequence + 1}).Error; err != nil {
+		if err := supersedePending(tx, state, now); err != nil {
 			return err
 		}
 		row := models.ClientPrivilegedRevision{Client: clientUUID, Revision: state.DesiredRevision + 1, Config: encodeSettings(settings), ConfigHash: settingsHash(settings), ProtocolVersion: 2, UpgradeClass: class, Reasons: encodeReasons(appendReason(reasons, reason)), FromPrivilegeMode: from, ToPrivilegeMode: to, State: StateNeedsConfirmation, PreviousRevision: state.AppliedRevision, SavedAt: now, CreatedAt: now, UpdateSequence: state.UpdateSequence + 1}
@@ -233,6 +235,9 @@ func ConfirmWithDB(db *gorm.DB, clientUUID string, revision uint64, userUUID str
 			return errors.New("an approving user is required")
 		}
 		now := time.Now().UTC()
+		if row.EnrollmentReset && row.State != StateDelivered {
+			return errors.New("the enrollment reset is delivered after the Agent negotiates")
+		}
 		if row.State == StateDelivered {
 			result = toRevision(row)
 			return nil
@@ -254,36 +259,51 @@ func ConfirmWithDB(db *gorm.DB, clientUUID string, revision uint64, userUUID str
 		if !supportsActions(state, actions) {
 			return errors.New("host does not support a required administrative action")
 		}
-		row.State = StateAwaitingAgent
-		if len(actions) > 0 {
-			row.State = StateNeedsManualAuthorization
-			row.UpgradeClass = ClassManualPrivileged
-		} else {
-			row.UpgradeClass = ClassManualConfirm
-		}
-		row.ConfirmedAt = &now
-		row.ConfirmedBy = userUUID
-		row.ApprovalGeneration++
-		row.TaskID = utils.GenerateRandomString(32)
-		row.Nonce = utils.GenerateRandomString(43)
-		row.NonceUsedAt = nil
-		expiry := now.Add(nonceLifetime)
-		row.NonceExpires = &expiry
-		authorization := &hostv1.HostAuthorization{AgentId: clientUUID, Revision: revision, ConfigHash: row.ConfigHash, ApprovalGeneration: row.ApprovalGeneration, ServiceId: state.ServiceID, TargetPrivilegeMode: reportv1.PrivilegeMode(row.ToPrivilegeMode), Nonce: row.Nonce, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expiry), ApprovedBy: userUUID}
-		for _, action := range actions {
-			authorization.Actions = append(authorization.Actions, hostv1.HostAction(action))
-		}
-		row.Authorization, err = proto.MarshalOptions{Deterministic: true}.Marshal(authorization)
-		if err != nil {
-			return err
-		}
-		if err := advance(tx, &state, &row); err != nil {
+		if err := approveRevision(tx, &state, &row, userUUID, actions, now); err != nil {
 			return err
 		}
 		result = toRevision(row)
 		return nil
 	})
 	return result, err
+}
+
+func supersedePending(tx *gorm.DB, state models.ClientPrivilegedState, now time.Time) error {
+	return tx.Model(&models.ClientPrivilegedRevision{}).
+		Where("client = ? AND state IN ?", state.Client, []int32{StateUnspecified, StateNeedsConfirmation, StateNeedsManualAuthorization, StateAwaitingAgent, StateApplying, StateExpired}).
+		Updates(map[string]any{"state": StateSuperseded, "superseded_at": now, "nonce": "", "update_sequence": state.UpdateSequence + 1}).Error
+}
+
+func approveRevision(tx *gorm.DB, state *models.ClientPrivilegedState, row *models.ClientPrivilegedRevision, user string, actions []int32, now time.Time) error {
+	row.State = StateAwaitingAgent
+	row.UpgradeClass = ClassManualConfirm
+	if len(actions) > 0 {
+		row.State = StateNeedsManualAuthorization
+		row.UpgradeClass = ClassManualPrivileged
+	}
+	row.ConfirmedAt = &now
+	row.ConfirmedBy = user
+	row.ApprovalGeneration++
+	row.TaskID = utils.GenerateRandomString(32)
+	row.Nonce = utils.GenerateRandomString(43)
+	row.NonceUsedAt = nil
+	expiry := now.Add(nonceLifetime)
+	row.NonceExpires = &expiry
+	authorization := &hostv1.HostAuthorization{
+		AgentId: row.Client, Revision: row.Revision, ConfigHash: row.ConfigHash,
+		ApprovalGeneration: row.ApprovalGeneration, ServiceId: state.ServiceID,
+		TargetPrivilegeMode: reportv1.PrivilegeMode(row.ToPrivilegeMode), Nonce: row.Nonce,
+		IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expiry), ApprovedBy: user,
+	}
+	for _, action := range actions {
+		authorization.Actions = append(authorization.Actions, hostv1.HostAction(action))
+	}
+	var err error
+	row.Authorization, err = proto.MarshalOptions{Deterministic: true}.Marshal(authorization)
+	if err != nil {
+		return err
+	}
+	return advance(tx, state, row)
 }
 
 // Report is a legacy transport receipt only. It cannot approve or complete a task.
@@ -351,7 +371,7 @@ func InstalledPrivilegeMode(clientUUID string) int32 {
 // InstalledPrivilegeModeWithDB reports what the Agent service is installed as using the provided DB/tx instance.
 func InstalledPrivilegeModeWithDB(db *gorm.DB, clientUUID string) int32 {
 	var state models.ClientPrivilegedState
-	if err := db.First(&state, "client = ?", clientUUID).Error; err == nil && state.ProtocolVersion == 2 && state.PrivilegeMode != 0 {
+	if err := db.First(&state, "client = ?", clientUUID).Error; err == nil && state.ProtocolVersion == 2 {
 		return state.PrivilegeMode
 	}
 	profile, saved, err := clients.GetDeploymentProfileWithDB(db, clientUUID)

@@ -27,6 +27,9 @@ func TestRescueSpecValidationIdempotencyAndBinding(t *testing.T) {
 	profile.RescueEnabled = true
 	_, err = clients.SaveDeploymentProfile(id, profile)
 	require.NoError(t, err)
+	require.NoError(t, rescueapp.ReportStatus(id, &rescuev1.RescueHelperStatus{
+		Installed: true, GuardianRunning: true, HelperRunning: true, HelperInstanceId: "test-helper",
+	}))
 
 	svc := &rescueService{}
 	targets := credentialaction.RescueTargets(id, int32(rescuev1.RescueAction_RESCUE_ACTION_TEMPORARY_SSH_ACCESS), nil, 300, 256*1024, 2222)

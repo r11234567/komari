@@ -88,6 +88,7 @@ type ClientDeploymentProfile struct {
 // invite a code path that treats one like the other.
 type ClientPrivilegedRevision struct {
 	InstallationBaseline bool `json:"-" gorm:"not null;default:false"`
+	EnrollmentReset      bool `json:"-" gorm:"not null;default:false"`
 
 	Client   string `json:"-" gorm:"type:varchar(36);primaryKey"`
 	Revision uint64 `json:"-" gorm:"primaryKey"`
@@ -197,10 +198,11 @@ type AgentEnrollment struct {
 	RemoteIP        string `json:"-" gorm:"type:varchar(64)"`
 	// Client is set once an approval binds this attempt to a machine, either a
 	// newly created one or an existing one being re-enrolled.
-	Client     string     `json:"-" gorm:"type:varchar(36);index"`
-	ApprovedBy string     `json:"-" gorm:"type:varchar(36)"`
-	ApprovedAt *time.Time `json:"-"`
-	ExpiresAt  time.Time  `json:"-"`
+	Client        string     `json:"-" gorm:"type:varchar(36);index"`
+	CreatedClient bool       `json:"-" gorm:"not null;default:false"`
+	ApprovedBy    string     `json:"-" gorm:"type:varchar(36)"`
+	ApprovedAt    *time.Time `json:"-"`
+	ExpiresAt     time.Time  `json:"-"`
 	// LastPolledAt supports slow-down responses without a separate counter.
 	LastPolledAt *time.Time `json:"-"`
 	CreatedAt    time.Time  `json:"-"`
