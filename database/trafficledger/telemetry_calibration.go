@@ -14,8 +14,9 @@ var ErrCalibrationCatchingUp = errors.New("traffic accounting is catching up; re
 
 // Acquire the metric lifecycle lease before the accounting mutex, matching the
 // background delivery order. Never drain the outbox from an administrator save.
-// New reports accepted after this check belong to subsequent counter growth.
-func withCalibrationAccounting(ctx context.Context, save func() (CalibrationSnapshot, error)) (CalibrationSnapshot, error) {
+// New reports accepted for this source after the check belong to subsequent
+// counter growth. Pending reports for other sources cannot change its baseline.
+func withCalibrationAccounting(ctx context.Context, source string, save func() (CalibrationSnapshot, error)) (CalibrationSnapshot, error) {
 	if !metricstore.TelemetryEnabled() {
 		return save()
 	}
@@ -27,7 +28,7 @@ func withCalibrationAccounting(ctx context.Context, save func() (CalibrationSnap
 	telemetryTrafficMu.Lock()
 	defer telemetryTrafficMu.Unlock()
 	if t := s.Telemetry(); t != nil {
-		pending, err := t.TrafficPending(ctx)
+		pending, err := t.TrafficPendingFor(ctx, source)
 		if err != nil {
 			return CalibrationSnapshot{}, err
 		}
