@@ -29,13 +29,15 @@ import (
 )
 
 const (
-	defaultTimeout   = 2 * time.Minute
-	maxTimeout       = 10 * time.Minute
-	defaultOutput    = 64 << 10
-	maximumOutput    = 1 << 20
-	maxArgumentCount = 16
-	maxArgumentBytes = 4096
-	defaultSSHPort   = 22
+	defaultTimeout = 2 * time.Minute
+	maxTimeout     = 10 * time.Minute
+	// The helper normally reports every lease heartbeat, or after a running action.
+	helperStatusLifetime = maxTimeout + 2*time.Minute
+	defaultOutput        = 64 << 10
+	maximumOutput        = 1 << 20
+	maxArgumentCount     = 16
+	maxArgumentBytes     = 4096
+	defaultSSHPort       = 22
 )
 
 var signals = struct {
@@ -56,18 +58,40 @@ type CreateSpec struct {
 }
 
 func ValidateTarget(agentID string) error {
-	profile, saved, err := clients.GetDeploymentProfile(agentID)
+	_, err := requireReadyHelper(dbcore.GetDBInstance(), agentID)
+	return err
+}
+
+func loadFreshHelper(db *gorm.DB, agentID string) (models.ClientRescueHelper, error) {
+	var helper models.ClientRescueHelper
+	err := db.Where("client = ? AND updated_at > ?", agentID, time.Now().UTC().Add(-helperStatusLifetime)).First(&helper).Error
+	return helper, err
+}
+
+func requireReadyHelper(db *gorm.DB, agentID string) (models.ClientRescueHelper, error) {
+	var empty models.ClientRescueHelper
+	profile, saved, err := clients.GetDeploymentProfileWithDB(db, agentID)
 	if err != nil {
-		return err
+		return empty, err
 	}
-	allowed, err := clients.PrivilegedCapabilityAllowed(agentID, "rescue")
+	allowed, err := clients.PrivilegedCapabilityAllowedWithDB(db, agentID, "rescue")
 	if err != nil {
-		return err
+		return empty, err
 	}
 	if !saved || !allowed || !profile.RescueEnabled {
-		return errors.New("rescue helper requires an applied rescue authorization")
+		return empty, errors.New("rescue helper requires an applied rescue authorization")
 	}
-	return nil
+	helper, err := loadFreshHelper(db, agentID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return empty, errors.New("no recent rescue helper status")
+	}
+	if err != nil {
+		return empty, err
+	}
+	if !helper.Installed || !helper.GuardianRunning || !helper.HelperRunning {
+		return empty, errors.New("rescue helper is not running")
+	}
+	return helper, nil
 }
 
 func NormalizeCreateSpec(action rescuev1.RescueAction, arguments []string, timeout *durationpb.Duration, maxOutput uint64, sshPort uint32) (CreateSpec, error) {
@@ -142,8 +166,8 @@ func GetStatus(agentID string) (*rescuev1.RescueHelperStatus, error) {
 		return nil, err
 	}
 	status := &rescuev1.RescueHelperStatus{Requested: profile.RescueEnabled}
-	var stored models.ClientRescueHelper
-	if err := dbcore.GetDBInstance().First(&stored, "client = ?", agentID).Error; err != nil {
+	stored, err := loadFreshHelper(dbcore.GetDBInstance(), agentID)
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return status, nil
 		}
@@ -199,27 +223,17 @@ func ReportStatus(agentID string, status *rescuev1.RescueHelperStatus) error {
 }
 
 func ValidateHelper(agentID, helperInstanceID string) error {
+	return validateHelper(dbcore.GetDBInstance(), agentID, helperInstanceID)
+}
+
+func validateHelper(db *gorm.DB, agentID, helperInstanceID string) error {
 	helperInstanceID = sanitize(helperInstanceID, 128)
 	if helperInstanceID == "" {
 		return errors.New("helper instance ID is required")
 	}
-	profile, saved, err := clients.GetDeploymentProfile(agentID)
+	stored, err := requireReadyHelper(db, agentID)
 	if err != nil {
 		return err
-	}
-	allowed, err := clients.PrivilegedCapabilityAllowed(agentID, "rescue")
-	if err != nil {
-		return err
-	}
-	if !saved || !allowed || !profile.RescueEnabled {
-		return errors.New("rescue helper is not enabled in the installed deployment profile")
-	}
-	var stored models.ClientRescueHelper
-	if err := dbcore.GetDBInstance().First(&stored, "client = ?", agentID).Error; err != nil {
-		return err
-	}
-	if !stored.Installed || !stored.GuardianRunning || !stored.HelperRunning {
-		return errors.New("rescue helper is not running")
 	}
 	if stored.HelperInstanceID != helperInstanceID {
 		return errors.New("rescue helper instance does not match the active helper")
@@ -278,7 +292,12 @@ func Create(agentID string, action rescuev1.RescueAction, arguments []string, ti
 	if row.ID == "" {
 		return nil, errors.New("failed to create rescue session ID")
 	}
-	if err := dbcore.GetDBInstance().Create(&row).Error; err != nil {
+	if err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
+		if _, err := requireReadyHelper(tx, agentID); err != nil {
+			return err
+		}
+		return tx.Create(&row).Error
+	}); err != nil {
 		return nil, err
 	}
 	if action == rescuev1.RescueAction_RESCUE_ACTION_ROLLBACK_ONLINE_CONFIG {
@@ -429,6 +448,9 @@ func Cancel(sessionID, reason string) (*rescuev1.RescueSession, error) {
 func NextAssignment(agentID, helperInstanceID, afterAssignmentID string) (*rescuev1.RescueAssignment, error) {
 	var row models.RescueSession
 	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
+		if err := validateHelper(tx, agentID, helperInstanceID); err != nil {
+			return err
+		}
 		if afterAssignmentID != "" {
 			var previous models.RescueSession
 			if err := tx.First(&previous, "id = ? AND client = ? AND helper_instance_id = ?", afterAssignmentID, agentID, helperInstanceID).Error; err == nil {

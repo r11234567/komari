@@ -171,9 +171,15 @@ func getStateTransactional(db *gorm.DB, id string) (Snapshot, error) {
 				return err
 			}
 			if entry.n == state.DesiredRevision && r.ConfirmedAt != nil && r.NonceExpires != nil && !time.Now().Before(*r.NonceExpires) && (r.State == StateNeedsManualAuthorization || r.State == StateAwaitingAgent) {
-				r.State = StateExpired
-				if err := advance(tx, &state, &r); err != nil {
-					return err
+				if r.EnrollmentReset {
+					if err := approveEnrollmentReset(tx, &state, &r, time.Now().UTC()); err != nil {
+						return err
+					}
+				} else {
+					r.State = StateExpired
+					if err := advance(tx, &state, &r); err != nil {
+						return err
+					}
 				}
 				out.State = state
 			}
@@ -228,6 +234,17 @@ func Negotiate(db *gorm.DB, id, service, startup string, mode int32, actions []i
 		state.SupportedActions = string(data)
 		state.UpdateSequence++
 		state.UpdatedAt = time.Now().UTC()
+		if state.DesiredRevision != 0 && state.AppliedRevision == 0 {
+			row, err := lockRevision(tx, id, state.DesiredRevision)
+			if err != nil {
+				return err
+			}
+			if row.EnrollmentReset && (row.ConfirmedAt == nil || row.State == StateFailed || row.ToPrivilegeMode != mode) {
+				if err := approveEnrollmentReset(tx, &state, &row, state.UpdatedAt); err != nil {
+					return err
+				}
+			}
+		}
 		if err := tx.Save(&state).Error; err != nil {
 			return err
 		}

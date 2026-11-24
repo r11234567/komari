@@ -28,6 +28,7 @@ import (
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/privilegeddelivery"
 	"github.com/komari-monitor/komari/utils"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -91,6 +92,7 @@ type Attempt struct {
 	Architecture    string
 	AgentVersion    string
 	HostFingerprint string
+	Reenrolled      bool
 	RequestedScopes []string
 	RemoteIP        string
 	Client          string
@@ -175,6 +177,7 @@ func beginDB(db *gorm.DB, publicKey []byte, keyID string, algorithm int32, devic
 }
 
 var (
+	pollLocks      [64]sync.Mutex
 	pollGraceCache sync.Map // map[string]*cachedPollResult
 )
 
@@ -213,19 +216,27 @@ func Poll(deviceCode string) (Attempt, *Issued, error) {
 		return Attempt{}, nil, errors.New("a device code is required")
 	}
 
+	// The same device code must finish publishing its committed result before a retry reads it.
+	lock := &pollLocks[int(sha256.Sum256([]byte(code))[0])%len(pollLocks)]
+	lock.Lock()
+	defer lock.Unlock()
+
 	// Idempotent grace window: if this device code was recently approved and consumed within 60s,
 	// return the same issued credentials to handle network packet loss on the initial response.
 	if val, ok := pollGraceCache.Load(code); ok {
 		cached := val.(*cachedPollResult)
 		if time.Now().UTC().Before(cached.expiresAt) && cached.epoch == dbcore.CurrentSecurityEpoch() {
 			issuedCopy := cached.issued
-			return cached.attempt, &issuedCopy, nil
+			attempt := cached.attempt
+			attempt.Reenrolled = false
+			return attempt, &issuedCopy, nil
 		}
 		pollGraceCache.Delete(code)
 	}
 
 	var attempt Attempt
 	var issued *Issued
+	var cache *cachedPollResult
 	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
 		row, err := lockAttempt(tx, "device_code = ?", code)
 		if err != nil {
@@ -264,14 +275,19 @@ func Poll(deviceCode string) (Attempt, *Issued, error) {
 		if err := tx.Model(&models.AgentCredential{}).Where("client = ?", row.Client).Update("last_approved_by", row.ApprovedBy).Error; err != nil {
 			return err
 		}
+		if !row.CreatedClient {
+			if err := privilegeddelivery.ResetForEnrollment(tx, row.Client, now); err != nil {
+				return err
+			}
+			attempt.Reenrolled = true
+		}
 		issued = &credentials
-		// Cache for 60s grace window before deleting row
-		pollGraceCache.Store(code, &cachedPollResult{
+		cache = &cachedPollResult{
 			attempt:   attempt,
 			issued:    credentials,
 			epoch:     dbcore.CurrentSecurityEpoch(),
 			expiresAt: now.Add(60 * time.Second),
-		})
+		}
 		// Atomic single-use invalidation: once credentials have been issued, the attempt row is deleted
 		// immediately so the device code cannot be replayed or hijacked after the grace window.
 		if err := tx.Delete(&row).Error; err != nil {
@@ -284,6 +300,12 @@ func Poll(deviceCode string) (Attempt, *Issued, error) {
 	}
 	if err != nil {
 		return Attempt{}, nil, err
+	}
+	if cache != nil {
+		pollGraceCache.Store(code, cache)
+		if attempt.Reenrolled {
+			privilegeddelivery.Notify(attempt.Client)
+		}
 	}
 	return attempt, issued, nil
 }
@@ -314,7 +336,7 @@ func GetByUserCode(userCode string) (Attempt, error) {
 // clientUUID is decided by the caller: the panel either creates a new machine
 // or picks an existing one to re-enroll. Doing that here would hide a
 // consequential choice inside a storage call.
-func Approve(userCode, clientUUID, approvedBy string) (Attempt, error) {
+func Approve(userCode, clientUUID, approvedBy string, createdClient bool) (Attempt, error) {
 	var attempt Attempt
 	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
 		row, err := lockAttempt(tx, "user_code = ?", normalizeUserCode(userCode))
@@ -330,11 +352,12 @@ func Approve(userCode, clientUUID, approvedBy string) (Attempt, error) {
 			return errors.New("this enrollment request has expired; start it again on the machine")
 		}
 		updates := map[string]any{
-			"state":       StateApproved,
-			"client":      clientUUID,
-			"approved_by": approvedBy,
-			"approved_at": now,
-			"updated_at":  now,
+			"state":          StateApproved,
+			"client":         clientUUID,
+			"created_client": createdClient,
+			"approved_by":    approvedBy,
+			"approved_at":    now,
+			"updated_at":     now,
 		}
 		if err := tx.Model(&row).Updates(updates).Error; err != nil {
 			return err

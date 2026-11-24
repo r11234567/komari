@@ -226,7 +226,7 @@ func (s *enrollmentAdminService) ApproveEnrollment(ctx context.Context, req *con
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("either an existing agent ID or new agent details are required"))
 	}
 
-	approvedAttempt, err := enrollment.Approve(req.Msg.GetUserCode(), clientUUID, claims.Sub)
+	approvedAttempt, err := enrollment.Approve(req.Msg.GetUserCode(), clientUUID, claims.Sub, created)
 	if err != nil {
 		if created {
 			// A just-created machine that cannot be bound to the request is

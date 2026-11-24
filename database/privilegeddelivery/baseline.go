@@ -43,6 +43,16 @@ func InitializeBaseline(db *gorm.DB, r *configv1.InitializeNodeConfigRequest, pr
 		if err != nil {
 			return err
 		}
+		if state.DesiredRevision != 0 {
+			desired, err := lockRevision(tx, r.AgentId, state.DesiredRevision)
+			if err != nil {
+				return err
+			}
+			if desired.EnrollmentReset {
+				out.SkippedReason = "enrollment reset uses signed privileged delivery"
+				return nil
+			}
+		}
 		var old models.ClientConfigBaseline
 		if e := tx.First(&old, "client = ?", r.AgentId).Error; e == nil {
 			if old.RequestHash != hash {

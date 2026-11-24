@@ -544,7 +544,7 @@ func TestDualEnd_SingleUseDeviceCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateClient failed: %v", err)
 	}
-	_, err = enrollment.Approve(userCode, singleUseUUID, "admin")
+	_, err = enrollment.Approve(userCode, singleUseUUID, "admin", true)
 	if err != nil {
 		t.Fatalf("Approve failed: %v", err)
 	}
