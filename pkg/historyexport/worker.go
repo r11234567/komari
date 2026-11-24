@@ -42,6 +42,7 @@ type Worker struct {
 }
 type Availability struct {
 	Available     bool           `json:"available"`
+	Detected      bool           `json:"-"`
 	Error         string         `json:"error,omitempty"`
 	At            time.Time      `json:"at"`
 	CPUCoreLimit  float64        `json:"cpu_core_limit"`
@@ -97,9 +98,10 @@ func (q *Queue) Availability() Availability {
 	if e == nil {
 		e = json.Unmarshal(b, &a)
 	}
+	a.Detected = !errors.Is(e, os.ErrNotExist)
 	if e != nil || time.Since(a.At) > 15*time.Second {
 		a.Available = false
-		a.Error = "strict background export worker unavailable; configure the isolated Linux worker with a verified CPU cap"
+		a.Error = "CSV export worker unavailable"
 	}
 	return a
 }

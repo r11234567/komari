@@ -2,7 +2,7 @@
 
 生产导出不再在 HTTP 服务进程内运行。主服务仅保存有界任务；计划、SQLite 扫描、热数据冻结、冷归档解码、CSV、排序/采样临时库、校验及发布全部在单独的 `export-worker` 进程及其 cgroup 内。
 
-当前提供 Linux cgroup v2 + 本地 SQLite 的严格路径。Windows 等未验证进程组硬限额的平台和未隔离数据库 CPU 的外部 SQL 明确拒绝运行，不自动回退到软限速。没有 worker 时，界面显示配置原因且禁止提交。
+当前支持 Linux cgroup v2 和本地 SQLite。管理界面会显示 Worker 状态和安装文档。Worker 就绪后即可提交任务。
 
 ## 配额与部署
 
