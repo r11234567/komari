@@ -203,6 +203,9 @@ func GetStatus(agentID string) (*rescuev1.RescueHelperStatus, error) {
 	status.SshWindowSupported = stored.SSHWindowSupported
 	status.SshAccessPort = stored.SSHAccessPort
 	status.SshEnrollmentKeyId = stored.SSHEnrollmentKey
+	if stored.SSHWindowErrorCode != "" {
+		status.SshWindowError = &commonv1.ErrorDetail{Code: stored.SSHWindowErrorCode, Message: stored.SSHWindowErrorText}
+	}
 	return status, readSSHWindowStatus(dbcore.GetDBInstance(), agentID, &stored, status)
 }
 
@@ -245,7 +248,7 @@ func ReportStatus(agentID string, status *rescuev1.RescueHelperStatus) error {
 			update.DoUpdates = append(clause.AssignmentColumns([]string{
 				"installed", "guardian_running", "helper_running", "network_isolation", "blocked_interfaces",
 				"version", "helper_instance_id", "error_code", "error_message", "observed_at", "updated_at",
-				"ssh_window_supported", "ssh_access_port", "ssh_enrollment_key",
+				"ssh_window_supported", "ssh_access_port", "ssh_enrollment_key", "ssh_window_error_code", "ssh_window_error_text",
 			}), clause.Assignment{Column: clause.Column{Name: "ssh_access"}, Value: gorm.Expr(
 				"CASE WHEN client_rescue_helpers.ssh_enrollment_key = excluded.ssh_enrollment_key OR excluded.ssh_enrollment_key = '' THEN client_rescue_helpers.ssh_access ELSE NULL END",
 			)})

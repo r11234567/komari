@@ -14,6 +14,8 @@ type ClientRescueHelper struct {
 	BlockedInterfaces  string    `json:"blocked_interfaces" gorm:"type:text;not null;default:''"`
 	SSHWindowSupported bool      `json:"-" gorm:"not null;default:false"`
 	SSHAccessPort      uint32    `json:"-" gorm:"not null;default:0"`
+	SSHWindowErrorCode string    `json:"-" gorm:"type:varchar(64);not null;default:''"`
+	SSHWindowErrorText string    `json:"-" gorm:"type:varchar(512);not null;default:''"`
 	SSHEnrollmentKey   string    `json:"-" gorm:"type:varchar(64);not null;default:''"`
 	SSHAccess          []byte    `json:"-" gorm:"type:blob"`
 	Version            string    `json:"version" gorm:"type:varchar(100)"`

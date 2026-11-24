@@ -60,9 +60,28 @@ func TestRescueSpecValidationIdempotencyAndBinding(t *testing.T) {
 	_, err = svc.CreateRescueSession(ctx, request(2222, source, "", token))
 	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
 	status.SshWindowSupported = true
-	status.SshAccessPort = 2222
 	status.SshEnrollmentKeyId = key
+	status.SshWindowError = &commonv1.ErrorDetail{Code: "SSH_CONFIG_MISSING", Message: "configuration file is missing"}
+	status.Error = &commonv1.ErrorDetail{Code: "HELPER_CONNECTION", Message: "lease reconnecting"}
 	require.NoError(t, rescueapp.ReportStatus(id, status))
+	readStatus := func() *rescuev1.RescueHelperStatus {
+		t.Helper()
+		response, err := svc.GetRescueStatus(ctx, connect.NewRequest(&rescuev1.GetRescueStatusRequest{AgentId: id}))
+		require.NoError(t, err)
+		return response.Msg.Status
+	}
+	unconfigured := readStatus()
+	require.Zero(t, unconfigured.GetSshAccessPort())
+	require.Equal(t, "SSH_CONFIG_MISSING", unconfigured.GetSshWindowError().GetCode())
+	require.Equal(t, "configuration file is missing", unconfigured.GetSshWindowError().GetMessage())
+	require.Equal(t, "HELPER_CONNECTION", unconfigured.GetError().GetCode())
+	status.SshAccessPort = 2222
+	status.SshWindowError = nil
+	status.Error = nil
+	require.NoError(t, rescueapp.ReportStatus(id, status))
+	ready := readStatus()
+	require.Equal(t, uint32(2222), ready.GetSshAccessPort())
+	require.Nil(t, ready.GetSshWindowError())
 	ctx, token = proofFor(2200, source)
 	_, err = svc.CreateRescueSession(ctx, request(2200, source, "", token))
 	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
