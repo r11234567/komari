@@ -1,5 +1,7 @@
 # Temporary inbound SSH on a Linux node
 
+[简体中文](temporary-ssh.zh-CN.md)
+
 Temporary SSH admits one source IPv4 or IPv6 address to a fixed SSH port for 15 minutes. The node needs an updated Agent and authorized rescue helper. The host administrator prepares a dedicated nftables entry point. Browser WebSSH remains a separate option.
 
 ## Configure the node
@@ -43,8 +45,52 @@ Komari manages only these two sets. Direct UFW, firewalld and legacy iptables in
 
 Open the node's Rescue panel, select Temporary SSH, enter the single IPv4 or IPv6 address as seen by the node, and complete two-factor verification. The port comes from the node. The helper first checks for a local SSH listener in the requested address family, then writes the source address and kernel timeout atomically. Two-factor approval binds the source, port, enrollment and any grant being replaced.
 
+Behind NAT, enter the public egress address of the device that will run SSH. On that device, using the same network or VPN, run:
+
+```bash
+curl -4 -fsS https://api.ipify.org
+```
+
+Use `curl.exe` in Windows PowerShell. Use `ssh -4` for the matching IPv4 connection. If SSH takes a different route, for example through a jump host or a split-tunnel VPN, use the source address the node sees for that route. In an existing SSH session on the same path, the first field of `printf '%s\n' "$SSH_CONNECTION"` is that address. Request a fresh window if your egress address changes.
+
 The receipt reports the listener check and the last confirmed kernel write and expiry. Check connectivity from the authorized machine using its usual SSH credentials. Test a fresh connection after revocation or timeout. Existing SSH connections can continue if the host's established-connection rules admit them.
 
 An operator can revoke the exact grant early. The panel shows a pending revocation until it has a receipt or the window expires. A brief disconnect pauses new rescue work and preserves the original deadline. The helper closes the grant on a verified enrollment withdrawal delivered over its live watch or on confirmed invalidation of local credentials. If a disconnected node cannot receive a withdrawal and still has local credentials, the kernel deadline ends admission. Reconnects and duplicate requests never extend a window. A firewall reload or host reboot never restores an old grant.
 
 For the first host acceptance, verify a successful SSH handshake from the permitted address, unsuccessful new connections from a second address, explicit revocation, one full 15-minute window and a firewall reload. `sudo journalctl -u komari-agent-rescue.service --since '15 minutes ago'` shows the grant ID, interface, port, source and expiry for confirmed writes and revocations. The administrative panel does not initiate an external probe.
+
+## Troubleshoot by error code
+
+The Rescue Helper output shows the code and local error details. Fix the cause, then reopen the node's Rescue panel after its next status report. Configuration and rules are checked again on each report.
+
+### SSH_CONFIG_MISSING
+
+The helper could not find the configuration file on this node. Create the JSON file in [Configure the node](#configure-the-node). The filename must match the installed Agent service name. Run the checks on the destination SSH node.
+
+### SSH_CONFIG_INVALID
+
+The helper could not read or validate the JSON. Check the reported path, root ownership, mode `0600`, and that the file and parent directories are trusted and contain no symlinks. Verify the four keys and the configured TCP port.
+
+### SSH_NFT_READ_FAILED
+
+The helper could not read or decode the configured nftables table. Run `sudo nft list tables` on the destination node. Check the configured table name and use `sudo nft -j list table inet <table>` to check whether nftables can return it. Use this node's table name, which may differ from the example. Check the helper journal if the command succeeds manually.
+
+### SSH_NFT_RULES_INVALID
+
+The table exists, but the expected input chain, two timeout sets, or matching rules could not be verified. Compare `sudo nft -a list chain inet <table> <chain>` and the two sets against [Configure the node](#configure-the-node). Keep the exact match order, interface and port. Reference each set only from its designated rule and put both rules before the public interface's drop rule. Apply changes through the host's persistent firewall configuration.
+
+### SSH_STATE_INVALID
+
+The helper could not read or reconcile its local grant state with the kernel sets. Read the local error details and inspect the two sets and the helper journal. Keep both sets empty in the persistent firewall definition. A reload that recreates them ends an active window. If the error refers to a damaged `*.temporary-ssh-state.json` file, retain it for diagnosis and review its path and ownership before requesting a new window.
+
+### SSH_HELPER_UPDATE_REQUIRED
+
+The running helper did not report support for source-scoped temporary SSH. Update the Agent and installed Rescue Helper together on the selected node. Check `sudo systemctl status komari-agent-rescue.service` and reopen Rescue after a fresh report.
+
+### SSH_STATUS_UNAVAILABLE
+
+The helper reported support without a usable port or a diagnostic code. Update the helper, then review its next status report. If this persists, confirm the JSON file and loaded firewall entry point on the same node.
+
+### The kernel write succeeded, but SSH still times out
+
+Confirm the reported port is listening, for example with `sudo ss -ltn 'sport = :8658'`. Verify the source address and IP family, then check rule placement, later input chains, CrowdSec and any cloud firewall. Test a fresh SSH connection from the authorized device.

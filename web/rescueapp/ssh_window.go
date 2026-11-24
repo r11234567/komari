@@ -137,6 +137,10 @@ func recordSSHWindowStatus(tx *gorm.DB, agentID string, status *rescuev1.RescueH
 		return errors.New("temporary SSH status belongs to a previous enrollment")
 	}
 	row.SSHWindowSupported, row.SSHAccessPort, row.SSHEnrollmentKey = true, status.GetSshAccessPort(), key
+	if detail := status.GetSshWindowError(); detail != nil && row.SSHAccessPort == 0 {
+		row.SSHWindowErrorCode = sanitize(detail.GetCode(), 64)
+		row.SSHWindowErrorText = sanitize(detail.GetMessage(), 512)
+	}
 	access := status.GetSshAccess()
 	if access == nil {
 		return nil
