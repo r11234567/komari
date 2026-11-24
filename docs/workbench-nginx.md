@@ -1,5 +1,7 @@
 # Workbench through Nginx
 
+For an orange-cloud DNS hostname, see [Agent gRPC through Cloudflare DNS proxy](cloudflare-agent-grpc.md).
+
 Both `WebSSHService/AttachSession` and `FileService/AttachFileOperations`
 require bidirectional HTTP/2 between Agent, Nginx and Komari. Enabling HTTP/2
 only on the public listener does not upgrade an HTTP/1.1 `proxy_pass` upstream.

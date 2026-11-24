@@ -40,6 +40,7 @@ type Settings struct {
 	OAuthProvider         string `json:"o_auth_provider" default:"github"`
 	DisablePasswordLogin  bool   `json:"disable_password_login" default:"false"`
 	CloudflareTunnelToken string `json:"cloudflare_tunnel_token" default:""`
+	AgentCloudflareProxy  bool   `json:"agent_cloudflare_proxy" default:"false"`
 	HTTPSEnabled          bool   `json:"https_enabled" default:"false"`
 	HTTPSListen           string `json:"https_listen" default:":35938"`
 	HTTPSRedirectHTTP     bool   `json:"https_redirect_http" default:"false"`
@@ -96,6 +97,7 @@ const (
 	OAuthProviderKey         = "o_auth_provider"
 	DisablePasswordLoginKey  = "disable_password_login"
 	CloudflareTunnelTokenKey = "cloudflare_tunnel_token"
+	AgentCloudflareProxyKey  = "agent_cloudflare_proxy"
 	HTTPSEnabledKey          = "https_enabled"
 	HTTPSListenKey           = "https_listen"
 	HTTPSRedirectHTTPKey     = "https_redirect_http"

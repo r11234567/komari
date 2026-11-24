@@ -177,6 +177,11 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	if _, found := cfg[config.RetiredAdminKey]; found {
 		return nil, rpc.MakeError(rpc.InvalidParams, "legacy administrator key is retired", nil)
 	}
+	if raw, found := cfg[config.AgentCloudflareProxyKey]; found {
+		if _, ok := raw.(bool); !ok {
+			return nil, rpc.MakeError(rpc.InvalidParams, "agent_cloudflare_proxy must be a boolean", nil)
+		}
+	}
 	if loginSettingsTouched(cfg) {
 		if err := signonauth.Require(ctx); err != nil {
 			return nil, rpc.MakeError(rpc.PermissionDenied, err.Error(), nil)

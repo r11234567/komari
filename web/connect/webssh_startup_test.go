@@ -20,6 +20,8 @@ import (
 	websshv1 "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1"
 	websshv1connect "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1/websshv1connect"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 func TestWebSSHColdStartupFramesPrecedePTYOutputAndDoNotAdvanceCursor(t *testing.T) {
@@ -48,21 +50,30 @@ func runWebSSHColdStartup(t *testing.T, throughNginx bool) {
 	require.NoError(t, err)
 	t.Cleanup(func() { session.Close(websshv1.CloseReason_CLOSE_REASON_CANCELLED) })
 	_, handler := websshv1connect.NewWebSSHServiceHandler(&webSSHService{}, connect.WithInterceptors(newPolicyInterceptor()))
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		meta := rpc.MetaFromContext(ctx)
-		if strings.HasSuffix(r.URL.Path, "/LeaseSessions") {
+		switch r.URL.Path {
+		case websshv1connect.WebSSHServiceAttachSessionProcedure:
+			if r.ProtoMajor != 2 || r.Header.Get("Content-Type") != "application/grpc" {
+				t.Errorf("Agent attach arrived as %s with content type %q", r.Proto, r.Header.Get("Content-Type"))
+			}
+			fallthrough
+		case websshv1connect.WebSSHServiceLeaseSessionsProcedure:
 			meta = &rpc.ContextMeta{Principal: rpc.NewAgentPrincipal(agent), ClientUUID: agent}
 		}
 		bound := workspace.WithToken(rpc.NewContextWithMeta(r.Context(), meta), token)
 		handler.ServeHTTP(w, r.WithContext(bound))
-	}))
+	}), &http2.Server{}))
 	defer server.Close()
 	client := websshv1connect.NewWebSSHServiceClient(server.Client(), server.URL)
+	var grpcAgent websshv1connect.WebSSHServiceClient
 	if throughNginx {
 		nginx, err := exec.LookPath("nginx")
 		require.NoError(t, err)
 		endpoint := startWorkbenchNginx(t, nginx, strings.TrimPrefix(server.URL, "http://"), "proxy_read_timeout 1s;")
-		client = websshv1connect.NewWebSSHServiceClient(workbenchHTTP2Client(t), endpoint)
+		httpClient := workbenchHTTP2Client(t)
+		client = websshv1connect.NewWebSSHServiceClient(httpClient, endpoint)
+		grpcAgent = websshv1connect.NewWebSSHServiceClient(httpClient, endpoint, connect.WithGRPC())
 	}
 	streamCtx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
@@ -85,15 +96,50 @@ func runWebSSHColdStartup(t *testing.T, throughNginx bool) {
 	require.True(t, lease.Receive(), lease.Err())
 	assignment := lease.Msg().Assignment
 	require.NotNil(t, assignment)
-	_, err = remotemanagement.Attach(agent, assignment.AssignmentId, assignment.SessionId)
-	require.NoError(t, err)
+	var attachment *connect.BidiStreamForClient[websshv1.AttachSessionRequest, websshv1.AttachSessionResponse]
+	if grpcAgent != nil {
+		attachment = grpcAgent.AttachSession(streamCtx)
+		t.Cleanup(func() { _ = attachment.CloseResponse() })
+		attachment.RequestHeader().Set(workspace.IdentityHeader, "v1")
+		require.NoError(t, attachment.Send(&websshv1.AttachSessionRequest{
+			Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{
+				AgentId: agent, AssignmentId: assignment.AssignmentId, SessionId: assignment.SessionId, Resumable: true,
+			}},
+		}))
+		first, err := attachment.Receive()
+		require.NoError(t, err)
+		require.Nil(t, first.Command)
+	} else {
+		_, err = remotemanagement.Attach(agent, assignment.AssignmentId, assignment.SessionId)
+		require.NoError(t, err)
+	}
 	// The process exists but deliberately has no prompt/output yet. A status
 	// frame must report precisely that state, without inventing terminal bytes.
 	require.True(t, stream.Receive(), stream.Err())
 	require.Nil(t, stream.Msg().Event)
 	require.True(t, stream.Msg().AgentAttached)
-	_, err = session.AppendAgentEvent(&websshv1.AgentSessionEvent{Sequence: 1, Event: &websshv1.AgentSessionEvent_Output{Output: []byte("prompt$ ")}})
-	require.NoError(t, err)
+	output := &websshv1.AgentSessionEvent{Sequence: 1, Event: &websshv1.AgentSessionEvent_Output{Output: []byte("prompt$ ")}}
+	if attachment != nil {
+		_, err = client.SendSessionCommand(streamCtx, connect.NewRequest(&websshv1.SendSessionCommandRequest{
+			SessionId: session.ID, Sequence: 1,
+			Command: &websshv1.SendSessionCommandRequest_Input{Input: []byte("pwd\n")},
+		}))
+		require.NoError(t, err)
+		for {
+			frame, err := attachment.Receive()
+			require.NoError(t, err)
+			if frame.Command != nil {
+				require.Equal(t, "pwd\n", string(frame.GetInput()))
+				break
+			}
+		}
+		require.NoError(t, attachment.Send(&websshv1.AttachSessionRequest{
+			Message: &websshv1.AttachSessionRequest_Event{Event: output},
+		}))
+	} else {
+		_, err = session.AppendAgentEvent(output)
+		require.NoError(t, err)
+	}
 	require.True(t, stream.Receive(), stream.Err())
 	require.Equal(t, uint64(1), stream.Msg().Event.Sequence)
 	require.Equal(t, "prompt$ ", string(stream.Msg().Event.GetOutput()))
