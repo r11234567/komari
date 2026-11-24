@@ -5,7 +5,56 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
+
+func TestTelemetryTrafficTransientBackoff(t *testing.T) {
+	s, e := telemetryFixture(t, "")
+	ctx := context.Background()
+	now := time.Now()
+	require.NoError(t, e.EnsureSchedule(ctx, []ScheduleTask{{Name: "traffic", Due: now}}))
+	for attempt, wait := range []time.Duration{2, 4, 8, 16, 16} {
+		failure := error(context.DeadlineExceeded)
+		if attempt == 1 {
+			failure = ErrTelemetryBackpressure
+		}
+		started := time.Now()
+		_, _, ran, err := e.DispatchSchedule(ctx, now, func(context.Context, ScheduleTask) (ScheduleOutcome, error) {
+			return ScheduleOutcome{}, failure
+		})
+		ended := time.Now()
+		require.True(t, ran)
+		require.ErrorIs(t, err, failure)
+		var due int64
+		var attempts int
+		var message string
+		require.NoError(t, s.db.QueryRow("SELECT due,attempts,last_error FROM metric_telemetry_schedule WHERE task='traffic'").Scan(&due, &attempts, &message))
+		require.Equal(t, attempt+1, attempts)
+		require.Equal(t, failure.Error(), message)
+		now = time.Unix(0, due)
+		require.False(t, now.Before(started.Add(wait*time.Second)))
+		require.False(t, now.After(ended.Add(wait*time.Second)))
+		beforeDue := now.Add(-time.Nanosecond)
+		require.NoError(t, e.ExpediteSchedule(ctx, []string{"traffic"}, beforeDue))
+		_, _, ran, err = e.DispatchSchedule(ctx, beforeDue, func(context.Context, ScheduleTask) (ScheduleOutcome, error) {
+			t.Fatal("input bypassed traffic backoff")
+			return ScheduleOutcome{}, nil
+		})
+		require.NoError(t, err)
+		require.False(t, ran)
+	}
+	_, _, ran, err := e.DispatchSchedule(ctx, now, func(context.Context, ScheduleTask) (ScheduleOutcome, error) {
+		return ScheduleOutcome{Progress: 1, Delay: time.Hour}, nil
+	})
+	require.NoError(t, err)
+	require.True(t, ran)
+	var attempts int
+	var message string
+	require.NoError(t, s.db.QueryRow("SELECT attempts,last_error FROM metric_telemetry_schedule WHERE task='traffic'").Scan(&attempts, &message))
+	require.Zero(t, attempts)
+	require.Empty(t, message)
+}
 
 func TestTelemetryScheduleFailurePersistsAndDoesNotStarve(t *testing.T) {
 	dir := t.TempDir()

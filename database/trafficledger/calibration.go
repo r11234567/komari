@@ -483,7 +483,7 @@ func CalibrateCurrentCycle(ctx context.Context, db *gorm.DB, client models.Clien
 	// correction, otherwise concurrent saves would apply the same delta twice.
 	calibrationWriteMu.Lock()
 	defer calibrationWriteMu.Unlock()
-	return withCalibrationAccounting(ctx, func() (CalibrationSnapshot, error) {
+	return withCalibrationAccounting(ctx, client.UUID, func() (CalibrationSnapshot, error) {
 		return calibrateCycle(ctx, db, client, target, operator, now, "directions", nil, nil)
 	})
 }

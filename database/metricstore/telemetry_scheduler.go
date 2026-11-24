@@ -158,7 +158,11 @@ func runTelemetryPass(ctx context.Context, s *metric.Store, now time.Time) (Sche
 		out := metric.ScheduleOutcome{Cursor: task.Cursor, Delay: time.Hour}
 		chunk := max(8, 128>>min(task.Attempts, 4))
 		budget := 2 * time.Second
-		if task.Name == "archive" || task.Name == "delete" {
+		switch task.Name {
+		case "traffic":
+			// SQLite metadata may spend up to 5 seconds waiting for a writer.
+			budget = 8 * time.Second
+		case "archive", "delete":
 			budget = 40 * time.Second
 		}
 		work, cancel := context.WithTimeout(ctx, budget)
@@ -193,6 +197,9 @@ func runTelemetryPass(ctx context.Context, s *metric.Store, now time.Time) (Sche
 		case "traffic":
 			if c := activeTelemetryConsumer.Load(); c != nil && c.apply != nil {
 				out.Progress, err = t.DeliverTraffic(work, chunk, c.apply)
+				if err != nil && work.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+					err = errors.Join(err, work.Err())
+				}
 			}
 			if out.Progress > 0 {
 				out.Delay = 200 * time.Millisecond

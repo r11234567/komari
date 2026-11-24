@@ -353,6 +353,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 		{"segments_partition", "segments", "state,archive_entity,archive_day,created,id"},
 		{"segments_file", "segments", "archive_file,archive_offset"},
 		{"outbox_pending", "outbox", "delivered,ingest_id"},
+		{"outbox_source_pending", "outbox", "source,delivered"},
 		{"summary_series", "summary", "series_id,resolution,bucket"},
 		{"receipt_age", "receipts", "received,ingest_id"},
 		{"receipt_segment", "receipts", "segment_id,ingest_id"},

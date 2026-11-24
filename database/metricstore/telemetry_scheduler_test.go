@@ -8,7 +8,62 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/pkg/metric"
+	"github.com/stretchr/testify/require"
 )
+
+func TestTelemetryTrafficSurvivesSQLiteWriterContention(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	s, err := metric.Open(ctx, metric.SQLite(filepath.Join(dir, "metrics.db"), metric.WithRetiredLegacyStorage(), metric.WithSQLiteProfile(metric.SQLiteProfileDurable)))
+	require.NoError(t, err)
+	defer s.Close()
+	require.NoError(t, s.CreateMetric(ctx, metric.Definition{Name: "cpu", RetentionDays: 30}))
+	require.NoError(t, s.EnableTelemetry(ctx, metric.TelemetryConfig{ArchiveDirectory: filepath.Join(dir, "archive")}))
+
+	ledger, err := sql.Open("sqlite3", filepath.Join(dir, "metadata.db")+"?_busy_timeout=5000&_txlock=immediate&_journal_mode=WAL")
+	require.NoError(t, err)
+	defer ledger.Close()
+	_, err = ledger.ExecContext(ctx, "CREATE TABLE traffic (ingest_id INTEGER PRIMARY KEY)")
+	require.NoError(t, err)
+	writer, err := ledger.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer writer.Rollback()
+	priorConsumer := activeTelemetryConsumer.Load()
+	defer activeTelemetryConsumer.Store(priorConsumer)
+	ConfigureTelemetryConsumer(func(ctx context.Context, event metric.TelemetryTrafficEvent) error {
+		// Keep the other SQLite writer open beyond the former delivery budget.
+		released := make(chan error, 1)
+		time.AfterFunc(3*time.Second, func() { released <- writer.Rollback() })
+		tx, err := ledger.BeginTx(ctx, nil)
+		require.NoError(t, <-released)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err = tx.ExecContext(ctx, "INSERT INTO traffic VALUES (?)", event.IngestID); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+	now := time.Now().UTC()
+	require.NoError(t, s.Telemetry().EnsureSchedule(ctx, []metric.ScheduleTask{{Name: "traffic", Due: now}}))
+	require.NoError(t, ensureTelemetrySchedule(ctx, s.Telemetry(), now.Add(time.Hour)))
+	_, err = s.Telemetry().Accept(ctx, metric.TelemetryBatch{
+		Source: "node", Identity: "one", Traffic: &metric.TelemetryTraffic{},
+		Points: []metric.Point{{MetricName: "cpu", EntityID: "node", Timestamp: now, Value: 1}},
+	}, now)
+	require.NoError(t, err)
+	result, err := runTelemetryPass(ctx, s, now)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Cleanups)
+	pending, err := s.Telemetry().TrafficPendingFor(ctx, "node")
+	require.NoError(t, err)
+	require.False(t, pending)
+	var count int
+	require.NoError(t, ledger.QueryRowContext(ctx, "SELECT COUNT(*) FROM traffic").Scan(&count))
+	require.Equal(t, 1, count)
+}
 
 func TestTelemetryDrainedSummarySleepsUntilInput(t *testing.T) {
 	ctx := context.Background()
