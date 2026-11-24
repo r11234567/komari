@@ -4,15 +4,25 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"github.com/komari-monitor/komari/pkg/trafficcounter"
 	"time"
+
+	"github.com/komari-monitor/komari/pkg/trafficcounter"
 )
 
 // TrafficPending uses a bounded indexed read, not a backlog COUNT(*). This is
 // advisory across the metadata/metric database boundary.
 func (t *Telemetry) TrafficPending(ctx context.Context) (bool, error) {
-	var id int64
-	err := t.s.reader().QueryRowContext(ctx, "SELECT ingest_id FROM "+t.table("outbox")+" WHERE delivered=0 ORDER BY ingest_id LIMIT 1").Scan(&id)
+	return t.trafficPending(ctx, "delivered=0")
+}
+
+// TrafficPendingFor checks whether a source has any unacknowledged traffic.
+func (t *Telemetry) TrafficPendingFor(ctx context.Context, source string) (bool, error) {
+	return t.trafficPending(ctx, "source=? AND delivered=0", source)
+}
+
+func (t *Telemetry) trafficPending(ctx context.Context, where string, args ...any) (bool, error) {
+	var found int
+	err := t.s.reader().QueryRowContext(ctx, t.bind("SELECT 1 FROM "+t.table("outbox")+" WHERE "+where+" LIMIT 1"), args...).Scan(&found)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

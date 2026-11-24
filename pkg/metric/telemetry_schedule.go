@@ -141,7 +141,13 @@ func (t *Telemetry) DispatchSchedule(ctx context.Context, now time.Time, run fun
 	if workErr != nil {
 		out.Cursor = task.Cursor
 		attempts = min(task.Attempts+1, 1000)
-		delay = telemetryRetryDelay(attempts)
+		if task.Name == "traffic" && (errors.Is(workErr, context.DeadlineExceeded) || errors.Is(workErr, ErrTelemetryBackpressure)) {
+			// Traffic accounting is foreground-visible. Bound retries after a
+			// transient stall without bypassing the durable schedule deadline.
+			delay = (2 * time.Second) << min(attempts-1, 3)
+		} else {
+			delay = telemetryRetryDelay(attempts)
+		}
 		message = workErr.Error()
 		if len(message) > 512 {
 			message = message[:512]
