@@ -205,9 +205,7 @@ func TestFullBackupIncludesPluginsAndRestoresPasskeyCredentials(t *testing.T) {
 
 	// Install and approve an active ordinary plugin through the real plugin
 	// lifecycle, and also stage a pre-retirement komari-passkey package + approval
-	// in state.json to verify that restore keeps ordinary plugins running while
-	// preventing the retired komari-passkey package and its legacy approval from
-	// auto-enabling after restore.
+	// in state.json to verify that restore discards both approvals.
 	_ = plugin.CloseAll()
 	oldDir, oldStorage := plugin.DataDir, plugin.StorageDir
 	plugin.DataDir = filepath.Join(srcData, "plugin")
@@ -276,6 +274,7 @@ func TestFullBackupIncludesPluginsAndRestoresPasskeyCredentials(t *testing.T) {
 	}
 
 	mustWrite("theme/custom/theme.json", `{"name":"custom"}`, 0o644)
+	mustWrite("plugin-data/hello-backup/settings.json", `{"saved":true}`, 0o600)
 	mustWrite("plugin-data/komari-passkey/passkeys.json", string(passkeyJSON), 0o600)
 
 	// Configuration-only backup retains its separate scope without plugin runtime/state.
@@ -337,9 +336,7 @@ func TestFullBackupIncludesPluginsAndRestoresPasskeyCredentials(t *testing.T) {
 		}
 	}
 
-	// Boot plugins from the restored directory using plugin.LoadAll() ONLY (no
-	// SetEnabled bypass) to prove persisted enabled state and approvals survive
-	// restore for active plugins while retired komari-passkey remains disabled.
+	// Boot from the restored directory before submitting any package approval.
 	plugin.DataDir = filepath.Join(restoredData, "plugin")
 	plugin.StorageDir = filepath.Join(restoredData, "plugin-data")
 	plugin.Init(gin.New())
@@ -347,24 +344,67 @@ func TestFullBackupIncludesPluginsAndRestoresPasskeyCredentials(t *testing.T) {
 		t.Fatalf("plugin.LoadAll after restore failed: %v", err)
 	}
 
-	var helloRunning, legacyRunning, legacyEnabled bool
+	var helloFound, legacyFound bool
 	for _, item := range plugin.List() {
 		switch item.Short {
 		case "hello-backup":
-			helloRunning = item.Enabled && item.Running
+			helloFound = true
+			if item.Enabled || item.Running {
+				t.Fatalf("restored ordinary plugin started before approval: %+v", item)
+			}
 		case "komari-passkey":
-			legacyEnabled = item.Enabled
-			legacyRunning = item.Running
+			legacyFound = true
+			if item.Enabled || item.Running {
+				t.Fatalf("retired Passkey plugin started: %+v", item)
+			}
 		}
 	}
-	if !helloRunning {
-		t.Fatal("restored hello-backup plugin is not running after plugin.LoadAll()")
+	if !helloFound || !legacyFound {
+		t.Fatalf("restored plugin manifests missing: hello=%v legacy=%v", helloFound, legacyFound)
 	}
-	if legacyEnabled || legacyRunning {
-		t.Fatalf("retired komari-passkey plugin was re-enabled after restore (enabled=%v running=%v)", legacyEnabled, legacyRunning)
+	if err := plugin.SetEnabled("hello-backup", true, false); err == nil {
+		t.Fatal("restored ordinary plugin enabled without a new package approval")
 	}
 	if err := plugin.SetEnabled("komari-passkey", true, true); err == nil {
 		t.Fatal("expected enabling retired komari-passkey plugin to fail")
+	}
+	if _, err := plugin.StageZip(helloZip, "Restore regression", "hello-backup", "0.1.0"); err != nil {
+		t.Fatalf("resubmit original plugin package: %v", err)
+	}
+	reviews, err := plugin.ListPackages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var review *plugin.PackageReview
+	for i := range reviews {
+		if reviews[i].Plugin.Short == "hello-backup" && reviews[i].Source == "Restore regression" {
+			review = &reviews[i]
+			break
+		}
+	}
+	if review == nil || !review.RequiresApproval || review.CurrentDigest != "" {
+		t.Fatalf("expected the resubmitted package to require a fresh approval, got %+v", review)
+	}
+	if err := plugin.DecidePackage("hello-backup", review.Digest, "", "activate", "test-admin", func(actual plugin.PackageReview) error {
+		if actual.Digest != review.Digest || actual.PermissionsHash != review.PermissionsHash || !actual.RequiresApproval {
+			t.Fatalf("approval did not match the resubmitted package: %+v", actual)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("approve original plugin package: %v", err)
+	}
+	var helloRunning bool
+	for _, item := range plugin.List() {
+		if item.Short == "hello-backup" {
+			helloRunning = item.Enabled && item.Running
+		}
+	}
+	if !helloRunning {
+		t.Fatal("approved plugin did not start")
+	}
+	rawSettings, err := os.ReadFile(filepath.Join(plugin.StorageDir, "hello-backup", "settings.json"))
+	if err != nil || string(rawSettings) != `{"saved":true}` {
+		t.Fatalf("restored ordinary plugin storage not preserved: %q, %v", rawSettings, err)
 	}
 
 	snapshot, err := passkeycredential.Read(context.Background(), userUUID)
