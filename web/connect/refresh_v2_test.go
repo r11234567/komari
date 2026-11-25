@@ -147,6 +147,23 @@ func TestCredentialRefreshV2RejectsExpiredHandoffAndProtocolDowngrade(t *testing
 	require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
 }
 
+func TestAuthenticatedRefreshReuseCancelsActiveStream(t *testing.T) {
+	record, token, key, client := refreshFixture(t)
+	ctx := t.Context()
+	stream, stop, err := enrollment.TrackStream(ctx, record.Client, "synthetic-access"+token)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	_, err = client.RefreshCredentials(ctx, refreshRequest(t, record, token, uuid.NewString(), nil, key))
+	require.NoError(t, err)
+	require.NoError(t, stream.Err(), "routine refresh should preserve a live stream")
+	generation := record.Generation
+	_, err = client.RefreshCredentials(ctx, refreshRequest(t, record, token, uuid.NewString(), &generation, key))
+	require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
+	require.ErrorIs(t, stream.Err(), context.Canceled)
+	_, _, err = enrollment.TrackStream(ctx, record.Client, "synthetic-access"+token)
+	require.Error(t, err)
+}
+
 func TestCredentialRefreshV2RejectsMalformedVersionAndBindings(t *testing.T) {
 	for _, kind := range []string{"unknown-protocol", "invalid-protocol", "wrong-agent", "wrong-token", "expired", "future", "missing-request", "unknown-field", "wrong-generation"} {
 		t.Run(kind, func(t *testing.T) {

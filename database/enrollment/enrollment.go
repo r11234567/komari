@@ -304,6 +304,7 @@ func Poll(deviceCode string) (Attempt, *Issued, error) {
 	if cache != nil {
 		pollGraceCache.Store(code, cache)
 		if attempt.Reenrolled {
+			cancelStreams(attempt.Client)
 			privilegeddelivery.Notify(attempt.Client)
 		}
 	}
@@ -446,12 +447,17 @@ func Refresh(refreshToken string) (Issued, models.AgentCredential, error) {
 // Revoke invalidates a machine's credentials immediately.
 func Revoke(clientUUID, reason string) error {
 	now := time.Now().UTC()
-	return dbcore.GetDBInstance().Model(&models.AgentCredential{}).
+	err := dbcore.GetDBInstance().Model(&models.AgentCredential{}).
 		Where("client = ?", clientUUID).
 		Updates(map[string]any{
 			"revoked_at": now, "revoked_reason": trim(reason, 255), "updated_at": now,
 			"refresh_recovery_sealed": "", "refresh_recovery_until": nil, "refresh_recovery_request": "",
 		}).Error
+	if err == nil {
+		cancelStreams(clientUUID)
+		privilegeddelivery.Notify(clientUUID)
+	}
+	return err
 }
 
 // ErrEpochMismatch indicates the panel's security epoch advanced (e.g. after a

@@ -212,6 +212,11 @@ func AgentTransfer(c *gin.Context) {
 		c.String(http.StatusUnauthorized, err.Error())
 		return
 	}
+	ctx := c.Request.Context()
+	stop := context.AfterFunc(ctx, func() {
+		transfer.close(ctx.Err())
+	})
+	defer stop()
 
 	switch c.Request.Method {
 	case http.MethodGet:
