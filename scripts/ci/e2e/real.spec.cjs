@@ -243,11 +243,6 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       const cookie = (await context.cookies()).find(c => c.name === '__Host-komari_session');
       expect(cookie?.secure).toBe(true);
       expect(cookie?.httpOnly).toBe(true);
-      const authorization = (await (await request('/api/bind/ticket', {})).json()).data;
-      expect(authorization.expires_in).toBeGreaterThan(0);
-      expect(authorization).not.toHaveProperty('ticket');
-      const bindCookie = (await context.cookies()).find(cookie => cookie.name === '__Host-komari_bind');
-      expect(bindCookie).toMatchObject({ secure: true, httpOnly: true, sameSite: 'Strict' });
       const log = fs.openSync(path.join(artifacts, 'enrollment.log'), 'w', 0o600);
       const loginCommand = process.env.KOMARI_E2E_LOCAL === '1' ? 'sudo' : '/usr/lib/komari/komari-e2e/komari-agent';
       const loginPrefix = process.env.KOMARI_E2E_LOCAL === '1' ? ['-u', serviceUser, '/usr/lib/komari/komari-e2e/komari-agent'] : [];
@@ -259,11 +254,40 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
         pending = (await rpc('enrollment', 'ListPendingEnrollments')).enrollments || [];
         return pending.length;
       }, { timeout: 60_000 }).toBe(1);
-      const approved = await rpc('enrollment', 'ApproveEnrollment', {
-        userCode: pending[0].userCode, newAgent: { name: 'Real E2E Agent' },
-      });
-      expect(approved.created).toBe(true);
-      agentId = approved.agentId;
+      const crossOrigin = await request('/api/bind/ticket', {}, { allowFailure: true,
+        headers: { Origin: 'https://status.invalid', 'Sec-Fetch-Site': 'cross-site' } });
+      expect(crossOrigin.status()).toBe(403);
+      const binding = `/bind?${new URLSearchParams({ code: pending[0].userCode })}`;
+      await page.goto(binding);
+      await expect(page).toHaveURL(/\/bind-login\?/);
+      const loginForm = page.locator('.km-login-form');
+      await loginForm.locator('input[name="username"]').fill('e2e-user');
+      await loginForm.locator('input[name="password"]').fill(password);
+      const ticketResponse = page.waitForResponse(r => new URL(r.url()).pathname === '/api/public/bind/ticket' && r.request().method() === 'POST');
+      await loginForm.locator('button[type="submit"]').click();
+      const authorization = (await (await ticketResponse).json()).data;
+      expect(authorization.expires_in).toBeGreaterThan(0);
+      expect(authorization).not.toHaveProperty('ticket');
+      await expect(page).toHaveURL(`${base}${binding}`);
+      const bindCookie = (await context.cookies()).find(cookie => cookie.name === '__Host-komari_bind');
+      expect(bindCookie).toMatchObject({ secure: true, httpOnly: true, sameSite: 'Strict' });
+      expect(await page.evaluate(() => document.cookie.includes('__Host-komari_bind='))).toBe(false);
+      const newMachine = page.getByText('选项 A：接入为新机器', { exact: true }).locator('../..');
+      await newMachine.getByRole('textbox').first().fill('Real E2E Agent');
+      const approvalResponse = page.waitForResponse(r => new URL(r.url()).pathname === `/${services.enrollment}/ApproveEnrollment`);
+      await page.getByRole('button', { name: '确认作为新机器接入' }).click();
+      const approval = await approvalResponse;
+      expect(approval.ok()).toBe(true);
+      const reader = new BinaryReader(await approval.body());
+      let created = false;
+      while (reader.pos < reader.len) {
+        const [field, wireType] = reader.tag();
+        if (field === 3) created = reader.bool();
+        else reader.skip(wireType);
+      }
+      expect(created).toBe(true);
+      await expect(page.getByText('机器绑定已批准', { exact: true })).toBeVisible();
+      agentId = await page.locator('code').textContent();
       expect(agentId).toMatch(/^[a-f0-9-]{36}$/);
       await expect.poll(() => login.exitCode, { timeout: 90_000 }).toBe(0);
       const bundle = await rpc('trust', 'GetTrustBundle');
