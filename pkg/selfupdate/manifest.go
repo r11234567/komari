@@ -1,7 +1,10 @@
 package selfupdate
 
 import (
+	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -9,7 +12,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -19,6 +21,7 @@ import (
 const (
 	releaseBaseURL = "https://github.com/r11234567/komari/releases/download"
 	manifestName   = "komari-update.json"
+	signatureName  = "komari-update.json.sig"
 	maxManifest    = 2 << 20
 	maxBinary      = 256 << 20
 )
@@ -43,26 +46,52 @@ type ManifestAsset struct {
 	SHA256 string `json:"sha256"`
 }
 
-func fetchManifest(ctxURL string, client *http.Client) (*Manifest, error) {
-	req, err := http.NewRequest(http.MethodGet, ctxURL, nil)
+func updateVerificationKey() (ed25519.PublicKey, error) {
+	value := strings.TrimSpace(os.Getenv("KOMARI_UPDATE_SIGNING_PUBLIC_KEY"))
+	key, err := base64.StdEncoding.Strict().DecodeString(value)
+	if err != nil || len(key) != ed25519.PublicKeySize {
+		return nil, errors.New("configure KOMARI_UPDATE_SIGNING_PUBLIC_KEY with the trusted Ed25519 release public key")
+	}
+	return ed25519.PublicKey(key), nil
+}
+
+func fetchUpdateMetadata(ctx context.Context, client *http.Client, endpoint string, limit int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("update manifest returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("update metadata returned HTTP %d", resp.StatusCode)
 	}
-	content, err := io.ReadAll(io.LimitReader(resp.Body, maxManifest+1))
+	content, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(content) > maxManifest {
-		return nil, errors.New("update manifest is too large")
+	if int64(len(content)) > limit {
+		return nil, errors.New("update metadata is too large")
+	}
+	return content, nil
+}
+
+func fetchManifest(ctx context.Context, client *http.Client, manifestURL, signatureURL string, key ed25519.PublicKey) (*Manifest, error) {
+	if len(key) != ed25519.PublicKeySize {
+		return nil, errors.New("invalid update verification key")
+	}
+	signature, err := fetchUpdateMetadata(ctx, client, signatureURL, ed25519.SignatureSize)
+	if err != nil {
+		return nil, fmt.Errorf("download update signature: %w", err)
+	}
+	content, err := fetchUpdateMetadata(ctx, client, manifestURL, maxManifest)
+	if err != nil {
+		return nil, fmt.Errorf("download update manifest: %w", err)
+	}
+	if !ed25519.Verify(key, content, signature) {
+		return nil, errors.New("update manifest signature verification failed")
 	}
 	var manifest Manifest
 	if err := json.Unmarshal(content, &manifest); err != nil {
@@ -98,8 +127,8 @@ func (manifest *Manifest) validate(version, versionHash string) (*ManifestAsset,
 	return nil, fmt.Errorf("release does not contain %s", name)
 }
 
-func downloadAsset(client *http.Client, url, destination string, asset ManifestAsset) error {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+func downloadAsset(ctx context.Context, client *http.Client, url, destination string, asset ManifestAsset) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
@@ -142,10 +171,6 @@ func downloadAsset(client *http.Client, url, destination string, asset ManifestA
 		return err
 	}
 	return os.Rename(temporary, destination)
-}
-
-func releaseURL(version, name string) string {
-	return releaseBaseURL + "/" + version + "/" + filepath.Base(name)
 }
 
 func updateHTTPClient() *http.Client {

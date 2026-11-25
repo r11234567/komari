@@ -304,35 +304,12 @@ jobs:
       - name: Generate checksums and update manifest
         env:
           VERSION: ${{ needs.prepare.outputs.app_version }}
-        working-directory: release-assets
+          KOMARI_UPDATE_SIGNING_KEY: ${{ secrets.KOMARI_UPDATE_SIGNING_KEY }}
         shell: bash
         run: |
           set -euo pipefail
-          sha256sum komari-linux-* komari-windows-* | sort -k2 > SHA256SUMS
-          node <<'NODE'
-          const crypto = require("crypto");
-          const fs = require("fs");
-          const files = fs.readdirSync(".")
-            .filter((name) => /^komari-(linux|windows)-[A-Za-z0-9]+(?:\.exe)?$/.test(name))
-            .sort();
-          const assets = files.map((name) => {
-            const content = fs.readFileSync(name);
-            const match = name.match(/^komari-(linux|windows)-([A-Za-z0-9]+)(?:\.exe)?$/);
-            return {
-              name,
-              os: match[1],
-              arch: match[2],
-              size: content.length,
-              sha256: crypto.createHash("sha256").update(content).digest("hex"),
-            };
-          });
-          fs.writeFileSync("komari-update.json", JSON.stringify({
-            schema: 1,
-            version: process.env.VERSION,
-            version_hash: process.env.GITHUB_SHA.slice(0, 7),
-            assets,
-          }, null, 2) + "\n");
-          NODE
+          (cd release-assets && sha256sum komari-linux-* komari-windows-* | sort -k2 > SHA256SUMS)
+          VERSION_HASH="${GITHUB_SHA::7}" node scripts/release/update-manifest.mjs release-assets
 
       - name: Create release and upload assets
         env:
@@ -394,11 +371,11 @@ jobs:
               --prerelease
           fi
 
-          gh release upload "${SNAPSHOT_TAG}" \
-            release-assets/komari-linux-* \
-            release-assets/komari-windows-* \
-            release-assets/SHA256SUMS \
-            release-assets/komari-update.json \
+          files=(release-assets/komari-linux-* release-assets/komari-windows-* release-assets/SHA256SUMS release-assets/komari-update.json)
+          if [[ -f release-assets/komari-update.json.sig ]]; then
+            files+=(release-assets/komari-update.json.sig)
+          fi
+          gh release upload "${SNAPSHOT_TAG}" "${files[@]}" \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
 
