@@ -100,6 +100,10 @@ func DetectCapability() Capability {
 		result.Reason = "data_directory_is_mount"
 		return result
 	}
+	if _, err := updateVerificationKey(); err != nil {
+		result.Reason = "update_key_unconfigured"
+		return result
+	}
 
 	result.Supported = true
 	result.LastResult, _ = ReadLastResult(filepath.Dir(executable))

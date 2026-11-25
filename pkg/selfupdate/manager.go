@@ -2,11 +2,13 @@ package selfupdate
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,6 +80,10 @@ func PrepareAndLaunch(ctx context.Context, version, versionHash string) (*Update
 	if err != nil {
 		return nil, err
 	}
+	key, err := updateVerificationKey()
+	if err != nil {
+		return nil, err
+	}
 	if previous, err := ReadLastResult(filepath.Dir(executable)); err == nil && previous != nil && isUpdateInProgress(previous.Status) && time.Since(previous.UpdatedAt) < activeTransactionTimeout {
 		return nil, errors.New("another self-update transaction is already running")
 	}
@@ -102,19 +108,7 @@ func PrepareAndLaunch(ctx context.Context, version, versionHash string) (*Update
 		}
 	}()
 	candidate := filepath.Join(jobRoot, "komari-candidate")
-	client := updateHTTPClient()
-	manifest, err := fetchManifest(releaseURL(version, manifestName), client)
-	if err != nil {
-		return nil, err
-	}
-	asset, err := manifest.validate(version, versionHash)
-	if err != nil {
-		return nil, err
-	}
-	if err := downloadAsset(client, releaseURL(version, asset.Name), candidate, *asset); err != nil {
-		return nil, err
-	}
-	if err := verifyCandidate(ctx, candidate, version, versionHash); err != nil {
+	if err := stageVerifiedCandidate(ctx, updateHTTPClient(), releaseBaseURL+"/"+version, candidate, version, versionHash, key); err != nil {
 		return nil, err
 	}
 
@@ -243,6 +237,21 @@ func isUpdateInProgress(status string) bool {
 	default:
 		return false
 	}
+}
+
+func stageVerifiedCandidate(ctx context.Context, client *http.Client, release, candidate, version, versionHash string, key ed25519.PublicKey) error {
+	manifest, err := fetchManifest(ctx, client, release+"/"+manifestName, release+"/"+signatureName, key)
+	if err != nil {
+		return err
+	}
+	asset, err := manifest.validate(version, versionHash)
+	if err != nil {
+		return err
+	}
+	if err := downloadAsset(ctx, client, release+"/"+asset.Name, candidate, *asset); err != nil {
+		return err
+	}
+	return verifyCandidate(ctx, candidate, version, versionHash)
 }
 
 func verifyCandidate(ctx context.Context, candidatePath, version, versionHash string) error {
