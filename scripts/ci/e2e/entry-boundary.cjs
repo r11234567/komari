@@ -234,6 +234,34 @@ async function run() {
   await page.screenshot({ path: path.join(artifacts, 'private-site-native-login.png'), fullPage: true });
   checks.push('built-web-native-private-site-login-and-session');
 
+  const sharedContext = await browser.newContext({ baseURL: base });
+  try {
+    const sharePath = '/api/admin/settings/temporary-share';
+    assert.equal((await sharedContext.request.get('/api/nodes')).status(), 401);
+    assert.equal((await sharedContext.request.get(sharePath)).status(), 401);
+    const { data: share } = await post(admin, sharePath, { hours: 1 });
+    assert.match(share.token, /^[A-Za-z0-9_-]{43}$/);
+    console.log(`::add-mask::${share.token}`);
+
+    const sharePage = await sharedContext.newPage();
+    await sharePage.goto(`/share?temp_key=${encodeURIComponent(share.token)}`);
+    assert.equal(new URL(sharePage.url()).pathname, '/');
+    assert.equal(new URL(sharePage.url()).search, '');
+    const cookie = (await sharedContext.cookies()).find(item => item.name === '__Host-komari_temp_key');
+    assert(cookie?.secure && cookie.httpOnly);
+    assert.equal(cookie.sameSite, 'Lax');
+    assert.notEqual(cookie.value, share.token);
+    assert.equal((await sharedContext.request.get('/api/nodes')).status(), 200);
+    assert.equal((await sharedContext.request.get(sharePath)).status(), 401);
+
+    const revoked = await admin.delete(sharePath, { headers: { Origin: base } });
+    assert.equal(revoked.status(), 200);
+    assert.equal((await sharedContext.request.get('/api/nodes')).status(), 401);
+    checks.push('private-status-share-via-https-browser-redeems-and-revokes-without-admin-access');
+  } finally {
+    await sharedContext.close();
+  }
+
   // Loopback alias on the same disposable Nginx listener exercises real browser CORS across origins.
   const callerOrigin = 'https://localhost:29443';
   await post(admin, '/api/admin/settings', { cors_origin_check_enabled: true, cors_allowed_origins: callerOrigin });

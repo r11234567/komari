@@ -423,12 +423,20 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 			return themeInfo, fmt.Errorf("创建文件失败: %v", err)
 		}
 
-		_, err = io.Copy(outFile, rc)
-		outFile.Close()
+		// The headers were checked against the per-file and cumulative
+		// budgets. Stop writing if the stream outgrows its declared size.
+		written, err := io.Copy(outFile, io.LimitReader(rc, int64(f.UncompressedSize64)+1))
+		closeErr := outFile.Close()
 		rc.Close()
 
 		if err != nil {
 			return themeInfo, fmt.Errorf("解压文件失败: %v", err)
+		}
+		if closeErr != nil {
+			return themeInfo, fmt.Errorf("保存解压文件失败: %v", closeErr)
+		}
+		if uint64(written) != f.UncompressedSize64 {
+			return themeInfo, fmt.Errorf("主题文件 %s 解压大小与声明不符", f.Name)
 		}
 	}
 	if !hasIndex {

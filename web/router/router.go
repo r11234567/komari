@@ -17,6 +17,7 @@ import (
 	installweb "github.com/komari-monitor/komari/web/install"
 	"github.com/komari-monitor/komari/web/public"
 	jsonRpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
+	"github.com/komari-monitor/komari/web/security"
 	"github.com/komari-monitor/komari/web/storageupdate"
 )
 
@@ -91,6 +92,7 @@ func registerHealthRoute(r *gin.Engine) {
 // registerPublicReadRoutes mounts public read-only compatibility endpoints and
 // the bounded native visitor-event endpoint.
 func registerPublicReadRoutes(r *gin.Engine) {
+	r.GET("/share", security.RedeemTempShare)
 	r.GET("/api/mjpeg_live", public_api.MjpegLiveHandler)
 	r.GET("/api/plugin/:short/*filepath", public_api.ServePluginFile)
 	r.POST("/api/public/visitor-event", jsonRpc.RecordVisitorEventHTTP)
@@ -234,6 +236,9 @@ func registerAdminRoutes(r *gin.Engine) func() error {
 	{
 		settings.GET("/", jsonRpc.Bind("admin:getSettings"))
 		settings.POST("/", jsonRpc.Bind("admin:editSettings"))
+		settings.GET("/temporary-share", admin.GetTemporaryShare)
+		settings.POST("/temporary-share", admin.CreateTemporaryShare)
+		settings.DELETE("/temporary-share", admin.DeleteTemporaryShare)
 		settings.GET("/xtermjs", jsonRpc.Bind("admin:getXtermjsSettings"))
 		settings.POST("/xtermjs", jsonRpc.Bind("admin:setXtermjsSettings", jsonRpc.WithMessage("settings saved")))
 		settings.GET("/dashboard", jsonRpc.Bind("admin:getDashboardSettings"))

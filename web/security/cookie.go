@@ -18,7 +18,6 @@ const (
 	TwoFactorSecretCookieName       = "__Host-komari_2fa_secret"
 	LegacyTwoFactorSecretCookieName = "2fa_secret"
 	TempShareCookieName             = "__Host-komari_temp_key"
-	LegacyTempShareCookieName       = "temp_key"
 )
 
 func setCookie(c *gin.Context, name, value string, maxAge int, sameSite http.SameSite) {

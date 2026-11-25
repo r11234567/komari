@@ -1,76 +1,95 @@
 package security
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
+	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/pkg/config"
 )
 
-const tempShareRedeemedContextKey = "temp_share_redeemed"
+const (
+	TempShareConfigKey       = "temporary_status_share"
+	LegacyTempShareTokenKey  = "tempory_share_token"
+	LegacyTempShareExpiryKey = "tempory_share_token_expire_at"
+	MaxTempShareHours        = 24 * 30
+)
 
-func activeTempShareToken() (string, int64, bool) {
-	expireAt, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
+type TempShare struct {
+	Token     string `json:"token"`
+	ExpiresAt int64  `json:"expires_at"`
+}
+
+func CurrentTempShare() (TempShare, error) {
+	share, err := config.GetAs[TempShare](TempShareConfigKey, TempShare{})
+	if share.ExpiresAt <= time.Now().Unix() {
+		return TempShare{}, err
+	}
+	return share, err
+}
+
+func CreateTempShare(hours int) (TempShare, error) {
+	if hours < 1 || hours > MaxTempShareHours {
+		return TempShare{}, errors.New("invalid temporary share duration")
+	}
+	var key [32]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		return TempShare{}, err
+	}
+	share := TempShare{
+		Token:     base64.RawURLEncoding.EncodeToString(key[:]),
+		ExpiresAt: time.Now().Add(time.Duration(hours) * time.Hour).Unix(),
+	}
+	return share, config.Set(TempShareConfigKey, share)
+}
+
+func RevokeTempShare() error {
+	return config.Set(TempShareConfigKey, TempShare{})
+}
+
+func tempShareMatches(candidate, expected string) bool {
+	return expected != "" && subtle.ConstantTimeCompare([]byte(candidate), []byte(expected)) == 1
+}
+
+func tempShareCookie(token string) string {
+	digest := sha256.Sum256([]byte("komari temporary share cookie v1\x00" + token))
+	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
+// RedeemTempShare exchanges the link on a dedicated route before loading any theme.
+func RedeemTempShare(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	c.Header("Referrer-Policy", "no-referrer")
+	if !IsRequestSecure(c.Request) {
+		c.Status(http.StatusForbidden)
+		return
+	}
+	share, err := CurrentTempShare()
 	if err != nil {
-		return "", 0, false
+		c.Status(http.StatusServiceUnavailable)
+		return
 	}
-	allowKey, err := config.GetAs[string]("tempory_share_token", "")
-	if err != nil || allowKey == "" {
-		return "", 0, false
+	remaining := share.ExpiresAt - time.Now().Unix()
+	if remaining > 0 && tempShareMatches(c.Query("temp_key"), share.Token) {
+		SetSensitiveCookie(c, TempShareCookieName, tempShareCookie(share.Token), int(remaining))
 	}
-	now := time.Now().Unix()
-	if expireAt < now {
-		return "", 0, false
-	}
-	return allowKey, expireAt - now, true
+	c.Redirect(http.StatusSeeOther, "/")
 }
 
-func tempShareMatches(candidate, allowKey string) bool {
-	return len(candidate) > 0 && subtle.ConstantTimeCompare([]byte(candidate), []byte(allowKey)) == 1
-}
-
-// RedeemTempShareQuery exchanges a valid ?temp_key= query parameter on GET
-// requests into the host-scoped temporary-share cookie and marks the request.
-func RedeemTempShareQuery(c *gin.Context) bool {
-	if c == nil || c.Request == nil || c.Request.Method != http.MethodGet {
-		return false
-	}
-	tempKey := strings.TrimSpace(c.Query("temp_key"))
-	if tempKey == "" {
-		return false
-	}
-	allowKey, remainingSeconds, ok := activeTempShareToken()
-	if !ok || !tempShareMatches(tempKey, allowKey) {
-		return false
-	}
-	if remainingSeconds > 0 {
-		SetSensitiveCookie(c, TempShareCookieName, tempKey, int(remainingSeconds))
-	}
-	c.Set(tempShareRedeemedContextKey, true)
-	return true
-}
-
-// HasTempAccess reports whether the request carries a valid temporary share
-// token (from query redemption on the current request, the host-scoped cookie,
-// or the client-visible legacy fallback cookie on plain-HTTP deployments).
+// HasTempAccess recognizes the current share on the public read surface only.
 func HasTempAccess(c *gin.Context) bool {
-	if c == nil {
+	if c == nil || !IsRequestSecure(c.Request) {
 		return false
 	}
-	if c.GetBool(tempShareRedeemedContextKey) {
-		return true
-	}
-	allowKey, _, ok := activeTempShareToken()
-	if !ok {
+	value, err := c.Cookie(TempShareCookieName)
+	if err != nil {
 		return false
 	}
-	for _, cookieName := range []string{TempShareCookieName, LegacyTempShareCookieName} {
-		if value, err := c.Cookie(cookieName); err == nil && tempShareMatches(value, allowKey) {
-			return true
-		}
-	}
-	return false
+	share, err := CurrentTempShare()
+	return err == nil && share.Token != "" && tempShareMatches(value, tempShareCookie(share.Token))
 }

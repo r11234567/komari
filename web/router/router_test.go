@@ -416,6 +416,92 @@ func TestSplitPublicAndPanelListenersEnforceHardBoundaries(t *testing.T) {
 	if privNodesRec.Code != http.StatusUnauthorized {
 		t.Fatalf("Public /api/nodes under private_site with admin cookie = %d, want 401", privNodesRec.Code)
 	}
+	const sharePath = "/api/admin/settings/temporary-share"
+	t.Cleanup(func() { _ = security.RevokeTempShare() })
+	shareRequest := func(method, body string, authenticated bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, "https://panel.example.com"+sharePath, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if authenticated {
+			req.AddCookie(&http.Cookie{Name: security.SessionCookieName, Value: session})
+		}
+		rec := httptest.NewRecorder()
+		panelEngine.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := shareRequest(http.MethodPost, `{"hours":1}`, false); rec.Code == http.StatusOK {
+		t.Fatal("anonymous request created a temporary share")
+	}
+	if rec := shareRequest(http.MethodPost, `{"hours":0}`, true); rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid temporary share duration returned %d", rec.Code)
+	}
+	create := func() security.TempShare {
+		t.Helper()
+		rec := shareRequest(http.MethodPost, `{"hours":1}`, true)
+		var payload struct {
+			Data security.TempShare `json:"data"`
+		}
+		if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-store" ||
+			json.Unmarshal(rec.Body.Bytes(), &payload) != nil || len(payload.Data.Token) != 43 ||
+			payload.Data.ExpiresAt <= time.Now().Unix() {
+			t.Fatalf("temporary share response was invalid: HTTP %d", rec.Code)
+		}
+		return payload.Data
+	}
+	publicRequest := func(address string, cookie *http.Cookie) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, address, nil)
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		rec := httptest.NewRecorder()
+		publicEngine.ServeHTTP(rec, req)
+		return rec
+	}
+	share := create()
+	shareURL := "https://status.example.com/share?temp_key=" + share.Token
+	if rec := publicRequest("http"+strings.TrimPrefix(shareURL, "https"), nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("HTTP share redemption returned %d", rec.Code)
+	}
+	redeem := publicRequest(shareURL, nil)
+	cookies := redeem.Result().Cookies()
+	if redeem.Code != http.StatusSeeOther || redeem.Header().Get("Location") != "/" ||
+		redeem.Header().Get("Cache-Control") != "no-store" || redeem.Header().Get("Referrer-Policy") != "no-referrer" ||
+		len(cookies) != 1 {
+		t.Fatalf("share redemption returned HTTP %d with %d cookies", redeem.Code, len(cookies))
+	}
+	cookie := cookies[0]
+	if cookie.Name != security.TempShareCookieName || cookie.Value == share.Token ||
+		!cookie.Secure || !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode ||
+		cookie.Path != "/" || cookie.Domain != "" || cookie.MaxAge < 1 || cookie.MaxAge > 3600 {
+		t.Fatal("share cookie did not preserve the expected browser protections")
+	}
+	const nodesURL = "https://status.example.com/api/nodes"
+	if rec := publicRequest(nodesURL, cookie); rec.Code != http.StatusOK {
+		t.Fatalf("active share could not reach public data: HTTP %d", rec.Code)
+	}
+	if rec := publicRequest(nodesURL, &http.Cookie{Name: "temp_key", Value: share.Token}); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("legacy share cookie returned HTTP %d", rec.Code)
+	}
+	if rotated := create(); rotated.Token == share.Token {
+		t.Fatal("rotated share reused the previous token")
+	}
+	if rec := publicRequest(nodesURL, cookie); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("rotated cookie returned HTTP %d", rec.Code)
+	}
+	if rec := publicRequest(shareURL, nil); len(rec.Result().Cookies()) != 0 {
+		t.Fatal("old URL could still issue a cookie")
+	}
+	active := create()
+	activeRedemption := publicRequest("https://status.example.com/share?temp_key="+active.Token, nil)
+	activeCookies := activeRedemption.Result().Cookies()
+	if len(activeCookies) != 1 {
+		t.Fatal("new share didn't receive a cookie")
+	}
+	if rec := shareRequest(http.MethodDelete, "", true); rec.Code != http.StatusOK {
+		t.Fatalf("share revocation returned HTTP %d", rec.Code)
+	}
+	if rec := publicRequest(nodesURL, activeCookies[0]); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked cookie returned HTTP %d", rec.Code)
+	}
 	for _, item := range []struct {
 		method string
 		path   string
