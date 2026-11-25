@@ -7,12 +7,33 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/komari-monitor/komari/internal/outboundpolicy"
 )
 
 var transport = func() *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	t.DialContext = ipv6FirstDialContext(net.DefaultResolver.LookupIPAddr, dialer.DialContext)
+	return t
+}()
+
+var protectedTransport = func() *http.Transport {
+	t := transport.Clone()
+	t.Proxy = nil
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil || outboundpolicy.BlockedAddress(net.ParseIP(host)) {
+				return errors.New("webhook destination is not a public address")
+			}
+			return nil
+		},
+	}
 	t.DialContext = ipv6FirstDialContext(net.DefaultResolver.LookupIPAddr, dialer.DialContext)
 	return t
 }()
@@ -23,6 +44,21 @@ const ipv4FallbackDelay = 300 * time.Millisecond
 // NewClient prefers IPv6 for dual-stack endpoints and falls back to IPv4.
 func NewClient(timeout time.Duration) *http.Client {
 	return &http.Client{Transport: transport, Timeout: timeout}
+}
+
+// NewWebhookClient snapshots the same outbound policy as market downloads.
+// Separate connection pools ensure enabling protection cannot reuse an old
+// private connection. The dial policy also applies to each redirect.
+func NewWebhookClient(timeout time.Duration) (*http.Client, error) {
+	protected, err := outboundpolicy.Enabled()
+	if err != nil {
+		return nil, err
+	}
+	client := NewClient(timeout)
+	if protected {
+		client.Transport = protectedTransport
+	}
+	return client, nil
 }
 
 func ipv6FirstDialContext(

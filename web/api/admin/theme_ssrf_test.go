@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"errors"
+	"github.com/komari-monitor/komari/internal/outboundpolicy"
 	"io"
 	"net"
 	"net/http"
@@ -32,12 +33,12 @@ func TestThemeDialRevalidatesDNSAndUsesOnlyNumericPublicAddresses(t *testing.T) 
 		_ = b.Close()
 		return a, nil
 	}
-	conn, err := dialPublicAddressWith(context.Background(), "tcp", "rebind.invalid:443", lookup, dial)
+	conn, err := outboundpolicy.DialPublicWith(context.Background(), "tcp", "rebind.invalid:443", lookup, dial)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = conn.Close()
-	if _, err = dialPublicAddressWith(context.Background(), "tcp", "rebind.invalid:443", lookup, dial); err == nil {
+	if _, err = outboundpolicy.DialPublicWith(context.Background(), "tcp", "rebind.invalid:443", lookup, dial); err == nil {
 		t.Fatal("rebound private DNS destination accepted")
 	}
 	if lookups != 2 || dials != 1 {
@@ -45,7 +46,7 @@ func TestThemeDialRevalidatesDNSAndUsesOnlyNumericPublicAddresses(t *testing.T) 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err = dialPublicAddressWith(ctx, "tcp", "rebind.invalid:443", lookup, dial); !errors.Is(err, context.Canceled) {
+	if _, err = outboundpolicy.DialPublicWith(ctx, "tcp", "rebind.invalid:443", lookup, dial); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel ignored: %v", err)
 	}
 	if dials != 1 {
@@ -80,7 +81,7 @@ func TestThemeRedirectBlocksPrivateIPv4IPv6AndUnsupportedSchemes(t *testing.T) {
 	}
 }
 
-// blockedThemeAddress is the last line of defence for market/theme downloads:
+// outboundpolicy.BlockedAddress is the last line of defence for market/theme downloads:
 // it judges the address actually being dialled, after DNS has resolved. Ranges
 // that Go's own predicates call global unicast still reach infrastructure, and
 // CGNAT is where cloud providers put internal endpoints.
@@ -102,7 +103,7 @@ func TestBlockedThemeAddressRejectsNonPublicRanges(t *testing.T) {
 		if ip == nil {
 			t.Fatalf("test fixture %q is not an IP", address)
 		}
-		if !blockedThemeAddress(ip) {
+		if !outboundpolicy.BlockedAddress(ip) {
 			t.Errorf("%s was allowed, want blocked", address)
 		}
 	}
@@ -113,12 +114,12 @@ func TestBlockedThemeAddressRejectsNonPublicRanges(t *testing.T) {
 		if ip == nil {
 			t.Fatalf("test fixture %q is not an IP", address)
 		}
-		if blockedThemeAddress(ip) {
+		if outboundpolicy.BlockedAddress(ip) {
 			t.Errorf("%s was blocked, want allowed", address)
 		}
 	}
 
-	if !blockedThemeAddress(nil) {
+	if !outboundpolicy.BlockedAddress(nil) {
 		t.Error("a nil address must be refused")
 	}
 }
