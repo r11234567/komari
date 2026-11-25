@@ -176,6 +176,7 @@ func metricKeysTouched(cfg map[string]interface{}) bool {
 }
 
 var sensitiveSettingKeys = []string{
+	config.PrivateSiteKey,
 	config.CorsOriginCheckEnabledKey, config.CorsAllowedOriginsKey, config.WsOriginCheckEnabledKey,
 	config.WsAllowedOriginsKey, config.SSRFProtectionEnabledKey, config.ScriptDomainKey,
 	config.CustomHeadKey, config.CustomBodyKey, config.HTTPSEnabledKey, config.HTTPSListenKey,
@@ -220,6 +221,9 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	}
 	if _, found := cfg[config.RetiredAdminKey]; found {
 		return nil, rpc.MakeError(rpc.InvalidParams, "legacy administrator key is retired", nil)
+	}
+	if _, found := cfg[config.XtermjsSettingsKey]; found {
+		return nil, rpc.MakeError(rpc.InvalidParams, "use the terminal settings endpoint", nil)
 	}
 	for _, key := range []string{security.TempShareConfigKey, security.LegacyTempShareTokenKey, security.LegacyTempShareExpiryKey} {
 		if _, found := cfg[key]; found {

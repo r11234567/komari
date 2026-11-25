@@ -9,10 +9,49 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/komari-monitor/komari/database/agentcredentials"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+func TestOrphanedEnrollmentCannotAuthenticateOrRenew(t *testing.T) {
+	db, token, orphan, now := rotationFixture(t)
+	require.NoError(t, db.AutoMigrate(&models.Client{}, &models.AgentEnrollment{}))
+	client := models.Client{UUID: uuid.NewString(), Name: "Existing node", Token: "synthetic-client-token"}
+	require.NoError(t, db.Create(&client).Error)
+	active := models.AgentCredential{Client: client.UUID, AgentPublicKey: "synthetic-key", AccessTokenHash: hashToken("existing-node-access"), AccessExpiresAt: now.Add(time.Hour)}
+	require.NoError(t, db.Create(&active).Error)
+	require.NoError(t, db.Create(&[]models.AgentEnrollment{
+		{DeviceCode: "orphan", UserCode: "ORPHAN", State: StateApproved, Client: orphan.Client, AgentPublicKey: "synthetic-key"},
+		{DeviceCode: "pending", UserCode: "PENDING", State: StatePending, AgentPublicKey: "synthetic-key"},
+	}).Error)
+
+	_, known, err := lookupAccessTokenDB(db, "synthetic-old-access", now)
+	require.NoError(t, err)
+	require.True(t, known)
+	rotated, err := rotateVerifiedDB(t.Context(), db, orphan, token, uuid.NewString(), nil, 2, func() time.Time { return now })
+	require.NoError(t, err)
+
+	require.NoError(t, agentcredentials.RevokeOrphans(t.Context(), db))
+	for _, access := range []string{"synthetic-old-access", rotated.AccessToken} {
+		_, known, err = lookupAccessTokenDB(db, access, now)
+		require.ErrorContains(t, err, "revoked")
+		require.True(t, known)
+	}
+	_, err = rotateVerifiedDB(t.Context(), db, orphan, rotated.RefreshToken, uuid.NewString(), nil, 2, func() time.Time { return now })
+	require.ErrorIs(t, err, ErrCredentialRejected)
+	var current models.AgentCredential
+	require.NoError(t, db.First(&current, "client = ?", orphan.Client).Error)
+	require.Empty(t, current.RefreshRecoverySealed)
+	require.Nil(t, current.RefreshRecoveryUntil)
+	var attempts []models.AgentEnrollment
+	require.NoError(t, db.Find(&attempts).Error)
+	require.Len(t, attempts, 1)
+	require.Equal(t, "pending", attempts[0].DeviceCode)
+	_, _, err = lookupAccessTokenDB(db, "existing-node-access", now)
+	require.NoError(t, err)
+}
 
 func TestCredentialLifecycleAbsoluteDeadlineNeverSlides(t *testing.T) {
 	db, _, _, now := rotationFixture(t)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/komari-monitor/komari/database/agentcredentials"
 	"github.com/komari-monitor/komari/database/billing"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
@@ -180,12 +181,23 @@ func deleteClient(db *gorm.DB, clientUuid string) (bool, error) {
 			}
 		}
 
+		if tx.Migrator().HasTable(&models.AgentCredential{}) {
+			if err := agentcredentials.Revoke(tx, clientUuid, "node deleted"); err != nil {
+				return fmt.Errorf("revoke client credentials: %w", err)
+			}
+		}
+		if tx.Migrator().HasTable(&models.AgentEnrollment{}) {
+			if err := tx.Where("client = ?", clientUuid).Delete(&models.AgentEnrollment{}).Error; err != nil {
+				return fmt.Errorf("delete client enrollment approvals: %w", err)
+			}
+		}
 		if err := tx.Delete(&models.Client{}, "uuid = ?", clientUuid).Error; err != nil {
 			return fmt.Errorf("delete client: %w", err)
 		}
 		return nil
 	})
 	if err == nil {
+		agentcredentials.CancelStreams(clientUuid)
 		billing.InvalidateAccrualCache()
 	}
 	return pingTasksChanged, err

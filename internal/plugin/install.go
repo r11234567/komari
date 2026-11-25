@@ -141,6 +141,7 @@ func validatePluginArchive(files []*zip.File) error {
 }
 
 func extractPluginArchive(files []*zip.File, dir string) error {
+	var remaining uint64 = maxPluginExtractedSize
 	for _, f := range files {
 		path := filepath.Join(dir, f.Name)
 		if !withinDir(path, dir) {
@@ -164,18 +165,23 @@ func extractPluginArchive(files []*zip.File, dir string) error {
 			_ = rc.Close()
 			return fmt.Errorf("failed to create file: %v", err)
 		}
-		n, copyErr := io.Copy(outFile, io.LimitReader(rc, maxPluginFileSize+1))
+		limit := min(remaining, f.UncompressedSize64, maxPluginFileSize)
+		n, copyErr := io.Copy(outFile, io.LimitReader(rc, int64(limit)+1))
 		closeErr := outFile.Close()
 		_ = rc.Close()
 		if copyErr == nil {
 			copyErr = closeErr
 		}
-		if n > maxPluginFileSize {
+		if uint64(n) > limit {
 			copyErr = fmt.Errorf("plugin file exceeds size limit")
 		}
 		if copyErr != nil {
 			return fmt.Errorf("failed to extract file: %v", copyErr)
 		}
+		if uint64(n) != f.UncompressedSize64 {
+			return fmt.Errorf("plugin file %s does not match its declared size", f.Name)
+		}
+		remaining -= uint64(n)
 	}
 	return nil
 }

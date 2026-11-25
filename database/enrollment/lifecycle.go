@@ -7,6 +7,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/komari-monitor/komari/database/agentcredentials"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"gorm.io/gorm"
@@ -136,7 +137,11 @@ func initializeLifecycleDB(ctx context.Context, db *gorm.DB, now time.Time) erro
 	})
 }
 func InitializeLifecycle(ctx context.Context) error {
-	return initializeLifecycleDB(ctx, dbcore.GetDBInstance(), time.Now().UTC())
+	db := dbcore.GetDBInstance()
+	if err := agentcredentials.RevokeOrphans(ctx, db); err != nil {
+		return err
+	}
+	return initializeLifecycleDB(ctx, db, time.Now().UTC())
 }
 func cleanupLifecycleDB(ctx context.Context, db *gorm.DB, now time.Time) error {
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

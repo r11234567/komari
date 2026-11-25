@@ -16,6 +16,20 @@ import (
 	"gorm.io/gorm"
 )
 
+func TestPublicDescriptionRendersOnlyMetadata(t *testing.T) {
+	const document = `<head><meta name="description" content="A simple server monitor tool."><meta property="og:description" content="A simple server monitor tool."></head><p>A simple server monitor tool.</p>`
+	got := renderPublicDescription(document, `Nodes "a" & <b>`)
+	if strings.Count(got, `content="Nodes &#34;a&#34; &amp; &lt;b&gt;"`) != 2 {
+		t.Fatalf("metadata did not preserve escaped text: %s", got)
+	}
+	if !strings.Contains(got, `<p>A simple server monitor tool.</p>`) {
+		t.Fatalf("rendering changed unrelated text: %s", got)
+	}
+	if got := renderPublicDescription(document, 42); got != document {
+		t.Fatalf("invalid description changed the default metadata: %s", got)
+	}
+}
+
 func TestRemoveFaviconIfHashMatches(t *testing.T) {
 	filePath := filepath.Join(t.TempDir(), "favicon.ico")
 	legacyData := []byte("legacy default favicon")

@@ -52,7 +52,21 @@ const (
 const (
 	defaultThemeBundle      = "bundledThemes/default"
 	themeBundleMigrationKey = "theme_bundle_migration_v1"
+	defaultSiteDescription  = "A simple server monitor tool."
 )
+
+func renderPublicDescription(document string, value any) string {
+	description, ok := value.(string)
+	if !ok {
+		return document
+	}
+	content := ` content="` + html.EscapeString(description) + `"`
+	for _, name := range []string{`name="description"`, `property="og:description"`, `name="twitter:description"`} {
+		prefix := "<meta " + name
+		document = strings.ReplaceAll(document, prefix+` content="`+defaultSiteDescription+`"`, prefix+content)
+	}
+	return document
+}
 
 // Increment whenever the embedded official default theme must replace an
 // already-installed bundle. Version 12 ships the billing-cycle display and
@@ -384,7 +398,7 @@ func publicThemeFileContent(themeID, relativePath string) ([]byte, string, bool)
 func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	getConfig := func() map[string]any {
 		cfg, _ := config.GetMany(map[string]any{
-			config.DescriptionKey: "A simple server monitor tool.",
+			config.DescriptionKey: defaultSiteDescription,
 			config.SitenameKey:    "Komari Monitor",
 		})
 		return cfg
@@ -422,14 +436,8 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			return
 		}
 
-		rendered := renderPublicDocumentTitle(
-			strings.ReplaceAll(
-				htmlStr,
-				"A simple server monitor tool.",
-				cfg[config.DescriptionKey].(string),
-			),
-			cfg[config.SitenameKey].(string),
-		)
+		sitename, _ := cfg[config.SitenameKey].(string)
+		rendered := renderPublicDocumentTitle(renderPublicDescription(htmlStr, cfg[config.DescriptionKey]), sitename)
 		c.Data(http.StatusOK, "text/html; charset=utf-8",
 			[]byte(injectNativeLoginBridge(injectHTTPErrorNotice(rendered))))
 	}
@@ -563,7 +571,7 @@ func renderPrivateSitePublicNotice(sitename, panelOrigin string) []byte {
 func StaticPublic(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc), decorateTheme func(*http.Request, []byte) []byte) {
 	getConfig := func() map[string]any {
 		cfg, _ := config.GetMany(map[string]any{
-			config.DescriptionKey: "A simple server monitor tool.",
+			config.DescriptionKey: defaultSiteDescription,
 			config.CustomHeadKey:  "",
 			config.CustomBodyKey:  "",
 			config.SitenameKey:    "Komari Monitor",
@@ -597,14 +605,11 @@ func StaticPublic(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc),
 		}
 		customHead, _ := cfg[config.CustomHeadKey].(string)
 		customBody, _ := cfg[config.CustomBodyKey].(string)
-		description, _ := cfg[config.DescriptionKey].(string)
 		sitename, _ := cfg[config.SitenameKey].(string)
 
+		htmlStr = renderPublicDescription(htmlStr, cfg[config.DescriptionKey])
 		htmlStr = injectCustomHTML(htmlStr, customHead, customBody)
-		rendered := renderPublicDocumentTitle(
-			strings.ReplaceAll(htmlStr, "A simple server monitor tool.", description),
-			sitename,
-		)
+		rendered := renderPublicDocumentTitle(htmlStr, sitename)
 		// Never inject native_login_bridge.js on the Public Listener: public
 		// status origins never accept passwords or Passkeys.
 		document := []byte(injectHTTPErrorNotice(injectThemeChangeReload(rendered)))

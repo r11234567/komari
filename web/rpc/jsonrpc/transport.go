@@ -79,8 +79,12 @@ func CallFromGin(c *gin.Context, method string, params any) *rpc.JsonRpcResponse
 	req := &rpc.JsonRpcRequest{Version: rpc.RPC_VERSION, Method: method, Params: params}
 	token, _ := c.Cookie(signonauth.CookieName)
 	ctx := signonauth.WithToken(c.Request.Context(), token)
-	if method == "admin:editSettings" && c.Request.Method == http.MethodPost {
-		ctx = credentialaction.WithToken(ctx, c.GetHeader(credentialaction.Header))
+	if c.Request.Method == http.MethodPost {
+		switch method {
+		case "admin:editSettings", "admin:setXtermjsSettings",
+			"admin:startCloudflared", "admin:stopCloudflared", "admin:removeCloudflaredToken":
+			ctx = credentialaction.WithToken(ctx, c.GetHeader(credentialaction.Header))
+		}
 	}
 	return dispatchWithSensitive(ctx, c, meta, req)
 }
