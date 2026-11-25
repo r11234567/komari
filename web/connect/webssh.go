@@ -8,13 +8,16 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	agentRuntime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/remotemanagement"
 	"github.com/komari-monitor/komari/web/workspace"
 	websshv1 "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1"
 	websshv1connect "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1/websshv1connect"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -211,6 +214,11 @@ func (s *webSSHService) LeaseSessions(ctx context.Context, req *connect.Request[
 		if !allowed {
 			return connectError(connect.CodePermissionDenied, errors.New("WebSSH authorization was revoked"))
 		}
+		expiry := assignment.GetLeaseExpiresAt().AsTime()
+		assignment.Envelope, err = signAgentControl(agentID, "terminal:"+assignment.GetAssignmentId()+":"+expiry.Format(time.RFC3339Nano), expiry, assignment)
+		if err != nil {
+			return connectError(connect.CodeInternal, err)
+		}
 		if err := stream.Send(&websshv1.LeaseSessionsResponse{Assignment: assignment}); err != nil {
 			return err
 		}
@@ -228,6 +236,9 @@ func (s *webSSHService) AttachSession(ctx context.Context, stream *connect.BidiS
 	attach := first.GetAttach()
 	if attach == nil {
 		return connectError(connect.CodeInvalidArgument, errors.New("first attach message is required"))
+	}
+	if size := len(attach.GetChallenge()); size != 0 && size != 32 {
+		return connectError(connect.CodeInvalidArgument, errors.New("terminal attach challenge must be 32 bytes"))
 	}
 	agentID, err := requireAgent(rpc.MetaFromContext(ctx), attach.AgentId)
 	if err != nil {
@@ -270,10 +281,34 @@ func (s *webSSHService) AttachSession(ctx context.Context, stream *connect.BidiS
 	}()
 	sequence := attach.AfterCommandSequence
 	var eventSequence uint64
+	var frameNumber uint64
+	var signingKey enrollment.SigningKey
+	if len(attach.GetChallenge()) != 0 {
+		signingKey, err = enrollment.ActiveSigningKey()
+		if err != nil {
+			return connectError(connect.CodeInternal, err)
+		}
+	}
+	sendFrame := func(command *websshv1.AttachSessionResponse) error {
+		if len(attach.GetChallenge()) == 0 {
+			return stream.Send(command)
+		}
+		frameNumber++
+		wire := proto.CloneOf(command)
+		var err error
+		wire.Envelope, err = signControlWithKey(signingKey, agentID, uuid.NewString(), time.Now().Add(30*time.Second), &websshv1.SessionControlFrame{
+			SessionId: attach.GetSessionId(), AssignmentId: attach.GetAssignmentId(), Frame: wire,
+			Challenge: attach.GetChallenge(), FrameNumber: frameNumber,
+		})
+		if err != nil {
+			return connectError(connect.CodeInternal, err)
+		}
+		return stream.Send(wire)
+	}
 	if attach.Resumable {
 		frame := session.TransportFrame(nil)
 		eventSequence = frame.AcceptedEventSequence
-		if err := stream.Send(frame); err != nil {
+		if err := sendFrame(frame); err != nil {
 			return err
 		}
 	}
@@ -310,7 +345,7 @@ func (s *webSSHService) AttachSession(ctx context.Context, stream *connect.BidiS
 			command = session.TransportFrame(command)
 			eventSequence = command.AcceptedEventSequence
 		}
-		if err := stream.Send(command); err != nil {
+		if err := sendFrame(command); err != nil {
 			return err
 		}
 		if command.Command != nil {
