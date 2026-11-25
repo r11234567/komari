@@ -6,9 +6,11 @@ package plugingateway
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 	"github.com/komari-monitor/komari/internal/plugin"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
@@ -46,7 +48,7 @@ func List(ctx context.Context) ([]plugin.Info, error) {
 	return plugin.List(), nil
 }
 
-func SetEnabled(ctx context.Context, short string, enabled, approved bool) error {
+func SetEnabled(ctx context.Context, short string, enabled bool) error {
 	short, err := authorize(ctx, short, true)
 	if err != nil {
 		return err
@@ -55,8 +57,10 @@ func SetEnabled(ctx context.Context, short string, enabled, approved bool) error
 	if meta.Principal.Type != rpc.PrincipalUser || meta.Principal.UserUUID == "" || meta.Principal.IsAPIKey {
 		return ErrPermissionDenied
 	}
-	// Ignore caller-controlled approval flags. Existing live grants permit a
-	// normal switch; missing or changed grants go through scoped human 2FA.
+	if err := credentialaction.RequireAction(ctx, "plugin:set-enabled", short, strconv.FormatBool(enabled)); err != nil {
+		return errors.Join(ErrPermissionDenied, err)
+	}
+	// Package approval remains a separate authorization.
 	return plugin.SetEnabled(short, enabled, false)
 }
 

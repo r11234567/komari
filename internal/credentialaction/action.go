@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,6 +43,21 @@ func Consume(ctx context.Context, token string, purpose credential.Purpose, reso
 		return v.verifier.Consume(ctx, token, purpose, resource)
 	}
 	return credential.Authorization{}, credential.ErrProviderUnavailable
+}
+
+type tokenContextKey struct{}
+
+func WithToken(ctx context.Context, token string) context.Context {
+	return context.WithValue(ctx, tokenContextKey{}, token)
+}
+
+func RequireAction(ctx context.Context, action string, targets ...string) error {
+	token, _ := ctx.Value(tokenContextKey{}).(string)
+	if token == "" {
+		return errors.New("verify this administrative action before continuing")
+	}
+	_, err := Consume(ctx, token, credential.SensitiveOperation, ScopedResource(action, targets...))
+	return err
 }
 
 func SessionState(ctx context.Context, user, session string) (string, error) {

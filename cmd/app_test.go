@@ -263,7 +263,11 @@ func TestSplitListenersStartServeAndShutdownWithoutPortLeak(t *testing.T) {
 
 	// Establish live upgraded WebSocket connections on /api/rpc2 and /api/clients
 	// to prove Shutdown actively closes hijacked WebSocket connections too.
-	wsHeaders := http.Header{"Origin": []string{"http://" + pubAddr}}
+	wsHeaders := http.Header{
+		"Origin":            []string{flags.PublicOrigin},
+		"X-Forwarded-Host":  []string{"status.example.com"},
+		"X-Forwarded-Proto": []string{"https"},
+	}
 	rpcWS, _, err := websocket.DefaultDialer.Dial("ws://"+pubAddr+"/api/rpc2", wsHeaders)
 	if err != nil {
 		_ = app.Shutdown()

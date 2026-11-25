@@ -3,10 +3,12 @@ package admin
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/utils/httpsserver"
 	"github.com/komari-monitor/komari/web/api"
@@ -25,6 +27,13 @@ func UpdateHTTPSSettings(c *gin.Context) {
 	var requested httpsserver.Settings
 	if err := c.ShouldBindJSON(&requested); err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Invalid HTTPS settings: "+err.Error())
+		return
+	}
+	c.Set("credential_action_resource", credentialaction.ScopedResource("https:edit",
+		strconv.FormatBool(requested.Enabled), requested.Listen, strconv.FormatBool(requested.RedirectHTTP),
+		requested.CertificatePath, requested.PrivateKeyPath))
+	if err := verifyHTTPSAction(c); err != nil {
+		api.RespondError(c, http.StatusUnauthorized, err.Error())
 		return
 	}
 	normalized, err := httpsserver.Normalize(requested)
@@ -71,6 +80,10 @@ func UpdateHTTPSSettings(c *gin.Context) {
 }
 
 func ReloadHTTPSCertificate(c *gin.Context) {
+	if err := verifyHTTPSAction(c); err != nil {
+		api.RespondError(c, http.StatusUnauthorized, err.Error())
+		return
+	}
 	if err := httpsserver.Default.ReloadCertificate(); err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -78,4 +91,11 @@ func ReloadHTTPSCertificate(c *gin.Context) {
 	uuid, _ := c.Get("uuid")
 	auditlog.Log(c.ClientIP(), fmt.Sprint(uuid), "reloaded built-in HTTPS certificate", "info")
 	api.RespondSuccess(c, gin.H{"status": httpsserver.Default.Status()})
+}
+
+func verifyHTTPSAction(c *gin.Context) error {
+	if c.GetHeader(credentialaction.Header) == "" {
+		return fmt.Errorf("verify this administrative action before continuing")
+	}
+	return api.VerifySensitive2FA(c)
 }

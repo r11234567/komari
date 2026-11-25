@@ -8,6 +8,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 	pluginapp "github.com/komari-monitor/komari/internal/plugin"
 	"github.com/komari-monitor/komari/internal/plugingateway"
 	pluginv1 "github.com/r11234567/komari-proto/gen/go/komari/plugin/v1"
@@ -36,7 +37,8 @@ func (s *pluginService) SetPluginEnabled(ctx context.Context, req *connect.Reque
 	if err != nil {
 		return nil, err
 	}
-	err = plugingateway.SetEnabled(ctx, short, req.Msg.Enabled, req.Msg.PermissionsApproved)
+	ctx = credentialaction.WithToken(ctx, req.Header().Get(credentialaction.Header))
+	err = plugingateway.SetEnabled(ctx, short, req.Msg.Enabled)
 	if errors.Is(err, pluginapp.ErrPermissionApprovalRequired) {
 		return connect.NewResponse(&pluginv1.SetPluginEnabledResponse{RequiresPermissionApproval: true}), nil
 	}
