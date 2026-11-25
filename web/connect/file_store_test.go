@@ -53,6 +53,9 @@ func TestFileStoreRejectsWrongAgent(t *testing.T) {
 	if got := store.takeAssignment("agent-2", "a-2"); got != nil {
 		t.Fatal("another agent resolved the assignment")
 	}
+	if got := store.takeAssignment("agent-1", "a-2"); got == nil {
+		t.Fatal("another agent removed the assignment")
+	}
 }
 
 func TestPathParent(t *testing.T) {

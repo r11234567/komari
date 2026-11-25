@@ -1,10 +1,9 @@
 package cloudflared
 
 import (
-	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -149,14 +148,10 @@ func (m *manager) start(token string) error {
 	cmd := exec.Command(binaryPath, "tunnel", "--no-autoupdate", "run")
 	cmd.Env = append(os.Environ(), "TUNNEL_TOKEN="+token)
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
+	stdout := &tunnelLogWriter{manager: m}
+	stderr := &tunnelLogWriter{manager: m, stderr: true}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.WaitDelay = 2 * time.Second
 
 	if err := cmd.Start(); err != nil {
 		return err
@@ -170,9 +165,7 @@ func (m *manager) start(token string) error {
 	m.message = "cloudflared is running"
 	m.appendLogLocked(fmt.Sprintf("started cloudflared (pid=%d)", cmd.Process.Pid))
 
-	go m.scanPipe(stdout, false)
-	go m.scanPipe(stderr, true)
-	go m.waitProcess(cmd, m.done)
+	go m.waitProcess(cmd, m.done, stdout, stderr)
 
 	return nil
 }
@@ -218,8 +211,10 @@ func (m *manager) stop() error {
 	return nil
 }
 
-func (m *manager) waitProcess(cmd *exec.Cmd, done chan struct{}) {
+func (m *manager) waitProcess(cmd *exec.Cmd, done chan struct{}, stdout, stderr *tunnelLogWriter) {
 	err := cmd.Wait()
+	stdout.flush()
+	stderr.flush()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -248,22 +243,47 @@ func (m *manager) waitProcess(cmd *exec.Cmd, done chan struct{}) {
 	close(done)
 }
 
-func (m *manager) scanPipe(reader io.ReadCloser, isErr bool) {
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
+type tunnelLogWriter struct {
+	manager   *manager
+	stderr    bool
+	line      []byte
+	truncated bool
+}
 
-		m.mu.Lock()
-		if isErr || looksLikeError(line) {
-			m.errorMessage = line
+func (w *tunnelLogWriter) Write(data []byte) (int, error) {
+	const maxLineSize = 64 << 10
+	size := len(data)
+	for len(data) > 0 {
+		line, rest, complete := bytes.Cut(data, []byte{'\n'})
+		available := maxLineSize - len(w.line)
+		w.line = append(w.line, line[:min(available, len(line))]...)
+		w.truncated = w.truncated || len(line) > available
+		if complete {
+			w.flush()
 		}
-		m.message = line
-		m.appendLogLocked(line)
-		m.mu.Unlock()
+		data = rest
 	}
+	return size, nil
+}
+
+func (w *tunnelLogWriter) flush() {
+	line := strings.TrimSuffix(string(w.line), "\r")
+	if w.truncated {
+		line += " [truncated]"
+	}
+	w.line = w.line[:0]
+	w.truncated = false
+	if strings.TrimSpace(line) == "" {
+		return
+	}
+	m := w.manager
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if w.stderr || looksLikeError(line) {
+		m.errorMessage = line
+	}
+	m.message = line
+	m.appendLogLocked(line)
 }
 
 func (m *manager) status() RuntimeStatus {

@@ -41,8 +41,13 @@ const (
 
 var signals = struct {
 	sync.Mutex
-	byKey map[string]chan struct{}
-}{byKey: make(map[string]chan struct{})}
+	byKey map[string]*rescueSignal
+}{byKey: make(map[string]*rescueSignal)}
+
+type rescueSignal struct {
+	changed  chan struct{}
+	watchers int
+}
 
 var createMu sync.Mutex
 
@@ -149,22 +154,36 @@ func NormalizeCreateSpec(action rescuev1.RescueAction, arguments []string, timeo
 
 func signalKey(key string) {
 	signals.Lock()
-	if current := signals.byKey[key]; current != nil {
-		close(current)
+	defer signals.Unlock()
+	if signal := signals.byKey[key]; signal != nil {
+		close(signal.changed)
+		signal.changed = make(chan struct{})
 	}
-	signals.byKey[key] = make(chan struct{})
-	signals.Unlock()
 }
 
-func signalFor(key string) chan struct{} {
+// SubscribeSignal keeps a notification key only while a stream uses it.
+// Call changed before querying persisted state to avoid missing a commit.
+func SubscribeSignal(key string) (changed func() <-chan struct{}, release func()) {
 	signals.Lock()
-	defer signals.Unlock()
-	current := signals.byKey[key]
-	if current == nil {
-		current = make(chan struct{})
-		signals.byKey[key] = current
+	signal := signals.byKey[key]
+	if signal == nil {
+		signal = &rescueSignal{changed: make(chan struct{})}
+		signals.byKey[key] = signal
 	}
-	return current
+	signal.watchers++
+	signals.Unlock()
+	return func() <-chan struct{} {
+			signals.Lock()
+			defer signals.Unlock()
+			return signal.changed
+		}, sync.OnceFunc(func() {
+			signals.Lock()
+			defer signals.Unlock()
+			signal.watchers--
+			if signal.watchers == 0 {
+				delete(signals.byKey, key)
+			}
+		})
 }
 
 func GetStatus(agentID string) (*rescuev1.RescueHelperStatus, error) {
@@ -772,8 +791,6 @@ func ReportEvent(agentID, helperInstanceID string, event *rescuev1.RescueEvent) 
 	signalKey("session:" + event.SessionId)
 	return acceptedSequence, nil
 }
-
-func WaitSignal(key string) chan struct{} { return signalFor(key) }
 
 func sessionToProto(row models.RescueSession) *rescuev1.RescueSession {
 	arguments := []string{}

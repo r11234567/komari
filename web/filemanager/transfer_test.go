@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/web/workspace"
 	filev1 "github.com/r11234567/komari-proto/gen/go/komari/file/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestUploadSessionLimitAndRelease(t *testing.T) {
@@ -363,4 +364,73 @@ func resetUploadSessionsForTest() {
 		<-uploadSlots
 	}
 	uploadMu.Unlock()
+}
+
+func TestExpiredUploadRetriesAfterRestartWithoutHumanGrant(t *testing.T) {
+	t.Chdir(t.TempDir())
+	resetUploadSessionsForTest()
+	t.Cleanup(resetUploadSessionsForTest)
+	ensureUploadSessionDirectory()
+	record := &uploadSession{
+		ID: "expired-fixture", UUID: "agent-1", Path: "/files/fixture",
+		WorkspaceID: "previous-workspace", SystemUser: "original-user",
+		ExpiresAt: time.Now().Add(-time.Minute),
+	}
+	if err := saveUploadSession(record); err != nil {
+		t.Fatal(err)
+	}
+	withDispatcher(t, func(agent string, assignment *filev1.FileAssignment) bool {
+		t.Fatal("offline dispatch should be disabled")
+		return false
+	})
+	SetDispatcher(nil)
+	if _, _, err := acquireUploadSession(record.ID, record.UUID, "", 0, 0, record.WorkspaceID); !errors.Is(err, ErrUnknownToken) {
+		t.Fatalf("expired session remained usable: %v", err)
+	}
+	sweepExpiredUploads(time.Now(), "")
+	if _, err := loadUploadSession(record.ID); err != nil {
+		t.Fatalf("offline cleanup did not preserve the retry record: %v", err)
+	}
+
+	calls := 0
+	SetDispatcher(func(agent string, assignment *filev1.FileAssignment) bool {
+		calls++
+		cancel := assignment.GetUploadCancel()
+		if agent != record.UUID || assignment.GetWorkspaceId() != record.WorkspaceID ||
+			assignment.GetSystemUser() != record.SystemUser || cancel.GetUploadId() != record.ID ||
+			cancel.GetPath() != record.Path || !IsUploadCleanup(agent, assignment) ||
+			IsUploadCleanup("other-agent", assignment) || IsUploadCleanup(agent, proto.CloneOf(assignment)) {
+			t.Fatalf("cleanup lost its original binding: %+v", assignment)
+		}
+		return Resolve(agent, &filev1.AgentFileEvent{RequestId: assignment.GetRequestId(), Success: true})
+	})
+	sweepExpiredUploads(time.Now(), "")
+	if calls != 1 {
+		t.Fatalf("cleanup dispatched %d operations", calls)
+	}
+	if _, err := loadUploadSession(record.ID); !errors.Is(err, ErrUnknownToken) {
+		t.Fatalf("acknowledged cleanup retained a retry record: %v", err)
+	}
+}
+
+func TestExpiredUploadWithoutOriginalSystemUserIsPreserved(t *testing.T) {
+	t.Chdir(t.TempDir())
+	resetUploadSessionsForTest()
+	t.Cleanup(resetUploadSessionsForTest)
+	ensureUploadSessionDirectory()
+	record := &uploadSession{
+		ID: "legacy-expired", UUID: "agent-1", Path: "/files/fixture",
+		WorkspaceID: "previous-workspace", ExpiresAt: time.Now().Add(-time.Minute),
+	}
+	if err := saveUploadSession(record); err != nil {
+		t.Fatal(err)
+	}
+	withDispatcher(t, func(string, *filev1.FileAssignment) bool {
+		t.Error("legacy record without a system user authorized remote cleanup")
+		return false
+	})
+	sweepExpiredUploads(time.Now(), "")
+	if _, err := loadUploadSession(record.ID); err != nil {
+		t.Fatalf("uncleaned legacy record was lost: %v", err)
+	}
 }

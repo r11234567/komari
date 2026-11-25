@@ -111,8 +111,10 @@ func (s *rescueService) WatchRescueSession(ctx context.Context, req *connect.Req
 	lastSent := time.Now()
 	lastState := session.State
 	sequence := req.Msg.AfterSequence
+	changed, release := rescueapp.SubscribeSignal("session:" + req.Msg.SessionId)
+	defer release()
 	for {
-		currentSignal := rescueapp.WaitSignal("session:" + req.Msg.SessionId)
+		currentSignal := changed()
 		events, err := rescueapp.EventsAfter(req.Msg.SessionId, sequence)
 		if err != nil {
 			return connectError(connect.CodeInternal, err)
@@ -191,8 +193,10 @@ func (s *rescueService) LeaseRescueSessions(ctx context.Context, req *connect.Re
 	if err := rescueapp.ClearConnectionError(agentID, req.Msg.HelperInstanceId); err != nil {
 		return connectError(connect.CodeInternal, err)
 	}
+	changed, release := rescueapp.SubscribeSignal("lease:" + agentID)
+	defer release()
 	for {
-		currentSignal := rescueapp.WaitSignal("lease:" + agentID)
+		currentSignal := changed()
 		assignment, err := rescueapp.NextAssignment(agentID, req.Msg.HelperInstanceId, req.Msg.AfterAssignmentId)
 		if err == nil {
 			return stream.Send(&rescuev1.LeaseRescueSessionsResponse{Assignment: assignment})
