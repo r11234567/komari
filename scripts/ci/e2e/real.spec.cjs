@@ -243,8 +243,11 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       const cookie = (await context.cookies()).find(c => c.name === '__Host-komari_session');
       expect(cookie?.secure).toBe(true);
       expect(cookie?.httpOnly).toBe(true);
-      const ticket = (await (await request('/api/bind/ticket', {})).json()).data.ticket;
-      expect(ticket).toBeTruthy();
+      const authorization = (await (await request('/api/bind/ticket', {})).json()).data;
+      expect(authorization.expires_in).toBeGreaterThan(0);
+      expect(authorization).not.toHaveProperty('ticket');
+      const bindCookie = (await context.cookies()).find(cookie => cookie.name === '__Host-komari_bind');
+      expect(bindCookie).toMatchObject({ secure: true, httpOnly: true, sameSite: 'Strict' });
       const log = fs.openSync(path.join(artifacts, 'enrollment.log'), 'w', 0o600);
       const loginCommand = process.env.KOMARI_E2E_LOCAL === '1' ? 'sudo' : '/usr/lib/komari/komari-e2e/komari-agent';
       const loginPrefix = process.env.KOMARI_E2E_LOCAL === '1' ? ['-u', serviceUser, '/usr/lib/komari/komari-e2e/komari-agent'] : [];
@@ -258,7 +261,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       }, { timeout: 60_000 }).toBe(1);
       const approved = await rpc('enrollment', 'ApproveEnrollment', {
         userCode: pending[0].userCode, newAgent: { name: 'Real E2E Agent' },
-      }, { headers: { 'X-Bind-Ticket': ticket } });
+      });
       expect(approved.created).toBe(true);
       agentId = approved.agentId;
       expect(agentId).toMatch(/^[a-f0-9-]{36}$/);

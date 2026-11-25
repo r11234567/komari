@@ -44,9 +44,10 @@ async function run() {
     try { return r.status(); } finally { await r.dispose(); }
   }, status => status === 200);
   await api('/api/login', { username: 'e2e-user', password, '2fa_code': '' });
-  const ticket = (await api('/api/bind/ticket', {})).data.ticket;
-  assert(ticket, 'No enrollment ticket');
-  console.log(`::add-mask::${ticket}`);
+  const authorization = (await api('/api/bind/ticket', {})).data;
+  assert(authorization.expires_in > 0 && !authorization.ticket, 'Invalid bind authorization response');
+  const state = await context.storageState();
+  assert(state.cookies.some(cookie => cookie.name === '__Host-komari_bind' && cookie.secure && cookie.httpOnly && cookie.sameSite === 'Strict'), 'No protected bind cookie');
   const log = fs.openSync(path.join(root, 'database-enrollment-private.log'), 'w', 0o600);
   try {
     login = spawn('/usr/lib/komari/komari-e2e/komari-agent', ['login', '--endpoint', base], {
@@ -63,7 +64,7 @@ async function run() {
   }, items => items.length === 1);
   const approval = await context.post('/komari.enrollment.v1.EnrollmentAdminService/ApproveEnrollment', {
     data: { userCode: pending[0].userCode, newAgent: { name: 'Real database qualification Agent' } },
-    headers: { Origin: base, 'Connect-Protocol-Version': '1', 'X-Bind-Ticket': ticket }, timeout: 30_000,
+    headers: { Origin: base, 'Connect-Protocol-Version': '1' }, timeout: 30_000,
   });
   let approved;
   try {

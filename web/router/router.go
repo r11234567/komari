@@ -122,6 +122,7 @@ func registerPanelAuthAndSystemRoutes(r *gin.Engine) {
 	r.POST("/api/login", public_api.Login)
 	r.POST("/api/bind/ticket", public_api.RequestBindTicket)
 	r.POST("/api/public/bind/ticket", public_api.RequestBindTicket)
+	r.GET("/api/public/bind/ticket", public_api.RequestBindTicket)
 	r.POST("/api/logout", public_api.Logout)
 	r.GET("/api/oauth", public_api.OAuth)
 	r.GET("/api/oauth_callback", public_api.OAuthCallback)

@@ -95,6 +95,7 @@ func Logout(c *gin.Context) {
 		accounts.DeleteSession(legacy)
 	}
 	setSessionCookie(c, "", -1)
+	security.ClearCookie(c, security.BindTicketCookieName)
 	auditlog.Log(c.ClientIP(), "", "logged out", "logout")
 	c.Redirect(302, "/")
 }

@@ -8,6 +8,7 @@ import (
 
 const (
 	SessionCookieName               = "__Host-komari_session"
+	BindTicketCookieName            = "__Host-komari_bind"
 	LegacySessionCookieName         = "session_token"
 	OAuthStateCookieName            = "__Host-komari_oauth_state"
 	LegacyOAuthStateCookieName      = "oauth_state"
@@ -42,6 +43,17 @@ func SetSensitiveCookie(c *gin.Context, name, value string, maxAge int) {
 // same-origin control-plane ceremonies such as TOTP enrollment.
 func SetStrictSensitiveCookie(c *gin.Context, name, value string, maxAge int) {
 	setCookie(c, name, value, maxAge, http.SameSiteStrictMode)
+}
+
+func SameOriginBindRequest(r *http.Request) bool {
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" {
+		return false
+	}
+	origins := r.Header.Values("Origin")
+	if r.Method == http.MethodGet && len(origins) == 0 {
+		return true
+	}
+	return len(origins) == 1 && OriginMatchesRequest(origins[0], r)
 }
 
 // ClearCookie expires one or more root-scoped cookies.

@@ -49,6 +49,17 @@ type Claims struct {
 	Exp   int64  `json:"exp"`
 }
 
+// SessionKey derives a ticket key for exactly one completed console session.
+func SessionKey(key []byte, session string) []byte {
+	if len(key) == 0 || session == "" {
+		return nil
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte("komari:bind-ticket:session:v1\x00"))
+	mac.Write([]byte(session))
+	return mac.Sum(nil)
+}
+
 // Issue creates a reusable signed 2-minute ticket for the specified user.
 func Issue(userUUID string, key []byte) (string, int64, error) {
 	return IssueWithDuration(userUUID, key, TicketDuration)
