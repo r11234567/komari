@@ -205,6 +205,12 @@ func (sc *SafeConn) SetReadDeadline(t time.Time) error {
 	return sc.conn.SetReadDeadline(t)
 }
 
+func (sc *SafeConn) SetWriteDeadline(t time.Time) error {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return sc.conn.SetWriteDeadline(t)
+}
+
 func (sc *SafeConn) SetReadLimit(limit int64) {
 	sc.conn.SetReadLimit(limit)
 }

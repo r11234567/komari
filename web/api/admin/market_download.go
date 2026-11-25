@@ -11,8 +11,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/komari-monitor/komari/pkg/config"
-	"gorm.io/gorm"
+	"github.com/komari-monitor/komari/internal/outboundpolicy"
 )
 
 var (
@@ -36,17 +35,9 @@ func marketTransport(protected bool) *http.Transport {
 		ResponseHeaderTimeout: 30 * time.Second,
 	}
 	if protected {
-		transport.DialContext = dialPublicAddress
+		transport.DialContext = outboundpolicy.DialPublic
 	}
 	return transport
-}
-
-func ssrfProtectionEnabled() (bool, error) {
-	enabled, err := config.GetAs[bool](config.SSRFProtectionEnabledKey)
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return true, nil
-	}
-	return enabled, err
 }
 
 func validateMarketDownloadURL(ctx context.Context, rawURL string, protected bool) error {
@@ -57,7 +48,7 @@ func validateMarketDownloadURL(ctx context.Context, rawURL string, protected boo
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil {
 		return errors.New("only HTTP and HTTPS URLs without embedded credentials are allowed")
 	}
-	if protected && isPrivateIPContext(ctx, parsed.Hostname()) {
+	if protected && outboundpolicy.HostHasBlockedAddress(ctx, parsed.Hostname()) {
 		return errors.New("requests to private or non-public addresses are not allowed")
 	}
 	return nil
@@ -78,7 +69,7 @@ func downloadMarketURL(rawURL string, maxSize int64, timeout time.Duration) ([]b
 	if !marketDownloadURLPattern.MatchString(rawURL) {
 		return nil, errors.New("invalid market download URL format")
 	}
-	protected, err := ssrfProtectionEnabled()
+	protected, err := outboundpolicy.Enabled()
 	if err != nil {
 		return nil, fmt.Errorf("unable to read SSRF protection setting: %w", err)
 	}
