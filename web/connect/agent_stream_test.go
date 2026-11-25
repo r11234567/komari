@@ -68,6 +68,58 @@ func TestAgentTransferRequiresDPoPBeforeReadingFileBody(t *testing.T) {
 	require.EqualValues(t, 1, hits.Load())
 }
 
+func TestRevocationInterruptsFileBodyOverHTTP2(t *testing.T) {
+	id, token, key := dpopTestAgent(t)
+	engine := gin.New()
+	engine.Use(api.APIAuthenticationMiddleware(), api.IdentityMiddleware())
+	stopped := make(chan error, 1)
+	engine.POST(api.AgentTransferRoute, GuardAgentTransfer, func(c *gin.Context) {
+		var prefix [4]byte
+		_, err := io.ReadFull(c.Request.Body, prefix[:])
+		if err != nil {
+			stopped <- err
+			return
+		}
+		_, _ = c.Writer.Write(prefix[:])
+		c.Writer.Flush()
+		_, err = io.Copy(io.Discard, c.Request.Body)
+		stopped <- err
+	})
+	server := httptest.NewUnstartedServer(engine)
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	endpoint := server.URL + "/api/clients/transfer/revoke-fixture"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, reader)
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "DPoP "+token)
+	request.Header.Set("DPoP", makeRFC9449Proof(t, key, key.Public().(ed25519.PublicKey), http.MethodPost,
+		endpoint, token, currentDPoPNonce(id, time.Now()), uuid.NewString(), nil, "stream"))
+	go func() { _, _ = writer.Write([]byte("data")) }()
+	response, err := server.Client().Do(request)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, 2, response.ProtoMajor)
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	var accepted [4]byte
+	_, err = io.ReadFull(response.Body, accepted[:])
+	require.NoError(t, err)
+	require.Equal(t, "data", string(accepted[:]))
+
+	require.NoError(t, enrollment.Revoke(id, "operator revoked the file transfer fixture"))
+	select {
+	case err := <-stopped:
+		require.Error(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the revoked file upload still waits for its request body")
+	}
+}
+
 func TestRevocationInterruptsInactiveBidiStreamOverHTTP2(t *testing.T) {
 	server := entryBoundaryServer(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
