@@ -3,21 +3,39 @@ package connectapi
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/enrollment"
+	"github.com/komari-monitor/komari/pkg/requestmeta"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/security"
 )
 
-// GuardAgentStream tracks the separately routed file data stream after its
-// Agent access credential has been authenticated by the entry boundary.
-func GuardAgentStream(c *gin.Context) {
+// GuardAgentTransfer verifies proof of possession before tracking the stream
+// or handing the one-shot file transfer to its handler.
+func GuardAgentTransfer(c *gin.Context) {
 	principal := api.GetPrincipal(c)
-	if principal == nil || principal.Type != rpc.PrincipalAgent {
-		security.AbortRequest(c, http.StatusUnauthorized, "an Agent credential is required")
+	auth := strings.Fields(c.GetHeader("Authorization"))
+	if principal == nil || principal.Type != rpc.PrincipalAgent || len(auth) != 2 || !strings.EqualFold(auth[0], "DPoP") {
+		security.AbortRequest(c, http.StatusUnauthorized, "an Agent DPoP credential is required")
+		return
+	}
+	if c.Request.URL.RawQuery != "" || c.Request.URL.ForceQuery {
+		security.AbortRequest(c, http.StatusBadRequest, "file transfers do not accept query parameters")
+		return
+	}
+	req, err := requestmeta.EnsureBound(c.Request)
+	if err != nil {
+		security.AbortRequest(c, http.StatusBadRequest, "invalid request origin")
+		return
+	}
+	c.Request = req
+	if err := verifyDPoP(c, principal); err != nil {
+		security.SetPrincipalHeader(c, rpc.NewAnonymousPrincipal())
+		security.AbortRequest(c, http.StatusUnauthorized, err.Error())
 		return
 	}
 	serveAgentStream(c, principal, c.Next)

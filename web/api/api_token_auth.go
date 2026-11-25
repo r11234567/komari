@@ -21,6 +21,7 @@ import (
 )
 
 const (
+	AgentTransferRoute         = "/api/clients/transfer/:id"
 	unknownMissCacheTTL        = 10 * time.Second
 	unknownMissCacheMaxEntries = 4096
 	unknownProbeConcurrency    = 4
@@ -118,9 +119,9 @@ func APIAuthenticationMiddleware(pluginRoute ...func(method, pattern string) boo
 			security.AbortRequest(c, http.StatusUnauthorized, "invalid API credential")
 			return
 		}
-		if scheme == "DPoP" && (!strings.HasPrefix(c.FullPath(), "/komari.") ||
+		if scheme == "DPoP" && ((!strings.HasPrefix(c.FullPath(), "/komari.") && c.FullPath() != AgentTransferRoute) ||
 			strings.HasPrefix(secret, apitokens.Prefix)) {
-			security.AbortRequest(c, http.StatusUnauthorized, "DPoP credentials require an enrolled Agent Connect procedure")
+			security.AbortRequest(c, http.StatusUnauthorized, "DPoP credentials require an enrolled Agent endpoint")
 			return
 		}
 		now := time.Now()

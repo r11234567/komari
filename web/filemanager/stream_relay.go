@@ -172,9 +172,6 @@ func lookupStreamTransfer(c *gin.Context) (*streamTransfer, error) {
 		return nil, errors.New("file transfer id does not match request")
 	}
 	token := strings.TrimSpace(c.GetHeader(streamTokenHeader))
-	if token == "" {
-		token = strings.TrimSpace(c.Query("transfer_token"))
-	}
 	if id == "" || token == "" {
 		return nil, errors.New("file transfer credentials are required")
 	}

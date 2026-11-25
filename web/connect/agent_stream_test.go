@@ -1,17 +1,72 @@
 package connectapi
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/database/enrollment"
+	"github.com/komari-monitor/komari/web/api"
 	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
 	metricsv1connect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAgentTransferRequiresDPoPBeforeReadingFileBody(t *testing.T) {
+	id, token, key := dpopTestAgent(t)
+	publicKey := key.Public().(ed25519.PublicKey)
+	engine := gin.New()
+	engine.Use(api.APIAuthenticationMiddleware(), api.IdentityMiddleware())
+	var hits atomic.Int32
+	engine.POST(api.AgentTransferRoute, GuardAgentTransfer, func(c *gin.Context) {
+		hits.Add(1)
+		count, err := io.Copy(io.Discard, c.Request.Body)
+		if err != nil || count != maxDPoPBodyBytes+1 {
+			t.Errorf("transfer body size = %d, error = %v", count, err)
+		}
+		c.Status(http.StatusNoContent)
+	})
+	server := httptest.NewUnstartedServer(engine)
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	endpoint := server.URL + "/api/clients/transfer/test"
+	call := func(target, auth, proof string, body io.Reader) int {
+		t.Helper()
+		request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, target, body)
+		require.NoError(t, err)
+		request.Header.Set("Authorization", auth)
+		request.Header.Set("DPoP", proof)
+		response, err := server.Client().Do(request)
+		require.NoError(t, err)
+		defer response.Body.Close()
+		require.Equal(t, 2, response.ProtoMajor)
+		return response.StatusCode
+	}
+	auth := "DPoP " + token
+	nonce := currentDPoPNonce(id, time.Now())
+	proof := makeRFC9449Proof(t, key, publicKey, http.MethodPost, endpoint, token, nonce, uuid.NewString(), nil, "stream")
+	require.Equal(t, http.StatusUnauthorized, call(endpoint, "Bearer "+token, proof, nil))
+	require.Equal(t, http.StatusUnauthorized, call(endpoint, auth, "", nil))
+	require.Equal(t, http.StatusUnauthorized, call(endpoint+"-different", auth, proof, nil))
+	require.Equal(t, http.StatusBadRequest, call(endpoint+"?transfer_token=fixture", auth, proof, nil))
+	require.Zero(t, hits.Load())
+
+	body := make([]byte, maxDPoPBodyBytes+1)
+	require.Equal(t, http.StatusNoContent, call(endpoint, auth, proof, bytes.NewReader(body)))
+	require.Equal(t, http.StatusUnauthorized, call(endpoint, auth, proof, nil))
+	require.EqualValues(t, 1, hits.Load())
+}
 
 func TestRevocationInterruptsInactiveBidiStreamOverHTTP2(t *testing.T) {
 	server := entryBoundaryServer(t)
