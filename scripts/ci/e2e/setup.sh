@@ -31,6 +31,22 @@ http {
   log_format e2e '\$time_iso8601 \$request_method \$uri \$status upstream=\$upstream_status rt=\$request_time';
   access_log $E2E_ARTIFACTS/nginx-access.log e2e;
   client_body_temp_path $E2E_ROOT/nginx-body;
+  map \$host \$split_backend {
+    localhost 127.0.0.1:29454;
+    default   127.0.0.1:29455;
+  }
+  server {
+    listen 127.0.0.1:29456 ssl;
+    ssl_certificate $E2E_ROOT/tls/server.crt;
+    ssl_certificate_key $E2E_ROOT/tls/server.key;
+    location / {
+      proxy_pass http://\$split_backend;
+      proxy_set_header Host \$http_host;
+      proxy_set_header X-Forwarded-Proto https;
+      proxy_set_header X-Forwarded-Host \$http_host;
+      proxy_set_header Forwarded '';
+    }
+  }
   server {
     listen 127.0.0.1:29443 ssl http2;
     server_name localhost;

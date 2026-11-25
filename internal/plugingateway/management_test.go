@@ -14,7 +14,7 @@ func TestManagementRequiresAdminBeforeSideEffects(t *testing.T) {
 		if _, err := List(ctx); !errors.Is(err, ErrPermissionDenied) {
 			t.Fatalf("list: %v", err)
 		}
-		if err := SetEnabled(ctx, "example", true, true); !errors.Is(err, ErrPermissionDenied) {
+		if err := SetEnabled(ctx, "example", true); !errors.Is(err, ErrPermissionDenied) {
 			t.Fatalf("enable: %v", err)
 		}
 		if _, err := Logs(ctx, "example"); !errors.Is(err, ErrPermissionDenied) {
@@ -34,7 +34,7 @@ func TestManagementRequiresAdminBeforeSideEffects(t *testing.T) {
 
 func TestManagementValidatesNamesAndCancellation(t *testing.T) {
 	ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: rpc.NewUserPrincipal("user")})
-	if err := SetEnabled(ctx, " \t", true, true); !errors.Is(err, ErrShortRequired) {
+	if err := SetEnabled(ctx, " \t", true); !errors.Is(err, ErrShortRequired) {
 		t.Fatalf("blank name: %v", err)
 	}
 	if _, _, err := Configuration(ctx, ""); !errors.Is(err, ErrShortRequired) {
@@ -47,14 +47,14 @@ func TestManagementValidatesNamesAndCancellation(t *testing.T) {
 	}
 }
 
-func TestPluginLifecycleCannotGrantExecutionWithLegacyBooleanOrMachineIdentity(t *testing.T) {
+func TestPluginLifecycleRequiresOperationProofAndHumanIdentity(t *testing.T) {
 	ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: rpc.NewUserPrincipal("human")})
-	if err := SetEnabled(ctx, "not-installed", true, true); err == nil {
-		t.Fatalf("legacy approval flag granted code execution: %v", err)
+	if err := SetEnabled(ctx, "not-installed", true); !errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("enable without operation proof: %v", err)
 	}
 	for _, principal := range []*rpc.Principal{rpc.NewAPITokenPrincipal(rpc.APITokenPolicy{}), rpc.PrincipalFromRole(rpc.RoleAdmin)} {
 		ctx = rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Principal: principal})
-		if err := SetEnabled(ctx, "target", true, true); !errors.Is(err, ErrPermissionDenied) {
+		if err := SetEnabled(ctx, "target", true); !errors.Is(err, ErrPermissionDenied) {
 			t.Fatalf("machine/plugin enable: %v", err)
 		}
 		if err := Delete(ctx, "target"); !errors.Is(err, ErrPermissionDenied) {

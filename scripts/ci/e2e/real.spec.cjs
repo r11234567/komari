@@ -60,6 +60,27 @@ function verificationResource(request) {
   return resource;
 }
 
+function previewPDF() {
+  const contents = ['1 0 0 rg\n0 0 100 100 re f\n', '0 0 1 rg\n0 0 100 100 re f\n'];
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Count 2 /Kids [3 0 R 4 0 R] /MediaBox [0 0 100 100] >>',
+    '<< /Type /Page /Parent 2 0 R /Resources << >> /Contents 5 0 R >>',
+    '<< /Type /Page /Parent 2 0 R /Resources << >> /Contents 6 0 R >>',
+    ...contents.map(stream => `<< /Length ${stream.length} >>\nstream\n${stream}endstream`),
+  ];
+  let pdf = '%PDF-1.4\n';
+  const offsets = objects.map((body, index) => {
+    const offset = pdf.length;
+    pdf += `${index + 1} 0 obj\n${body}\nendobj\n`;
+    return offset;
+  });
+  const xref = pdf.length;
+  pdf += `xref\n0 7\n0000000000 65535 f \n${offsets.map(offset => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')}`;
+  pdf += `trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(pdf, 'ascii');
+}
+
 test('real HTTPS panel and installed Agent: authorization, workspace and files', async ({ page, context }, info) => {
   const events = [];
   const metrics = { createdSessions: 0, closedSessions: 0, uploadChunks: 0 };
@@ -592,6 +613,29 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       fs.writeFileSync(path.join(artifacts, 'file-roundtrip.json'), JSON.stringify({
         size: bytes.length, sha256: sha256(bytes), chunks: metrics.uploadChunks,
       }, null, 2));
+    });
+
+    await stage('real workspace PDF renders both pages without a document iframe', async () => {
+      const filename = 'page-preview.pdf';
+      const bytes = previewPDF();
+      await page.locator('input[type=file][multiple]').setInputFiles({
+        name: filename, mimeType: 'application/pdf', buffer: bytes,
+      });
+      await expect.poll(() => fs.existsSync(fixture(filename)) ? sha256(fs.readFileSync(fixture(filename))) : '')
+        .toBe(sha256(bytes));
+      await page.locator('[data-file-path]').filter({ hasText: filename }).dblclick();
+      const editor = page.locator('.km-file-editor');
+      const canvas = editor.locator(`canvas[aria-label="${filename}"]`);
+      await expect(canvas).toBeVisible();
+      await expect(editor.locator('iframe')).toHaveCount(0);
+      const pixel = () => canvas.evaluate(node => [...node.getContext('2d').getImageData(20, 20, 1, 1).data]);
+      await expect.poll(pixel).toEqual([255, 0, 0, 255]);
+      await editor.getByRole('button', { name: 'Next page', exact: true }).click();
+      await expect.poll(pixel).toEqual([0, 0, 255, 255]);
+      await editor.getByRole('button', { name: 'Previous page', exact: true }).click();
+      await expect.poll(pixel).toEqual([255, 0, 0, 255]);
+      expect(sha256(await downloadFile(filename))).toBe(sha256(bytes));
+      await editor.getByRole('button', { name: 'Close File', exact: true }).click();
     });
 
     await stage('actual Monaco editor saves UTF-8 and zero-byte content through the Agent', async () => {

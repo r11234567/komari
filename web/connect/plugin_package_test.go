@@ -131,7 +131,7 @@ func TestPluginPackageReductionsDoNotNeedConfigured2FA(t *testing.T) {
 				return
 			}
 			require.False(t, pluginapp.List()[0].Running)
-			require.Error(t, plugingateway.SetEnabled(ctx, "proof", true, false))
+			require.Error(t, plugingateway.SetEnabled(ctx, "proof", true))
 			_, err = service.DecidePluginPackage(ctx, connect.NewRequest(&pluginv1.DecidePluginPackageRequest{ShortName: "proof", Digest: row.Digest, ExpectedCurrentDigest: row.Digest, Action: "activate"}))
 			require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
 		})
@@ -147,8 +147,21 @@ func TestPluginPackageExistingGrantAllowsSwitchAndUpdateButNotExpansion(t *testi
 	// protection by reusing the same code twice within a 30-second window.
 	err := pluginapp.DecidePackage("proof", row.Digest, "", "activate", "test-setup", func(pluginapp.PackageReview) error { return nil })
 	require.NoError(t, err)
-	require.NoError(t, plugingateway.SetEnabled(ctx, "proof", false, false))
-	require.NoError(t, plugingateway.SetEnabled(ctx, "proof", true, false))
+	for _, toggle := range []struct {
+		enabled bool
+		target  string
+	}{{false, "false"}, {true, "true"}} {
+		actor, _, _ := actionFixture(t)
+		request := connect.NewRequest(&pluginv1.SetPluginEnabledRequest{ShortName: "proof", Enabled: toggle.enabled, PermissionsApproved: true})
+		_, err := service.SetPluginEnabled(actor, request)
+		require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+		request.Header().Set(credentialaction.Header, actionAuthorization(t, actor, credential.SensitiveOperation,
+			credentialaction.ScopedResource("plugin:set-enabled", "proof", toggle.target)))
+		_, err = service.SetPluginEnabled(actor, request)
+		require.NoError(t, err)
+		_, err = service.SetPluginEnabled(actor, request)
+		require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+	}
 	stage := func(version, permissions string) pluginapp.PackageReview {
 		path := filepath.Join(t.TempDir(), "update.zip")
 		f, err := os.Create(path)
@@ -204,7 +217,7 @@ func TestPluginPackageApprovalPreservesExistingConfigurationCapability(t *testin
 	values, err := pluginapp.GetConfiguration("proof")
 	require.NoError(t, err)
 	require.Equal(t, "saved", values["fixture"])
-	require.ErrorIs(t, plugingateway.SetEnabled(pluginCtx, "proof", true, true), plugingateway.ErrPermissionDenied)
+	require.ErrorIs(t, plugingateway.SetEnabled(pluginCtx, "proof", true), plugingateway.ErrPermissionDenied)
 	require.Len(t, pluginapp.List(), 1)
 	require.True(t, pluginapp.List()[0].Running)
 }

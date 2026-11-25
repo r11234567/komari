@@ -379,15 +379,13 @@ func publicThemeFileContent(themeID, relativePath string) ([]byte, string, bool)
 	return embeddedFileContent(defaultThemeBundle, relativePath)
 }
 
-// Static 注册静态资源和 SPA 路由处理
+// Static serves the two embedded applications on the shared listener. Local
+// themes and custom HTML are served only by StaticPublic on a separate origin.
 func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	getConfig := func() map[string]any {
 		cfg, _ := config.GetMany(map[string]any{
 			config.DescriptionKey: "A simple server monitor tool.",
-			config.CustomHeadKey:  "",
-			config.CustomBodyKey:  "",
 			config.SitenameKey:    "Komari Monitor",
-			config.ThemeKey:       DefaultTheme,
 		})
 		return cfg
 	}
@@ -406,7 +404,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		if privateApplication {
 			content, _, exists = embeddedFileContent("systemUI", targetFile)
 		} else {
-			content, _, exists = publicThemeFileContent(cfg[config.ThemeKey].(string), targetFile)
+			content, _, exists = embeddedFileContent(defaultThemeBundle, targetFile)
 		}
 
 		if !exists {
@@ -419,19 +417,10 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			htmlStr = replaceHTMLLanguage(htmlStr, language)
 		}
 
-		// Custom Head/Body content belongs to the public site only. Keeping the
-		// private applications on the built-in document prevents public CSS and
-		// scripts from changing the admin or terminal interfaces.
 		if privateApplication {
 			c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(injectHTTPErrorNotice(htmlStr)))
 			return
 		}
-
-		htmlStr = injectCustomHTML(
-			htmlStr,
-			cfg[config.CustomHeadKey].(string),
-			cfg[config.CustomBodyKey].(string),
-		)
 
 		rendered := renderPublicDocumentTitle(
 			strings.ReplaceAll(
@@ -441,11 +430,8 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			),
 			cfg[config.SitenameKey].(string),
 		)
-		// The notice is injected for every theme, not only the bundled one: a
-		// theme replaces the whole application, so a rejected request would
-		// otherwise leave a blank chart with nothing explaining why.
 		c.Data(http.StatusOK, "text/html; charset=utf-8",
-			[]byte(injectNativeLoginBridge(injectHTTPErrorNotice(injectThemeChangeReload(rendered)))))
+			[]byte(injectNativeLoginBridge(injectHTTPErrorNotice(rendered))))
 	}
 
 	// ================= 路由定义 =================
@@ -464,11 +450,8 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			return
 		}
 
-		// 其次：当前主题的 dist/favicon.ico 或 theme_root/favicon.ico ?
-		// 通常构建后的资源在 dist 中，这里假设优先找 dist 内的，如果你的 favicon 在根目录，去掉 DistDir 拼接即可
-		cfg := getConfig()
 		themeFaviconPath := path.Join(DistDir, FaviconFile)
-		content, mimeType, exists := publicThemeFileContent(cfg[config.ThemeKey].(string), themeFaviconPath)
+		content, mimeType, exists := embeddedFileContent(defaultThemeBundle, themeFaviconPath)
 		if exists {
 			c.Data(http.StatusOK, mimeType, content)
 			return
@@ -497,36 +480,16 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		c.Data(http.StatusOK, mimeType, content)
 	})
 
-	// 2. Static theme files are served only from installed, manageable themes.
-	// 允许访问 /themes/MyTheme/theme.json 和 /themes/MyTheme/dist/assets/a.js
-	r.GET("/themes/:id/*path", func(c *gin.Context) {
-		themeID := c.Param("id")
-		// c.Param("path") 包含了开头的 /，getFileContent 会处理
-		filePath := c.Param("path")
-
-		content, mimeType, exists := localThemeFileContent(themeID, filePath)
-		if exists {
-			c.Data(http.StatusOK, mimeType, content)
-			return
-		}
-		c.Status(http.StatusNotFound)
-	})
-
-	// 3. SPA 路由 (noRoute)
 	noRoute(func(c *gin.Context) {
 		if c.Request.Method != http.MethodGet {
 			c.Status(http.StatusNotFound)
 			return
 		}
 		reqPath := c.Request.URL.Path
-		if isUnmountedAPIOrConnectPath(reqPath) {
+		if isUnmountedAPIOrConnectPath(reqPath) || reqPath == "/themes" || strings.HasPrefix(reqPath, "/themes/") {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		cfg := getConfig()
-		// index.html is a live document, not a static asset. It must pass
-		// through serveIndex so site metadata and custom Head/Body content
-		// are applied even when a browser requests the file explicitly.
 		if reqPath == "/index.html" {
 			serveIndex(c)
 			return
@@ -538,7 +501,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		var mimeType string
 		var exists bool
 		if !isPrivateApplicationPath(reqPath) {
-			content, mimeType, exists = publicThemeFileContent(cfg[config.ThemeKey].(string), distPath)
+			content, mimeType, exists = embeddedFileContent(defaultThemeBundle, distPath)
 		}
 		if exists {
 			setStaticCacheHeaders(c, reqPath)

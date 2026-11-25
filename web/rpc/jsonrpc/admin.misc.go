@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/requestmeta"
 	"github.com/komari-monitor/komari/pkg/rpc"
@@ -173,10 +175,48 @@ func metricKeysTouched(cfg map[string]interface{}) bool {
 	return false
 }
 
+var sensitiveSettingKeys = []string{
+	config.CorsOriginCheckEnabledKey, config.CorsAllowedOriginsKey, config.WsOriginCheckEnabledKey,
+	config.WsAllowedOriginsKey, config.SSRFProtectionEnabledKey, config.ScriptDomainKey,
+	config.CustomHeadKey, config.CustomBodyKey, config.HTTPSEnabledKey, config.HTTPSListenKey,
+	config.HTTPSRedirectHTTPKey, config.HTTPSCertificatePathKey, config.HTTPSPrivateKeyPathKey,
+}
+
+func sensitiveSettingTargets(cfg map[string]any) ([]string, error) {
+	keys := make([]string, 0, len(sensitiveSettingKeys))
+	for _, key := range sensitiveSettingKeys {
+		if _, ok := cfg[key]; ok {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	targets := make([]string, 0, 2*len(keys))
+	for _, key := range keys {
+		switch value := cfg[key].(type) {
+		case string:
+			targets = append(targets, key, "string:"+value)
+		case bool:
+			targets = append(targets, key, "bool:"+strconv.FormatBool(value))
+		default:
+			return nil, errors.New("invalid value for " + key)
+		}
+	}
+	return targets, nil
+}
+
 func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	cfg := make(map[string]interface{})
 	if err := req.BindParams(&cfg); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid or missing request body: "+err.Error(), nil)
+	}
+	targets, err := sensitiveSettingTargets(cfg)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
+	}
+	if len(targets) != 0 {
+		if err := credentialaction.RequireAction(ctx, "settings:edit", targets...); err != nil {
+			return nil, rpc.MakeError(rpc.PermissionDenied, err.Error(), nil)
+		}
 	}
 	if _, found := cfg[config.RetiredAdminKey]; found {
 		return nil, rpc.MakeError(rpc.InvalidParams, "legacy administrator key is retired", nil)

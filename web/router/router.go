@@ -57,6 +57,7 @@ func Register(r *gin.Engine) func() error {
 func MountPublicRoutes(r *gin.Engine, decorateTheme func(*http.Request, []byte) []byte) {
 	registerHealthRoute(r)
 	registerPublicReadRoutes(r)
+	r.GET("/api/plugin/:short/*filepath", public_api.ServePluginFile)
 	connectapi.RegisterPublic(r)
 	public.StaticPublic(r.Group("/"), func(handlers ...gin.HandlerFunc) {
 		r.NoRoute(handlers...)
@@ -94,7 +95,6 @@ func registerHealthRoute(r *gin.Engine) {
 func registerPublicReadRoutes(r *gin.Engine) {
 	r.GET("/share", security.RedeemTempShare)
 	r.GET("/api/mjpeg_live", public_api.MjpegLiveHandler)
-	r.GET("/api/plugin/:short/*filepath", public_api.ServePluginFile)
 	r.POST("/api/public/visitor-event", jsonRpc.RecordVisitorEventHTTP)
 	// /api/clients 是公开只读 WebSocket 端点（客户端发 "get"/"get <uuid>" 拉取在线列表与最新上报）。
 	r.GET("/api/clients", api.GetClients)

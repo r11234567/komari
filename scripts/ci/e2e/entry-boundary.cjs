@@ -4,8 +4,10 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
+const { once } = require('node:events');
 const { chromium, request } = require('@playwright/test');
+const { freshTOTP } = require('./totp.cjs');
 require('./guard.cjs');
 
 const base = process.env.E2E_URL || 'https://127.0.0.1:29443';
@@ -28,8 +30,8 @@ async function rpc(client, service, method, data = {}, headers = {}) {
   return { status, body };
 }
 
-async function post(client, url, data) {
-  const response = await client.post(url, { data, headers: { Origin: base } });
+async function post(client, url, data, headers = {}) {
+  const response = await client.post(url, { data, headers: { Origin: base, ...headers } });
   assert(response.ok(), `${url}: HTTP ${response.status()} ${await response.text()}`);
   const result = await response.json();
   await response.dispose();
@@ -264,7 +266,49 @@ async function run() {
 
   // Loopback alias on the same disposable Nginx listener exercises real browser CORS across origins.
   const callerOrigin = 'https://localhost:29443';
-  await post(admin, '/api/admin/settings', { cors_origin_check_enabled: true, cors_allowed_origins: callerOrigin });
+  await post(admin, '/api/admin/2fa/generate', {});
+  const secret = (await admin.storageState()).cookies
+    .find(cookie => ['__Host-komari_2fa_secret', '2fa_secret'].includes(cookie.name))?.value;
+  assert(secret);
+  console.log(`::add-mask::${secret}`);
+  let code = await freshTOTP(secret, -1);
+  await post(admin, `/api/admin/2fa/enable?code=${code.code}`, {});
+
+  const settingsURL = '/api/admin/settings/';
+  const credentialHeader = 'X-Komari-Credential-Authorization';
+  const verificationService = 'credential.v1.TrustedCredentialService';
+  async function verifySettings(values) {
+    const targets = Object.keys(values).sort().flatMap(key => [
+      key,
+      `${typeof values[key] === 'boolean' ? 'bool' : 'string'}:${values[key]}`,
+    ]);
+    const digest = crypto.createHash('sha256').update(JSON.stringify(targets)).digest('hex');
+    const begin = await rpc(admin, verificationService, 'BeginVerification', {
+      providerId: 'native:totp', purpose: 'CREDENTIAL_PURPOSE_SENSITIVE_OPERATION', resource: `action:settings:edit:${digest}`,
+    });
+    assert.equal(begin.status, 200);
+    code = await freshTOTP(secret, code.counter);
+    const complete = await rpc(admin, verificationService, 'CompleteVerification', {
+      challengeId: begin.body.challengeId, proof: { code: code.code },
+    });
+    assert.equal(complete.status, 200);
+    const token = complete.body.authorization?.grantToken;
+    assert(token);
+    return { [credentialHeader]: token };
+  }
+  async function expectSettingsDenied(data, headers = {}) {
+    const response = await admin.post(settingsURL, { data, headers: { Origin: base, ...headers } });
+    assert.equal(response.status(), 401);
+    await response.dispose();
+  }
+
+  const allowAlias = { cors_origin_check_enabled: true, cors_allowed_origins: callerOrigin };
+  await expectSettingsDenied(allowAlias);
+  const allowProof = await verifySettings(allowAlias);
+  await expectSettingsDenied({ ...allowAlias, cors_allowed_origins: '' }, allowProof);
+  await post(admin, settingsURL, allowAlias, allowProof);
+  await expectSettingsDenied(allowAlias, allowProof);
+  checks.push('settings-accept-only-fresh-verification-for-the-exact-change');
   await until('CORS policy reload', async () => {
     const response = await guest.fetch('/komari.browser.v1.BrowserService/GetPublicInfo', {
       method: 'OPTIONS',
@@ -315,7 +359,8 @@ async function run() {
   assert(Number(limited.retry) > 0, 'browser cannot read Retry-After');
   assert.equal(limited.cookie, null, 'browser exposed a cookie header');
 
-  await post(admin, '/api/admin/settings', { cors_allowed_origins: '' });
+  const removeAlias = { cors_allowed_origins: '' };
+  await post(admin, settingsURL, removeAlias, await verifySettings(removeAlias));
   await until('CORS removal reload', async () => {
     const response = await guest.fetch('/komari.browser.v1.BrowserService/GetThemeContract', {
       method: 'OPTIONS',
@@ -349,6 +394,64 @@ async function run() {
   assert(blocked, 'removed origin remained browser-authorized');
   await crossPage.close();
   checks.push('real-browser-preflight-rpc-headers-readable-401-and-429-retry-after', 'removed-origin-cannot-bypass-cors-with-authorization');
+
+  const custom = { custom_body: '<p id="e2e-custom-body">Public status content</p>' };
+  await post(admin, settingsURL, custom, await verifySettings(custom));
+  await post(admin, settingsURL, { private_site: false });
+  const shared = await context.newPage();
+  const sharedDocument = await shared.goto(base);
+  assert.equal(sharedDocument.status(), 200);
+  assert.equal(await shared.locator('#e2e-custom-body').count(), 0);
+  await shared.close();
+
+  // Reopen the same disposable installation in split mode through the two
+  // HTTPS hostnames. Use the actual persisted configuration from the API.
+  execFileSync('sudo', ['systemctl', 'stop', 'komari-e2e-panel.service']);
+  const publicURL = 'https://localhost:29456';
+  const panelURL = 'https://127.0.0.1:29456';
+  const splitLog = fs.openSync(path.join(artifacts, 'split-listener.log'), 'w');
+  const split = spawn(path.join(root, 'bin', 'komari'), ['server', '--listen', '127.0.0.1:29454'], {
+    cwd: path.join(root, 'panel'),
+    env: {
+      ...process.env,
+      KOMARI_PUBLIC_ORIGIN: publicURL,
+      KOMARI_PANEL_ORIGIN: panelURL,
+      KOMARI_PANEL_LISTEN: '127.0.0.1:29455',
+      KOMARI_TRUSTED_PROXIES: '127.0.0.1,::1',
+    },
+    stdio: ['ignore', splitLog, splitLog],
+  });
+  fs.closeSync(splitLog);
+  const exited = once(split, 'exit');
+  try {
+    await until('split panel starts', async () => {
+      assert.equal(split.exitCode, null, 'split panel exited before serving the fixture');
+      const response = await guest.get(`${panelURL}/ping`);
+      const ready = response.status() === 200;
+      await response.dispose();
+      return ready;
+    }, Boolean);
+    const splitContext = await browser.newContext();
+    try {
+      const publicPage = await splitContext.newPage();
+      const publicAdmin = await publicPage.goto(`${publicURL}/admin`);
+      assert.equal(publicAdmin.status(), 404);
+      const publicDocument = await publicPage.goto(publicURL);
+      assert.equal(publicDocument.status(), 200);
+      assert.equal(await publicPage.locator('#e2e-custom-body').textContent(), 'Public status content');
+      const panelPage = await splitContext.newPage();
+      const panelDocument = await panelPage.goto(`${panelURL}/admin`);
+      assert.equal(panelDocument.status(), 200);
+      assert.equal(await panelPage.locator('#e2e-custom-body').count(), 0);
+      assert.equal((await splitContext.request.get(`${panelURL}/themes/default/komari-theme.json`)).status(), 404);
+    } finally {
+      await splitContext.close();
+    }
+  } finally {
+    if (split.exitCode === null && split.signalCode === null) split.kill('SIGTERM');
+    await exited;
+  }
+  checks.push('shared-browser-suppresses-custom-html-and-split-origins-separate-admin-from-public');
 }
 
 run().then(() => {

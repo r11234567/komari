@@ -58,8 +58,7 @@ func adminSetPluginEnabled(ctx context.Context, req *rpc.JsonRpcRequest) (any, *
 		return nil, rpc.MakeError(rpc.InvalidParams, "short is required", nil)
 	}
 	enabled, _ := rpc.GetParamAs[bool](req, "enabled")
-	approved, _ := rpc.GetParamAs[bool](req, "approved")
-	if err := plugingateway.SetEnabled(ctx, short, enabled, approved); err != nil {
+	if err := plugingateway.SetEnabled(ctx, short, enabled); err != nil {
 		if errors.Is(err, plugin.ErrPermissionApprovalRequired) {
 			return map[string]any{"requires_approval": true}, nil
 		}

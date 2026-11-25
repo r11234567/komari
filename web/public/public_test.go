@@ -192,7 +192,7 @@ func TestRenderPublicDocumentTitle(t *testing.T) {
 	}
 }
 
-func TestCustomHTMLIsLimitedToPublicPages(t *testing.T) {
+func TestSharedListenerOmitsCustomHTML(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
@@ -210,11 +210,11 @@ func TestCustomHTMLIsLimitedToPublicPages(t *testing.T) {
 	Static(router.Group("/"), router.NoRoute)
 
 	tests := []struct {
-		path       string
-		wantCustom bool
+		path            string
+		wantLoginBridge bool
 	}{
-		{path: "/", wantCustom: true},
-		{path: "/index.html", wantCustom: true},
+		{path: "/", wantLoginBridge: true},
+		{path: "/index.html", wantLoginBridge: true},
 		{path: "/admin"},
 		{path: "/admin/settings"},
 		{path: "/login"},
@@ -234,18 +234,56 @@ func TestCustomHTMLIsLimitedToPublicPages(t *testing.T) {
 			t.Fatalf("GET %s status = %d, want %d", tt.path, recorder.Code, http.StatusOK)
 		}
 		body := recorder.Body.String()
-		if strings.Contains(body, nativeLoginBridgeMarker) != tt.wantCustom {
+		if strings.Contains(body, nativeLoginBridgeMarker) != tt.wantLoginBridge {
 			t.Fatalf("GET %s native login bridge must be public-theme-only", tt.path)
 		}
 		hasCustomHead := strings.Contains(body, `data-custom-head`)
 		hasCustomBody := strings.Contains(body, `data-custom-body`)
-		if hasCustomHead != tt.wantCustom || hasCustomBody != tt.wantCustom {
-			t.Fatalf("GET %s custom HTML = (head: %t, body: %t), want both %t", tt.path, hasCustomHead, hasCustomBody, tt.wantCustom)
+		if hasCustomHead || hasCustomBody {
+			t.Fatalf("GET %s served custom HTML on the shared listener", tt.path)
 		}
 		if got := recorder.Header().Get("Cache-Control"); got != "no-store, no-cache, must-revalidate" {
 			t.Fatalf("GET %s Cache-Control = %q", tt.path, got)
 		}
 	}
+}
+
+func TestInstalledThemeIsServedOnlyByPublicListener(t *testing.T) {
+	t.Chdir(t.TempDir())
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.SetDb(db)
+	dir := filepath.Join(DataDir, ThemesDir, "third-party", DistDir)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "..", "komari-theme.json"), []byte(`{"name":"Third party","short":"third-party"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	const marker = "third-party document only"
+	if err := os.WriteFile(filepath.Join(dir, IndexFile), []byte("<html><title>Theme</title><body>"+marker+"</body></html>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Set(config.ThemeKey, "third-party"); err != nil {
+		t.Fatal(err)
+	}
+	shared, public := gin.New(), gin.New()
+	Static(shared.Group("/"), shared.NoRoute)
+	StaticPublic(public.Group("/"), public.NoRoute, nil)
+	check := func(server *gin.Engine, path string, status int, hasMarker bool) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != status || strings.Contains(response.Body.String(), marker) != hasMarker {
+			t.Fatalf("%s: status=%d, has theme marker=%t", path, response.Code, strings.Contains(response.Body.String(), marker))
+		}
+	}
+	check(shared, "/", http.StatusOK, false)
+	check(shared, "/themes/third-party/dist/index.html", http.StatusNotFound, false)
+	check(public, "/", http.StatusOK, true)
+	check(public, "/themes/third-party/dist/index.html", http.StatusOK, true)
 }
 
 func TestEnsureBundledThemesUsesOfficialDefaultForNewInstall(t *testing.T) {
@@ -479,7 +517,7 @@ func TestStaticKeepsSystemUIAndPublicThemeResourcesIsolated(t *testing.T) {
 	}
 
 	publicPage := request("/")
-	if publicPage.Code != http.StatusOK || !strings.Contains(publicPage.Body.String(), "data-public-custom-head") {
+	if publicPage.Code != http.StatusOK || strings.Contains(publicPage.Body.String(), "data-public-custom-head") {
 		t.Fatalf("public rescue page status=%d body=%q", publicPage.Code, publicPage.Body.String())
 	}
 	officialEntries, err := fs.Glob(PublicFS, defaultThemeBundle+"/dist/assets/entry-*.js")
@@ -495,7 +533,7 @@ func TestStaticKeepsSystemUIAndPublicThemeResourcesIsolated(t *testing.T) {
 	for _, path := range []string{"/", officialAssetPath} {
 		recorder := httptest.NewRecorder()
 		publicRouter.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
-		if recorder.Code != http.StatusOK || path == "/" && !strings.Contains(recorder.Body.String(), officialAssetPath) {
+		if recorder.Code != http.StatusOK || path == "/" && (!strings.Contains(recorder.Body.String(), officialAssetPath) || !strings.Contains(recorder.Body.String(), "data-public-custom-head")) {
 			t.Fatalf("public fallback GET %s status=%d", path, recorder.Code)
 		}
 	}

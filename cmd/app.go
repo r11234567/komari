@@ -778,7 +778,7 @@ func (a *App) BuildRouter() error {
 			WithTrustedOrigins(flags.EffectivePublicOrigin(), flags.EffectivePanelOrigin())
 		r.Use(cors.Middleware())
 		r.Use(backup.RejectMutationsWhileRestarting())
-		r.Use(api.APIAuthenticationMiddleware(plugin.OwnsHTTPRoute))
+		r.Use(api.APIAuthenticationMiddleware())
 		r.Use(api.IdentityMiddleware())
 		rateLimiter := security.NewRateLimitController(a.settings.RateLimitEnabled)
 		r.Use(rateLimiter.Middleware())
@@ -788,7 +788,9 @@ func (a *App) BuildRouter() error {
 
 		closeExports := router.Register(r)
 		a.addCleanup("history-export-queue", func(context.Context) error { return closeExports() })
-		plugin.Init(r)
+		// Retain plug-in initialization and its non-HTTP services while keeping
+		// third-party handlers off the shared browser origin.
+		plugin.Init(gin.New())
 		if err := plugin.LoadAll(); err != nil {
 			logger.ErrorArgs("server", "Failed to load some plugins:", err)
 		}
@@ -806,9 +808,17 @@ func (a *App) BuildRouter() error {
 	}
 
 	publicEngine := gin.New()
-	if err := configureBaseEngine(publicEngine, flags.EffectivePublicOrigin()); err != nil {
+	publicOrigin := flags.EffectivePublicOrigin()
+	if err := configureBaseEngine(publicEngine, publicOrigin); err != nil {
 		return err
 	}
+	publicEngine.Use(func(c *gin.Context) {
+		if c.Request.URL.Path != "/ping" && !security.OriginMatchesRequest(publicOrigin, c.Request) {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+		c.Next()
+	})
 	publicCors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins).
 		WithTrustedOrigins(flags.EffectivePublicOrigin())
 	publicEngine.Use(publicCors.Middleware())
@@ -819,13 +829,7 @@ func (a *App) BuildRouter() error {
 	publicEngine.Use(foregroundHistoryObserverMiddleware())
 	publicEngine.Use(api.PublicPrivateSiteMiddleware())
 	publicEngine.Use(apiNoStoreMiddleware())
-	publicOrigin := flags.EffectivePublicOrigin()
-	router.MountPublicRoutes(publicEngine, func(r *http.Request, document []byte) []byte {
-		if !security.OriginMatchesRequest(publicOrigin, r) {
-			return document
-		}
-		return plugin.InjectPublicThemeHTML(r, document)
-	})
+	router.MountPublicRoutes(publicEngine, plugin.InjectPublicThemeHTML)
 	plugin.Init(publicEngine)
 	if err := plugin.LoadAll(); err != nil {
 		logger.ErrorArgs("server", "Failed to load some plugins:", err)
@@ -869,7 +873,18 @@ func (a *App) BuildRouter() error {
 
 // Run 启动 HTTP 服务并阻塞直到收到中断信号或服务异常退出。
 func (a *App) Run() error {
-	publicHandler := plugin.WrapHandler(a.engine)
+	var publicHandler http.Handler = a.engine
+	if a.panelEngine != nil {
+		hooks := plugin.WrapHandler(publicHandler)
+		origin := flags.EffectivePublicOrigin()
+		publicHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/ping" || !security.OriginMatchesRequest(origin, r) {
+				a.engine.ServeHTTP(w, r)
+				return
+			}
+			hooks.ServeHTTP(w, r)
+		})
+	}
 	httpsSettings, err := httpsserver.LoadSettings()
 	if err != nil {
 		logger.Errorf("https", "Failed to load built-in HTTPS settings: %v", err)
