@@ -21,6 +21,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/requestmeta"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/utils/messageSender"
+	"github.com/komari-monitor/komari/web/security"
 	"github.com/komari-monitor/komari/web/signonauth"
 )
 
@@ -129,6 +130,9 @@ func adminGetSettings(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.Jso
 	}
 	delete(cst, config.CloudflareTunnelTokenKey)
 	delete(cst, config.LowResourceModeKey)
+	delete(cst, security.TempShareConfigKey)
+	delete(cst, security.LegacyTempShareTokenKey)
+	delete(cst, security.LegacyTempShareExpiryKey)
 	delete(cst, metricstore.MetricDownsamplingEnabledKey)
 	if flags.SplitPanelEnabled() {
 		cst["panel_isolation_mode"] = "split"
@@ -176,6 +180,11 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	}
 	if _, found := cfg[config.RetiredAdminKey]; found {
 		return nil, rpc.MakeError(rpc.InvalidParams, "legacy administrator key is retired", nil)
+	}
+	for _, key := range []string{security.TempShareConfigKey, security.LegacyTempShareTokenKey, security.LegacyTempShareExpiryKey} {
+		if _, found := cfg[key]; found {
+			return nil, rpc.MakeError(rpc.InvalidParams, "use the temporary share settings endpoint", nil)
+		}
 	}
 	if raw, found := cfg[config.AgentCloudflareProxyKey]; found {
 		if _, ok := raw.(bool); !ok {

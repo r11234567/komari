@@ -518,7 +518,6 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		websecurity.RedeemTempShareQuery(c)
 		reqPath := c.Request.URL.Path
 		if isUnmountedAPIOrConnectPath(reqPath) {
 			c.Status(http.StatusNotFound)
@@ -576,10 +575,6 @@ func isPrivateApplicationPath(requestPath string) bool {
 		}
 	}
 	return false
-}
-
-func redeemOrCheckTempShare(c *gin.Context) bool {
-	return websecurity.RedeemTempShareQuery(c) || websecurity.HasTempAccess(c)
 }
 
 func renderPrivateSitePublicNotice(sitename, panelOrigin string) []byte {
@@ -699,7 +694,7 @@ func StaticPublic(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc),
 			c.Status(http.StatusNotFound)
 			return
 		}
-		tempShareValid := redeemOrCheckTempShare(c)
+		tempShareValid := websecurity.HasTempAccess(c)
 		cfg := getConfig()
 		if reqPath == "/index.html" {
 			servePublicIndex(c, cfg, tempShareValid)

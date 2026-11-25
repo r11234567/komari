@@ -188,19 +188,12 @@ func PublicViewerMiddleware() gin.HandlerFunc {
 	}
 }
 
-// RedeemTempShareQuery exchanges a valid ?temp_key= query parameter on GET
-// requests into the host-scoped temp_key cookie and marks the current request.
-func RedeemTempShareQuery(c *gin.Context) bool {
-	return security.RedeemTempShareQuery(c)
-}
-
 // PublicPrivateSiteMiddleware gates data routes on the dedicated Public
 // Listener when private_site is enabled. Unlike PrivateSiteMiddleware, it never
 // honors administrator session cookies or exposes login/Passkey ceremonies;
 // callers without a temporary share token are directed to KOMARI_PANEL_ORIGIN.
 func PublicPrivateSiteMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		RedeemTempShareQuery(c)
 		// Unmounted routes (such as /api/login, /api/admin/*, and control-plane
 		// Connect RPCs) have an empty matched pattern and must proceed to NoRoute
 		// so the Public Listener always returns a hard 404 even under private_site.
