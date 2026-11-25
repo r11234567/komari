@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/trafficledger"
@@ -13,10 +14,19 @@ import (
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 )
 
+var publicClientConnections = make(chan struct{}, 128)
+
 func GetClients(c *gin.Context) {
 	// 升级到ws
 	if !IsWebSocketUpgrade(c) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Require WebSocket upgrade"})
+		return
+	}
+	select {
+	case publicClientConnections <- struct{}{}:
+		defer func() { <-publicClientConnections }()
+	default:
+		c.Status(http.StatusServiceUnavailable)
 		return
 	}
 	// Upgrade the HTTP connection to a WebSocket connection
@@ -26,6 +36,7 @@ func GetClients(c *gin.Context) {
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(256)
 
 	// PublicViewer invariant: /api/clients always filters Hidden nodes and
 	// ignores session cookies.
@@ -43,6 +54,8 @@ func GetClients(c *gin.Context) {
 	}
 
 	// 请求
+	var window time.Time
+	var messages int
 	for {
 		var resp struct {
 			Online []string             `json:"online"` // 已建立连接的客户端uuid列表
@@ -52,8 +65,25 @@ func GetClients(c *gin.Context) {
 		resp.Online = []string{}
 		resp.Data = map[string]v1.Report{}
 
-		_, data, err := conn.ReadMessage()
+		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Minute)); err != nil {
+			return
+		}
+		kind, data, err := conn.ReadMessage()
 		if err != nil {
+			return
+		}
+		now := time.Now()
+		if now.Sub(window) >= time.Second {
+			window, messages = now, 0
+		}
+		messages++
+		if messages > 8 || kind != websocket.TextMessage || len(data) > 256 {
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "invalid or excessive status requests"),
+				now.Add(time.Second))
+			return
+		}
+		if err := conn.SetWriteDeadline(now.Add(10 * time.Second)); err != nil {
 			return
 		}
 		message := string(data)

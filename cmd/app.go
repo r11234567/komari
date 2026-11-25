@@ -16,8 +16,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/internal/datadir"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database"
@@ -416,7 +414,7 @@ func (a *App) RunInstallGuide() (bool, error) {
 
 	listenAddr := flags.ControlListenAddr()
 	a.engine = r
-	a.server = &http.Server{Addr: listenAddr, Handler: h2c.NewHandler(r, &http2.Server{})}
+	a.server = newH2CServer(listenAddr, r)
 	serverErr := make(chan error, 1)
 	logger.Infof("server", "First-run installation guide is available on %s", listenAddr)
 	go func() {
@@ -500,7 +498,7 @@ func (a *App) RunLegacyUpgrade(summary migrations.LegacyMonitoringSummary) (bool
 
 	listenAddr := flags.ControlListenAddr()
 	a.engine = r
-	a.server = &http.Server{Addr: listenAddr, Handler: h2c.NewHandler(r, &http2.Server{})}
+	a.server = newH2CServer(listenAddr, r)
 	serverErr := make(chan error, 1)
 	logger.Infof("server", "Legacy monitoring data requires the 1.2.7 upgrade wizard on %s", listenAddr)
 	go func() {
@@ -581,7 +579,7 @@ func (a *App) RunMetricStorageUpgrade(summary metric.SQLiteMigrationSummary) (bo
 
 	listenAddr := flags.ControlListenAddr()
 	a.engine = r
-	a.server = &http.Server{Addr: listenAddr, Handler: h2c.NewHandler(r, &http2.Server{})}
+	a.server = newH2CServer(listenAddr, r)
 	serverErr := make(chan error, 1)
 	logger.Infof("server", "Metric storage upgrade progress is available on %s", listenAddr)
 	go func() {
@@ -917,19 +915,13 @@ func (a *App) Run() error {
 	baseContextFn := func(net.Listener) context.Context { return baseCtx }
 
 	rootHandler := httpsserver.Default.HTTPRedirectHandler(publicHandler)
-	a.server = &http.Server{
-		Addr:        a.PublicAddr(),
-		Handler:     h2c.NewHandler(rootHandler, &http2.Server{}),
-		BaseContext: baseContextFn,
-	}
+	a.server = newH2CServer(a.PublicAddr(), rootHandler)
+	a.server.BaseContext = baseContextFn
 
 	serverErr := make(chan error, 2)
 	if panelLn != nil {
-		a.panelServer = &http.Server{
-			Addr:        a.PanelAddr(),
-			Handler:     h2c.NewHandler(a.panelEngine, &http2.Server{}),
-			BaseContext: baseContextFn,
-		}
+		a.panelServer = newH2CServer(a.PanelAddr(), a.panelEngine)
+		a.panelServer.BaseContext = baseContextFn
 		logger.Infof("server", "Starting split listeners: public=%s panel=%s ...", a.PublicAddr(), a.PanelAddr())
 		go func() {
 			if err := a.panelServer.Serve(panelLn); err != nil && err != http.ErrServerClosed {

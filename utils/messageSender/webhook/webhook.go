@@ -23,7 +23,7 @@ func (w *WebhookSender) Unload() error {
 	return nil
 }
 
-func (w *WebhookSender) Send(_ context.Context, notification messageSender.Notification, config map[string]any) error {
+func (w *WebhookSender) Send(ctx context.Context, notification messageSender.Notification, config map[string]any) error {
 	var addition Addition
 	if err := messageSender.DecodeConfiguration(config, &addition); err != nil {
 		return err
@@ -36,8 +36,6 @@ func (w *WebhookSender) Send(_ context.Context, notification messageSender.Notif
 	if method == "" {
 		method = "GET" // 默认使用 GET
 	}
-
-	client := outboundhttp.NewClient(30 * time.Second)
 
 	var req *http.Request
 	var err error
@@ -53,6 +51,13 @@ func (w *WebhookSender) Send(_ context.Context, notification messageSender.Notif
 
 	if err != nil {
 		return fmt.Errorf("failed to create request: %v", err)
+	}
+	if (req.URL.Scheme != "http" && req.URL.Scheme != "https") || req.URL.Hostname() == "" || req.URL.User != nil {
+		return fmt.Errorf("webhook requires an HTTP or HTTPS URL without embedded credentials")
+	}
+	client, err := outboundhttp.NewWebhookClient(30 * time.Second)
+	if err != nil {
+		return fmt.Errorf("load webhook destination policy: %w", err)
 	}
 
 	// 解析并设置自定义头部
@@ -70,14 +75,15 @@ func (w *WebhookSender) Send(_ context.Context, notification messageSender.Notif
 		req.SetBasicAuth(addition.Username, addition.Password)
 	}
 
-	resp, err := client.Do(req)
+	resp, err := client.Do(req.WithContext(ctx))
 	if err != nil {
-		return fmt.Errorf("failed to send webhook request: %v", err)
+		return fmt.Errorf("failed to send webhook request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
+		const maxErrorBodyBytes = 4 << 10
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		return fmt.Errorf("webhook request failed with status %d: %s", resp.StatusCode, string(body))
 	}
 

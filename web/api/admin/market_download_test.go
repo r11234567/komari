@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/outboundpolicy"
 	"github.com/komari-monitor/komari/pkg/config"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -19,7 +20,7 @@ func TestMarketDownloadSwitchControlsAllRemoteEntrypoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	config.SetDb(database)
-	if enabled, err := ssrfProtectionEnabled(); err != nil || !enabled {
+	if enabled, err := outboundpolicy.Enabled(); err != nil || !enabled {
 		t.Fatalf("historical settings lost default protection: %v %v", enabled, err)
 	}
 	var hits atomic.Int32

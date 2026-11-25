@@ -3,13 +3,14 @@ package client
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sync"
 	"time"
 
 	logger "github.com/komari-monitor/komari/utils/log"
-	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -25,6 +26,7 @@ const (
 	// 因为目前server没有存agent的信息上报间隔。只有写一个默认的
 	readWait        = 11 * time.Second
 	postPresenceTTL = 35 * time.Second
+	maxLegacyReport = 1 << 20
 )
 
 // postPresenceEntry 保存单个客户端的 POST 上报会话状态
@@ -95,8 +97,13 @@ func postPresenceExpired(uuid string, connID int64, gen uint64) {
 }
 
 func UploadReport(c *gin.Context) {
-	bodyBytes, err := io.ReadAll(c.Request.Body)
+	bodyBytes, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, maxLegacyReport))
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "Report too large"})
+			return
+		}
 		logger.ErrorArgs("client-api", "Failed to read request body:", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
@@ -145,6 +152,10 @@ func WebSocketReport(c *gin.Context) {
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(maxLegacyReport)
+	if err := conn.SetReadDeadline(time.Now().Add(readWait)); err != nil {
+		return
+	}
 
 	_, message, err := conn.ReadMessage()
 	if err != nil {
