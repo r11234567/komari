@@ -268,7 +268,10 @@ async function run() {
 
   // Loopback alias on the same disposable Nginx listener exercises real browser CORS across origins.
   const callerOrigin = 'https://localhost:29443';
-  await post(admin, '/api/admin/2fa/generate', {});
+  const qr = await admin.post('/api/admin/2fa/generate', { headers: { Origin: base } });
+  assert.equal(qr.status(), 200);
+  assert.match(qr.headers()['content-type'], /^image\/png\b/);
+  await qr.dispose();
   const secret = (await admin.storageState()).cookies
     .find(cookie => ['__Host-komari_2fa_secret', '2fa_secret'].includes(cookie.name))?.value;
   assert(secret);
