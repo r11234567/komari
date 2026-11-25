@@ -104,6 +104,7 @@ func TestPolicyDeclaresEveryGeneratedProcedure(t *testing.T) {
 		"/komari.deployment.v1.DeploymentService/GenerateInstallCommand",
 		"/komari.report.v1.AgentReportService/SubmitReport",
 		"/komari.metrics.v1.MetricsService/SubmitMetrics",
+		"/komari.metrics.v1.MetricsService/SubmitTrafficSamples",
 		"/komari.metrics.v1.MetricsService/UploadMetrics",
 		metricsv1connect.MetricsServiceStreamMetricsProcedure,
 		"/komari.metrics.v1.MetricsService/QueryMetrics",

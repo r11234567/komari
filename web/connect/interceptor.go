@@ -84,7 +84,7 @@ func newPolicyInterceptor() *policyInterceptor {
 	add(enroll, rpc.RoleAdmin, 30*time.Second, "RevokeCredentials")
 	add(deploy, rpc.RoleAdmin, 30*time.Second, "GetDeployment", "SaveDeploymentProfile", "GenerateInstallCommand")
 	add(report, rpc.RoleClient, 15*time.Second, "SubmitReport")
-	add(metrics, rpc.RoleClient, 30*time.Second, "SubmitMetrics")
+	add(metrics, rpc.RoleClient, 30*time.Second, "SubmitMetrics", "SubmitTrafficSamples")
 	add(metrics, rpc.RoleClient, 5*time.Minute, "UploadMetrics")
 	add(metrics, rpc.RoleClient, 30*time.Minute, "StreamMetrics")
 	add(metrics, rpc.RoleGuest, 30*time.Second, "QueryMetrics", "ListMetricDefinitions", "ListPingTasks", "GetPingStats")
