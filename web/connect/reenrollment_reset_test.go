@@ -114,11 +114,19 @@ func TestDualEnd_ReenrollmentResetsPrivilegesAndRedispatchesRuntime(t *testing.T
 			require.NoError(t, db.Create(&queued).Error)
 			agentRuntime.SetConnectInstallation(id, 1, &reportv1.InstallationObservation{StartupId: "old-boot", ObservedAt: timestamppb.Now()})
 
+			var oldStream context.Context
+			if oldCredentials != nil {
+				tracked, stop, err := enrollment.TrackStream(ctx, id, oldCredentials.AccessToken)
+				require.NoError(t, err)
+				defer stop()
+				oldStream = tracked
+			}
 			code, creds, key := register()
 			retry, err := service.PollEnrollment(ctx, connect.NewRequest(&enrollmentv1.PollEnrollmentRequest{DeviceCode: code}))
 			require.NoError(t, err)
 			require.True(t, proto.Equal(creds, retry.Msg.Credentials))
 			if oldCredentials != nil {
+				require.ErrorIs(t, oldStream.Err(), context.Canceled)
 				_, err := enrollment.ResolveAccessToken(oldCredentials.AccessToken)
 				require.Error(t, err)
 			}

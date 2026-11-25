@@ -11,6 +11,7 @@ import (
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/privilegeddelivery"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/secureconfig"
 	"gorm.io/gorm"
@@ -324,6 +325,10 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 			return nil
 		})
 		if err == nil {
+			if outcome == ErrRefreshReuse {
+				cancelStreams(record.Client)
+				privilegeddelivery.Notify(record.Client)
+			}
 			return issued, signedResponse, outcome
 		}
 		if ctx.Err() != nil {

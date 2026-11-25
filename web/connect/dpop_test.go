@@ -380,7 +380,7 @@ func TestDPoPMiddlewareAndBridgeAuthSchemes(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-	})))
+	}), nil))
 
 	targetPath := "/komari.report.v1.AgentReportService/SubmitReport"
 	targetURL := "http://example.com" + targetPath

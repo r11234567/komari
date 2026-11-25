@@ -40,8 +40,7 @@ const maxConnectRequestBytes = 4 << 20
 // ceremony, including its configured second factor, never operational RPCs.
 func RegisterRestrictedPasswordLogin(r *gin.Engine) {
 	path, handler := credentialv1connect.NewPasswordLoginServiceHandler(&passwordLoginService{}, connect.WithInterceptors(diagnostics.OutcomeInterceptor{}, newPolicyInterceptor()), connect.WithReadMaxBytes(128<<10))
-	registerDiagnosticProcedures(path)
-	r.Any(strings.TrimSuffix(path, "/")+"/*method", bridge(handler))
+	r.Any(strings.TrimSuffix(path, "/")+"/*method", bridge(handler, registerDiagnosticProcedures(path)))
 }
 
 // Register mounts each generated Connect service at its canonical procedure path.
@@ -83,9 +82,8 @@ func Register(r *gin.Engine) {
 		newHandler(agentv1connect.NewAgentEventServiceHandler(&agentEventService{}, opts...)),
 	}
 	for _, item := range handlers {
-		registerDiagnosticProcedures(item.path)
 		pattern := strings.TrimSuffix(item.path, "/") + "/*method"
-		r.Any(pattern, bridge(item.handler))
+		r.Any(pattern, bridge(item.handler, registerDiagnosticProcedures(item.path)))
 	}
 }
 
@@ -125,6 +123,9 @@ func RegisterPublic(r *gin.Engine) {
 
 func bridgePublic(handler http.Handler) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if !allowConnectMethod(c, true) {
+			return
+		}
 		anon := rpc.NewAnonymousPrincipal()
 		security.SetPrincipalHeader(c, anon)
 		meta := &rpc.ContextMeta{
@@ -140,20 +141,27 @@ func bridgePublic(handler http.Handler) gin.HandlerFunc {
 	}
 }
 
-func registerDiagnosticProcedures(path string) {
+func registerDiagnosticProcedures(path string) map[string]bool {
 	name := protoreflect.FullName(strings.Trim(path, "/"))
 	descriptor, err := protoregistry.GlobalFiles.FindDescriptorByName(name)
 	if err != nil {
-		return
+		return nil
 	}
 	service, ok := descriptor.(protoreflect.ServiceDescriptor)
 	if !ok {
-		return
+		return nil
 	}
+	streams := make(map[string]bool)
 	for i := 0; i < service.Methods().Len(); i++ {
 		method := service.Methods().Get(i)
-		diagnostics.Default.RegisterProcedure(path+string(method.Name()), method.IsStreamingClient() || method.IsStreamingServer())
+		procedure := path + string(method.Name())
+		streaming := method.IsStreamingClient() || method.IsStreamingServer()
+		diagnostics.Default.RegisterProcedure(procedure, streaming)
+		if streaming {
+			streams[procedure] = true
+		}
 	}
+	return streams
 }
 
 func newHandler(path string, handler http.Handler) struct {
@@ -166,8 +174,11 @@ func newHandler(path string, handler http.Handler) struct {
 	}{path: path, handler: handler}
 }
 
-func bridge(handler http.Handler) gin.HandlerFunc {
+func bridge(handler http.Handler, streams map[string]bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if !allowConnectMethod(c, false) {
+			return
+		}
 		req, err := requestmeta.EnsureBound(c.Request)
 		if err != nil {
 			security.AbortRequest(c, http.StatusBadRequest, "invalid request origin")
@@ -208,6 +219,40 @@ func bridge(handler http.Handler) gin.HandlerFunc {
 		secure := scheme == "https"
 		ctx := passkeycredential.WithRequestOrigin(rpc.NewContextWithMeta(req.Context(), meta), host, secure)
 		c.Request = req.WithContext(workspace.WithSecure(workspace.WithToken(ctx, c.GetHeader(workspace.Header)), secure))
+		if streams[req.URL.Path] && principal.Type == rpc.PrincipalAgent {
+			// Rescue watches already recheck credentials once per second and
+			// use a final signed frame to withdraw a temporary SSH rule.
+			rescueWatch := req.URL.Path == configv1connect.PrivilegedDeliveryServiceWatchPrivilegedDeliveryProcedure &&
+				c.GetHeader(rescueWatchHeader) == "v1"
+			if !rescueWatch {
+				serveAgentStream(c, principal, func() { handler.ServeHTTP(c.Writer, c.Request) })
+				return
+			}
+		}
 		handler.ServeHTTP(c.Writer, c.Request)
 	}
+}
+
+func allowConnectMethod(c *gin.Context, publicListener bool) bool {
+	// Private responses can depend on a console session, Agent identity or
+	// temporary share cookie. Proxy and browser caches must not store them.
+	c.Header("Cache-Control", "no-store")
+	if c.Request.Method != http.MethodGet {
+		return true
+	}
+	switch c.Request.URL.Path {
+	case browserv1connect.BrowserServiceGetPublicInfoProcedure, browserv1connect.BrowserServiceGetThemeContractProcedure,
+		credentialv1connect.PasskeyLoginServiceGetPasskeyStatusProcedure,
+		metricsv1connect.MetricsServiceListMetricDefinitionsProcedure, metricsv1connect.MetricsServiceListPingTasksProcedure:
+		return true
+	case browserv1connect.BrowserServiceListAgentsProcedure, browserv1connect.BrowserServiceGetAgentProcedure:
+		if publicListener {
+			return true
+		}
+	}
+	// Historical protocol descriptors retain their idempotency annotations.
+	// Enforce the transport method here without changing those contracts.
+	c.Header("Allow", http.MethodPost)
+	c.AbortWithStatus(http.StatusMethodNotAllowed)
+	return false
 }
