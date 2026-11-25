@@ -265,13 +265,13 @@ func unzipToDir(zipPath, dstDir string) error {
 		return err
 	}
 	defer root.Close()
-	for _, f := range zr.File {
-		name := filepath.Clean(filepath.FromSlash(f.Name))
-		mode := f.Mode()
-		if !f.FileInfo().IsDir() && !mode.IsRegular() {
-			return fmt.Errorf("unsupported non-regular file in zip: %s", f.Name)
-		}
-		if f.FileInfo().IsDir() {
+	entries, err := zr.RestoreEntries(false)
+	if err != nil {
+		return err
+	}
+	for _, f := range entries {
+		name := filepath.FromSlash(f.Path)
+		if f.Mode().IsDir() {
 			if err := root.MkdirAll(name, 0755); err != nil {
 				return err
 			}
@@ -282,22 +282,12 @@ func unzipToDir(zipPath, dstDir string) error {
 				return err
 			}
 		}
-		rc, err := f.Open()
+		perm := restoreFilePerm(name, f.Mode())
+		out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 		if err != nil {
 			return err
 		}
-		perm := restoreFilePerm(name, mode)
-		out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-		if err != nil {
-			rc.Close()
-			return err
-		}
-		if _, err := io.Copy(out, rc); err != nil {
-			out.Close()
-			rc.Close()
-			return err
-		}
-		if err := errors.Join(out.Chmod(perm), out.Close(), rc.Close()); err != nil {
+		if err := errors.Join(f.CopyTo(out), out.Chmod(perm), out.Close()); err != nil {
 			return err
 		}
 		if err := atomicRestoreCheckpoint("extract-entry"); err != nil {
@@ -308,12 +298,12 @@ func unzipToDir(zipPath, dstDir string) error {
 }
 
 func restoreFilePerm(cleanPath string, mode os.FileMode) os.FileMode {
-	perm := mode.Perm() & 0o777
+	perm := mode.Perm() & 0o644
 	if perm == 0 {
 		perm = 0o644
 	}
 	slashed := filepath.ToSlash(cleanPath)
-	if slashed == "secret.key" || strings.HasPrefix(slashed, "plugin-data/") {
+	if slashed == "secret.key" || strings.HasPrefix(slashed, "plugin-data/") || strings.HasPrefix(slashed, "tls/") {
 		return 0o600
 	}
 	// Ensure restored runtime and SQLite files remain owner-writable even if an
@@ -409,8 +399,8 @@ func prepareStagedGeneration(backupZipPath, stageDir, publishDir string, reconci
 	if err := validateRestoredSQLite(filepath.Join(stageDir, "komari.db"), "komari.db"); err != nil {
 		return 0, err
 	}
-	if err := retireRestoredLegacyPasskeyPlugin(stageDir); err != nil {
-		return 0, fmt.Errorf("retire legacy passkey plugin state in backup: %w", err)
+	if err := clearRestoredPluginApprovals(stageDir); err != nil {
+		return 0, fmt.Errorf("clear restored plugin approvals: %w", err)
 	}
 	newEpoch, err := reconcileSecurity(stageDir)
 	if err != nil {
@@ -535,113 +525,34 @@ func sqliteTableExists(db *sql.DB, name string) (bool, error) {
 	return found == name, nil
 }
 
-// retireRestoredLegacyPasskeyPlugin strips any persisted enabled/approval state
-// and package receipt/staged packages for the retired komari-passkey plugin
-// (case-insensitively and across manifest short identifiers) when extracting an
-// older backup archive.
-func retireRestoredLegacyPasskeyPlugin(stageDir string) error {
-	const legacyShort = "komari-passkey"
-	pluginRoot := filepath.Join(stageDir, "plugin")
-	retiredShorts := map[string]bool{legacyShort: true}
-
-	if entries, err := os.ReadDir(pluginRoot); err == nil {
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			name := entry.Name()
-			dirPath := filepath.Join(pluginRoot, name)
-			matched := strings.EqualFold(strings.TrimSpace(name), legacyShort)
-			if !matched {
-				for _, manifestName := range []string{"komari-plugin.json", "plugin.json"} {
-					data, err := os.ReadFile(filepath.Join(dirPath, manifestName))
-					if err != nil {
-						continue
-					}
-					var manifest struct {
-						Short string `json:"short"`
-					}
-					if json.Unmarshal(data, &manifest) == nil && strings.EqualFold(strings.TrimSpace(manifest.Short), legacyShort) {
-						matched = true
-						break
-					}
-				}
-			}
-			if !matched {
-				continue
-			}
-			retiredShorts[strings.ToLower(strings.TrimSpace(name))] = true
-			receiptPath := filepath.Join(dirPath, ".komari-package.json")
-			if err := os.Remove(receiptPath); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-
-	packagesDir := filepath.Join(pluginRoot, ".packages")
-	if pkgEntries, err := os.ReadDir(packagesDir); err == nil {
-		for _, entry := range pkgEntries {
-			if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
-				continue
-			}
-			metaPath := filepath.Join(packagesDir, entry.Name())
-			raw, err := os.ReadFile(metaPath)
-			if err != nil {
-				continue
-			}
-			var meta struct {
-				Short  string `json:"short"`
-				Plugin struct {
-					Short string `json:"short"`
-				} `json:"plugin"`
-			}
-			if json.Unmarshal(raw, &meta) != nil {
-				continue
-			}
-			if strings.EqualFold(strings.TrimSpace(meta.Short), legacyShort) ||
-				strings.EqualFold(strings.TrimSpace(meta.Plugin.Short), legacyShort) {
-				_ = os.Remove(metaPath)
-				stem := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
-				_ = os.Remove(filepath.Join(packagesDir, stem+".zip"))
-			}
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-
-	statePath := filepath.Join(pluginRoot, "state.json")
+// Uploaded archives do not carry local authority to start plugin code. Keep
+// recognizable state for the management UI, and leave all restored code disabled.
+func clearRestoredPluginApprovals(stageDir string) error {
+	statePath := filepath.Join(stageDir, "plugin", "state.json")
 	data, err := os.ReadFile(statePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return err
 	}
 	var doc struct {
 		Plugins map[string]map[string]any `json:"plugins"`
 	}
-	if err := json.Unmarshal(data, &doc); err != nil || doc.Plugins == nil {
-		return nil
+	if err := json.Unmarshal(data, &doc); err != nil {
+		doc.Plugins = nil
 	}
-	modified := false
-	for key, entry := range doc.Plugins {
+	for short, entry := range doc.Plugins {
 		if entry == nil {
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(key), legacyShort) && !retiredShorts[strings.ToLower(strings.TrimSpace(key))] {
 			continue
 		}
 		entry["enabled"] = false
 		entry["approved_permissions_hash"] = ""
 		delete(entry, "approved_package_digest")
-		entry["last_error"] = "legacy Passkey plugin is retired; configure native Passkey instead"
-		doc.Plugins[key] = entry
-		modified = true
-	}
-	if !modified {
-		return nil
+		entry["last_error"] = "restored plugin requires a new approval"
+		if strings.EqualFold(short, "komari-passkey") {
+			entry["last_error"] = "legacy Passkey plugin is retired; configure native Passkey instead"
+		}
 	}
 	updated, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {

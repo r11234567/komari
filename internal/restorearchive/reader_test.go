@@ -2,6 +2,8 @@ package restorearchive
 
 import (
 	"archive/zip"
+	"bytes"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +12,44 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestCopyToChecksDeclaredSizeAndCRC(t *testing.T) {
+	payload := []byte("archive entry")
+	for _, tc := range []struct {
+		name string
+		size uint64
+		crc  uint32
+		ok   bool
+	}{
+		{"valid", uint64(len(payload)), crc32.ChecksumIEEE(payload), true},
+		{"wrong size", uint64(len(payload) - 1), crc32.ChecksumIEEE(payload), false},
+		{"wrong checksum", uint64(len(payload)), 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var archive bytes.Buffer
+			writer := zip.NewWriter(&archive)
+			entry, err := writer.CreateRaw(&zip.FileHeader{
+				Name: "komari.db", Method: zip.Store, CRC32: tc.crc,
+				CompressedSize64: uint64(len(payload)), UncompressedSize64: tc.size,
+			})
+			require.NoError(t, err)
+			_, err = entry.Write(payload)
+			require.NoError(t, err)
+			require.NoError(t, writer.Close())
+			reader, err := zip.NewReader(bytes.NewReader(archive.Bytes()), int64(archive.Len()))
+			require.NoError(t, err)
+			var out bytes.Buffer
+			err = (Entry{File: reader.File[0], Path: "komari.db"}).CopyTo(&out)
+			if tc.ok {
+				require.NoError(t, err)
+				require.Equal(t, payload, out.Bytes())
+			} else {
+				require.Error(t, err)
+				require.LessOrEqual(t, uint64(out.Len()), tc.size)
+			}
+		})
+	}
+}
 
 func TestReadBounded(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "backup.zip")
