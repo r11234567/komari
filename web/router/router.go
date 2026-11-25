@@ -156,8 +156,8 @@ func registerAgentRoutes(r *gin.Engine) {
 		legacy.POST("/ping/result", jsonRpc.Bind("client:uploadPingResult", jsonRpc.WithRaw()))
 		// Agent-initiated one-shot file transfer endpoint. Image/video previews
 		// and large uploads/chunks use this rather than the control RPC.
-		tokenAuthorized.GET("/transfer/:id", connectapi.GuardAgentStream, filemanager.AgentTransfer)
-		tokenAuthorized.POST("/transfer/:id", connectapi.GuardAgentStream, filemanager.AgentTransfer)
+		tokenAuthorized.GET("/transfer/:id", connectapi.GuardAgentTransfer, filemanager.AgentTransfer)
+		tokenAuthorized.POST("/transfer/:id", connectapi.GuardAgentTransfer, filemanager.AgentTransfer)
 	}
 }
 
