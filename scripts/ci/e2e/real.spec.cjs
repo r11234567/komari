@@ -265,10 +265,11 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await loginForm.locator('input[name="password"]').fill(password);
       const ticketResponse = page.waitForResponse(r => new URL(r.url()).pathname === '/api/public/bind/ticket' && r.request().method() === 'POST');
       await loginForm.locator('button[type="submit"]').click();
-      const authorization = (await (await ticketResponse).json()).data;
+      expect((await ticketResponse).ok()).toBe(true);
+      await expect(page).toHaveURL(`${base}${binding}`);
+      const authorization = (await (await request('/api/public/bind/ticket', undefined, { method: 'GET' })).json()).data;
       expect(authorization.expires_in).toBeGreaterThan(0);
       expect(authorization).not.toHaveProperty('ticket');
-      await expect(page).toHaveURL(`${base}${binding}`);
       const bindCookie = (await context.cookies()).find(cookie => cookie.name === '__Host-komari_bind');
       expect(bindCookie).toMatchObject({ secure: true, httpOnly: true, sameSite: 'Strict' });
       expect(await page.evaluate(() => document.cookie.includes('__Host-komari_bind='))).toBe(false);
