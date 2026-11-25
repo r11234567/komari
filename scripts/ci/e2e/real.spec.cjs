@@ -664,6 +664,9 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await expect.poll(pixel).toEqual([255, 0, 0, 255]);
       expect(sha256(await downloadFile(filename))).toBe(sha256(bytes));
       await editor.getByRole('button', { name: 'Close File', exact: true }).click();
+      await expect(canvas).toHaveCount(0);
+      await editor.getByRole('button', { name: 'Close', exact: true }).click();
+      await expect(editor).toBeHidden();
     });
 
     await stage('actual Monaco editor saves UTF-8 and zero-byte content through the Agent', async () => {
