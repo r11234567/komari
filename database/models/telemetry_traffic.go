@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 // TelemetryTrafficStream is a contiguous consumed outbox watermark. It is
 // committed in the same metadata transaction as counters and ledger deltas.
 type TelemetryTrafficStream struct {
@@ -17,6 +19,7 @@ type TelemetryTrafficState struct {
 	TotalDown           int64  `gorm:"not null"`
 	AccountedUp         int64  `gorm:"not null"`
 	AccountedDown       int64  `gorm:"not null"`
+	Dedicated           bool   `gorm:"not null;default:false"`
 	LateReports         int64  `gorm:"not null"`
 	HourlyPrunedThrough int64  `gorm:"not null;default:0"`
 	MinuteSince         int64  `gorm:"not null;default:0"`
@@ -65,4 +68,41 @@ type TelemetryTrafficCycle struct {
 	UpBytes   int64  `gorm:"not null"`
 	DownBytes int64  `gorm:"not null"`
 	Through   int64  `gorm:"not null"`
+}
+
+// TelemetryTrafficGap records known volume that could not be assigned, as well
+// as holes with no measured volume. It does not contribute to billed totals.
+type TelemetryTrafficGap struct {
+	Client    string `gorm:"type:varchar(36);primaryKey" json:"-"`
+	End       int64  `gorm:"primaryKey;autoIncrement:false;index" json:"end_ns"`
+	Start     int64  `gorm:"not null" json:"start_ns"`
+	Kind      string `gorm:"type:varchar(24);not null" json:"kind"`
+	UpBytes   int64  `gorm:"not null" json:"up_bytes"`
+	DownBytes int64  `gorm:"not null" json:"down_bytes"`
+}
+
+type TrafficPolicyVersion struct {
+	Client    string `gorm:"type:varchar(36);primaryKey"`
+	Effective int64  `gorm:"primaryKey;autoIncrement:false"`
+	Day       int    `gorm:"not null"`
+	Clock     string `gorm:"type:varchar(8);not null"`
+	Timezone  string `gorm:"type:varchar(64);not null"`
+}
+
+type TrafficCalibrationCutoff struct {
+	ID           string `gorm:"type:varchar(32);primaryKey"`
+	Client       string `gorm:"type:varchar(36);not null;index:idx_traffic_cutoff,priority:1"`
+	Cycle        string `gorm:"type:varchar(64);not null;index:idx_traffic_cutoff,priority:2"`
+	Cutoff       int64  `gorm:"not null;index:idx_traffic_cutoff,priority:3"`
+	RawUp        int64  `gorm:"not null"`
+	RawDown      int64  `gorm:"not null"`
+	BasisUp      int64  `gorm:"not null"`
+	BasisDown    int64  `gorm:"not null"`
+	TargetUp     int64  `gorm:"not null"`
+	TargetDown   int64  `gorm:"not null"`
+	TargetTotal  *int64
+	CountingType string    `gorm:"type:varchar(8);not null"`
+	Operator     string    `gorm:"type:varchar(36);not null"`
+	Note         string    `gorm:"type:varchar(1200);not null"`
+	CreatedAt    time.Time `gorm:"not null"`
 }

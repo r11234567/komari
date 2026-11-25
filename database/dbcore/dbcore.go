@@ -1091,6 +1091,9 @@ func doInitialize() error {
 		&models.TelemetryTrafficCycle{},
 		&models.TelemetryTrafficMinute{},
 		&models.TelemetryTrafficTail{},
+		&models.TelemetryTrafficGap{},
+		&models.TrafficPolicyVersion{},
+		&models.TrafficCalibrationCutoff{},
 		&models.PingTask{},
 		&models.PingLossNotification{},
 		&models.ReturnRouteTask{},
@@ -1256,6 +1259,9 @@ func cleanupOrphanedClientData(db *gorm.DB) error {
 			"telemetry traffic cycles":        &models.TelemetryTrafficCycle{},
 			"telemetry traffic minutes":       &models.TelemetryTrafficMinute{},
 			"telemetry traffic tails":         &models.TelemetryTrafficTail{},
+			"telemetry traffic gaps":          &models.TelemetryTrafficGap{},
+			"traffic policy versions":         &models.TrafficPolicyVersion{},
+			"traffic calibration cutoffs":     &models.TrafficCalibrationCutoff{},
 		} {
 			if !tx.Migrator().HasTable(model) {
 				continue

@@ -91,6 +91,9 @@ func deleteClient(db *gorm.DB, clientUuid string) (bool, error) {
 			"telemetry traffic cycles":        &models.TelemetryTrafficCycle{},
 			"telemetry traffic minutes":       &models.TelemetryTrafficMinute{},
 			"telemetry traffic tails":         &models.TelemetryTrafficTail{},
+			"telemetry traffic gaps":          &models.TelemetryTrafficGap{},
+			"traffic policy versions":         &models.TrafficPolicyVersion{},
+			"traffic calibration cutoffs":     &models.TrafficCalibrationCutoff{},
 			"ping loss notifications":         &models.PingLossNotification{},
 			"task results":                    &models.TaskResult{},
 			"installation baseline":           &models.ClientConfigBaseline{},
@@ -420,11 +423,11 @@ func GetClientByUUID(uuid string) (client models.Client, err error) {
 	if err != nil {
 		return models.Client{}, err
 	}
-	if err := applyClientDisplayFieldsAndPersist(db, []models.Client{client}, time.Now().UTC()); err != nil {
+	items := []models.Client{client}
+	if err := applyClientDisplayFieldsAndPersist(db, items, time.Now().UTC()); err != nil {
 		return models.Client{}, err
 	}
-	applyClientDisplayFields(&client, time.Now().UTC())
-	return client, nil
+	return items[0], nil
 }
 
 func GetClientTokenByUUID(uuid string) (token string, err error) {
@@ -572,9 +575,16 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 	}
 
 	var existing models.Client
-	if err := db.Select("uuid", "name", "region", "group", "price", "billing_cycle", "currency", "expired_at", "expiry_timezone", "region_override", "traffic_limit", "traffic_limit_type", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone", "traffic_reset_allowance", "traffic_reset_cycle").
+	if err := db.Select("uuid", "name", "region", "group", "price", "billing_cycle", "currency", "expired_at", "expiry_timezone", "region_override", "traffic_limit", "traffic_limit_type", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone", "traffic_reset_allowance", "traffic_reset_cycle", "traffic_policy_managed").
 		Where("uuid = ?", clientUUID).First(&existing).Error; err != nil {
 		return err
+	}
+	if existing.TrafficPolicyManaged {
+		for _, field := range []string{"traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone"} {
+			if _, exists := updates[field]; exists {
+				return fmt.Errorf("use the traffic policy endpoint to change a versioned billing cycle")
+			}
+		}
 	}
 
 	if v, exists := updates["traffic_limit"]; exists {
@@ -654,7 +664,15 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 	}
 	if _, allowanceChanged := updates["traffic_reset_allowance"]; allowanceChanged {
 		if resetAllowance > 0 {
-			cycle := currentTrafficCycleAt(resetDay, resetTime, resetTimezone, time.Now().UTC())
+			now := time.Now().UTC()
+			cycle := currentTrafficCycleAt(resetDay, resetTime, resetTimezone, now)
+			if existing.TrafficPolicyManaged {
+				schedule, err := trafficledger.TrafficScheduleAt(context.Background(), db, existing, now)
+				if err != nil {
+					return err
+				}
+				cycle = schedule.CycleKey(now)
+			}
 			if cycle == "" {
 				return fmt.Errorf("set a traffic reset day from 1 to 31 before adding reset traffic")
 			}
@@ -864,7 +882,7 @@ func AdoptTrafficResetDay(clientUUID string, value interface{}) error {
 	}
 	db := dbcore.GetDBInstance()
 	return db.Model(&models.Client{}).
-		Where("uuid = ? AND traffic_reset_day IS NULL", clientUUID).
+		Where("uuid = ? AND traffic_reset_day IS NULL AND traffic_policy_managed = ?", clientUUID, false).
 		Update("traffic_reset_day", *day).Error
 }
 

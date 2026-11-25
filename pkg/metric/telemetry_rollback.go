@@ -176,7 +176,7 @@ func (t *Telemetry) RollbackLegacy(ctx context.Context, destination string, obse
 		return err
 	}
 	// Never let a future new-engine startup silently use the pre-replay target.
-	for _, name := range []string{"imports", "rollup", "rollup_due", "rollup_keys", "raw_gaps", "schedule", "gaps", "traffic_ingress", "identity", "erasures", "members", "work", "leases", "outbox", "summary", "hot", "latest", "series", "series_keys", "receipts", "segments", "progress"} {
+	for _, name := range []string{"imports", "rollup", "rollup_due", "rollup_keys", "raw_gaps", "schedule", "gaps", "traffic_ingress", "traffic_stream", "identity", "erasures", "members", "work", "leases", "outbox", "summary", "hot", "latest", "series", "series_keys", "receipts", "segments", "progress"} {
 		if _, err = target.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+t.table(name)); err != nil {
 			return err
 		}

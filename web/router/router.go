@@ -272,6 +272,7 @@ func registerAdminRoutes(r *gin.Engine) func() error {
 		clientGroup.GET("/:uuid/traffic-policy", admin.GetTrafficPolicy)
 		clientGroup.GET("/:uuid/billing-policy", admin.GetBillingPolicy)
 		clientGroup.POST("/:uuid/traffic-calibration", admin.UpdateTrafficCalibration)
+		clientGroup.POST("/:uuid/traffic-policy", admin.UpdateTrafficPolicy)
 		clientGroup.GET("/:uuid/traffic/daily", jsonRpc.Bind("admin:getClientDailyTraffic", jsonRpc.WithPath("uuid"), jsonRpc.WithQuery("days")))
 		clientGroup.POST("/token/rotate", api.RequireSensitive2FA(), jsonRpc.Bind("admin:rotateClientToken"))
 		clientGroup.POST("/order", jsonRpc.Bind("admin:orderClients"))

@@ -347,8 +347,19 @@ func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile De
 	runtimeValuesChanged := false
 	err = db.Transaction(func(tx *gorm.DB) error {
 		var client models.Client
-		if err := tx.Select("uuid", "traffic_reset_day").First(&client, "uuid = ?", clientUUID).Error; err != nil {
+		if err := tx.Select("uuid", "traffic_reset_day", "traffic_policy_managed").First(&client, "uuid = ?", clientUUID).Error; err != nil {
 			return err
+		}
+		if client.TrafficPolicyManaged {
+			profile.MonthRotate, profile.EnableMonthRotate = 0, false
+			if client.TrafficResetDay != nil {
+				profile.MonthRotate, profile.EnableMonthRotate = *client.TrafficResetDay, *client.TrafficResetDay > 0
+			}
+			var err error
+			encoded, err = json.Marshal(profile)
+			if err != nil {
+				return err
+			}
 		}
 
 		var privilegedState models.ClientPrivilegedState
@@ -419,7 +430,7 @@ func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile De
 			row.SentAt = nil
 			row.FinishedAt = nil
 		}
-		if err := tx.Model(&models.Client{}).Where("uuid = ?", clientUUID).Update("traffic_reset_day", resetDay).Error; err != nil {
+		if err := tx.Model(&models.Client{}).Where("uuid = ? AND traffic_policy_managed = ?", clientUUID, false).Update("traffic_reset_day", resetDay).Error; err != nil {
 			return err
 		}
 		if err := tx.Clauses(clause.OnConflict{

@@ -1,12 +1,14 @@
 package clients
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strings"
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/trafficledger"
 	"github.com/komari-monitor/komari/pkg/trafficreset"
 	"gorm.io/gorm"
 )
@@ -43,7 +45,7 @@ func currentTrafficCycleAt(resetDay *int, clock, timezone string, now time.Time)
 
 func applyClientDisplayFields(client *models.Client, now time.Time) bool {
 	changed := false
-	cycle := currentTrafficCycleAt(client.TrafficResetDay, client.TrafficResetTime, client.TrafficResetTimezone, now)
+	cycle := trafficledger.DisplayTrafficSchedule(*client).CycleKey(now)
 	if client.TrafficResetAllowance < 0 || cycle == "" || client.TrafficResetCycle != cycle {
 		if client.TrafficResetAllowance != 0 || client.TrafficResetCycle != "" {
 			client.TrafficResetAllowance = 0
@@ -73,6 +75,17 @@ func applyClientDisplayFields(client *models.Client, now time.Time) bool {
 func applyClientDisplayFieldsAndPersist(db *gorm.DB, clients []models.Client, now time.Time) error {
 	expired := make([]string, 0)
 	for index := range clients {
+		client := &clients[index]
+		if client.TrafficPolicyManaged {
+			schedule, err := trafficledger.TrafficScheduleAt(context.Background(), db, *client, now)
+			if err != nil {
+				return err
+			}
+			client.TrafficResetDay = &schedule.Day
+			client.TrafficResetTime = trafficreset.FormatClock(schedule.Hour, schedule.Minute, schedule.Second)
+			client.TrafficResetTimezone = schedule.Timezone
+			client.TrafficPolicyStart, client.TrafficPolicyEnd = &schedule.StartsAt, &schedule.EndsAt
+		}
 		if applyClientDisplayFields(&clients[index], now) {
 			expired = append(expired, clients[index].UUID)
 		}

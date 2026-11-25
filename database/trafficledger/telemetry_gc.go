@@ -41,6 +41,7 @@ func PruneTelemetrySlices(ctx context.Context, now time.Time, limit int) (int, e
 			{&models.TelemetryTrafficSlice{}, "start", "end", "end < ?", now.AddDate(0, 0, -35).UnixNano(), int64(35 * 24 * time.Hour), "hourly_pruned_through", "end, client, start"},
 			{&models.TelemetryTrafficMinute{}, "start", "start + 60000000000", "start < ?", now.Add(-telemetryMinuteRetention).Truncate(time.Minute).UnixNano(), int64(telemetryMinuteRetention), "minute_pruned_through", "start, client"},
 			{&models.TelemetryTrafficTail{}, "observed", "observed + 1", "observed < ?", now.Add(-telemetryTailRetention).UnixNano(), int64(telemetryTailRetention), "tail_pruned_through", "observed, client"},
+			{&models.TelemetryTrafficGap{}, "end", "end", "end < ? AND kind <> 'unallocated'", now.AddDate(0, 0, -35).UnixNano(), int64(35 * 24 * time.Hour), "", "end, client"},
 		}
 		var candidates []trafficPruneRow
 		for kind, spec := range specs {
@@ -80,6 +81,9 @@ func PruneTelemetrySlices(ctx context.Context, now time.Time, limit int) (int, e
 			sort.Strings(clients)
 			for _, id := range clients {
 				through := watermarks[id]
+				if spec.watermark == "" {
+					break
+				}
 				if err := tx.Model(&models.TelemetryTrafficState{}).Where("client = ?", id).UpdateColumn(spec.watermark, gorm.Expr("CASE WHEN "+spec.watermark+" < ? THEN ? ELSE "+spec.watermark+" END", through, through)).Error; err != nil {
 					return err
 				}

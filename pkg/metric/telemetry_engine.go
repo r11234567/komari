@@ -92,6 +92,7 @@ type Telemetry struct {
 }
 
 type TelemetryTraffic struct {
+	Dedicated  bool  `json:"dedicated,omitempty"`
 	HasDelta   bool  `json:"has_delta,omitempty"`
 	DeltaUp    int64 `json:"delta_up,omitempty"`
 	DeltaDown  int64 `json:"delta_down,omitempty"`
@@ -100,15 +101,18 @@ type TelemetryTraffic struct {
 	TotalDown  int64 `json:"total_down"`
 	Up         int64 `json:"up"`
 	Down       int64 `json:"down"`
+	Start      int64 `json:"interval_start_ns,omitempty"`
+	GapStart   int64 `json:"gap_start_ns,omitempty"`
 }
 
 type TelemetryBatch struct {
 	Source string `json:"source"`
 	// Identity is supplied by the authenticated adapter. Legacy Agent identity
 	// includes sequence AND observed time; process-local sequence alone is unsafe.
-	Identity string            `json:"identity"`
-	Points   []Point           `json:"points"`
-	Traffic  *TelemetryTraffic `json:"traffic,omitempty"`
+	Identity      string            `json:"identity"`
+	Points        []Point           `json:"points"`
+	Traffic       *TelemetryTraffic `json:"traffic,omitempty"`
+	TrafficSample *TrafficSample    `json:"traffic_sample,omitempty"`
 }
 
 type TelemetryReceipt struct {
@@ -296,6 +300,7 @@ func (t *Telemetry) createSchema(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS %serasures (series_id CHAR(64) PRIMARY KEY, through_id BIGINT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS %sidentity (slot INTEGER PRIMARY KEY, id CHAR(32) NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS %straffic_ingress (source VARCHAR(255) PRIMARY KEY, observed BIGINT NOT NULL, total_up BIGINT NOT NULL, total_down BIGINT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS %straffic_stream (source VARCHAR(255) PRIMARY KEY, observed BIGINT NOT NULL, stream VARCHAR(64) NOT NULL, sequence BIGINT NOT NULL, payload TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS %sgaps (segment_id CHAR(32) NOT NULL, series_id CHAR(64) NOT NULL, first_observed BIGINT NOT NULL, last_observed BIGINT NOT NULL, PRIMARY KEY(segment_id,series_id,first_observed))`,
 		`CREATE TABLE IF NOT EXISTS %sschedule (task VARCHAR(64) PRIMARY KEY, due BIGINT NOT NULL, attempts INTEGER NOT NULL, scan_after VARCHAR(255) NOT NULL, owner CHAR(32) NOT NULL, expires BIGINT NOT NULL, last_error TEXT NOT NULL)`,
 	}
@@ -467,7 +472,7 @@ func (t *Telemetry) Accept(ctx context.Context, b TelemetryBatch, now time.Time)
 
 func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time, importing bool) (TelemetryReceipt, error) {
 	var result TelemetryReceipt
-	if b.Source == "" || len(b.Source) > 255 || strings.ContainsRune(b.Source, 0) || b.Identity == "" || strings.ContainsRune(b.Identity, 0) || len(b.Identity) > 256 || (len(b.Points) == 0 && b.Traffic == nil) || len(b.Points) > 256 {
+	if b.Source == "" || len(b.Source) > 255 || strings.ContainsRune(b.Source, 0) || b.Identity == "" || strings.ContainsRune(b.Identity, 0) || len(b.Identity) > 256 || (len(b.Points) == 0 && b.Traffic == nil && b.TrafficSample == nil) || len(b.Points) > 256 {
 		return result, fmt.Errorf("%w: telemetry batch", ErrInvalidArgument)
 	}
 	b.Points = append([]Point(nil), b.Points...)
@@ -544,8 +549,23 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 	if b.Traffic != nil {
 		traffic := *b.Traffic
 		b.Traffic = &traffic
-		if err = t.deriveTraffic(ctx, tx, &b, oldest); err != nil {
-			return result, err
+	}
+	if b.Traffic != nil || b.TrafficSample != nil {
+		duplicate, trafficErr := t.prepareTraffic(ctx, tx, &b, oldest)
+		if trafficErr != nil {
+			return result, trafficErr
+		}
+		if duplicate {
+			return TelemetryReceipt{Duplicate: true}, tx.Commit()
+		}
+		if b.Traffic == nil && len(b.Points) == 0 {
+			return result, tx.Commit()
+		}
+		if b.TrafficSample != nil {
+			oldest = b.TrafficSample.Observed
+		}
+		if oldest == 0 {
+			return result, ErrInvalidArgument
 		}
 	}
 	last, err := t.progress(ctx, tx, "ingest")
@@ -570,6 +590,9 @@ func (t *Telemetry) accept(ctx context.Context, b TelemetryBatch, now time.Time,
 		return result, ErrTelemetryBackpressure
 	}
 	entity, day := telemetryBatchPartition(b.Points)
+	if b.TrafficSample != nil && len(b.Points) == 0 {
+		entity, day = b.Source, time.Unix(0, oldest).UTC().Truncate(24*time.Hour).Unix()
+	}
 	seg, err := t.activeSegment(ctx, tx, now, int64(len(b.Points)), batchBytes, entity, day)
 	if err != nil {
 		return result, err

@@ -20,6 +20,8 @@ type Schedule struct {
 	Minute   int
 	Second   int
 	Timezone string
+	StartsAt time.Time
+	EndsAt   time.Time
 }
 
 func Enabled(day *int) bool {
@@ -180,11 +182,14 @@ func (s Schedule) Last(now time.Time) time.Time {
 	}
 	local := now.In(s.loc())
 	this := s.boundary(local.Year(), local.Month())
-	if !local.Before(this) {
-		return this
+	if local.Before(this) {
+		year, month := previousYearMonth(local.Year(), local.Month())
+		this = s.boundary(year, month)
 	}
-	year, month := previousYearMonth(local.Year(), local.Month())
-	return s.boundary(year, month)
+	if this.Before(s.StartsAt) {
+		return s.StartsAt
+	}
+	return this
 }
 
 // Next is the upcoming reset instant after now.
@@ -194,11 +199,14 @@ func (s Schedule) Next(now time.Time) time.Time {
 	}
 	local := now.In(s.loc())
 	this := s.boundary(local.Year(), local.Month())
-	if local.Before(this) {
-		return this
+	if !local.Before(this) {
+		year, month := nextYearMonth(local.Year(), local.Month())
+		this = s.boundary(year, month)
 	}
-	year, month := nextYearMonth(local.Year(), local.Month())
-	return s.boundary(year, month)
+	if !s.EndsAt.IsZero() && s.EndsAt.After(now) && this.After(s.EndsAt) {
+		return s.EndsAt
+	}
+	return this
 }
 
 func beijingTimezone(name string) bool {
@@ -225,7 +233,7 @@ func (s Schedule) CycleKey(now time.Time) string {
 	if last.IsZero() {
 		return ""
 	}
-	if s.UsesLegacyCycleKey() {
+	if s.UsesLegacyCycleKey() && (!last.Equal(s.StartsAt) || last.In(s.loc()).Equal(s.boundary(last.In(s.loc()).Year(), last.In(s.loc()).Month()))) {
 		return last.In(s.loc()).Format(time.DateOnly)
 	}
 	return last.UTC().Format(time.RFC3339)

@@ -13,7 +13,7 @@ import (
 )
 
 func browserTrafficAccounting(client models.Client, report *legacyv1.Report, values map[string]trafficledger.Usage, now time.Time) *browserv1.TrafficAccounting {
-	schedule := trafficreset.FromFields(client.TrafficResetDay, client.TrafficResetTime, client.TrafficResetTimezone)
+	schedule := trafficledger.DisplayTrafficSchedule(client)
 	result := &browserv1.TrafficAccounting{
 		ResetTime:     trafficreset.FormatClock(schedule.Hour, schedule.Minute, schedule.Second),
 		ResetTimezone: schedule.Timezone,
