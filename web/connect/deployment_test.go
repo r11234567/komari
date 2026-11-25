@@ -2,61 +2,20 @@ package connectapi
 
 import (
 	"net/http/httptest"
-	"strings"
 	"testing"
+
+	"connectrpc.com/connect"
 
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/pkg/requestmeta"
 	deploymentv1 "github.com/r11234567/komari-proto/gen/go/komari/deployment/v1"
 )
 
-func TestDeploymentCommandIncludesManagedAgentInstallOptions(t *testing.T) {
-	command, err := deploymentCommand(clients.DeploymentProfile{
-		Platform:             "linux",
-		RuntimeIdentity:      clients.AgentRuntimeIdentityServiceAccount,
-		RemoteControlEnabled: false,
-		RescueEnabled:        true,
-	}, "https://monitor.example.com", "agent-token")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, expected := range []string{
-		"r11234567/komari-agent/main/install.sh",
-		"--install-runtime-identity", "service-account",
-		"--disable-remote-control", "--install-rescue",
-	} {
-		if !strings.Contains(command, expected) {
-			t.Fatalf("deployment command does not contain %q: %s", expected, command)
-		}
-	}
-}
-
-func TestDeploymentCommandRejectsRescueOnMacOS(t *testing.T) {
-	_, err := deploymentCommand(clients.DeploymentProfile{
-		Platform:             "macos",
-		RuntimeIdentity:      clients.AgentRuntimeIdentityServiceAccount,
-		RemoteControlEnabled: false,
-		RescueEnabled:        true,
-	}, "https://monitor.example.com", "agent-token")
-	if err == nil {
-		t.Fatal("deploymentCommand() accepted rescue mode on macOS")
-	}
-}
-
-func TestDeploymentCommandDisablesRemoteControlForNonPrivilegedRuntime(t *testing.T) {
-	command, err := deploymentCommand(clients.DeploymentProfile{
-		Platform:             "linux",
-		RuntimeIdentity:      clients.AgentRuntimeIdentityServiceAccount,
-		RemoteControlEnabled: true,
-	}, "https://monitor.example.com", "agent-token")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(command, "--disable-remote-control") {
-		t.Fatalf("non-privileged install command enables remote control: %s", command)
-	}
-	if strings.Contains(command, "--disable-web-ssh") {
-		t.Fatalf("install command retains deprecated WebSSH switch: %s", command)
+func TestGenerateInstallCommandIsRetired(t *testing.T) {
+	service := &deploymentService{}
+	response, err := service.GenerateInstallCommand(t.Context(), connect.NewRequest(&deploymentv1.GenerateInstallCommandRequest{AgentId: "existing-agent"}))
+	if response != nil || connect.CodeOf(err) != connect.CodeUnimplemented {
+		t.Fatalf("retired install RPC = (%v, %v)", response, err)
 	}
 }
 
@@ -101,20 +60,6 @@ func TestRuntimeIdentityUsesDedicatedServiceAccount(t *testing.T) {
 	} {
 		if got := runtimeIdentityFromProto(wireValue); got != clients.AgentRuntimeIdentityServiceAccount {
 			t.Fatalf("wire identity %s decoded as %q", wireValue, got)
-		}
-	}
-}
-
-func TestDeploymentCommandDoesNotEmitOnlineConfigurationFlags(t *testing.T) {
-	for _, platform := range []string{"linux", "windows", "macos"} {
-		command, err := deploymentCommand(clients.DeploymentProfile{Platform: platform, RuntimeIdentity: clients.AgentRuntimeIdentityServiceAccount, EnableGPU: true, DetailedGPU: true, GetIPAddrFromNIC: true}, "https://panel.example", "one-time-token")
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, removed := range []string{"--enable-gpu", "--detailed-gpu", "--get-ip-addr-from-nic"} {
-			if strings.Contains(command, removed) {
-				t.Fatalf("%s command emits removed online option %s", platform, removed)
-			}
 		}
 	}
 }

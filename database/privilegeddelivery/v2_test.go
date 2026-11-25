@@ -223,18 +223,37 @@ func TestV2UnnegotiatedSettingsCannotBeConfirmed(t *testing.T) {
 	require.Error(t, err)
 }
 func TestV2HashVectors(t *testing.T) {
-	path := filepath.Join("..", "..", "testdata", "privileged-settings-v1.json")
+	path := filepath.Join("..", "..", "third_party", "komari-proto", "testdata", "privileged-settings-v1.json")
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	var vectors []struct {
-		Booleans []int  `json:"booleans"`
-		Mode     int32  `json:"required_privilege_mode"`
-		Hash     string `json:"sha256"`
+		Booleans             [5]int `json:"booleans"`
+		Mode                 int32  `json:"required_privilege_mode"`
+		RootExecutionAllowed bool   `json:"root_execution_allowed"`
+		Hash                 string `json:"sha256"`
 	}
 	require.NoError(t, json.Unmarshal(data, &vectors))
 	for _, v := range vectors {
-		require.Equal(t, v.Hash, settingsHash(Settings{RemoteControlEnabled: v.Booleans[0] != 0, WebSSHEnabled: v.Booleans[1] != 0, ExecutionEnabled: v.Booleans[2] != 0, EnableGPU: v.Booleans[3] != 0, RescueHelperEnabled: v.Booleans[4] != 0, RequiredPrivilegeMode: v.Mode}))
+		require.Equal(t, v.Hash, settingsHash(Settings{
+			RemoteControlEnabled:  v.Booleans[0] != 0,
+			WebSSHEnabled:         v.Booleans[1] != 0,
+			ExecutionEnabled:      v.Booleans[2] != 0,
+			EnableGPU:             v.Booleans[3] != 0,
+			RescueHelperEnabled:   v.Booleans[4] != 0,
+			RequiredPrivilegeMode: v.Mode,
+			RootExecutionAllowed:  v.RootExecutionAllowed,
+		}))
 	}
+}
+
+func TestV2HashBindsRootExecutionPermission(t *testing.T) {
+	settings := Settings{
+		RemoteControlEnabled: true, WebSSHEnabled: true, ExecutionEnabled: true,
+		RequiredPrivilegeMode: int32(reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT),
+	}
+	require.Equal(t, "732d1dcb21b8c7f11ee60fb34e3fb182658abed2d5b0a2e8f7f535cb22d71be2", settingsHash(settings))
+	settings.RootExecutionAllowed = true
+	require.Equal(t, "905ed93eb53892e1f086adcd3c2cd46ad0cdcd913568879d0275c501790e01fa", settingsHash(settings))
 }
 
 func TestV2HelperInstallDoesNotPromoteOrdinaryAgent(t *testing.T) {

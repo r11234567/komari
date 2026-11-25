@@ -219,3 +219,44 @@ func TestAPIAuthenticationMiddlewareRateLimitsUnknownBeforeSQLAndIsolatesLanes(t
 		t.Fatalf("unknown lane should remain unblocked by agent failures, got %d", rec.Code)
 	}
 }
+
+func TestRetiredInstallCredentialCannotResolveIdentity(t *testing.T) {
+	const token = "ki_retired-install-token"
+	db := dbcore.GetDBInstance()
+	if err := db.Exec("CREATE TABLE IF NOT EXISTS install_tokens (token TEXT PRIMARY KEY, client TEXT, created_at DATETIME, expires_at DATETIME, used_at DATETIME)").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("INSERT INTO install_tokens (token, client, created_at, expires_at) VALUES (?, ?, ?, ?)",
+		token, "retired-install-test-agent", time.Now(), time.Now().Add(time.Hour)).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Exec("DELETE FROM install_tokens WHERE token = ?", token).Error })
+	handler := func(c *gin.Context) {
+		if IdentifyPrincipal(c).Type != rpc.PrincipalAnonymous {
+			t.Error("retired credential resolved to a principal")
+		}
+		c.Status(http.StatusUnauthorized)
+	}
+	router := gin.New()
+	router.Use(APIAuthenticationMiddleware())
+	router.GET("/komari.test.v1.TestService/Probe", handler)
+	router.GET("/api/probe", handler)
+	for _, tc := range []struct{ path, authorization string }{
+		{"/komari.test.v1.TestService/Probe", "Bearer " + token},
+		{"/komari.test.v1.TestService/Probe", "DPoP " + token},
+		{"/api/probe?token=" + token, ""},
+		{"/api/probe?Authorization=" + token, ""},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		req.Header.Set("Authorization", tc.authorization)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("retired credential reached %s: status %d", tc.path, w.Code)
+		}
+	}
+
+	if p := agentPrincipal(token); p.Type != rpc.PrincipalAnonymous {
+		t.Fatal("retired credential was directly accepted")
+	}
+}

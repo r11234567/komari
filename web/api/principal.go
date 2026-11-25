@@ -5,13 +5,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
-	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/security"
 )
 
 // principalContextKey 是 principal 在 gin.Context 中的存储键。
 const principalContextKey = "principal"
+const retiredInstallTokenPrefix = "ki_"
 
 // IdentifyPrincipal reuses verified API credentials and resolves browser and device identities.
 func IdentifyPrincipal(c *gin.Context) *rpc.Principal {
@@ -65,19 +65,7 @@ func requestBearer(header string) (string, bool) {
 }
 
 func agentPrincipal(token string) *rpc.Principal {
-	// 3. Client Token(agent 客户端)
-	if token != "" {
-		// 3a. Single-use install token — redeemed on first presentation, giving
-		// the installer a one-shot RoleClient identity so the install script can
-		// connect the agent without the permanent token ever leaving the panel.
-		if enrollment.IsInstallToken(token) {
-			if uuid, err := enrollment.RedeemInstallToken(token); err == nil && uuid != "" {
-				return rpc.NewAgentPrincipal(uuid)
-			}
-			// A bad or already-used install token falls through to anonymous;
-			// it must never accidentally match a permanent token.
-			return rpc.NewAnonymousPrincipal()
-		}
+	if token != "" && !strings.HasPrefix(token, retiredInstallTokenPrefix) {
 		if uuid, err := checkTokenAndGetUUID(token); err == nil && uuid != "" {
 			return rpc.NewAgentPrincipal(uuid)
 		}
