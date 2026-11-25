@@ -11,6 +11,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database"
+	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
@@ -140,10 +141,13 @@ func (s *browserService) GetAgent(ctx context.Context, req *connect.Request[brow
 // whether to show a login prompt or link to the admin console.
 func (s *browserService) GetSession(ctx context.Context, _ *connect.Request[browserv1.GetSessionRequest]) (*connect.Response[browserv1.GetSessionResponse], error) {
 	meta := rpc.MetaFromContext(ctx)
-	if meta == nil || meta.User == nil {
+	if meta == nil || meta.Principal == nil || meta.Principal.Type != rpc.PrincipalUser || meta.SessionToken == "" {
 		return connect.NewResponse(&browserv1.GetSessionResponse{Username: "Guest"}), nil
 	}
-	user := meta.User
+	user, err := accounts.GetUserBySession(meta.SessionToken)
+	if err != nil || user.UUID != meta.Principal.UserUUID {
+		return connect.NewResponse(&browserv1.GetSessionResponse{Username: "Guest"}), nil
+	}
 	return connect.NewResponse(&browserv1.GetSessionResponse{
 		LoggedIn:         true,
 		UserId:           user.UUID,

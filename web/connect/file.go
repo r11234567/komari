@@ -48,6 +48,7 @@ func newFileService() *fileService {
 		assignments: make(map[string]*fileAssignment),
 	}
 	filemanager.SetDispatcher(store.dispatch)
+	filemanager.StartUploadCleanup()
 	return &fileService{store: store}
 }
 
@@ -366,8 +367,10 @@ func (s *fileService) LeaseFileOperations(ctx context.Context, req *connect.Requ
 				return err
 			}
 		case assignment := <-channel:
-			if _, err := workspace.Default.ByID(assignment.WorkspaceId, agentID, assignment.SystemUser); err != nil {
-				continue
+			if !filemanager.IsUploadCleanup(agentID, assignment) {
+				if _, err := workspace.Default.ByID(assignment.WorkspaceId, agentID, assignment.SystemUser); err != nil {
+					continue
+				}
 			}
 			if req.Header().Get(filemanager.TypedPayloadHeader) != "1" {
 				legacy, err := filemanager.LegacyAssignment(agentID, assignment)
@@ -409,11 +412,17 @@ func (s *fileService) AttachFileOperations(ctx context.Context, stream *connect.
 	if assignment == nil {
 		return connect.NewError(connect.CodeNotFound, errors.New("file assignment is unknown or expired"))
 	}
-	grant, err := workspace.Default.ByID(assignment.WorkspaceId, authenticated, assignment.SystemUser)
-	if err != nil {
-		return connectError(connect.CodeUnauthenticated, err)
+	var bounded context.Context
+	var cancel context.CancelFunc
+	if filemanager.IsUploadCleanup(authenticated, assignment) {
+		bounded, cancel = context.WithDeadline(ctx, assignment.GetLeaseExpiresAt().AsTime())
+	} else {
+		grant, err := workspace.Default.ByID(assignment.WorkspaceId, authenticated, assignment.SystemUser)
+		if err != nil {
+			return connectError(connect.CodeUnauthenticated, err)
+		}
+		bounded, cancel = workspace.Bind(ctx, grant)
 	}
-	bounded, cancel := workspace.Bind(ctx, grant)
 	defer cancel()
 	wireAssignment := assignment
 	if stream.RequestHeader().Get(filemanager.TypedPayloadHeader) != "1" {

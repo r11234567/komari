@@ -54,6 +54,7 @@ type pendingCall struct {
 	response  chan *filev1.AgentFileEvent
 	operation string
 	args      map[string]any
+	cleanup   *filev1.FileAssignment
 }
 
 // CallOptions bounds one control operation.
@@ -77,6 +78,10 @@ func Call(ctx context.Context, uuid string, operation string, args map[string]an
 	if grant == nil || grant.Binding.AgentID != uuid || !grant.Alive() {
 		return nil, workspace.ErrLocked
 	}
+	return callScoped(ctx, uuid, grant.ID, grant.Binding.SystemUser, operation, args, false, options...)
+}
+
+func callScoped(ctx context.Context, uuid, workspaceID, systemUser, operation string, args map[string]any, cleanup bool, options ...CallOptions) (*filev1.AgentFileEvent, error) {
 	kind, ok := operationFromString(operation)
 	if !ok {
 		return nil, fmt.Errorf("unsupported file operation %q", operation)
@@ -101,8 +106,8 @@ func Call(ctx context.Context, uuid string, operation string, args map[string]an
 	}
 	assignment := &filev1.FileAssignment{
 		AssignmentId:   requestID,
-		SystemUser:     grant.Binding.SystemUser,
-		WorkspaceId:    grant.ID,
+		SystemUser:     systemUser,
+		WorkspaceId:    workspaceID,
 		RequestId:      requestID,
 		Operation:      kind,
 		TimeoutSeconds: uint32(max(timeout/time.Second, 1)),
@@ -112,7 +117,11 @@ func Call(ctx context.Context, uuid string, operation string, args map[string]an
 
 	responses := make(chan *filev1.AgentFileEvent, 1)
 	pendingMu.Lock()
-	pending[requestID] = pendingCall{uuid: uuid, response: responses, operation: strings.TrimSpace(operation), args: maps.Clone(args)}
+	call := pendingCall{uuid: uuid, response: responses, operation: strings.TrimSpace(operation), args: maps.Clone(args)}
+	if cleanup {
+		call.cleanup = assignment
+	}
+	pending[requestID] = call
 	pendingMu.Unlock()
 	defer removePending(requestID)
 
@@ -136,6 +145,18 @@ func Call(ctx context.Context, uuid string, operation string, args map[string]an
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// IsUploadCleanup recognizes only a live server-owned cancellation of a
+// persisted upload. Browser calls still require a live workspace grant.
+func IsUploadCleanup(agentID string, assignment *filev1.FileAssignment) bool {
+	if assignment.GetOperation() != filev1.FileOperation_FILE_OPERATION_UPLOAD_CANCEL || assignment.GetLeaseExpiresAt().AsTime().Before(time.Now()) {
+		return false
+	}
+	pendingMu.Lock()
+	defer pendingMu.Unlock()
+	call := pending[assignment.GetRequestId()]
+	return call.cleanup == assignment && call.uuid == agentID
 }
 
 const TypedPayloadHeader = "X-Komari-File-Payload"

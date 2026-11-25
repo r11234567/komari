@@ -362,6 +362,41 @@ func TestSplitPublicAndPanelListenersEnforceHardBoundaries(t *testing.T) {
 		t.Fatalf("Public BrowserService/ListAgents leaked hidden node or real IP with admin cookie: %s", listAgentsRec.Body.String())
 	}
 
+	// Only the panel listener may project a validated browser session.
+	for _, check := range []struct {
+		name     string
+		host     string
+		engine   *gin.Engine
+		cookie   string
+		loggedIn bool
+	}{
+		{"panel session", "https://panel.example.com", panelEngine, session, true},
+		{"panel guest", "https://panel.example.com", panelEngine, "", false},
+		{"public cookie", "https://status.example.com", publicEngine, session, false},
+	} {
+		req := httptest.NewRequest(http.MethodPost, check.host+"/komari.browser.v1.BrowserService/GetSession", strings.NewReader("{}"))
+		req.Header.Set("Content-Type", "application/json")
+		if check.cookie != "" {
+			req.AddCookie(&http.Cookie{Name: security.SessionCookieName, Value: check.cookie})
+		}
+		rec := httptest.NewRecorder()
+		check.engine.ServeHTTP(rec, req)
+		var got struct {
+			LoggedIn bool
+			Username string
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || rec.Code != http.StatusOK || got.LoggedIn != check.loggedIn {
+			t.Fatalf("%s: expected loggedIn=%v, got %d %s (%v)", check.name, check.loggedIn, rec.Code, rec.Body, err)
+		}
+		want := "Guest"
+		if check.loggedIn {
+			want = user.Username
+		}
+		if got.Username != want {
+			t.Fatalf("%s: expected username %q, got %q", check.name, want, got.Username)
+		}
+	}
+
 	// 2b. Public Ping task list (/api/task/ping) and common:getRecords(type=ping)
 	//     must strip Hidden node UUIDs from task client lists even with an admin cookie.
 	pingTasksReq := httptest.NewRequest(http.MethodGet, "/api/task/ping", nil)

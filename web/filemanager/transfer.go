@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +42,8 @@ var ErrTooManyUploads = errors.New("too many concurrent uploads")
 
 type uploadSession struct {
 	WorkspaceID string
+	SystemUser  string
+	closed      bool
 	mu          sync.Mutex
 	ID          string
 	UUID        string
@@ -127,6 +130,7 @@ func rememberDownloadChunkSize(clientUUID string, size int64) {
 
 type persistedUploadSession struct {
 	WorkspaceID string
+	SystemUser  string    `json:"system_user,omitempty"`
 	ID          string    `json:"id"`
 	UUID        string    `json:"uuid"`
 	Path        string    `json:"path"`
@@ -171,7 +175,6 @@ func Upload(c *gin.Context) {
 	if !ok {
 		return
 	}
-	cleanupOnce.Do(startUploadCleanup)
 
 	clientUUID := c.Param("uuid")
 	operation := c.Query("operation")
@@ -239,8 +242,16 @@ func initRemoteUpload(c *gin.Context, clientUUID string) {
 	}
 	session.mu.Lock()
 	session.ChunkSize = chunkSize
-	saveUploadSession(session)
+	session.SystemUser = workspace.FromContext(c.Request.Context()).Binding.SystemUser
+	err = saveUploadSession(session)
+	if err != nil {
+		finishUploadSession(session)
+	}
 	session.mu.Unlock()
+	if err != nil {
+		respondTransferError(c, err)
+		return
+	}
 	api.RespondSuccess(c, gin.H{
 		"upload_id":        session.ID,
 		"chunk_size":       chunkSize,
@@ -283,6 +294,11 @@ func uploadRemoteChunkStream(c *gin.Context, clientUUID string) {
 		return
 	}
 	session.mu.Lock()
+	if session.closed {
+		session.mu.Unlock()
+		respondTransferError(c, ErrUnknownToken)
+		return
+	}
 	chunkSize := session.ChunkSize
 	if chunkSize <= 0 {
 		chunkSize = DefaultTransferChunkSize
@@ -307,8 +323,13 @@ func uploadRemoteChunkStream(c *gin.Context, clientUUID string) {
 	// session TTL on a slow uplink. Keep the persisted session alive for at
 	// least the duration allowed for this transfer.
 	session.ExpiresAt = time.Now().Add(streamCallTimeout)
-	saveUploadSession(session)
+	session.SystemUser = workspace.FromContext(c.Request.Context()).Binding.SystemUser
+	err = saveUploadSession(session)
 	session.mu.Unlock()
+	if err != nil {
+		respondTransferError(c, err)
+		return
+	}
 
 	if c.Request.ContentLength >= 0 && c.Request.ContentLength != expectedSize {
 		logger.Warnf("file-transfer", "upload chunk content length mismatch client=%s upload_id=%s chunk=%d got=%d want=%d", clientUUID, uploadID, index, c.Request.ContentLength, expectedSize)
@@ -395,9 +416,6 @@ func uploadRemoteChunkStream(c *gin.Context, clientUUID string) {
 		} else {
 			logger.Errorf("file-transfer", "upload chunk agent stream failed client=%s upload_id=%s chunk=%d offset=%d size=%d: %v", clientUUID, uploadID, index, offset, expectedSize, callErr)
 		}
-		session.mu.Lock()
-		saveUploadSession(session)
-		session.mu.Unlock()
 		respondTransferError(c, callErr)
 		return
 	}
@@ -410,8 +428,12 @@ func uploadRemoteChunkStream(c *gin.Context, clientUUID string) {
 	session.mu.Lock()
 	session.NextOffset = max(session.NextOffset, offset+expectedSize)
 	nextOffset := session.NextOffset
-	saveUploadSession(session)
+	err = saveUploadSession(session)
 	session.mu.Unlock()
+	if err != nil {
+		respondTransferError(c, err)
+		return
+	}
 	api.RespondSuccess(c, gin.H{
 		"received":    true,
 		"chunk_index": index,
@@ -434,6 +456,10 @@ func mergeRemoteUpload(c *gin.Context, clientUUID string) {
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
+	if session.closed {
+		respondTransferError(c, ErrUnknownToken)
+		return
+	}
 	chunkSize := session.ChunkSize
 	if chunkSize <= 0 {
 		chunkSize = DefaultTransferChunkSize
@@ -482,13 +508,29 @@ func cancelUpload(c *gin.Context, clientUUID string) {
 		respondTransferError(c, err)
 		return
 	}
-	_, _ = Call(c.Request.Context(), clientUUID, "upload_cancel", map[string]any{
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.closed {
+		respondTransferError(c, ErrUnknownToken)
+		return
+	}
+	// Keep the cleanup record if the grant is revoked or the Agent disconnects
+	// while an explicit cancel is in flight.
+	session.ExpiresAt = time.Now()
+	session.SystemUser = workspace.FromContext(c.Request.Context()).Binding.SystemUser
+	if err := saveUploadSession(session); err != nil {
+		respondTransferError(c, err)
+		return
+	}
+	_, err = Call(c.Request.Context(), clientUUID, "upload_cancel", map[string]any{
 		"upload_id": id,
 		"path":      session.Path,
 	}, CallOptions{Timeout: 30 * time.Second})
-	session.mu.Lock()
-	finishUploadSession(session)
-	session.mu.Unlock()
+	if err == nil {
+		finishUploadSession(session)
+	} else {
+		detachUploadSession(session)
+	}
 	api.RespondSuccess(c, gin.H{"cancelled": true})
 }
 
@@ -851,14 +893,13 @@ func acquireUploadSession(id, clientUUID, path string, size, offset int64, works
 		uploadSessions[session.ID] = session
 		uploadMu.Unlock()
 		ensureUploadSessionDirectory()
-		saveUploadSession(session)
 		return session, true, nil
 	}
 
 	uploadMu.Lock()
 	session := uploadSessions[id]
 	uploadMu.Unlock()
-	if session != nil && removeExpiredUploadSession(id, session) {
+	if session != nil && removeExpiredUploadSession(session, time.Now()) {
 		session = nil
 	}
 	if session == nil {
@@ -867,6 +908,10 @@ func acquireUploadSession(id, clientUUID, path string, size, offset int64, works
 			if existing := uploadSessions[id]; existing != nil {
 				session = existing
 			} else {
+				if !time.Now().Before(restoredSession.ExpiresAt) {
+					uploadMu.Unlock()
+					return nil, false, ErrUnknownToken
+				}
 				select {
 				case uploadSlots <- struct{}{}:
 					restoredSession.slotHeld = true
@@ -915,11 +960,7 @@ func loadUploadSession(id string) (*persistedUploadSession, error) {
 		return nil, ErrUnknownToken
 	}
 	var restored persistedUploadSession
-	if err := json.Unmarshal(data, &restored); err != nil {
-		return nil, ErrUnknownToken
-	}
-	if time.Now().After(restored.ExpiresAt) {
-		removeUploadSessionState(id)
+	if err := json.Unmarshal(data, &restored); err != nil || restored.ID != id || restored.ExpiresAt.IsZero() {
 		return nil, ErrUnknownToken
 	}
 	return &restored, nil
@@ -930,41 +971,27 @@ func finishUploadSession(session *uploadSession) {
 		return
 	}
 	removeUploadSessionState(session.ID)
+	detachUploadSession(session)
+}
+
+// The caller holds session.mu while retiring a session.
+func detachUploadSession(session *uploadSession) {
+	session.closed = true
 	uploadMu.Lock()
-	if current := uploadSessions[session.ID]; current == session {
+	defer uploadMu.Unlock()
+	if uploadSessions[session.ID] == session {
 		delete(uploadSessions, session.ID)
 		releaseUploadSlotLocked(session)
 	}
-	uploadMu.Unlock()
 }
 
-func uploadSessionExpired(session *uploadSession, now time.Time) bool {
-	if session == nil {
-		return true
-	}
+func removeExpiredUploadSession(session *uploadSession, now time.Time) bool {
 	session.mu.Lock()
-	expired := now.After(session.ExpiresAt)
-	session.mu.Unlock()
-	return expired
-}
-
-func removeExpiredUploadSession(id string, session *uploadSession) bool {
-	if !uploadSessionExpired(session, time.Now()) {
-		return false
+	defer session.mu.Unlock()
+	if session.closed || now.Before(session.ExpiresAt) {
+		return session.closed
 	}
-	uploadMu.Lock()
-	if current := uploadSessions[id]; current != session {
-		uploadMu.Unlock()
-		return false
-	}
-	delete(uploadSessions, id)
-	releaseUploadSlotLocked(session)
-	removeUploadSessionState(id)
-	uploadMu.Unlock()
-	// The agent owns the temporary part file. Best-effort cleanup is performed
-	// after releasing the server lock so a slow/offline agent cannot block the
-	// upload session manager.
-	go cancelAgentUpload(session)
+	detachUploadSession(session)
 	return true
 }
 
@@ -979,13 +1006,23 @@ func releaseUploadSlotLocked(session *uploadSession) {
 	}
 }
 
-func saveUploadSession(session *uploadSession) {
-	if session == nil || session.ID == "" || strings.Contains(session.ID, "..") || !uploadSessionIDPattern.MatchString(session.ID) {
-		return
+func saveUploadSession(session *uploadSession) error {
+	if session.closed {
+		return ErrUnknownToken
 	}
-	data, err := json.Marshal(persistedUploadSession{
+	path, err := uploadSessionPath(session.ID)
+	if err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".pending-upload-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	err = json.NewEncoder(file).Encode(persistedUploadSession{
 		ID:          session.ID,
 		WorkspaceID: session.WorkspaceID,
+		SystemUser:  session.SystemUser,
 		UUID:        session.UUID,
 		Path:        session.Path,
 		Size:        session.Size,
@@ -993,25 +1030,16 @@ func saveUploadSession(session *uploadSession) {
 		NextOffset:  session.NextOffset,
 		ExpiresAt:   session.ExpiresAt,
 	})
+	if err == nil {
+		err = file.Sync()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
 	if err != nil {
-		return
+		return err
 	}
-	path, err := uploadSessionPath(session.ID)
-	if err != nil {
-		return
-	}
-	baseDir, err := uploadSessionDirectory()
-	if err != nil {
-		return
-	}
-	cleanBase := baseDir + string(filepath.Separator)
-	if !strings.HasPrefix(path, cleanBase) {
-		return
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return
-	}
-	_ = os.Chtimes(path, session.ExpiresAt, session.ExpiresAt)
+	return os.Rename(file.Name(), path)
 }
 
 func removeUploadSessionState(id string) {
@@ -1034,24 +1062,63 @@ func removeUploadSessionState(id string) {
 	_ = os.Remove(path)
 }
 
-func startUploadCleanup() {
-	go func() {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		for now := range ticker.C {
-			uploadMu.Lock()
-			sessions := make(map[string]*uploadSession, len(uploadSessions))
-			for id, session := range uploadSessions {
-				sessions[id] = session
+func StartUploadCleanup() {
+	cleanupOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			cursor := ""
+			for now := range ticker.C {
+				cursor = sweepExpiredUploads(now, cursor)
 			}
-			uploadMu.Unlock()
-			for id, session := range sessions {
-				if uploadSessionExpired(session, now) {
-					removeExpiredUploadSession(id, session)
-				}
-			}
+		}()
+	})
+}
+
+func sweepExpiredUploads(now time.Time, cursor string) string {
+	uploadMu.Lock()
+	sessions := make([]*uploadSession, 0, len(uploadSessions))
+	for _, session := range uploadSessions {
+		sessions = append(sessions, session)
+	}
+	uploadMu.Unlock()
+	for _, session := range sessions {
+		removeExpiredUploadSession(session, now)
+	}
+
+	dir, err := uploadSessionDirectory()
+	if err != nil {
+		return ""
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	// Leave failed cancellations on disk for a later sweep, including across
+	// panel restarts. Bound work per sweep and rotate past unavailable Agents.
+	first := sort.Search(len(entries), func(i int) bool { return entries[i].Name() > cursor })
+	attempts := 0
+	for _, entry := range entries[first:] {
+		name, prefixed := strings.CutPrefix(entry.Name(), ".komari-upload-")
+		id, suffixed := strings.CutSuffix(name, ".json")
+		if !prefixed || !suffixed || !entry.Type().IsRegular() {
+			continue
 		}
-	}()
+		session, err := loadUploadSession(id)
+		if err != nil || now.Before(session.ExpiresAt) || session.SystemUser == "" {
+			continue
+		}
+		if err := cancelAgentUpload(session); err == nil {
+			removeUploadSessionState(id)
+		} else if !errors.Is(err, ErrOffline) {
+			logger.Warnf("file-transfer", "retrying expired upload cleanup client=%s upload_id=%s: %v", session.UUID, id, err)
+		}
+		attempts++
+		if attempts == 4 {
+			return entry.Name()
+		}
+	}
+	return ""
 }
 
 func ensureUploadSessionDirectory() {
@@ -1062,12 +1129,13 @@ func ensureUploadSessionDirectory() {
 
 func restoreUploadSession(id string) *uploadSession {
 	restored, err := loadUploadSession(id)
-	if err != nil {
+	if err != nil || !time.Now().Before(restored.ExpiresAt) {
 		return nil
 	}
 	return &uploadSession{
 		ID:          restored.ID,
 		WorkspaceID: restored.WorkspaceID,
+		SystemUser:  restored.SystemUser,
 		UUID:        restored.UUID,
 		Path:        restored.Path,
 		Size:        restored.Size,
@@ -1077,16 +1145,17 @@ func restoreUploadSession(id string) *uploadSession {
 	}
 }
 
-func cancelAgentUpload(session *uploadSession) {
-	if session == nil || session.UUID == "" || session.ID == "" {
-		return
+func cancelAgentUpload(session *persistedUploadSession) error {
+	if session == nil || session.UUID == "" || session.ID == "" || session.WorkspaceID == "" || session.SystemUser == "" || session.Path == "" {
+		return ErrUnknownToken
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, _ = Call(ctx, session.UUID, "upload_cancel", map[string]any{
+	_, err := callScoped(ctx, session.UUID, session.WorkspaceID, session.SystemUser, "upload_cancel", map[string]any{
 		"upload_id": session.ID,
 		"path":      session.Path,
-	}, CallOptions{Timeout: 10 * time.Second})
+	}, true, CallOptions{Timeout: 10 * time.Second})
+	return err
 }
 
 func uploadChunkCount(size, chunkSize int64) int64 {
