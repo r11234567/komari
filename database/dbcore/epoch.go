@@ -131,10 +131,12 @@ func reconcileStartupSecurityEpoch(defaultDataDir string, db *gorm.DB) (uint64, 
 				return 0, fmt.Errorf("purge pre-epoch sessions: %w", err)
 			}
 		}
-		if db.Migrator().HasTable(&models.InstallToken{}) {
-			if err := db.Where("used_at IS NOT NULL OR expires_at <= ?", now).Delete(&models.InstallToken{}).Error; err != nil {
-				return 0, fmt.Errorf("clean expired install tokens: %w", err)
-			}
+	}
+	// Keep the old table for rollback compatibility, but erase all previously
+	// issued credentials, including those that have not expired.
+	if db.Migrator().HasTable("install_tokens") {
+		if err := db.Exec("DELETE FROM install_tokens").Error; err != nil {
+			return 0, fmt.Errorf("purge retired install tokens: %w", err)
 		}
 	}
 	if markerDir != "" {

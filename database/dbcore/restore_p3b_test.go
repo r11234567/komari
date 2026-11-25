@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestRestoreStagedBackupHandlesReadOnlyMountParentSameVolume(t *testing.T) {
@@ -336,5 +338,32 @@ func TestRestoreKeepsTheLiveRefreshGenerationForTheSameDeviceKey(t *testing.T) {
 	}
 	if rows["changed"].RevokedAt == nil || rows["removed"].RevokedAt == nil {
 		t.Fatal("restored an obsolete or removed device key")
+	}
+}
+
+func TestStartupPurgesUnexpiredLegacyInstallTokens(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "legacy.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	previousEpoch := CurrentSecurityEpoch()
+	t.Cleanup(func() { SetCurrentSecurityEpoch(previousEpoch) })
+	if err := db.Exec("CREATE TABLE install_tokens (token TEXT PRIMARY KEY, expires_at TEXT)").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("INSERT INTO install_tokens VALUES (?, ?)", "ki_old", "2099-01-01").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconcileStartupSecurityEpoch(t.TempDir(), db); err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	if err := db.Table("install_tokens").Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("retired token rows remaining: %d, err=%v", count, err)
 	}
 }

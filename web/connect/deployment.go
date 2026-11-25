@@ -2,16 +2,11 @@ package connectapi
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
-	"fmt"
 	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/clients"
-	"github.com/komari-monitor/komari/database/enrollment"
-	"github.com/komari-monitor/komari/utils"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	deploymentapp "github.com/komari-monitor/komari/web/deployment"
 	"github.com/komari-monitor/komari/web/rescueapp"
@@ -24,109 +19,10 @@ type deploymentService struct {
 	deploymentv1connect.UnimplementedDeploymentServiceHandler
 }
 
-func (s *deploymentService) GenerateInstallCommand(ctx context.Context, req *connect.Request[deploymentv1.GenerateInstallCommandRequest]) (*connect.Response[deploymentv1.GenerateInstallCommandResponse], error) {
-	if strings.TrimSpace(req.Msg.AgentId) == "" {
-		return nil, connectError(connect.CodeInvalidArgument, errors.New("agent ID is required"))
-	}
-	profile, saved, err := clients.GetDeploymentProfile(req.Msg.AgentId)
-	if err != nil {
-		return nil, connectError(connect.CodeNotFound, errors.New("agent not found"))
-	}
-	if !saved {
-		return nil, connectError(connect.CodeFailedPrecondition, errors.New("save the deployment profile before generating an install command"))
-	}
-	endpoint, err := utils.PublicPanelURL(ctx)
-	if err != nil {
-		return nil, connectError(connect.CodeFailedPrecondition, err)
-	}
-	platform := platformFromProto(req.Msg.Platform)
-	profile.Platform = platform
-
-	// Issue a single-use install token so the permanent agent token never
-	// appears in a shell command that may end up in logs, chat history, or a
-	// ticket. The token is valid for 24 hours and is redeemed exactly once
-	// when the installer calls home for the first time.
-	installToken, _, tokenErr := enrollment.IssueInstallToken(req.Msg.AgentId)
-	if tokenErr != nil {
-		return nil, connectError(connect.CodeInternal, fmt.Errorf("issue install token: %w", tokenErr))
-	}
-
-	command, err := deploymentCommand(profile, endpoint, installToken)
-	if err != nil {
-		return nil, connectError(connect.CodeInvalidArgument, err)
-	}
-	sum := sha256.Sum256([]byte(command))
-	return connect.NewResponse(&deploymentv1.GenerateInstallCommandResponse{
-		Command: command,
-		Sha256:  hex.EncodeToString(sum[:]),
-	}), nil
+// GenerateInstallCommand is retained for callers using the old protocol.
+func (s *deploymentService) GenerateInstallCommand(context.Context, *connect.Request[deploymentv1.GenerateInstallCommandRequest]) (*connect.Response[deploymentv1.GenerateInstallCommandResponse], error) {
+	return nil, connectError(connect.CodeUnimplemented, errors.New("install commands with one-time tokens have been retired; install the Agent and enroll using browser approval"))
 }
-
-func deploymentCommand(profile clients.DeploymentProfile, endpoint, token string) (string, error) {
-	// The ordinary Agent executes remote commands as its own process. A
-	// non-privileged runtime must therefore never receive a command that enables
-	// remote control, even when an API caller bypasses the deployment UI.
-	if profile.RuntimeIdentity == clients.AgentRuntimeIdentityServiceAccount {
-		profile.RemoteControlEnabled = false
-	}
-	arguments := []string{"--install-runtime-identity", profile.RuntimeIdentity, "--endpoint", endpoint, "--token", token}
-	if profile.EnableCustomDir && profile.Dir != "" {
-		arguments = append(arguments, "--install-dir", profile.Dir)
-	}
-	if profile.EnableCustomServiceName && profile.ServiceName != "" {
-		arguments = append(arguments, "--install-service-name", profile.ServiceName)
-	}
-	if profile.EnableGHProxy && profile.GHProxy != "" {
-		arguments = append(arguments, "--install-ghproxy", profile.GHProxy)
-	}
-	if profile.DisableAutoUpdate {
-		arguments = append(arguments, "--disable-auto-update")
-	}
-	if profile.IgnoreUnsafeCert {
-		arguments = append(arguments, "--ignore-unsafe-cert")
-	}
-	if !profile.RemoteControlEnabled {
-		arguments = append(arguments, "--disable-remote-control")
-	}
-	if profile.RescueEnabled {
-		arguments = append(arguments, "--install-rescue")
-	}
-	script := "https://raw.githubusercontent.com/r11234567/komari-agent/main/install.sh"
-	switch profile.Platform {
-	case "windows":
-		script = "https://raw.githubusercontent.com/r11234567/komari-agent/main/install.ps1"
-		return "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"iwr " + powerShellQuote(script) + " -UseBasicParsing -OutFile 'install.ps1'; & '.\\install.ps1' " + powerShellArguments(arguments) + "\"", nil
-	case "linux":
-		return "curl -fsSL " + shellQuote(script) + " | sudo bash -s -- " + shellArguments(arguments), nil
-	case "macos":
-		if profile.RescueEnabled {
-			return "", errors.New("the privileged rescue helper is currently supported only on Linux and Windows")
-		}
-		return "curl -fsSL " + shellQuote(script) + " | sudo bash -s -- " + shellArguments(arguments), nil
-	default:
-		return "", errors.New("install command is supported only for Linux, Windows, and macOS")
-	}
-}
-
-func shellArguments(values []string) string {
-	quoted := make([]string, len(values))
-	for index, value := range values {
-		quoted[index] = shellQuote(value)
-	}
-	return strings.Join(quoted, " ")
-}
-
-func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
-
-func powerShellArguments(values []string) string {
-	quoted := make([]string, len(values))
-	for index, value := range values {
-		quoted[index] = powerShellQuote(value)
-	}
-	return strings.Join(quoted, " ")
-}
-
-func powerShellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
 
 func (s *deploymentService) GetDeployment(_ context.Context, req *connect.Request[deploymentv1.GetDeploymentRequest]) (*connect.Response[deploymentv1.GetDeploymentResponse], error) {
 	if strings.TrimSpace(req.Msg.AgentId) == "" {

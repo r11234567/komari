@@ -114,8 +114,12 @@ func APIAuthenticationMiddleware(pluginRoute ...func(method, pattern string) boo
 			c.Next()
 			return
 		}
+		if strings.HasPrefix(secret, retiredInstallTokenPrefix) {
+			security.AbortRequest(c, http.StatusUnauthorized, "invalid API credential")
+			return
+		}
 		if scheme == "DPoP" && (!strings.HasPrefix(c.FullPath(), "/komari.") ||
-			strings.HasPrefix(secret, apitokens.Prefix) || enrollment.IsInstallToken(secret)) {
+			strings.HasPrefix(secret, apitokens.Prefix)) {
 			security.AbortRequest(c, http.StatusUnauthorized, "DPoP credentials require an enrolled Agent Connect procedure")
 			return
 		}
@@ -139,24 +143,6 @@ func APIAuthenticationMiddleware(pluginRoute ...func(method, pattern string) boo
 
 		sourceIP := security.AuthSourceIP(c)
 		isPAT := strings.HasPrefix(secret, apitokens.Prefix)
-		isInstall := !isPAT && enrollment.IsInstallToken(secret)
-
-		if isInstall {
-			failureKey := "agent:" + sourceIP
-			if ok, retry := limiter.Allow(failureKey, now); !ok {
-				abortRateLimited(c, retry)
-				return
-			}
-			if principal := agentPrincipal(secret); principal.Type == rpc.PrincipalAgent {
-				SetPrincipal(c, principal)
-				c.Next()
-				return
-			}
-			limiter.Failure(failureKey, now)
-			security.AbortRequest(c, http.StatusUnauthorized, "invalid API credential")
-			return
-		}
-
 		if !isPAT {
 			failureLane := "unknown:"
 			if plausible && !missGuard.knownMiss(digest, now) {

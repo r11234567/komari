@@ -1117,7 +1117,6 @@ func doInitialize() error {
 		&models.AgentCredentialPolicy{},
 		&models.ControlPlaneKey{},
 		&models.ControlPlanePrivateKey{},
-		&models.InstallToken{},
 		&models.BillingPriceVersion{},
 		&models.BillingFXSnapshot{},
 		&models.BillingEntry{},
