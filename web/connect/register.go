@@ -190,6 +190,15 @@ func bridge(handler http.Handler, streams map[string]bool) gin.HandlerFunc {
 			return
 		}
 		c.Request = req
+		switch req.URL.Path {
+		case enrollmentv1connect.EnrollmentAdminServiceGetPendingEnrollmentProcedure,
+			enrollmentv1connect.EnrollmentAdminServiceApproveEnrollmentProcedure,
+			enrollmentv1connect.EnrollmentAdminServiceDenyEnrollmentProcedure:
+			if !security.SameOriginBindRequest(req) {
+				security.AbortRequest(c, http.StatusForbidden, "Bind authorization requires a same-origin request")
+				return
+			}
+		}
 		principal := api.GetPrincipal(c)
 		if principal == nil {
 			principal = api.IdentifyPrincipal(c)

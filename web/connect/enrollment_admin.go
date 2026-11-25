@@ -29,6 +29,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/bindticket"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	deploymentapp "github.com/komari-monitor/komari/web/deployment"
+	"github.com/komari-monitor/komari/web/security"
 	enrollmentv1 "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1"
 	"github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1/enrollmentv1connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -68,24 +69,26 @@ func bindTicketConnectError(err error) error {
 	return connectErr
 }
 
-func verifyBindTicket(reqHeader http.Header, principal *rpc.Principal) (*bindticket.Claims, error) {
-	ticket := strings.TrimSpace(reqHeader.Get("X-Bind-Ticket"))
-	if ticket == "" {
+func verifyBindTicket(reqHeader http.Header, meta *rpc.ContextMeta) (*bindticket.Claims, error) {
+	request := &http.Request{Header: reqHeader}
+	ticket, err := request.Cookie(security.BindTicketCookieName)
+	if err != nil || ticket.Value == "" {
 		return nil, newBindTicketFailure(
 			connect.CodeUnauthenticated,
 			"bind_ticket_missing",
 			errors.New("bind ticket is required; complete login on /bind-login first"),
 		)
 	}
-	if principal == nil || principal.UserUUID == "" || !principal.HasRole(rpc.RoleAdmin) {
+	principal := meta.Principal
+	if principal == nil || principal.Type != rpc.PrincipalUser || principal.UserUUID == "" || !principal.HasRole(rpc.RoleAdmin) || meta.SessionToken == "" {
 		return nil, newBindTicketFailure(
 			connect.CodePermissionDenied,
 			"console_session_required",
 			errors.New("administrator authentication is required"),
 		)
 	}
-	key := accounts.SessionDigestKey()
-	claims, err := bindticket.VerifyWithEpoch(ticket, key, dbcore.CurrentSecurityEpoch())
+	key := bindticket.SessionKey(accounts.SessionDigestKey(), meta.SessionToken)
+	claims, err := bindticket.VerifyWithEpoch(ticket.Value, key, dbcore.CurrentSecurityEpoch())
 	if err != nil {
 		switch {
 		case errors.Is(err, bindticket.ErrTicketExpired):
@@ -134,7 +137,7 @@ func (s *enrollmentAdminService) GetPendingEnrollment(ctx context.Context, req *
 	if err != nil {
 		return nil, err
 	}
-	if _, err := verifyBindTicket(req.Header(), meta.Principal); err != nil {
+	if _, err := verifyBindTicket(req.Header(), meta); err != nil {
 		return nil, bindTicketConnectError(err)
 	}
 	if strings.TrimSpace(req.Msg.GetUserCode()) == "" {
@@ -166,7 +169,7 @@ func (s *enrollmentAdminService) ApproveEnrollment(ctx context.Context, req *con
 	if err != nil {
 		return nil, err
 	}
-	claims, err := verifyBindTicket(req.Header(), meta.Principal)
+	claims, err := verifyBindTicket(req.Header(), meta)
 	if err != nil {
 		return nil, bindTicketConnectError(err)
 	}
@@ -254,7 +257,7 @@ func (s *enrollmentAdminService) DenyEnrollment(ctx context.Context, req *connec
 	if err != nil {
 		return nil, err
 	}
-	claims, err := verifyBindTicket(req.Header(), meta.Principal)
+	claims, err := verifyBindTicket(req.Header(), meta)
 	if err != nil {
 		return nil, bindTicketConnectError(err)
 	}

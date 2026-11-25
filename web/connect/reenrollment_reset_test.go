@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 	agentRuntime "github.com/komari-monitor/komari/web/agent"
 	"github.com/komari-monitor/komari/web/rescueapp"
+	"github.com/komari-monitor/komari/web/security"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	"github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
@@ -44,7 +46,7 @@ func TestDualEnd_ReenrollmentResetsPrivilegesAndRedispatchesRuntime(t *testing.T
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			const operator = "reenrollment-admin"
-			admin := rpc.NewContextWithMeta(ctx, &rpc.ContextMeta{Principal: rpc.NewUserPrincipal(operator)})
+			admin := rpc.NewContextWithMeta(ctx, &rpc.ContextMeta{Principal: rpc.NewUserPrincipal(operator), SessionToken: "test-console-session"})
 			id, _, err := clients.CreateClientWithName("preserve node name")
 			require.NoError(t, err)
 			db := dbcore.GetDBInstance()
@@ -70,10 +72,10 @@ func TestDualEnd_ReenrollmentResetsPrivilegesAndRedispatchesRuntime(t *testing.T
 					AgentPublicKey: &securityv1.PublicKey{Algorithm: securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ED25519, Value: pub, KeyId: uuid.NewString()},
 				}))
 				require.NoError(t, err)
-				ticket, _, err := bindticket.IssueWithDurationAndEpoch(operator, accounts.SessionDigestKey(), bindticket.TicketDuration, dbcore.CurrentSecurityEpoch())
+				ticket, _, err := bindticket.IssueWithDurationAndEpoch(operator, bindticket.SessionKey(accounts.SessionDigestKey(), "test-console-session"), bindticket.TicketDuration, dbcore.CurrentSecurityEpoch())
 				require.NoError(t, err)
 				approval := connect.NewRequest(&enrollmentv1.ApproveEnrollmentRequest{UserCode: begin.Msg.UserCode, Target: &enrollmentv1.ApproveEnrollmentRequest_ExistingAgentId{ExistingAgentId: id}})
-				approval.Header().Set("X-Bind-Ticket", ticket)
+				(&http.Request{Header: approval.Header()}).AddCookie(&http.Cookie{Name: security.BindTicketCookieName, Value: ticket})
 				_, err = (&enrollmentAdminService{}).ApproveEnrollment(admin, approval)
 				require.NoError(t, err)
 				poll, err := service.PollEnrollment(ctx, connect.NewRequest(&enrollmentv1.PollEnrollmentRequest{DeviceCode: begin.Msg.DeviceCode}))

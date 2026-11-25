@@ -127,9 +127,11 @@ async function run() {
   await rpcBatchRejected.dispose();
   checks.push('rpc2-private-site-blocks-guest-and-enforces-256kib-body-and-256-batch-limits');
 
-  const ticket = (await post(admin, '/api/bind/ticket', {})).data.ticket;
-  assert(ticket);
-  console.log(`::add-mask::${ticket}`);
+  const authorization = (await post(admin, '/api/bind/ticket', {})).data;
+  assert(authorization.expires_in > 0);
+  assert.equal(authorization.ticket, undefined);
+  const state = await admin.storageState();
+  assert(state.cookies.some(cookie => cookie.name === '__Host-komari_bind' && cookie.secure && cookie.httpOnly && cookie.sameSite === 'Strict'));
   const log = fs.openSync(path.join(root, 'entry-agent-private.log'), 'w', 0o600);
   try {
     login = spawn('/usr/lib/komari/komari-e2e/komari-agent', ['login', '--endpoint', base, '--credentials-file', credentialsPath], {
@@ -151,7 +153,7 @@ async function run() {
   const approved = await rpc(admin, 'enrollment.v1.EnrollmentAdminService', 'ApproveEnrollment', {
     userCode: pending[0].userCode,
     newAgent: { name: 'Private-site entry Agent' },
-  }, { 'X-Bind-Ticket': ticket });
+  });
   assert.equal(approved.status, 200);
   assert.equal(approved.body.created, true);
   await until('actual Agent saves credentials', async () => {
