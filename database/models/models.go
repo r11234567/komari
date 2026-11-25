@@ -280,13 +280,15 @@ type AgentRefreshUse struct {
 // config store. Agents pin these on first contact, so rotation adds a row
 // rather than replacing one, letting old and new coexist during a migration.
 type ControlPlaneKey struct {
-	KeyID     string     `json:"-" gorm:"type:varchar(64);primaryKey"`
-	Algorithm int32      `json:"-" gorm:"not null;default:0"`
-	PublicKey string     `json:"-" gorm:"type:text;not null"`
-	NotBefore time.Time  `json:"-"`
-	NotAfter  *time.Time `json:"-"`
-	CreatedAt time.Time  `json:"-"`
-	UpdatedAt time.Time  `json:"-"`
+	KeyID         string     `json:"-" gorm:"type:varchar(64);primaryKey"`
+	Algorithm     int32      `json:"-" gorm:"not null;default:0"`
+	PublicKey     string     `json:"-" gorm:"type:text;not null"`
+	NotBefore     time.Time  `json:"-"`
+	NotAfter      *time.Time `json:"-"`
+	CreatedAt     time.Time  `json:"-"`
+	UpdatedAt     time.Time  `json:"-"`
+	TrustRevision uint64     `json:"-" gorm:"not null;default:1"`
+	RotationProof []byte     `json:"-"`
 }
 
 // ControlPlanePrivateKey holds the sealed private half of a signing key.

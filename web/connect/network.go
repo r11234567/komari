@@ -44,10 +44,15 @@ func (s *networkProbeService) LeasePingProbe(ctx context.Context, req *connect.R
 		}
 		return nil, err
 	}
-	return connect.NewResponse(&networkv1.LeasePingProbeResponse{Assignment: &networkv1.PingProbeAssignment{
+	wire := &networkv1.PingProbeAssignment{
 		AssignmentId: assignment.AssignmentID, TaskId: uint64(assignment.TaskID), Protocol: assignment.Protocol,
 		Target: assignment.Target, Timeout: durationpb.New(3 * time.Second), LeaseExpiresAt: timestamppb.New(assignment.LeaseExpires),
-	}}), nil
+	}
+	wire.Envelope, err = signAgentControl(agentID, "ping:"+wire.AssignmentId+":"+assignment.LeaseExpires.UTC().Format(time.RFC3339Nano), assignment.LeaseExpires, wire)
+	if err != nil {
+		return nil, connectError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&networkv1.LeasePingProbeResponse{Assignment: wire}), nil
 }
 
 func (s *networkProbeService) SubmitPingProbeResult(ctx context.Context, req *connect.Request[networkv1.SubmitPingProbeResultRequest]) (*connect.Response[networkv1.SubmitPingProbeResultResponse], error) {
@@ -99,11 +104,16 @@ func (s *networkProbeService) LeaseReturnRouteProbe(ctx context.Context, req *co
 		}
 		return nil, err
 	}
-	return connect.NewResponse(&networkv1.LeaseReturnRouteProbeResponse{Assignment: &networkv1.ReturnRouteProbeAssignment{
+	wire := &networkv1.ReturnRouteProbeAssignment{
 		AssignmentId: assignment.AssignmentID, TaskId: uint64(assignment.TaskID), Protocol: assignment.Protocol,
 		Target: assignment.Target, IpVersion: uint32(assignment.IPVersion), MaxHops: uint32(assignment.MaxHops),
 		HopTimeout: durationpb.New(900 * time.Millisecond), LeaseExpiresAt: timestamppb.New(assignment.LeaseExpires),
-	}}), nil
+	}
+	wire.Envelope, err = signAgentControl(agentID, "route:"+wire.AssignmentId+":"+assignment.LeaseExpires.UTC().Format(time.RFC3339Nano), assignment.LeaseExpires, wire)
+	if err != nil {
+		return nil, connectError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&networkv1.LeaseReturnRouteProbeResponse{Assignment: wire}), nil
 }
 
 func (s *networkProbeService) SubmitReturnRouteProbeResult(ctx context.Context, req *connect.Request[networkv1.SubmitReturnRouteProbeResultRequest]) (*connect.Response[networkv1.SubmitReturnRouteProbeResultResponse], error) {

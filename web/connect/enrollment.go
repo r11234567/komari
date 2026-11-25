@@ -292,10 +292,11 @@ func (s *enrollmentService) RevokeCredentials(ctx context.Context, req *connect.
 }
 
 func (s *enrollmentService) GetTrustBundle(ctx context.Context, req *connect.Request[enrollmentv1.GetTrustBundleRequest]) (*connect.Response[enrollmentv1.GetTrustBundleResponse], error) {
-	if _, err := enrollment.ActiveSigningKey(); err != nil {
-		return nil, connectError(connect.CodeInternal, err)
+	challenge := req.Msg.GetChallenge()
+	if len(challenge) != 0 && (len(challenge) != 32 || len(req.Msg.GetAgentId()) > 128 || strings.TrimSpace(req.Msg.GetAgentId()) == "") {
+		return nil, connectError(connect.CodeInvalidArgument, errors.New("signed bundle requires a 32-byte challenge and agent ID"))
 	}
-	keys, err := enrollment.ListControlPlaneKeys()
+	active, keys, err := enrollment.TrustSigningState()
 	if err != nil {
 		return nil, connectError(connect.CodeInternal, err)
 	}
@@ -316,7 +317,7 @@ func (s *enrollmentService) GetTrustBundle(ctx context.Context, req *connect.Req
 		}
 		published = append(published, entry)
 	}
-	return connect.NewResponse(&enrollmentv1.GetTrustBundleResponse{
+	response := &enrollmentv1.GetTrustBundleResponse{
 		SigningKeys: published,
 		Policy: &securityv1.VerificationPolicy{
 			AcceptedAlgorithms: []securityv1.SignatureAlgorithm{
@@ -328,8 +329,31 @@ func (s *enrollmentService) GetTrustBundle(ctx context.Context, req *connect.Req
 			RequireAll:        false,
 			MinimumSignatures: 1,
 		},
-		RefreshAfter: durationpb.New(24 * time.Hour),
-	}), nil
+		RefreshAfter: durationpb.New(15 * time.Minute),
+	}
+	if len(challenge) != 0 {
+		bundle := &enrollmentv1.TrustBundle{
+			Revision: active.Revision, Challenge: challenge, SigningKeys: published,
+			Policy: response.Policy, RefreshAfter: response.RefreshAfter,
+		}
+		for index := len(keys) - 1; index >= 0; index-- {
+			if keys[index].TrustRevision > active.Revision || len(keys[index].RotationProof) == 0 {
+				continue
+			}
+			proof := &securityv1.SignedEnvelope{}
+			if err := proto.Unmarshal(keys[index].RotationProof, proof); err != nil {
+				return nil, connectError(connect.CodeInternal, err)
+			}
+			bundle.Rotations = append(bundle.Rotations, proof)
+		}
+		response.Envelope, err = signControlWithKey(active, req.Msg.GetAgentId(), base64.RawURLEncoding.EncodeToString(challenge), time.Now().Add(time.Minute), bundle)
+		if err != nil {
+			return nil, connectError(connect.CodeInternal, err)
+		}
+	}
+	result := connect.NewResponse(response)
+	result.Header().Set("Cache-Control", "no-store")
+	return result, nil
 }
 
 // verifyRefreshProof checks the signature and bound payload an Agent makes over its refresh.

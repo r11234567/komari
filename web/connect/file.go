@@ -16,6 +16,7 @@ import (
 	"github.com/komari-monitor/komari/web/workspace"
 	filev1 "github.com/r11234567/komari-proto/gen/go/komari/file/v1"
 	filev1connect "github.com/r11234567/komari-proto/gen/go/komari/file/v1/filev1connect"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -98,7 +99,10 @@ func (s *fileStore) takeAssignment(agentID, assignmentID string) *filev1.FileAss
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pending, ok := s.assignments[assignmentID]
-	if !ok || pending.agentID != agentID || time.Now().After(pending.expiresAt) {
+	if !ok || pending.agentID != agentID {
+		return nil
+	}
+	if time.Now().After(pending.expiresAt) {
 		delete(s.assignments, assignmentID)
 		return nil
 	}
@@ -374,6 +378,10 @@ func (s *fileService) LeaseFileOperations(ctx context.Context, req *connect.Requ
 				}
 				assignment = legacy
 			}
+			assignment, err := signedFileAssignment(agentID, "lease", assignment)
+			if err != nil {
+				return connectError(connect.CodeInternal, err)
+			}
 			if err := stream.Send(&filev1.LeaseFileOperationsResponse{Assignment: assignment}); err != nil {
 				return err
 			}
@@ -414,6 +422,10 @@ func (s *fileService) AttachFileOperations(ctx context.Context, stream *connect.
 			return connectError(connect.CodeFailedPrecondition, err)
 		}
 	}
+	wireAssignment, err = signedFileAssignment(authenticated, "attach", wireAssignment)
+	if err != nil {
+		return connectError(connect.CodeInternal, err)
+	}
 	if err := stream.Send(&filev1.AttachFileOperationsResponse{
 		Command: &filev1.AttachFileOperationsResponse_Assignment{Assignment: wireAssignment},
 	}); err != nil {
@@ -452,6 +464,14 @@ waitForEvent:
 	s.store.finishAssignment(assignment.GetAssignmentId())
 	filemanager.Resolve(authenticated, result)
 	return nil
+}
+
+func signedFileAssignment(agentID, stage string, assignment *filev1.FileAssignment) (*filev1.FileAssignment, error) {
+	wire := proto.CloneOf(assignment)
+	wire.Envelope = nil
+	var err error
+	wire.Envelope, err = signAgentControl(agentID, "file:"+stage+":"+wire.GetAssignmentId(), wire.GetLeaseExpiresAt().AsTime(), wire)
+	return wire, err
 }
 
 func fileEntry(entries []*filev1.FileEntry) *filev1.FileEntry {

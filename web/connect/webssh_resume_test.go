@@ -2,6 +2,8 @@ package connectapi
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,13 +12,16 @@ import (
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/remotemanagement"
 	"github.com/komari-monitor/komari/web/workspace"
+	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 	websshv1 "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1"
 	websshv1connect "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1/websshv1connect"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 // Real HTTP/2 and production Connect handler/store, with an isolated account
@@ -47,18 +52,47 @@ func TestWebSSHTransportResumesCheckpointsOverHTTP2(t *testing.T) {
 	server.StartTLS()
 	defer server.Close()
 	client := websshv1connect.NewWebSSHServiceClient(server.Client(), server.URL)
-	attach := func(after uint64) (*connect.BidiStreamForClient[websshv1.AttachSessionRequest, websshv1.AttachSessionResponse], context.CancelFunc) {
+	key, err := enrollment.ActiveSigningKey()
+	require.NoError(t, err)
+	attach := func(after uint64) (*connect.BidiStreamForClient[websshv1.AttachSessionRequest, websshv1.AttachSessionResponse], context.CancelFunc, func() (*websshv1.AttachSessionResponse, error)) {
 		connectionCtx, stop := context.WithCancel(ctx)
 		stream := client.AttachSession(connectionCtx)
 		stream.RequestHeader().Set(workspace.IdentityHeader, "v1")
+		challenge := make([]byte, 32)
+		_, err := rand.Read(challenge)
+		require.NoError(t, err)
 		require.NoError(t, stream.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{
 			AgentId: agent, AssignmentId: assignment.AssignmentId, SessionId: session.ID, AfterCommandSequence: after, Resumable: true,
+			Challenge: challenge,
 		}}}))
-		return stream, stop
+		var frameNumber uint64
+		return stream, stop, func() (*websshv1.AttachSessionResponse, error) {
+			frame, err := stream.Receive()
+			if err != nil {
+				return nil, err
+			}
+			frameNumber++
+			envelope := frame.GetEnvelope()
+			require.Len(t, envelope.GetSignatures(), 1)
+			require.True(t, ed25519.Verify(key.PublicKey, envelope.GetPayload(), envelope.GetSignatures()[0].GetValue()))
+			var instruction securityv1.SignedInstruction
+			require.NoError(t, proto.Unmarshal(envelope.GetPayload(), &instruction))
+			require.Equal(t, agent, instruction.GetAgentId())
+			require.Equal(t, "komari.webssh.v1.SessionControlFrame", instruction.GetInstructionType())
+			var body websshv1.SessionControlFrame
+			require.NoError(t, proto.Unmarshal(instruction.GetBody(), &body))
+			require.Equal(t, session.ID, body.GetSessionId())
+			require.Equal(t, assignment.GetAssignmentId(), body.GetAssignmentId())
+			require.Equal(t, challenge, body.GetChallenge())
+			require.Equal(t, frameNumber, body.GetFrameNumber())
+			frame.Envelope = nil
+			require.True(t, proto.Equal(frame, body.GetFrame()))
+			return frame, nil
+		}
 	}
-	first, stop := attach(0)
+	first, stop, receiveFirst := attach(0)
 	defer stop()
-	frame, err := first.Receive()
+	frame, err := receiveFirst()
 	require.NoError(t, err)
 	require.EqualValues(t, 0, frame.AcceptedEventSequence)
 	require.False(t, frame.ResumeUntil.AsTime().After(grant.IdleExpiresAt))
@@ -68,12 +102,12 @@ func TestWebSSHTransportResumesCheckpointsOverHTTP2(t *testing.T) {
 		}}}
 	}
 	require.NoError(t, first.Send(output(1, "before")))
-	frame, err = first.Receive()
+	frame, err = receiveFirst()
 	require.NoError(t, err)
 	require.EqualValues(t, 1, frame.AcceptedEventSequence)
 	_, err = session.EnqueueCommand(1, remotemanagement.Input("once\n"))
 	require.NoError(t, err)
-	frame, err = first.Receive()
+	frame, err = receiveFirst()
 	require.NoError(t, err)
 	require.EqualValues(t, 1, frame.Sequence)
 	require.Equal(t, "once\n", string(frame.GetInput()))
@@ -82,9 +116,9 @@ func TestWebSSHTransportResumesCheckpointsOverHTTP2(t *testing.T) {
 	_ = first.CloseResponse()
 	_ = first.CloseRequest()
 	require.Eventually(t, func() bool { return !session.AgentAttached() }, time.Second, time.Millisecond)
-	second, stopSecond := attach(1)
+	second, stopSecond, receiveSecond := attach(1)
 	defer stopSecond()
-	frame, err = second.Receive()
+	frame, err = receiveSecond()
 	require.NoError(t, err)
 	require.EqualValues(t, 1, frame.AcceptedEventSequence, "backend lost accepted output")
 	require.Nil(t, frame.Command)
@@ -94,7 +128,7 @@ func TestWebSSHTransportResumesCheckpointsOverHTTP2(t *testing.T) {
 	require.NoError(t, second.Send(replayed))
 	require.NoError(t, second.Send(output(2, "after")))
 	for {
-		frame, err = second.Receive()
+		frame, err = receiveSecond()
 		require.NoError(t, err)
 		require.Nil(t, frame.Command, "already-applied input was replayed")
 		if frame.AcceptedEventSequence == 2 {
@@ -110,7 +144,7 @@ func TestWebSSHTransportResumesCheckpointsOverHTTP2(t *testing.T) {
 	require.EqualValues(t, 2, after.Sequence)
 	require.NoError(t, workspace.Default.Lock(token, user, login))
 	for {
-		frame, err = second.Receive()
+		frame, err = receiveSecond()
 		if err != nil || frame.GetCloseReason() != "" {
 			break
 		}
