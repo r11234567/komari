@@ -12,6 +12,7 @@ import (
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/metric"
+	"github.com/komari-monitor/komari/pkg/trafficreset"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -24,7 +25,7 @@ var telemetryTrafficMu sync.Mutex
 func ConfigureTelemetry(db *gorm.DB) { telemetryMetadata.Store(db) }
 
 func TelemetryModels() []any {
-	return []any{&models.TelemetryTrafficStream{}, &models.TelemetryTrafficState{}, &models.TelemetryTrafficSlice{}, &models.TelemetryTrafficCycle{}, &models.TelemetryTrafficMinute{}, &models.TelemetryTrafficTail{}}
+	return []any{&models.TelemetryTrafficStream{}, &models.TelemetryTrafficState{}, &models.TelemetryTrafficSlice{}, &models.TelemetryTrafficCycle{}, &models.TelemetryTrafficMinute{}, &models.TelemetryTrafficTail{}, &models.TelemetryTrafficGap{}, &models.TrafficPolicyVersion{}, &models.TrafficCalibrationCutoff{}}
 }
 
 func ConsumeTelemetry(ctx context.Context, event metric.TelemetryTrafficEvent) error {
@@ -127,7 +128,43 @@ func ApplyTelemetry(ctx context.Context, db *gorm.DB, event metric.TelemetryTraf
 				state.MinuteSince = state.LastObserved + 1
 			}
 		}
+		var start time.Time
+		if event.Traffic.Start > 0 {
+			start = time.Unix(0, event.Traffic.Start).UTC()
+		}
+		from := start
+		if from.IsZero() || !from.Before(event.Observed) {
+			from = event.Observed
+		}
+		policies, err := loadTrafficPolicies(tx, client, from, event.Observed)
+		if err != nil {
+			return err
+		}
+		parts, quality := allocateTrafficRange(policies, start, event.Observed, delta)
+		if event.Traffic.GapStart > 0 || quality != "" {
+			gap := models.TelemetryTrafficGap{Client: event.Source, End: ns, Start: event.Traffic.Start, Kind: quality}
+			if gap.Kind == "" {
+				gap.Kind = "sampling_gap"
+			}
+			if event.Traffic.GapStart > 0 {
+				gap.Start = event.Traffic.GapStart
+			}
+			if quality == "unallocated" {
+				gap.UpBytes, gap.DownBytes = delta.Up, delta.Down
+				delta = Usage{}
+			} else if quality == "long_interval" {
+				gap.Start = start.UnixNano()
+				gap.UpBytes, gap.DownBytes = delta.Up, delta.Down
+				if err = updateCutoffsAcrossLongInterval(tx, event.Source, policies.at(start).CycleKey(start), start, event.Observed, delta); err != nil {
+					return err
+				}
+			}
+			if err = tx.Create(&gap).Error; err != nil {
+				return err
+			}
+		}
 		state.LastObserved = ns
+		state.Dedicated = state.Dedicated || event.Traffic.Dedicated
 		state.TotalUp = event.Traffic.TotalUp
 		state.TotalDown = event.Traffic.TotalDown
 		state.AccountedUp = saturatingAdd(state.AccountedUp, delta.Up)
@@ -135,57 +172,72 @@ func ApplyTelemetry(ctx context.Context, db *gorm.DB, event metric.TelemetryTraf
 		if err = tx.Save(&state).Error; err != nil {
 			return err
 		}
-		day := models.TrafficDailyLedger{Client: event.Source, Day: dayKey(event.Observed), UpBytes: delta.Up, DownBytes: delta.Down}
-		if err = tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "client"}, {Name: "day"}}, DoUpdates: clause.Assignments(map[string]any{"up_bytes": gorm.Expr("up_bytes + ?", delta.Up), "down_bytes": gorm.Expr("down_bytes + ?", delta.Down), "updated_at": event.Received})}).Create(&day).Error; err != nil {
-			return err
-		}
-		hourStart := event.Observed.Truncate(time.Hour)
-		hourEnd := hourStart.Add(time.Hour)
-		schedule := clientSchedule(client)
-		if schedule.Active() {
-			cycleStart := schedule.Last(event.Observed)
-			cycleEnd := schedule.Next(cycleStart)
-			if cycleStart.After(hourStart) {
-				hourStart = cycleStart
-			}
-			if cycleEnd.Before(hourEnd) {
-				hourEnd = cycleEnd
-			}
-			cycle := models.TelemetryTrafficCycle{Client: event.Source, Cycle: schedule.CycleKey(event.Observed), Start: cycleStart.UnixNano(), End: cycleEnd.UnixNano(), UpBytes: delta.Up, DownBytes: delta.Down, Through: ns}
-			if err = tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "client"}, {Name: "cycle"}}, DoUpdates: clause.Assignments(map[string]any{"up_bytes": gorm.Expr("up_bytes + ?", delta.Up), "down_bytes": gorm.Expr("down_bytes + ?", delta.Down), "through": ns})}).Create(&cycle).Error; err != nil {
+		for _, part := range parts {
+			allocated := event
+			allocated.Observed = part.at
+			if err := applyTrafficAllocation(tx, policies.at(part.at), allocated, part.usage); err != nil {
 				return err
 			}
-			// Maintain the special first calendar day directly from events. The
-			// calibration reader can then outlive both raw and hourly retention.
-			if !isBeijingMidnight(cycleStart) && BeijingDay(cycleStart).Equal(BeijingDay(event.Observed)) {
-				first := models.TrafficCycleFirstDay{Client: event.Source, Cycle: cycle.Cycle, Day: dayKey(event.Observed), UpBytes: delta.Up, DownBytes: delta.Down, CoveredUntil: event.Observed.Add(time.Nanosecond)}
-				if err = tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "client"}, {Name: "cycle"}}, DoUpdates: clause.Assignments(map[string]any{"up_bytes": gorm.Expr("up_bytes + ?", delta.Up), "down_bytes": gorm.Expr("down_bytes + ?", delta.Down), "covered_until": first.CoveredUntil})}).Create(&first).Error; err != nil {
-					return err
-				}
-			}
 		}
-		var slice models.TelemetryTrafficSlice
-		err = tx.Where("client = ? AND start = ?", event.Source, hourStart.UnixNano()).Take(&slice).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			slice = models.TelemetryTrafficSlice{Client: event.Source, Start: hourStart.UnixNano(), End: hourEnd.UnixNano(), FirstObserved: ns}
-		} else if err != nil {
-			return err
-		}
-		// A settings change cannot poison the global outbox. Retain the actual
-		// observed bounds; current-cycle totals use the separately keyed cycles.
-		slice.End = max(slice.End, hourEnd.UnixNano())
-		slice.LastObserved = ns
-		slice.UpBytes = saturatingAdd(slice.UpBytes, delta.Up)
-		slice.DownBytes = saturatingAdd(slice.DownBytes, delta.Down)
-		if err = tx.Save(&slice).Error; err != nil {
-			return err
-		}
-		return applyTelemetryMinute(tx, event.Source, event.Observed, delta)
+		return nil
 	})
 	if err == nil {
 		InvalidateCalibratedCycleCache()
 	}
 	return err
+}
+
+func applyTrafficAllocation(tx *gorm.DB, schedule trafficreset.Schedule, event metric.TelemetryTrafficEvent, delta Usage) error {
+	ns := event.Observed.UnixNano()
+	var err error
+	day := models.TrafficDailyLedger{Client: event.Source, Day: dayKey(event.Observed), UpBytes: delta.Up, DownBytes: delta.Down}
+	if err = tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "client"}, {Name: "day"}}, DoUpdates: clause.Assignments(map[string]any{"up_bytes": gorm.Expr("up_bytes + ?", delta.Up), "down_bytes": gorm.Expr("down_bytes + ?", delta.Down), "updated_at": event.Received})}).Create(&day).Error; err != nil {
+		return err
+	}
+	hourStart := event.Observed.Truncate(time.Hour)
+	hourEnd := hourStart.Add(time.Hour)
+	if schedule.Active() {
+		cycleStart := schedule.Last(event.Observed)
+		cycleEnd := schedule.Next(cycleStart)
+		if cycleStart.After(hourStart) {
+			hourStart = cycleStart
+		}
+		if cycleEnd.Before(hourEnd) {
+			hourEnd = cycleEnd
+		}
+		cycle := models.TelemetryTrafficCycle{Client: event.Source, Cycle: schedule.CycleKey(event.Observed), Start: cycleStart.UnixNano(), End: cycleEnd.UnixNano(), UpBytes: delta.Up, DownBytes: delta.Down, Through: ns}
+		if err = tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "client"}, {Name: "cycle"}}, DoUpdates: clause.Assignments(map[string]any{"up_bytes": gorm.Expr("up_bytes + ?", delta.Up), "down_bytes": gorm.Expr("down_bytes + ?", delta.Down), "through": ns})}).Create(&cycle).Error; err != nil {
+			return err
+		}
+		if err := updateTrafficCutoff(tx, event.Source, cycle.Cycle, ns, delta); err != nil {
+			return err
+		}
+		// Maintain the special first calendar day directly from events. The
+		// calibration reader can then outlive both raw and hourly retention.
+		if !isBeijingMidnight(cycleStart) && BeijingDay(cycleStart).Equal(BeijingDay(event.Observed)) {
+			first := models.TrafficCycleFirstDay{Client: event.Source, Cycle: cycle.Cycle, Day: dayKey(event.Observed), UpBytes: delta.Up, DownBytes: delta.Down, CoveredUntil: event.Observed.Add(time.Nanosecond)}
+			if err = tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "client"}, {Name: "cycle"}}, DoUpdates: clause.Assignments(map[string]any{"up_bytes": gorm.Expr("up_bytes + ?", delta.Up), "down_bytes": gorm.Expr("down_bytes + ?", delta.Down), "covered_until": first.CoveredUntil})}).Create(&first).Error; err != nil {
+				return err
+			}
+		}
+	}
+	var slice models.TelemetryTrafficSlice
+	err = tx.Where("client = ? AND start = ?", event.Source, hourStart.UnixNano()).Take(&slice).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		slice = models.TelemetryTrafficSlice{Client: event.Source, Start: hourStart.UnixNano(), End: hourEnd.UnixNano(), FirstObserved: ns}
+	} else if err != nil {
+		return err
+	}
+	// A settings change cannot poison the global outbox. Retain the actual
+	// observed bounds; current-cycle totals use the separately keyed cycles.
+	slice.End = max(slice.End, hourEnd.UnixNano())
+	slice.LastObserved = ns
+	slice.UpBytes = saturatingAdd(slice.UpBytes, delta.Up)
+	slice.DownBytes = saturatingAdd(slice.DownBytes, delta.Down)
+	if err = tx.Save(&slice).Error; err != nil {
+		return err
+	}
+	return applyTelemetryMinute(tx, event.Source, event.Observed, delta)
 }
 
 // TelemetryUsageBatch reads only compact business ledgers. Partial historical

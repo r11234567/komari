@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
-	"github.com/komari-monitor/komari/pkg/trafficreset"
+	"github.com/komari-monitor/komari/database/trafficledger"
 )
 
 // applyThemeTrafficCompatibility keeps existing themes on the current billing
@@ -25,7 +25,7 @@ func applyThemeTrafficCompatibility(nodes []models.Client) {
 		node.TrafficLimit = limit
 		node.TrafficLimitType = typeName
 
-		schedule := trafficreset.FromFields(node.TrafficResetDay, node.TrafficResetTime, node.TrafficResetTimezone)
+		schedule := trafficledger.DisplayTrafficSchedule(*node)
 		if schedule.Active() {
 			next := schedule.Next(now)
 			node.TrafficNextReset = &next

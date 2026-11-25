@@ -34,6 +34,8 @@ type CalibrationHistory struct {
 	Adjustment     SignedUsage `json:"adjustment"`
 	Operator       string      `json:"operator,omitempty"`
 	CreatedAt      time.Time   `json:"created_at"`
+	Cutoff         string      `json:"cutoff,omitempty"`
+	Note           string      `json:"note,omitempty"`
 }
 
 type CalibrationSnapshot struct {
@@ -122,7 +124,8 @@ func LoadCalibrationSnapshot(ctx context.Context, db *gorm.DB, client models.Cli
 }
 
 func loadCalibrationSnapshot(ctx context.Context, db *gorm.DB, client models.Client, now time.Time) (CalibrationSnapshot, error) {
-	days, snapshot, err := loadCalibrationDays(ctx, db, client, now)
+	// The caller already owns the read snapshot or write transaction.
+	days, snapshot, err := loadCalibrationDaysSnapshot(ctx, db, client, now)
 	if err != nil {
 		return CalibrationSnapshot{}, err
 	}
@@ -136,6 +139,12 @@ func loadCalibrationSnapshot(ctx context.Context, db *gorm.DB, client models.Cli
 		return CalibrationSnapshot{}, err
 	}
 	snapshot.History = history
+	if metricstore.TelemetryEnabled() {
+		applied, err := applyCutoffCalibration(ctx, db, &snapshot, NormalizedCountingType(client.TrafficLimitType))
+		if err != nil || applied {
+			return snapshot, err
+		}
+	}
 	if len(history) > 0 && history[0].BillableOffset != nil && strings.HasPrefix(history[0].Mode, "total:") {
 		kind := strings.TrimPrefix(history[0].Mode, "total:")
 		if kind != NormalizedCountingType(client.TrafficLimitType) {
@@ -377,9 +386,24 @@ func loadCalibrationDays(ctx context.Context, db *gorm.DB, client models.Client,
 }
 
 func loadCalibrationDaysSnapshot(ctx context.Context, db *gorm.DB, client models.Client, now time.Time) ([]calibrationDay, CalibrationSnapshot, error) {
-	cycleStart, cycle, err := CurrentTrafficCycleFor(client, now)
+	schedule, err := TrafficScheduleAt(ctx, db, client, now)
 	if err != nil {
 		return nil, CalibrationSnapshot{}, err
+	}
+	if !schedule.Active() {
+		return nil, CalibrationSnapshot{}, fmt.Errorf("traffic reset day must be configured before calibration")
+	}
+	cycleStart, cycle := schedule.Last(now), schedule.CycleKey(now)
+	cycleEnd := cycleClosedEnd(schedule, cycleStart).UTC()
+	if client.TrafficPolicyManaged && !schedule.StartsAt.IsZero() {
+		var row models.TelemetryTrafficCycle
+		if err := db.WithContext(ctx).Where("client = ? AND cycle = ?", client.UUID, cycle).Take(&row).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, CalibrationSnapshot{}, err
+		}
+		raw := Usage{Up: row.UpBytes, Down: row.DownBytes}
+		return []calibrationDay{{Day: dayKey(now), Raw: raw, Effective: raw}}, CalibrationSnapshot{
+			Client: client.UUID, Cycle: cycle, CycleStart: cycleStart.UTC(), CycleEnd: cycleEnd, HistoryComplete: true,
+		}, nil
 	}
 	today := BeijingDay(now)
 	startDay := BeijingDay(cycleStart)
@@ -473,7 +497,7 @@ func loadCalibrationDaysSnapshot(ctx context.Context, db *gorm.DB, client models
 		Client:          client.UUID,
 		Cycle:           cycle,
 		CycleStart:      cycleStart.UTC(),
-		CycleEnd:        cycleEndDay(client, cycleStart).UTC(),
+		CycleEnd:        cycleEnd,
 		HistoryComplete: historyComplete,
 	}, nil
 }
@@ -719,14 +743,47 @@ func CurrentCalibratedCycleUsages(ctx context.Context, db *gorm.DB, now time.Tim
 	// Configured cycles are computed centrally, so custom vendor clocks work
 	// with existing Agents without changing their raw counters or privileges.
 	var clients []models.Client
-	if err := db.WithContext(ctx).Select("uuid", "traffic_limit_type", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone").Where("traffic_reset_day BETWEEN 1 AND 31").Find(&clients).Error; err != nil {
+	if err := db.WithContext(ctx).Select("uuid", "traffic_limit_type", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone", "traffic_policy_managed").Where("traffic_reset_day BETWEEN 1 AND 31 OR traffic_policy_managed = ?", true).Find(&clients).Error; err != nil {
 		return nil, fmt.Errorf("load traffic cycle clients: %w", err)
 	}
 	values := make(map[string]Usage)
 	var loadErr error
 	expires := now.Add(calibratedCycleCacheTTL)
+	if metricstore.TelemetryEnabled() {
+		var lifetime []models.TelemetryTrafficState
+		if err := db.WithContext(ctx).Model(&models.TelemetryTrafficState{}).
+			Select("client", "accounted_up", "accounted_down").
+			Joins("JOIN clients ON clients.uuid = telemetry_traffic_states.client").
+			Where("dedicated = ? AND traffic_policy_managed = ? AND (traffic_reset_day IS NULL OR traffic_reset_day = 0)", true, false).
+			Find(&lifetime).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range lifetime {
+			values[row.Client] = Usage{Up: row.AccountedUp, Down: row.AccountedDown}
+		}
+	}
 	for _, client := range clients {
-		if next := clientSchedule(client).Next(now); !next.IsZero() && next.Before(expires) {
+		schedule, err := TrafficScheduleAt(ctx, db, client, now)
+		if err != nil {
+			loadErr = errors.Join(loadErr, err)
+			continue
+		}
+		if !schedule.Active() {
+			if client.TrafficPolicyManaged {
+				var row models.TelemetryTrafficState
+				err := db.WithContext(ctx).Where("client = ? AND dedicated = ?", client.UUID, true).Take(&row).Error
+				if err == nil {
+					values[client.UUID] = Usage{Up: row.AccountedUp, Down: row.AccountedDown}
+				} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+					loadErr = errors.Join(loadErr, err)
+				}
+			}
+			if !schedule.EndsAt.IsZero() && schedule.EndsAt.Before(expires) {
+				expires = schedule.EndsAt
+			}
+			continue
+		}
+		if next := schedule.Next(now); next.Before(expires) {
 			expires = next
 		}
 		snapshot, err := LoadCalibrationSnapshot(ctx, db, client, now)

@@ -8,6 +8,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/web/agentevents"
@@ -23,6 +24,15 @@ type configService struct {
 }
 
 const agentDuplexProtocolHeader = "X-Komari-Agent-Duplex-Protocol"
+const agentTrafficAccountingHeader = "X-Komari-Agent-Traffic-Accounting"
+
+func agentRuntimeToProto(profile clients.DeploymentProfile, panelAccounting string) *configv1.RuntimeConfig {
+	runtime := runtimeToProto(profile)
+	if panelAccounting == "v1" && metricstore.TelemetryEnabled() {
+		runtime.TrafficResetDay = nil
+	}
+	return runtime
+}
 
 func (s *configService) GetDesiredConfig(ctx context.Context, req *connect.Request[configv1.GetDesiredConfigRequest]) (*connect.Response[configv1.GetDesiredConfigResponse], error) {
 	agentID, err := requireAgent(rpc.MetaFromContext(ctx), req.Msg.AgentId)
@@ -36,7 +46,7 @@ func (s *configService) GetDesiredConfig(ctx context.Context, req *connect.Reque
 	response := &configv1.GetDesiredConfigResponse{DeliveryState: deliveryState(state.Status)}
 	if saved {
 		response.Desired = &configv1.DesiredConfig{
-			AgentId: agentID, Revision: state.Revision, Runtime: runtimeToProto(profile),
+			AgentId: agentID, Revision: state.Revision, Runtime: agentRuntimeToProto(profile, req.Header().Get(agentTrafficAccountingHeader)),
 			SavedAt: timestamppb.New(state.SavedAt),
 		}
 		_, _ = clients.MarkDeploymentConfigSent(agentID, state.Revision)
@@ -127,7 +137,7 @@ func (s *configService) WatchDesiredConfig(ctx context.Context, req *connect.Req
 			return nil
 		}
 		if err := stream.Send(&configv1.WatchDesiredConfigResponse{Desired: &configv1.DesiredConfig{
-			AgentId: agentID, Revision: state.Revision, Runtime: runtimeToProto(profile), SavedAt: timestamppb.New(state.SavedAt),
+			AgentId: agentID, Revision: state.Revision, Runtime: agentRuntimeToProto(profile, req.Header().Get(agentTrafficAccountingHeader)), SavedAt: timestamppb.New(state.SavedAt),
 		}}); err != nil {
 			return err
 		}

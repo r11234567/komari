@@ -34,7 +34,12 @@ func applyTelemetryMinute(tx *gorm.DB, client string, observed time.Time, delta 
 	}).Create(&row).Error; err != nil {
 		return err
 	}
-	return tx.Create(&models.TelemetryTrafficTail{Client: client, Observed: ns, UpBytes: delta.Up, DownBytes: delta.Down}).Error
+	return tx.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "client"}, {Name: "observed"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"up_bytes": gorm.Expr("up_bytes + ?", delta.Up), "down_bytes": gorm.Expr("down_bytes + ?", delta.Down),
+		}),
+	}).Create(&models.TelemetryTrafficTail{Client: client, Observed: ns, UpBytes: delta.Up, DownBytes: delta.Down}).Error
 }
 
 // TelemetryUsageBatch keeps the legacy inclusive endpoint adapter. All internal

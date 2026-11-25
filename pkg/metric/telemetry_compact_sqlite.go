@@ -328,7 +328,7 @@ func (t *Telemetry) compactStateHash(ctx context.Context, db querier) (string, e
 		h.Write(b)
 		return nil
 	}
-	for _, suffix := range []string{"definitions", "receipts", "series", "hot", "latest", "segments", "summary", "rollup_keys", "rollup", "rollup_due", "raw_gaps", "outbox", "members", "erasures", "identity", "traffic_ingress", "gaps", "progress"} {
+	for _, suffix := range []string{"definitions", "receipts", "series", "hot", "latest", "segments", "summary", "rollup_keys", "rollup", "rollup_due", "raw_gaps", "outbox", "members", "erasures", "identity", "traffic_ingress", "traffic_stream", "gaps", "progress"} {
 		name := t.table(suffix)
 		if suffix == "definitions" {
 			name = t.s.tables.definitions
