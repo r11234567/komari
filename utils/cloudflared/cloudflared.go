@@ -339,41 +339,36 @@ func resolveBinaryPath() (string, bool) {
 	}
 
 	candidates = append(candidates, "cloudflared")
-	if runtime.GOOS == "windows" {
-		candidates = append(candidates,
-			filepath.Join("data", "cloudflared.exe"),
-			filepath.Join("data", "bin", "cloudflared.exe"),
-		)
-	} else {
-		candidates = append(candidates,
-			filepath.Join("data", "cloudflared"),
-			filepath.Join("data", "bin", "cloudflared"),
-			"/usr/local/bin/cloudflared",
-			"/usr/bin/cloudflared",
-		)
+	if runtime.GOOS != "windows" {
+		candidates = append(candidates, "/usr/local/bin/cloudflared", "/usr/bin/cloudflared")
 	}
 
-	seen := map[string]struct{}{}
+	dataRoot, err := filepath.Abs("data")
+	if err != nil {
+		return "", false
+	}
+	if resolved, err := filepath.EvalSymlinks(dataRoot); err == nil {
+		dataRoot = resolved
+	}
 	for _, candidate := range candidates {
-		if candidate == "" {
+		binary, err := exec.LookPath(candidate)
+		if err != nil {
 			continue
 		}
-		if _, ok := seen[candidate]; ok {
+		binary, err = filepath.Abs(binary)
+		if err != nil {
 			continue
 		}
-		seen[candidate] = struct{}{}
-
-		if path, err := exec.LookPath(candidate); err == nil {
-			return path, true
+		binary, err = filepath.EvalSymlinks(binary)
+		if err != nil {
+			continue
 		}
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			if abs, absErr := filepath.Abs(candidate); absErr == nil {
-				return abs, true
-			}
-			return candidate, true
+		rel, err := filepath.Rel(dataRoot, binary)
+		if err == nil && filepath.IsLocal(rel) {
+			continue
 		}
+		return binary, true
 	}
-
 	return "", false
 }
 

@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -126,52 +125,13 @@ func (l *RestoreLock) SaveUploadedBackup(file io.Reader, filename string) error 
 	return datadir.SyncDirectory(filepath.Dir(finalPath))
 }
 
-func normalizedArchivePath(name string) (string, error) {
-	if name == "" || strings.Contains(name, `\`) || strings.HasPrefix(name, "/") {
-		return "", fmt.Errorf("invalid backup path %q", name)
-	}
-	cleaned := path.Clean(name)
-	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
-		return "", fmt.Errorf("invalid backup path %q", name)
-	}
-	return cleaned, nil
-}
-
-// ValidateArchive requires the upstream-compatible root layout and bounds all
-// archive entries before the startup path is allowed to replace current data.
+// ValidateArchive checks the portable backup layout before staging it.
 func ValidateArchive(archivePath string) error {
 	reader, err := restorearchive.Open(archivePath)
 	if err != nil {
 		return fmt.Errorf("open backup archive: %w", err)
 	}
 	defer reader.Close()
-	hasMarkup := false
-	hasMainDatabase := false
-	seen := make(map[string]struct{}, len(reader.File))
-	for _, entry := range reader.File {
-		name, err := normalizedArchivePath(entry.Name)
-		if err != nil {
-			return err
-		}
-		if _, duplicate := seen[name]; duplicate {
-			return fmt.Errorf("backup archive contains duplicate path %q", name)
-		}
-		seen[name] = struct{}{}
-		if entry.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("backup archive contains unsupported symbolic link %q", name)
-		}
-		if name == restorearchive.MarkupName && entry.Mode().IsRegular() {
-			hasMarkup = true
-		}
-		if name == "komari.db" && !entry.FileInfo().IsDir() {
-			hasMainDatabase = true
-		}
-	}
-	if !hasMarkup {
-		return fmt.Errorf("invalid backup file: missing komari-backup-markup file")
-	}
-	if !hasMainDatabase {
-		return fmt.Errorf("invalid backup file: missing komari.db")
-	}
-	return nil
+	_, err = reader.RestoreEntries(true)
+	return err
 }

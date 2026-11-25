@@ -505,7 +505,12 @@ func TestRestoreStagedBackupRetiresCaseVariantPasskeyAndSnapshotsExternalDB(t *t
 	addBytes("plugin/Komari-Passkey/.komari-package.json", []byte(`{"digest":"abc"}`))
 	addBytes("plugin/.packages/deadbeef.json", []byte(`{"short":"Komari-Passkey","digest":"deadbeef"}`))
 	addBytes("plugin/.packages/deadbeef.zip", []byte("zipdata"))
-	addBytes("plugin/state.json", []byte(`{"plugins":{"Komari-Passkey":{"enabled":true,"approved_permissions_hash":"h1","approved_package_digest":"deadbeef"}}}`))
+	addBytes("plugin/.packages/journal-fixture.json", []byte("{}"))
+	addBytes("plugin/fixture/.komari-package.json", []byte(`{"digest":"other"}`))
+	addBytes("plugin/fixture/komari-plugin.json", []byte(`{"short":"fixture"}`))
+	addBytes("plugin-data/fixture/settings.json", []byte("{}"))
+	addBytes("unmanaged-file.txt", []byte("outside the restore layout"))
+	addBytes("plugin/state.json", []byte(`{"plugins":{"Komari-Passkey":{"enabled":true,"approved_permissions_hash":"h1","approved_package_digest":"deadbeef"},"fixture":{"enabled":true,"approved_permissions_hash":"h2","approved_package_digest":"other"}}}`))
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -533,6 +538,23 @@ func TestRestoreStagedBackupRetiresCaseVariantPasskeyAndSnapshotsExternalDB(t *t
 	}
 	if strings.Contains(string(stateRaw), `"enabled": true`) {
 		t.Fatalf("case-variant Komari-Passkey remained enabled in state.json: %s", stateRaw)
+	}
+
+	if strings.Contains(string(stateRaw), "approved_package_digest") || !strings.Contains(string(stateRaw), "restored plugin requires a new approval") {
+		t.Fatalf("restored state retained package approval or lost its status: %s", stateRaw)
+	}
+	for _, name := range []string{"plugin/.packages/journal-fixture.json", "plugin/fixture/.komari-package.json", "unmanaged-file.txt"} {
+		if _, err := os.Stat(filepath.Join(dataDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("non-restorable entry %s exists: %v", name, err)
+		}
+	}
+	for _, name := range []string{"plugin/fixture/komari-plugin.json", "plugin-data/fixture/settings.json"} {
+		if _, err := os.Stat(filepath.Join(dataDir, name)); err != nil {
+			t.Fatalf("restorable entry %s missing: %v", name, err)
+		}
+	}
+	if got := restoreFilePerm("theme/fixture.js", 0o1755); got != 0o644 {
+		t.Fatalf("restored file permission = %o, want 0644", got)
 	}
 
 	preZips, err := filepath.Glob(filepath.Join(root, "backup", "pre-restore-*.zip"))
