@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/komari-monitor/komari/database/agentcredentials"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/privilegeddelivery"
@@ -326,7 +327,7 @@ func rotateVerifiedDBWithSeal(ctx context.Context, db *gorm.DB, record models.Ag
 		})
 		if err == nil {
 			if outcome == ErrRefreshReuse {
-				cancelStreams(record.Client)
+				agentcredentials.CancelStreams(record.Client)
 				privilegeddelivery.Notify(record.Client)
 			}
 			return issued, signedResponse, outcome

@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/komari-monitor/komari/utils/messageSender/factory"
+	"github.com/komari-monitor/komari/utils/messageSender/outboundhttp"
 )
 
 type BarkSender struct {
@@ -83,7 +85,11 @@ func (b *BarkSender) SendTextMessage(message, title string) error {
 	requestURL := fmt.Sprintf("%s/push", serverURL)
 
 	// 发送 HTTP POST 请求
-	resp, err := http.Post(requestURL, "application/json", bytes.NewBuffer(jsonData))
+	client, err := outboundhttp.NewWebhookClient(30 * time.Second)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Post(requestURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to send request: %v", err)
 	}
@@ -101,7 +107,11 @@ func (b *BarkSender) SendTextMessage(message, title string) error {
 		Data    interface{} `json:"data"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	data, err := outboundhttp.ReadNotificationResponse(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read Bark response: %w", err)
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
 		// 如果解析失败，认为发送成功（某些 Bark 服务器可能返回纯文本）
 		return nil
 	}

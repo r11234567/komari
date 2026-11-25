@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/komari-monitor/komari/utils/messageSender/factory"
+	"github.com/komari-monitor/komari/utils/messageSender/outboundhttp"
 )
 
 type TelegramSender struct {
@@ -54,9 +56,17 @@ func (t *TelegramSender) SendTextMessage(message, title string) error {
 		data.Set("message_thread_id", t.Addition.MessageThreadID)
 	}
 
-	resp, err := http.PostForm(endpoint, data)
+	client, err := outboundhttp.NewWebhookClient(30 * time.Second)
 	if err != nil {
-		return fmt.Errorf("failed to send message: %v", err)
+		return err
+	}
+	resp, err := client.PostForm(endpoint, data)
+	if err != nil {
+		var requestError *url.Error
+		if errors.As(err, &requestError) {
+			err = requestError.Err
+		}
+		return fmt.Errorf("failed to send Telegram message: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -64,7 +74,11 @@ func (t *TelegramSender) SendTextMessage(message, title string) error {
 		Ok          bool   `json:"ok"`
 		Description string `json:"description"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	body, err := outboundhttp.ReadNotificationResponse(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read Telegram response: %w", err)
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
 		return fmt.Errorf("failed to decode response: %v", err)
 	}
 

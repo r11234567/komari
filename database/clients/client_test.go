@@ -1,12 +1,14 @@
 package clients
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/komari-monitor/komari/database/agentcredentials"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -82,6 +84,8 @@ func TestDeleteClientCleansAllRelatedRowsAndSharedAssignments(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, db.AutoMigrate(
 				&models.Client{},
+				&models.AgentCredential{},
+				&models.AgentEnrollment{},
 				&models.PingTask{},
 				&models.PingLossNotification{},
 				&models.OfflineNotification{},
@@ -142,9 +146,23 @@ func TestDeleteClientCleansAllRelatedRowsAndSharedAssignments(t *testing.T) {
 					"client-a", pingTask.Id, "client-b", pingTask.Id).Error)
 			}
 
+			require.NoError(t, db.Create(&models.AgentCredential{Client: "client-a", RefreshRecoverySealed: "fixture"}).Error)
+			require.NoError(t, db.Create(&models.AgentEnrollment{Client: "client-a"}).Error)
+			streamCtx, stop := agentcredentials.TrackStream(t.Context(), "client-a")
+			defer stop()
+			otherCtx, stopOther := agentcredentials.TrackStream(t.Context(), "client-b")
+			defer stopOther()
+
 			changed, err := deleteClient(db, "client-a")
 			require.NoError(t, err)
 			assert.True(t, changed)
+			require.ErrorIs(t, streamCtx.Err(), context.Canceled)
+			require.NoError(t, otherCtx.Err())
+			var credential models.AgentCredential
+			require.NoError(t, db.Take(&credential, "client = ?", "client-a").Error)
+			require.NotNil(t, credential.RevokedAt)
+			assert.Empty(t, credential.RefreshRecoverySealed)
+			assertRowCount(t, db, &models.AgentEnrollment{}, "client = ?", 0, "client-a")
 
 			assertRowCount(t, db, &models.Client{}, "uuid = ?", 0, "client-a")
 			assertRowCount(t, db, &models.PingLossNotification{}, "client = ?", 0, "client-a")
@@ -198,14 +216,20 @@ func TestDeleteClientRollsBackRelatedRowsWhenClientDeleteFails(t *testing.T) {
 		&models.Client{}, &models.PingTask{}, &models.PingLossNotification{},
 		&models.OfflineNotification{}, &models.TrafficReportNotification{},
 		&models.LoadNotification{}, &models.Task{}, &models.TaskResult{},
+		&models.AgentCredential{},
 	))
 	require.NoError(t, db.Create(&models.Client{UUID: "client-a", Token: "token-a"}).Error)
 	require.NoError(t, db.Create(&models.OfflineNotification{Client: "client-a", Enable: true}).Error)
+	require.NoError(t, db.Create(&models.AgentCredential{Client: "client-a"}).Error)
+	stream, stop := agentcredentials.TrackStream(t.Context(), "client-a")
+	defer stop()
 	require.NoError(t, db.Exec(`CREATE TRIGGER reject_client_delete BEFORE DELETE ON clients
 		BEGIN SELECT RAISE(FAIL, 'delete rejected'); END`).Error)
 
 	_, err = deleteClient(db, "client-a")
 	require.Error(t, err)
+	require.NoError(t, stream.Err())
+	assertRowCount(t, db, &models.AgentCredential{}, "client = ? AND revoked_at IS NULL", 1, "client-a")
 	assertRowCount(t, db, &models.Client{}, "uuid = ?", 1, "client-a")
 	assertRowCount(t, db, &models.OfflineNotification{}, "client = ?", 1, "client-a")
 }

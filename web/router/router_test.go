@@ -23,6 +23,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/security"
+	"github.com/pquerna/otp/totp"
 )
 
 func TestHealthRouteDisablesCaching(t *testing.T) {
@@ -418,25 +419,42 @@ func TestSplitPublicAndPanelListenersEnforceHardBoundaries(t *testing.T) {
 	}
 	const sharePath = "/api/admin/settings/temporary-share"
 	t.Cleanup(func() { _ = security.RevokeTempShare() })
-	shareRequest := func(method, body string, authenticated bool) *httptest.ResponseRecorder {
+	shareRequest := func(method, body string, authenticated, verified bool) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, "https://panel.example.com"+sharePath, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		if authenticated {
 			req.AddCookie(&http.Cookie{Name: security.SessionCookieName, Value: session})
 		}
+		if verified {
+			secret, _, err := accounts.Generate2Fa()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := accounts.Enable2Fa(user.UUID, secret); err != nil {
+				t.Fatal(err)
+			}
+			code, err := totp.GenerateCode(secret, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("X-2FA-Code", code)
+		}
 		rec := httptest.NewRecorder()
 		panelEngine.ServeHTTP(rec, req)
 		return rec
 	}
-	if rec := shareRequest(http.MethodPost, `{"hours":1}`, false); rec.Code == http.StatusOK {
+	if rec := shareRequest(http.MethodPost, `{"hours":1}`, false, false); rec.Code == http.StatusOK {
 		t.Fatal("anonymous request created a temporary share")
 	}
-	if rec := shareRequest(http.MethodPost, `{"hours":0}`, true); rec.Code != http.StatusBadRequest {
+	if rec := shareRequest(http.MethodPost, `{"hours":0}`, true, false); rec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid temporary share duration returned %d", rec.Code)
+	}
+	if rec := shareRequest(http.MethodPost, `{"hours":1}`, true, false); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unverified temporary-share creation returned %d", rec.Code)
 	}
 	create := func() security.TempShare {
 		t.Helper()
-		rec := shareRequest(http.MethodPost, `{"hours":1}`, true)
+		rec := shareRequest(http.MethodPost, `{"hours":1}`, true, true)
 		var payload struct {
 			Data security.TempShare `json:"data"`
 		}
@@ -496,7 +514,10 @@ func TestSplitPublicAndPanelListenersEnforceHardBoundaries(t *testing.T) {
 	if len(activeCookies) != 1 {
 		t.Fatal("new share didn't receive a cookie")
 	}
-	if rec := shareRequest(http.MethodDelete, "", true); rec.Code != http.StatusOK {
+	if rec := shareRequest(http.MethodDelete, "", true, false); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unverified temporary-share revocation returned %d", rec.Code)
+	}
+	if rec := shareRequest(http.MethodDelete, "", true, true); rec.Code != http.StatusOK {
 		t.Fatalf("share revocation returned HTTP %d", rec.Code)
 	}
 	if rec := publicRequest(nodesURL, activeCookies[0]); rec.Code != http.StatusUnauthorized {

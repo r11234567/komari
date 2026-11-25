@@ -72,7 +72,44 @@ async function run() {
   });
   assert.equal(signedIn.status, 200);
   assert.equal(signedIn.body.authenticated, true);
-  await post(admin, '/api/admin/settings', { private_site: true });
+  const settingsURL = '/api/admin/settings/';
+  const credentialHeader = 'X-Komari-Credential-Authorization';
+  const verificationService = 'credential.v1.TrustedCredentialService';
+  const qr = await admin.post('/api/admin/2fa/generate', { headers: { Origin: base } });
+  assert.equal(qr.status(), 200);
+  assert.match(qr.headers()['content-type'], /^image\/png\b/);
+  await qr.dispose();
+  const secret = (await admin.storageState()).cookies
+    .find(cookie => ['__Host-komari_2fa_secret', '2fa_secret'].includes(cookie.name))?.value;
+  assert(secret);
+  console.log(`::add-mask::${secret}`);
+  let code = await freshTOTP(secret, -1);
+  await post(admin, `/api/admin/2fa/enable?code=${code.code}`, {});
+  async function verifyAction(resource) {
+    const begin = await rpc(admin, verificationService, 'BeginVerification', {
+      providerId: 'native:totp', purpose: 'CREDENTIAL_PURPOSE_SENSITIVE_OPERATION', resource,
+    });
+    assert.equal(begin.status, 200);
+    code = await freshTOTP(secret, code.counter);
+    const complete = await rpc(admin, verificationService, 'CompleteVerification', {
+      challengeId: begin.body.challengeId, proof: { code: code.code },
+    });
+    assert.equal(complete.status, 200);
+    const token = complete.body.authorization?.grantToken;
+    assert(token);
+    return { [credentialHeader]: token };
+  }
+  function verifySettings(values) {
+    const targets = Object.keys(values).sort().flatMap(key => [
+      key,
+      `${typeof values[key] === 'boolean' ? 'bool' : 'string'}:${values[key]}`,
+    ]);
+    const digest = crypto.createHash('sha256').update(JSON.stringify(targets)).digest('hex');
+    return verifyAction(`action:settings:edit:${digest}`);
+  }
+  const privateSite = { private_site: true };
+  await expectSettingsDenied(privateSite);
+  await post(admin, settingsURL, privateSite, await verifySettings(privateSite));
   checks.push('private-site-enabled-through-authenticated-settings');
 
   guest = await request.newContext({ baseURL: base });
@@ -230,6 +267,13 @@ async function run() {
     page.locator('.km-login-form button[type=submit]').click(),
   ]);
   assert.equal(loginResponse.status(), 200, 'native login request failed');
+  code = await freshTOTP(secret, code.counter);
+  await page.getByRole('textbox', { name: 'Enter verification code', exact: true }).fill(code.code);
+  const [factorResponse] = await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname.endsWith('.PasswordLoginService/CompletePasswordLogin')),
+    page.locator('.km-password-credential-step').getByRole('button', { name: 'Continue', exact: true }).click(),
+  ]);
+  assert.equal(factorResponse.status(), 200);
   await page.waitForURL(url => url.pathname === '/admin/dashboard', { timeout: 30000 });
   const cookies = await context.cookies();
   const cookie = cookies.find(item => item.name === '__Host-komari_session' || item.name === 'komari_session');
@@ -243,7 +287,10 @@ async function run() {
     const sharePath = '/api/admin/settings/temporary-share';
     assert.equal((await sharedContext.request.get('/api/nodes')).status(), 401);
     assert.equal((await sharedContext.request.get(sharePath)).status(), 401);
-    const { data: share } = await post(admin, sharePath, { hours: 1 });
+    const deniedCreate = await admin.post(sharePath, { data: { hours: 1 }, headers: { Origin: base } });
+    assert.equal(deniedCreate.status(), 401);
+    await deniedCreate.dispose();
+    const { data: share } = await post(admin, sharePath, { hours: 1 }, await verifyAction(`rest:POST:${sharePath}`));
     assert.match(share.token, /^[A-Za-z0-9_-]{43}$/);
     console.log(`::add-mask::${share.token}`);
 
@@ -258,7 +305,28 @@ async function run() {
     assert.equal((await sharedContext.request.get('/api/nodes')).status(), 200);
     assert.equal((await sharedContext.request.get(sharePath)).status(), 401);
 
-    const revoked = await admin.delete(sharePath, { headers: { Origin: base } });
+    const info = await rpc(sharedContext.request, 'browser.v1.BrowserService', 'GetPublicInfo');
+    assert.equal(info.status, 200);
+    assert(!info.body.privateSite);
+    await sharePage.locator('.km-navbar').waitFor();
+    assert.equal(await sharePage.locator('.km-login-form').count(), 0);
+    const metadataResponse = await admin.get(sharePath);
+    const metadata = (await metadataResponse.json()).data;
+    assert.equal(metadata.token, '');
+    assert.equal(metadata.expires_at, share.expires_at);
+    await metadataResponse.dispose();
+    const revealDenied = await admin.get(sharePath + '?reveal=true');
+    assert.equal(revealDenied.status(), 401);
+    await revealDenied.dispose();
+    const revealed = await admin.get(sharePath + '?reveal=true', {
+      headers: { Origin: base, ...await verifyAction(`rest:GET:${sharePath}`) },
+    });
+    assert.equal(revealed.status(), 200);
+    assert.equal((await revealed.json()).data.token, share.token);
+    await revealed.dispose();
+    const revoked = await admin.delete(sharePath, {
+      headers: { Origin: base, ...await verifyAction(`rest:DELETE:${sharePath}`) },
+    });
     assert.equal(revoked.status(), 200);
     assert.equal((await sharedContext.request.get('/api/nodes')).status(), 401);
     checks.push('private-status-share-via-https-browser-redeems-and-revokes-without-admin-access');
@@ -268,39 +336,6 @@ async function run() {
 
   // Loopback alias on the same disposable Nginx listener exercises real browser CORS across origins.
   const callerOrigin = 'https://localhost:29443';
-  const qr = await admin.post('/api/admin/2fa/generate', { headers: { Origin: base } });
-  assert.equal(qr.status(), 200);
-  assert.match(qr.headers()['content-type'], /^image\/png\b/);
-  await qr.dispose();
-  const secret = (await admin.storageState()).cookies
-    .find(cookie => ['__Host-komari_2fa_secret', '2fa_secret'].includes(cookie.name))?.value;
-  assert(secret);
-  console.log(`::add-mask::${secret}`);
-  let code = await freshTOTP(secret, -1);
-  await post(admin, `/api/admin/2fa/enable?code=${code.code}`, {});
-
-  const settingsURL = '/api/admin/settings/';
-  const credentialHeader = 'X-Komari-Credential-Authorization';
-  const verificationService = 'credential.v1.TrustedCredentialService';
-  async function verifySettings(values) {
-    const targets = Object.keys(values).sort().flatMap(key => [
-      key,
-      `${typeof values[key] === 'boolean' ? 'bool' : 'string'}:${values[key]}`,
-    ]);
-    const digest = crypto.createHash('sha256').update(JSON.stringify(targets)).digest('hex');
-    const begin = await rpc(admin, verificationService, 'BeginVerification', {
-      providerId: 'native:totp', purpose: 'CREDENTIAL_PURPOSE_SENSITIVE_OPERATION', resource: `action:settings:edit:${digest}`,
-    });
-    assert.equal(begin.status, 200);
-    code = await freshTOTP(secret, code.counter);
-    const complete = await rpc(admin, verificationService, 'CompleteVerification', {
-      challengeId: begin.body.challengeId, proof: { code: code.code },
-    });
-    assert.equal(complete.status, 200);
-    const token = complete.body.authorization?.grantToken;
-    assert(token);
-    return { [credentialHeader]: token };
-  }
   async function expectSettingsDenied(data, headers = {}) {
     const response = await admin.post(settingsURL, { data, headers: { Origin: base, ...headers } });
     assert.equal(response.status(), 401);
@@ -402,11 +437,15 @@ async function run() {
 
   const custom = { custom_body: '<p id="e2e-custom-body">Public status content</p>' };
   await post(admin, settingsURL, custom, await verifySettings(custom));
-  await post(admin, settingsURL, { private_site: false });
+  const publicSite = { private_site: false };
+  await post(admin, settingsURL, publicSite, await verifySettings(publicSite));
+  const description = 'Nodes "a" & <b>';
+  await post(admin, settingsURL, { description });
   const shared = await context.newPage();
   const sharedDocument = await shared.goto(base);
   assert.equal(sharedDocument.status(), 200);
   assert.equal(await shared.locator('#e2e-custom-body').count(), 0);
+  assert.equal(await shared.locator('meta[name=description]').getAttribute('content'), description);
   await shared.close();
 
   // Reopen the same disposable installation in split mode through the two
@@ -444,6 +483,7 @@ async function run() {
       const publicDocument = await publicPage.goto(publicURL);
       assert.equal(publicDocument.status(), 200);
       assert.equal(await publicPage.locator('#e2e-custom-body').textContent(), 'Public status content');
+      assert.equal(await publicPage.locator('meta[name=description]').getAttribute('content'), description);
       const panelPage = await splitContext.newPage();
       const panelDocument = await panelPage.goto(`${panelURL}/admin`);
       assert.equal(panelDocument.status(), 200);

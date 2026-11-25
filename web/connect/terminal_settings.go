@@ -7,6 +7,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	jsonRpc "github.com/komari-monitor/komari/web/rpc/jsonrpc"
 	adminv1 "github.com/r11234567/komari-proto/gen/go/komari/admin/v1"
@@ -47,7 +48,11 @@ func (s *terminalSettingsService) SetTerminalSettings(ctx context.Context, req *
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	if err := jsonRpc.SaveXtermjsSettings(normalized); err != nil {
+	proofContext := credentialaction.WithToken(ctx, req.Header().Get(credentialaction.Header))
+	if err := jsonRpc.SaveXtermjsSettings(proofContext, normalized); err != nil {
+		if errors.Is(err, jsonRpc.ErrTerminalCSSVerification) {
+			return nil, connect.NewError(connect.CodePermissionDenied, err)
+		}
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	message, err := terminalSettingsToProto(normalized)

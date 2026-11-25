@@ -4,6 +4,7 @@ package outboundhttp
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -40,6 +41,19 @@ var protectedTransport = func() *http.Transport {
 
 // Keep IPv6 preferred without letting an unreachable IPv6 path block notifications.
 const ipv4FallbackDelay = 300 * time.Millisecond
+
+const maxNotificationResponseSize = 64 << 10
+
+func ReadNotificationResponse(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxNotificationResponseSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxNotificationResponseSize {
+		return nil, errors.New("notification response exceeds 64 KiB")
+	}
+	return data, nil
+}
 
 // NewClient prefers IPv6 for dual-stack endpoints and falls back to IPv4.
 func NewClient(timeout time.Duration) *http.Client {

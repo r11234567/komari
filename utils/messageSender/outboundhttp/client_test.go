@@ -5,9 +5,22 @@ import (
 	"errors"
 	"net"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestReadNotificationResponseBoundsTheEntireBody(t *testing.T) {
+	body := strings.Repeat("x", maxNotificationResponseSize)
+	got, err := ReadNotificationResponse(strings.NewReader(body))
+	if err != nil || string(got) != body {
+		t.Fatalf("response at the limit: bytes=%d err=%v", len(got), err)
+	}
+	got, err = ReadNotificationResponse(strings.NewReader(body + "x"))
+	if err == nil || got != nil {
+		t.Fatalf("oversize response: bytes=%d err=%v", len(got), err)
+	}
+}
 
 func TestIPv6FirstDialContextPrefersIPv6AndFallsBackToIPv4(t *testing.T) {
 	lookup := func(context.Context, string) ([]net.IPAddr, error) {

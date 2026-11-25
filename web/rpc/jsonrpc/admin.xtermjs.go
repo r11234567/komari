@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
@@ -27,6 +29,11 @@ type XtermJSSettings struct {
 	TransparentBackground bool             `json:"transparentBackground"`
 	CustomCss             string           `json:"customCss"`
 }
+
+var (
+	terminalSettingsMu         sync.Mutex
+	ErrTerminalCSSVerification = errors.New("verify the terminal CSS change before continuing")
+)
 
 // TerminalOptions stores the xterm.js terminal options.
 type TerminalOptions struct {
@@ -92,7 +99,10 @@ func adminSetXtermjs(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Js
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid xtermjs settings: "+err.Error(), nil)
 	}
-	if err := SaveXtermjsSettings(normalized); err != nil {
+	if err := SaveXtermjsSettings(ctx, normalized); err != nil {
+		if errors.Is(err, ErrTerminalCSSVerification) {
+			return nil, rpc.MakeError(rpc.PermissionDenied, err.Error(), nil)
+		}
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to save settings: "+err.Error(), nil)
 	}
 	actor, ip := auditActor(ctx)
@@ -113,7 +123,18 @@ func GetXtermjsSettings() (XtermJSSettings, error) {
 }
 
 // SaveXtermjsSettings persists already-normalized terminal settings.
-func SaveXtermjsSettings(settings XtermJSSettings) error {
+func SaveXtermjsSettings(ctx context.Context, settings XtermJSSettings) error {
+	terminalSettingsMu.Lock()
+	defer terminalSettingsMu.Unlock()
+	current, err := GetXtermjsSettings()
+	if err != nil {
+		return err
+	}
+	if settings.CustomCss != current.CustomCss {
+		if err := credentialaction.RequireAction(ctx, "terminal:custom-css", settings.CustomCss); err != nil {
+			return ErrTerminalCSSVerification
+		}
+	}
 	return config.Set(config.XtermjsSettingsKey, settings)
 }
 

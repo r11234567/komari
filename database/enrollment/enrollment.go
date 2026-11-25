@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari/database/agentcredentials"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/privilegeddelivery"
@@ -227,9 +228,11 @@ func Poll(deviceCode string) (Attempt, *Issued, error) {
 		cached := val.(*cachedPollResult)
 		if time.Now().UTC().Before(cached.expiresAt) && cached.epoch == dbcore.CurrentSecurityEpoch() {
 			issuedCopy := cached.issued
-			attempt := cached.attempt
-			attempt.Reenrolled = false
-			return attempt, &issuedCopy, nil
+			if id, _, err := LookupAccessToken(issuedCopy.AccessToken); err == nil && id == cached.attempt.Client {
+				attempt := cached.attempt
+				attempt.Reenrolled = false
+				return attempt, &issuedCopy, nil
+			}
 		}
 		pollGraceCache.Delete(code)
 	}
@@ -268,6 +271,9 @@ func Poll(deviceCode string) (Attempt, *Issued, error) {
 			return nil
 		}
 
+		if err := tx.Select("uuid").Take(&models.Client{}, "uuid = ?", row.Client).Error; err != nil {
+			return err
+		}
 		credentials, err := issueLocked(tx, row.Client, row.AgentPublicKey, row.AgentKeyID, row.KeyAlgorithm, decodeScopes(row.RequestedScopes), now)
 		if err != nil {
 			return err
@@ -304,7 +310,7 @@ func Poll(deviceCode string) (Attempt, *Issued, error) {
 	if cache != nil {
 		pollGraceCache.Store(code, cache)
 		if attempt.Reenrolled {
-			cancelStreams(attempt.Client)
+			agentcredentials.CancelStreams(attempt.Client)
 			privilegeddelivery.Notify(attempt.Client)
 		}
 	}
@@ -351,6 +357,9 @@ func Approve(userCode, clientUUID, approvedBy string, createdClient bool) (Attem
 		if now.After(row.ExpiresAt) {
 			_ = tx.Model(&row).Updates(map[string]any{"state": StateExpired, "updated_at": now}).Error
 			return errors.New("this enrollment request has expired; start it again on the machine")
+		}
+		if err := tx.Select("uuid").Take(&models.Client{}, "uuid = ?", clientUUID).Error; err != nil {
+			return err
 		}
 		updates := map[string]any{
 			"state":          StateApproved,
@@ -446,15 +455,9 @@ func Refresh(refreshToken string) (Issued, models.AgentCredential, error) {
 
 // Revoke invalidates a machine's credentials immediately.
 func Revoke(clientUUID, reason string) error {
-	now := time.Now().UTC()
-	err := dbcore.GetDBInstance().Model(&models.AgentCredential{}).
-		Where("client = ?", clientUUID).
-		Updates(map[string]any{
-			"revoked_at": now, "revoked_reason": trim(reason, 255), "updated_at": now,
-			"refresh_recovery_sealed": "", "refresh_recovery_until": nil, "refresh_recovery_request": "",
-		}).Error
+	err := agentcredentials.Revoke(dbcore.GetDBInstance(), clientUUID, reason)
 	if err == nil {
-		cancelStreams(clientUUID)
+		agentcredentials.CancelStreams(clientUUID)
 		privilegeddelivery.Notify(clientUUID)
 	}
 	return err

@@ -15,6 +15,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/credentialaction"
 
 	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
@@ -119,6 +120,9 @@ func adminStartCloudflared(ctx context.Context, req *rpc.JsonRpcRequest) (any, *
 	}
 	req.BindParams(&params)
 	token := strings.TrimSpace(params.Token)
+	if err := credentialaction.RequireAction(ctx, "cloudflared:start"); err != nil {
+		return nil, rpc.MakeError(rpc.PermissionDenied, err.Error(), nil)
+	}
 	if token != "" {
 		if err := cloudflared.SaveToken(token); err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to save Cloudflare Tunnel token: "+err.Error(), nil)
@@ -159,6 +163,9 @@ func adminStopCloudflared(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 		return nil, rpc.MakeError(rpc.InvalidParams, "Type STOP CLOUDFLARED to confirm stopping cloudflared", nil)
 	}
 
+	if err := credentialaction.RequireAction(ctx, "cloudflared:stop"); err != nil {
+		return nil, rpc.MakeError(rpc.PermissionDenied, err.Error(), nil)
+	}
 	if err := cloudflared.Stop(); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to stop cloudflared: "+err.Error(), nil)
 	}
@@ -168,6 +175,9 @@ func adminStopCloudflared(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 }
 
 func adminRemoveCloudflaredToken(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	if err := credentialaction.RequireAction(ctx, "cloudflared:remove-token"); err != nil {
+		return nil, rpc.MakeError(rpc.PermissionDenied, err.Error(), nil)
+	}
 	if err := cloudflared.RemoveToken(); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Failed to remove Cloudflare Tunnel token: "+err.Error(), nil)
 	}
