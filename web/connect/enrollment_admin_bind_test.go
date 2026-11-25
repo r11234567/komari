@@ -9,21 +9,22 @@ import (
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/pkg/bindticket"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/web/security"
 )
 
 func TestVerifyBindTicketIsReusableAndSubjectBound(t *testing.T) {
 	const userUUID = "bind-ticket-test-user"
-	key := accounts.SessionDigestKey()
+	key := bindticket.SessionKey(accounts.SessionDigestKey(), "test-console-session")
 	ticket, _, err := bindticket.Issue(userUUID, key)
 	if err != nil {
 		t.Fatalf("Issue failed: %v", err)
 	}
 
 	header := http.Header{}
-	header.Set("X-Bind-Ticket", ticket)
-	principal := rpc.NewUserPrincipal(userUUID)
+	(&http.Request{Header: header}).AddCookie(&http.Cookie{Name: security.BindTicketCookieName, Value: ticket})
+	meta := &rpc.ContextMeta{Principal: rpc.NewUserPrincipal(userUUID), SessionToken: "test-console-session"}
 
-	claims, err := verifyBindTicket(header, principal)
+	claims, err := verifyBindTicket(header, meta)
 	if err != nil {
 		t.Fatalf("first verification failed: %v", err)
 	}
@@ -31,7 +32,7 @@ func TestVerifyBindTicketIsReusableAndSubjectBound(t *testing.T) {
 		t.Fatalf("claims.Sub = %q, want %q", claims.Sub, userUUID)
 	}
 
-	claimsAgain, err := verifyBindTicket(header, principal)
+	claimsAgain, err := verifyBindTicket(header, meta)
 	if err != nil {
 		t.Fatalf("ticket must remain reusable within its lifetime: %v", err)
 	}
@@ -39,7 +40,11 @@ func TestVerifyBindTicketIsReusableAndSubjectBound(t *testing.T) {
 		t.Fatalf("repeated verification changed Jti")
 	}
 
-	_, err = verifyBindTicket(header, rpc.NewUserPrincipal("someone-else"))
+	if _, err := verifyBindTicket(header, &rpc.ContextMeta{Principal: meta.Principal, SessionToken: "another-session"}); err == nil {
+		t.Fatal("another session of the same administrator accepted the ticket")
+	}
+
+	_, err = verifyBindTicket(header, &rpc.ContextMeta{Principal: rpc.NewUserPrincipal("someone-else"), SessionToken: meta.SessionToken})
 	if err == nil {
 		t.Fatal("subject mismatch was accepted")
 	}
@@ -56,19 +61,19 @@ func TestVerifyBindTicketIsReusableAndSubjectBound(t *testing.T) {
 	}
 }
 
-func TestVerifyBindTicketRequiresHeaderAndAdminPrincipal(t *testing.T) {
-	if _, err := verifyBindTicket(http.Header{}, rpc.NewUserPrincipal("user")); err == nil {
+func TestVerifyBindTicketRequiresCookieAndAdminSession(t *testing.T) {
+	if _, err := verifyBindTicket(http.Header{}, &rpc.ContextMeta{Principal: rpc.NewUserPrincipal("user"), SessionToken: "test-console-session"}); err == nil {
 		t.Fatal("missing ticket was accepted")
 	}
 
-	key := accounts.SessionDigestKey()
+	key := bindticket.SessionKey(accounts.SessionDigestKey(), "test-console-session")
 	ticket, _, err := bindticket.Issue("user", key)
 	if err != nil {
 		t.Fatalf("Issue failed: %v", err)
 	}
 	header := http.Header{}
-	header.Set("X-Bind-Ticket", ticket)
-	if _, err := verifyBindTicket(header, rpc.NewAnonymousPrincipal()); err == nil {
+	(&http.Request{Header: header}).AddCookie(&http.Cookie{Name: security.BindTicketCookieName, Value: ticket})
+	if _, err := verifyBindTicket(header, &rpc.ContextMeta{Principal: rpc.NewAnonymousPrincipal()}); err == nil {
 		t.Fatal("anonymous principal was accepted")
 	}
 }

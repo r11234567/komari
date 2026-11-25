@@ -12,7 +12,9 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/pkg/bindticket"
+	"github.com/komari-monitor/komari/web/security"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRequestBindTicket(t *testing.T) {
@@ -27,7 +29,8 @@ func TestRequestBindTicket(t *testing.T) {
 
 		session, err := accounts.CreateSession(user.UUID, 3600, "test", "127.0.0.1", "password")
 		assert.NoError(t, err)
-		req, _ := http.NewRequest(http.MethodPost, "/api/bind/ticket", nil)
+		req := httptest.NewRequest(http.MethodPost, "https://panel.example/api/bind/ticket", nil)
+		req.Header.Set("Origin", "https://panel.example")
 		req.AddCookie(&http.Cookie{Name: "__Host-komari_session", Value: session})
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
@@ -45,18 +48,21 @@ func TestRequestBindTicket(t *testing.T) {
 		err = json.Unmarshal(w.Body.Bytes(), &resp)
 		assert.NoError(t, err)
 		assert.Equal(t, "success", resp.Status)
-		assert.NotEmpty(t, resp.Data.Ticket)
+		assert.Empty(t, resp.Data.Ticket)
 		assert.Equal(t, 120, resp.Data.ExpiresIn)
 		assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
 
 		// Exchanging a session for a bind ticket must not rotate that session.
-		for _, cookie := range w.Result().Cookies() {
-			assert.NotEqual(t, "__Host-komari_session", cookie.Name)
-		}
+		cookies := w.Result().Cookies()
+		require.Len(t, cookies, 1)
+		assert.Equal(t, security.BindTicketCookieName, cookies[0].Name)
+		assert.True(t, cookies[0].Secure)
+		assert.True(t, cookies[0].HttpOnly)
+		assert.Equal(t, http.SameSiteStrictMode, cookies[0].SameSite)
 
 		// Verify ticket signature and claims
-		key := accounts.SessionDigestKey()
-		claims, err := bindticket.Verify(resp.Data.Ticket, key)
+		key := bindticket.SessionKey(accounts.SessionDigestKey(), session)
+		claims, err := bindticket.Verify(cookies[0].Value, key)
 		assert.NoError(t, err)
 		assert.Equal(t, user.UUID, claims.Sub)
 		assert.Equal(t, bindticket.TicketType, claims.Type)
@@ -68,7 +74,8 @@ func TestRequestBindTicket(t *testing.T) {
 		router := gin.New()
 		router.POST("/api/bind/ticket", RequestBindTicket)
 
-		req, _ := http.NewRequest(http.MethodPost, "/api/bind/ticket", nil)
+		req := httptest.NewRequest(http.MethodPost, "https://panel.example/api/bind/ticket", nil)
+		req.Header.Set("Origin", "https://panel.example")
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 
@@ -81,7 +88,8 @@ func TestRequestBindTicket(t *testing.T) {
 
 		session, err := accounts.CreateSession(user.UUID, -1, "test", "127.0.0.1", "password")
 		assert.NoError(t, err)
-		req, _ := http.NewRequest(http.MethodPost, "/api/bind/ticket", nil)
+		req := httptest.NewRequest(http.MethodPost, "https://panel.example/api/bind/ticket", nil)
+		req.Header.Set("Origin", "https://panel.example")
 		req.AddCookie(&http.Cookie{Name: "__Host-komari_session", Value: session})
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
@@ -101,7 +109,8 @@ func TestRequestBindTicket(t *testing.T) {
 			Update("created_at", time.Now().UTC().Add(-bindticket.TicketDuration-time.Second)).Error
 		assert.NoError(t, err)
 
-		req, _ := http.NewRequest(http.MethodPost, "/api/bind/ticket", nil)
+		req := httptest.NewRequest(http.MethodPost, "https://panel.example/api/bind/ticket", nil)
+		req.Header.Set("Origin", "https://panel.example")
 		req.AddCookie(&http.Cookie{Name: "__Host-komari_session", Value: session})
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
