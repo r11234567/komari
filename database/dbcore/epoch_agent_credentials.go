@@ -101,9 +101,9 @@ func reconcileLiveControlPlaneKeys(tx *sql.Tx, carry restoreSecurityCarryover) e
 	}
 	for _, key := range carry.controlPlaneKeys {
 		if _, err := tx.Exec(`INSERT INTO control_plane_keys
-			(key_id, algorithm, public_key, not_before, not_after, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`, key.KeyID, key.Algorithm, key.PublicKey,
-			key.NotBefore, key.NotAfter, key.CreatedAt, key.UpdatedAt); err != nil {
+			(key_id, algorithm, public_key, not_before, not_after, created_at, updated_at, trust_revision, rotation_proof)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, key.KeyID, key.Algorithm, key.PublicKey,
+			key.NotBefore, key.NotAfter, key.CreatedAt, key.UpdatedAt, max(1, key.TrustRevision), key.RotationProof); err != nil {
 			return err
 		}
 	}
