@@ -124,7 +124,8 @@ func LoadCalibrationSnapshot(ctx context.Context, db *gorm.DB, client models.Cli
 }
 
 func loadCalibrationSnapshot(ctx context.Context, db *gorm.DB, client models.Client, now time.Time) (CalibrationSnapshot, error) {
-	days, snapshot, err := loadCalibrationDays(ctx, db, client, now)
+	// The caller already owns the read snapshot or write transaction.
+	days, snapshot, err := loadCalibrationDaysSnapshot(ctx, db, client, now)
 	if err != nil {
 		return CalibrationSnapshot{}, err
 	}

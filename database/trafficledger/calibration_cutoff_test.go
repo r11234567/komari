@@ -1,6 +1,7 @@
 package trafficledger
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -11,8 +12,12 @@ import (
 )
 
 func TestCutoffCalibrationSettlesPendingEventsOnBothSides(t *testing.T) {
-	ctx := t.Context()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
 	db := openCalibrationOutbox(t, "fixed-cutoff")
+	pool, err := db.DB()
+	require.NoError(t, err)
+	pool.SetMaxOpenConns(1)
 	cutoff := time.Date(2026, 11, 15, 15, 30, 0, 0, time.UTC)
 	now := cutoff.Add(5 * time.Minute)
 	client := models.Client{UUID: "cutoff-node", Token: "cutoff-token", TrafficResetDay: intPointer(1), TrafficLimitType: "max"}
