@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/komari-monitor/komari/database/enrollment"
 	"github.com/komari-monitor/komari/pkg/requestmeta"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/web/api"
 	"gorm.io/gorm"
 )
 
@@ -414,7 +416,8 @@ func verifyRFC9449DPoP(c *gin.Context, agentID string, pubKey ed25519.PublicKey,
 		return errors.New("dpop: ath access token hash mismatch")
 	}
 
-	allowStream := isClientStreamingProcedure(c.Request.URL.Path)
+	allowStream := isClientStreamingProcedure(c.Request.URL.Path) ||
+		(c.FullPath() == api.AgentTransferRoute && c.Request.Method == http.MethodPost)
 	if claims.BM != "" && claims.BM != "stream" {
 		return errors.New("dpop: unsupported bm body mode")
 	}

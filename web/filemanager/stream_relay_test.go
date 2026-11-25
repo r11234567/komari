@@ -16,7 +16,8 @@ import (
 func newAgentTransferTestContext(method, transferID, token, clientUUID string, body io.Reader) (*gin.Context, *httptest.ResponseRecorder) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(method, "/api/clients/transfer/"+url.PathEscape(transferID)+"?transfer_token="+url.QueryEscape(token), body)
+	request := httptest.NewRequest(method, "/api/clients/transfer/"+url.PathEscape(transferID), body)
+	request.Header.Set(streamTokenHeader, token)
 	context, _ := gin.CreateTestContext(recorder)
 	context.Request = request
 	context.Params = gin.Params{{Key: "id", Value: transferID}}
@@ -174,7 +175,7 @@ func testAgentTransferOverHTTP(t *testing.T, http2 bool) {
 	}
 	defer server.Close()
 	client := server.Client()
-	endpoint := server.URL + "/api/clients/transfer/" + transfer.id + "?transfer_token=" + url.QueryEscape(transfer.token)
+	endpoint := server.URL + "/api/clients/transfer/" + transfer.id
 
 	writeDone := make(chan struct{})
 	go func() {
@@ -186,6 +187,7 @@ func testAgentTransferOverHTTP(t *testing.T, http2 bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	request.Header.Set(streamTokenHeader, transfer.token)
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
