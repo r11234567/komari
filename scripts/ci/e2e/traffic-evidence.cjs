@@ -92,16 +92,17 @@ function startAgent(name, args, log, evidenceEnabled = false) {
 function startCollector() {
   const fixture = path.resolve('e2e-agent/scripts/ci/test-traffic-anomaly.py');
   const xray = path.join(root, 'bin', 'xray');
+  const samplerArgs = ['--sampler', 'ebpf'];
   if (distro === 'native') {
-    return privateProcess('sudo', ['-n', 'python3', '-B', fixture, agent, xray, inbox], 'traffic-collector.log');
+    return privateProcess('sudo', ['-n', 'python3', '-B', fixture, agent, xray, inbox, ...samplerArgs], 'traffic-collector.log');
   }
   return containerProcess('capture', [
-    '--privileged', '--network', 'none', '--ulimit', 'memlock=335544320:335544320',
+    '--privileged', '--network', 'none',
     ...bind(inbox, inbox, true),
     ...bind(fixture, '/fixtures/test-traffic-anomaly.py'),
     ...bind(xray, '/fixtures/xray'),
     ...bind(path.join(root, 'bin', 'traffic-container-agent'), '/fixtures/komari-agent'),
-  ], ['python3', '-B', '/fixtures/test-traffic-anomaly.py', '/fixtures/komari-agent', '/fixtures/xray', inbox], 'traffic-collector.log');
+  ], ['python3', '-B', '/fixtures/test-traffic-anomaly.py', '/fixtures/komari-agent', '/fixtures/xray', inbox, ...samplerArgs], 'traffic-collector.log');
 }
 
 function successfulUploads() {
@@ -175,6 +176,7 @@ async function main() {
     }, body => body.incidents?.length === 1 && body.hours?.some(hour => BigInt(hour.services?.xray?.txBytes || 0) >= 8n << 20n));
     const incident = captured.incidents[0];
     assert.equal(incident.reason, 'fast_unexplained_ingress');
+    assert.equal(incident.sampler, 'ebpf');
     assert.equal(incident.ingressSources, undefined, 'summary disclosed source addresses');
     assert.equal(incident.egressDestinations, undefined, 'summary disclosed destination addresses');
     assert.equal(incident.interfaceName, 'edge0');
