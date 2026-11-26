@@ -14,7 +14,7 @@
 [English](./README.md) | [简体中文](./README_zh-cn.md)
 
 Komari 是一款轻量级的自托管服务器监控工具，旨在提供简单、高效的服务器性能监控解决方案。它支持通过 Web 界面查看服务器状态，并通过轻量级 Agent 收集数据。
-[文档](https://www.komari.wiki/) 
+[面板发布](https://github.com/r11234567/komari/releases/latest) · [Agent 发布](https://github.com/r11234567/komari-agent/releases/latest) · [上游文档](https://www.komari.wiki/)
 
 ## 特性
 
@@ -24,18 +24,19 @@ Komari 是一款轻量级的自托管服务器监控工具，旨在提供简单�
 - **Web 界面**：直观的监控仪表盘，易于使用。
 - **极强的可扩展性**: 支持自定义主题和插件。
 
-## 本版本改进
+## 部署与升级
 
-- **非 Root Agent**：Agent 可在非 Root 权限下运行，降低部署复杂度和安全风险。
-- **Agent 救援模式**：提供恢复通道，用于诊断和恢复失联 Agent。
-- **原始数据 CSV 导出**：导出保留的原始指标点，便于审计和离线分析。
-- **可选不降采样**：可选择是否启用降采样，原始数据留存与 Rollup 分开管理。
-- **Connect-RPC 连接**：使用 Connect-RPC 提供统一、高效的 Agent 与 API 通信。
-- **数据库优化**：增加更细粒度 Rollup、增量清理、自适应维护和更高效的查询读写路径。
-- **可信客户端地址**：通过 `KOMARI_TRUSTED_PROXIES` 声明哪些对端可以设置转发头，使限流与审计日志记录的地址不再由调用方自行决定。
-- **可见的拒绝提示**：HTTP 429/401/403/5xx 会在页面上弹出提示，且不依赖当前主题，不再只留下一张空白图表。
-- **便于反代识别**：所有响应都带 `X-Komari-Principal`，反向代理无需靠猜测 URL 就能区分已认证流量与探测流量。
+1. 备份面板和数据，先升级面板，再升级 Agent。Docker 部署可使用 `ghcr.io/r11234567/komari:<版本号>`。详见[备份与恢复](docs/backup-restore.md)和 [Linux systemd 更新与回退](docs/self-update.md)。
+2. 配置面板的 HTTPS 来源和可信代理。使用旧 Passkey 插件时，先阅读[原生 Passkey 迁移](docs/native-passkeys.md)，并确认备用登录方式可用。会话 Cookie 迁移后需重新登录。
+3. 按 [Agent 安装与校验](https://github.com/r11234567/komari-agent/blob/main/docs/service-startup.md)操作。新节点通过浏览器审批注册，原地升级 Agent 时保留已有注册凭据。
 
+## 功能配置
+
+- [Cloudflare 橙云](docs/cloudflare-agent-grpc.md)配置 Agent WebSSH 与文件操作的 gRPC 双向流。
+- [流量账本](docs/traffic-accounting.md)配置面板账期和流量校准，了解 Agent 样本补传。
+- [临时开放 SSH](docs/temporary-ssh.zh-CN.md)适用于已安装救援辅助程序且配置 nftables 接入点的节点。
+- [历史 CSV 导出](docs/background-csv-worker.md)通过独立 Linux Worker 导出留存的原始指标点。
+- [公开主题与管理端隔离](docs/security/public-theme-origin.md)适用于部署第三方主题或插件的站点。
 
 ## 在反向代理 / IP 封禁系统后运行
 
@@ -46,15 +47,13 @@ Komari 是一款轻量级的自托管服务器监控工具，旨在提供简单�
 
 | 取值 | 含义 |
 | --- | --- |
-| 不设置 | 信任所有对端的转发头。保持旧行为，**且客户端地址完全由调用方决定**。 |
+| 不设置 | 仅信任回环代理（`127.0.0.1,::1`）。 |
 | `127.0.0.1,::1` | 反向代理与 Komari 在同一台机器上。常见部署用这个。 |
 | `none` | Komari 直接对外暴露。忽略转发头，直接使用连接对端地址。 |
 | 逗号分隔列表 | 只信任列出的主机或 CIDR，例如 `10.0.0.0/8,192.168.1.5`。 |
 
-不设置不只是「不够精确」。客户端地址既是限流的分桶依据，也是审计日志与登录会话
-记录的来源地址；在信任所有对端的状态下，调用方可以每个请求换一个头部值来获得全新
-的限流额度、把自己的流量记到别人的地址上，或伪造审计日志里的来源地址。取值格式
-错误会在启动时报错，而不会静默退回「信任所有代理」。
+代理从容器或独立主机连入时，显式填写其实际来源地址或 CIDR。限流、审计日志与登录会话
+共用这套地址策略。无效或没有约束的取值会阻止服务启动。
 
 ### 外部封禁系统应如何判断 Komari 流量
 

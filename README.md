@@ -20,7 +20,7 @@
 Komari is a lightweight, self-hosted server monitoring solution. It provides a simple and efficient way to track server performance through a web interface, with metrics collected by a lightweight agent.
 
 
-[Documentation](https://www.komari.wiki/) 
+[Fork releases](https://github.com/r11234567/komari/releases/latest) · [Agent releases](https://github.com/r11234567/komari-agent/releases/latest) · [Upstream documentation](https://www.komari.wiki/)
 
 ## Features
 
@@ -30,18 +30,19 @@ Komari is a lightweight, self-hosted server monitoring solution. It provides a s
 - **Web interface**: Provides an intuitive, easy-to-use monitoring dashboard.
 - **Extensible**: Supports custom themes and plugins.
 
-## Improvements in This Version
+## Deployment and upgrades
 
-- **Non-root agent**: The agent can run without root privileges, reducing deployment and security risks.
-- **Agent rescue mode**: Provides a recovery channel for diagnosing and restoring unavailable agents.
-- **Raw CSV export**: Export retained raw metric points for auditing and offline analysis.
-- **Optional downsampling**: Choose whether to use downsampling; raw-data retention and rollups are handled separately.
-- **Connect-RPC transport**: Uses Connect-RPC for consistent, efficient agent and API communication.
-- **Database improvements**: Adds more precise rollups, incremental cleanup, adaptive maintenance, and optimized query/read paths.
-- **Trustworthy client addresses**: `KOMARI_TRUSTED_PROXIES` declares which peers may set forwarding headers, so rate limiting and audit logs record an address the caller cannot choose.
-- **Visible rejections**: HTTP 429/401/403/5xx raise an on-page notice that works under any theme, instead of leaving a chart blank.
-- **Proxy-friendly identification**: Every response carries `X-Komari-Principal`, so a reverse proxy can separate authenticated traffic from probes without guessing at URLs.
+1. Back up the panel and data, then upgrade the panel before the Agents. Docker deployments can use `ghcr.io/r11234567/komari:<version>`. See [backup and restore](docs/backup-restore.md) and [Linux systemd updates and rollback](docs/self-update.md).
+2. Configure the panel's HTTPS origin and trusted proxies. If you use the legacy Passkey plugin, follow the [native Passkey migration](docs/native-passkeys.md) and verify a backup sign-in method before upgrading. Sign in again after the session-cookie migration.
+3. Follow the [Agent installation and verification guide](https://github.com/r11234567/komari-agent/blob/main/docs/service-startup.md). New nodes use browser approval. Preserve existing enrolled credentials when upgrading an Agent in place.
 
+## Configuration guides
+
+- [Cloudflare DNS proxy](docs/cloudflare-agent-grpc.md) for Agent WebSSH and file-operation streams over gRPC.
+- [Traffic accounting](docs/traffic-accounting.md) for panel-managed billing periods, calibration and delayed Agent samples.
+- [Temporary SSH access](docs/temporary-ssh.md) for nodes with the optional rescue helper and a configured nftables entry point.
+- [Historical CSV worker](docs/background-csv-worker.md) for exporting retained raw metric points with a separate Linux worker.
+- [Public theme and admin origin isolation](docs/security/public-theme-origin.md) for sites using third-party themes or plugins.
 
 ## Running behind a reverse proxy or an IP banning layer
 
@@ -52,17 +53,14 @@ client address through `X-Forwarded-For` / `X-Real-Ip`:
 
 | Value | Meaning |
 | --- | --- |
-| unset | Trust every peer's forwarding headers. Backwards-compatible, and **the client address becomes caller-controlled**. |
+| unset | Trust loopback proxies (`127.0.0.1,::1`) only. |
 | `127.0.0.1,::1` | A reverse proxy runs on the same host. Use this for the common setup. |
 | `none` | Komari is exposed directly. Forwarding headers are ignored and the transport peer is used. |
 | a comma-separated list | Trust exactly these hosts or CIDRs, e.g. `10.0.0.0/8,192.168.1.5`. |
 
-Leaving it unset is not merely imprecise. The client address is what the rate
-limiter buckets on and what the audit log and login sessions record, so while
-every peer is trusted a caller can rotate the header to get a fresh rate-limit
-budget per request, attribute its traffic to somebody else's address, or forge
-the source address in the audit log. A malformed value fails at startup rather
-than silently falling back to trusting everything.
+For a proxy connecting from a container or a separate host, list its actual
+source address or CIDR explicitly. Komari uses this policy for rate limiting,
+audit logs and login sessions. Invalid or unrestricted values prevent startup.
 
 ### How an external banning layer should judge Komari traffic
 
@@ -112,4 +110,4 @@ layer reads.
 | Theme Market        | <img src="https://b2.akz.moe/awesome-pictures/komari-screenshot/%E4%B8%BB%E9%A2%98%E5%B8%82%E5%9C%BA-en.webp" width="800" alt="Theme Market">                          |
 
 
-协议源码使用 Git 子模块，构建前请执行 `git submodule update --init --recursive`；详见 [Proto 子模块依赖](docs/proto-dependency.md)。
+Before building from source, run `git submodule update --init --recursive`. See the [Proto dependency guide](docs/proto-dependency.md).
