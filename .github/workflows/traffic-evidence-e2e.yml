@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   traffic-evidence:
-    name: ${{ matrix.distribution }} / capture → panel → browser
+    name: ${{ matrix.distribution }} / eBPF capture → panel → browser
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -47,7 +47,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: r11234567/komari-agent
-          ref: 68e8f33e63b91fbb725b0c91ce55de0d84868ddf
+          ref: f4c4138fa959a070e85bdabd8c17d1313dc531d2
           path: e2e-agent
           submodules: recursive
           persist-credentials: false
@@ -74,13 +74,12 @@ jobs:
           DISTRO: ${{ matrix.image }}
           CGO_ENABLED: '0'
         run: |
-          docker build --target "$DISTRO" --tag "komari-traffic-e2e:$DISTRO" - < scripts/ci/traffic-e2e.Dockerfile
+          docker build --target "$DISTRO-ebpf" --tag "komari-traffic-e2e:$DISTRO" - < scripts/ci/traffic-e2e.Dockerfile
           go build -trimpath -o "$E2E_ROOT/bin/traffic-container-agent" .
-      - name: Install browser, HTTPS proxy and flow tools
+      - name: Install browser, HTTPS proxy and network tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y nginx libnss3-tools nfdump iproute2
-          sudo systemctl stop nfdump
+          sudo apt-get install -y nginx libnss3-tools iproute2
           npm install --prefix "$E2E_TOOLS" --no-audit --no-fund --no-package-lock @playwright/test@1.56.1
           "$E2E_TOOLS/node_modules/.bin/playwright" install --with-deps chromium
           bash e2e-agent/scripts/ci/fetch-traffic-test-xray.sh "$E2E_ROOT/bin"
