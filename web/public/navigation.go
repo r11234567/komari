@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/pkg/config"
 )
 
@@ -30,6 +31,10 @@ type themeNavigationManifest struct {
 
 func ActiveThemeNavigation() ThemeNavigation {
 	themeID, _ := config.GetAs[string](config.ThemeKey, DefaultTheme)
+	themeID = EffectiveThemeID(themeID)
+	if themeID == DefaultTheme && !flags.SplitPanelEnabled() {
+		return bundledThemeNavigation(themeID)
+	}
 	if manifest, _, ok := localThemeFileContent(themeID, "komari-theme.json"); ok {
 		if navigation, valid := parseThemeNavigation(manifest); valid {
 			return navigation

@@ -94,12 +94,15 @@ func TestDashboardLatencyUsesFifteenMinuteBuckets(t *testing.T) {
 
 func TestDashboardNavigationFollowsThirdPartyThemeManifest(t *testing.T) {
 	t.Chdir(t.TempDir())
+	t.Setenv("KOMARI_PANEL_LISTEN", "")
+	t.Setenv("KOMARI_ALLOW_SHARED_ORIGIN_THEMES", "true")
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)
 	config.SetDb(db)
 
 	themeDir := filepath.Join("data", "theme", "third-party")
-	require.NoError(t, os.MkdirAll(themeDir, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(themeDir, "dist"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(themeDir, "dist", "index.html"), []byte("theme"), 0o644))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(themeDir, "komari-theme.json"),
 		[]byte(`{"navigation":{"server_detail":"/nodes/{uuid}","server_network":"/nodes/{uuid}?tab=network","ping_task_parameter":"task"}}`),

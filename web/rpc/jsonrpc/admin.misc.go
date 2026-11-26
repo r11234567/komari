@@ -23,6 +23,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/requestmeta"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/utils/messageSender"
+	publicweb "github.com/komari-monitor/komari/web/public"
 	"github.com/komari-monitor/komari/web/security"
 	"github.com/komari-monitor/komari/web/signonauth"
 )
@@ -145,6 +146,9 @@ func adminGetSettings(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.Jso
 	}
 	cst["public_origin"] = flags.EffectivePublicOrigin()
 	cst["panel_origin"] = flags.EffectivePanelOrigin()
+	cst["shared_origin_themes_enabled"] = flags.SharedOriginThemesEnabled()
+	configuredTheme, _ := cst[config.ThemeKey].(string)
+	cst[config.ThemeKey] = publicweb.EffectiveThemeID(configuredTheme)
 	return cst, nil
 }
 
@@ -224,6 +228,9 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	}
 	if _, found := cfg[config.XtermjsSettingsKey]; found {
 		return nil, rpc.MakeError(rpc.InvalidParams, "use the terminal settings endpoint", nil)
+	}
+	if _, found := cfg[config.ThemeKey]; found {
+		return nil, rpc.MakeError(rpc.InvalidParams, "use the theme selection endpoint", nil)
 	}
 	for _, key := range []string{security.TempShareConfigKey, security.LegacyTempShareTokenKey, security.LegacyTempShareExpiryKey} {
 		if _, found := cfg[key]; found {
@@ -305,6 +312,7 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	delete(cfg, metricstore.MetricDownsamplingEnabledKey)
 	delete(cfg, "panel_isolation_mode")
 	delete(cfg, "panel_listen_enabled")
+	delete(cfg, "shared_origin_themes_enabled")
 	delete(cfg, "public_origin")
 	delete(cfg, "panel_origin")
 

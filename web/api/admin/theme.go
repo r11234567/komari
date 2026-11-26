@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/datadir"
@@ -292,14 +293,18 @@ func SetTheme(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "无效的主题名称")
 		return
 	}
+	if themeName != public.DefaultTheme && !flags.SplitPanelEnabled() && !flags.SharedOriginThemesEnabled() {
+		api.RespondError(c, http.StatusConflict, "Installed themes require KOMARI_ALLOW_SHARED_ORIGIN_THEMES=true or a separate public origin")
+		return
+	}
 	themeMutationMu.Lock()
 	defer themeMutationMu.Unlock()
-	if !public.IsLocalThemeUsable(themeName) {
+	if themeName != public.DefaultTheme && !public.IsLocalThemeUsable(themeName) {
 		api.RespondError(c, http.StatusNotFound, "主题不存在或不可用")
 		return
 	}
 
-	if err := config.Set("theme", themeName); err != nil {
+	if err := config.Set(config.ThemeKey, themeName); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "更新主题设置失败: "+err.Error())
 		return
 	}

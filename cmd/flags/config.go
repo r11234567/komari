@@ -45,6 +45,12 @@ func SplitPanelEnabled() bool {
 	return EffectivePanelListen() != ""
 }
 
+// SharedOriginThemesEnabled is an operator opt-in to running installed themes
+// with the browser privileges of the management origin.
+func SharedOriginThemesEnabled() bool {
+	return !SplitPanelEnabled() && strings.EqualFold(strings.TrimSpace(os.Getenv("KOMARI_ALLOW_SHARED_ORIGIN_THEMES")), "true")
+}
+
 // ControlListenAddr returns the listener address where management and setup
 // ceremonies (install guide, legacy upgrade, storage migration) must bind.
 func ControlListenAddr() string {

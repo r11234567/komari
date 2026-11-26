@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/api/admin"
 	"github.com/komari-monitor/komari/web/api/client"
@@ -48,7 +49,7 @@ func Register(r *gin.Engine) func() error {
 
 	public.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
 		r.NoRoute(handlers...)
-	})
+	}, flags.SharedOriginThemesEnabled())
 	return closeExports
 }
 

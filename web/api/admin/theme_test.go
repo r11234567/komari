@@ -12,7 +12,47 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/pkg/config"
+	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
+
+func TestSetThemeRespectsDeploymentMode(t *testing.T) {
+	t.Chdir(t.TempDir())
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	config.SetDb(db)
+	themeDir := filepath.Join("data", "theme", "installed")
+	require.NoError(t, os.MkdirAll(filepath.Join(themeDir, "dist"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(themeDir, "komari-theme.json"), []byte(`{"short":"installed"}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(themeDir, "dist", "index.html"), []byte("installed theme"), 0o644))
+	require.NoError(t, config.Set(config.ThemeKey, "default"))
+	router := gin.New()
+	router.POST("/set", SetTheme)
+	check := func(theme string, status int, stored string) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/set?theme="+theme, nil))
+		require.Equal(t, status, response.Code, response.Body.String())
+		active, err := config.GetAs[string](config.ThemeKey)
+		require.NoError(t, err)
+		require.Equal(t, stored, active)
+	}
+	t.Setenv("KOMARI_PANEL_LISTEN", "")
+	t.Setenv("KOMARI_ALLOW_SHARED_ORIGIN_THEMES", "")
+	check("installed", http.StatusConflict, "default")
+	t.Setenv("KOMARI_ALLOW_SHARED_ORIGIN_THEMES", "true")
+	check("missing", http.StatusNotFound, "default")
+	check("installed", http.StatusOK, "installed")
+	check("default", http.StatusOK, "default")
+	t.Setenv("KOMARI_ALLOW_SHARED_ORIGIN_THEMES", "")
+	t.Setenv("KOMARI_PANEL_LISTEN", "127.0.0.1:25775")
+	check("installed", http.StatusOK, "installed")
+}
 
 // TestIsValidThemeShort_PathTraversal 防止 DeleteTheme/UpdateTheme/SetTheme
 // 的路径穿越漏洞：req.Short 直接进入 filepath.Join("./data/theme", short)，

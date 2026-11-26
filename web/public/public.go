@@ -393,15 +393,32 @@ func publicThemeFileContent(themeID, relativePath string) ([]byte, string, bool)
 	return embeddedFileContent(defaultThemeBundle, relativePath)
 }
 
-// Static serves the two embedded applications on the shared listener. Local
-// themes and custom HTML are served only by StaticPublic on a separate origin.
-func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
+// EffectiveThemeID reports the theme a deployed public site can actually serve.
+func EffectiveThemeID(configured string) string {
+	if (flags.SplitPanelEnabled() || flags.SharedOriginThemesEnabled()) && IsLocalThemeUsable(configured) {
+		return configured
+	}
+	return DefaultTheme
+}
+
+// Static serves the management UI and public application on the shared listener.
+// Only an explicit operator opt-in allows an installed public theme here.
+func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc), sharedThemes bool) {
 	getConfig := func() map[string]any {
 		cfg, _ := config.GetMany(map[string]any{
 			config.DescriptionKey: defaultSiteDescription,
 			config.SitenameKey:    "Komari Monitor",
 		})
 		return cfg
+	}
+	getPublicFile := func(c *gin.Context, relativePath string) ([]byte, string, bool) {
+		if sharedThemes && c.GetHeader("Service-Worker") != "script" {
+			themeID, _ := config.GetAs[string](config.ThemeKey, DefaultTheme)
+			if themeID != DefaultTheme && IsLocalThemeUsable(themeID) {
+				return localThemeFileContent(themeID, relativePath)
+			}
+		}
+		return embeddedFileContent(defaultThemeBundle, relativePath)
 	}
 
 	// 核心逻辑：渲染 Index.html
@@ -418,7 +435,10 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		if privateApplication {
 			content, _, exists = embeddedFileContent("systemUI", targetFile)
 		} else {
-			content, _, exists = embeddedFileContent(defaultThemeBundle, targetFile)
+			content, _, exists = getPublicFile(c, targetFile)
+			if !exists {
+				content, _, exists = embeddedFileContent(defaultThemeBundle, targetFile)
+			}
 		}
 
 		if !exists {
@@ -459,7 +479,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		}
 
 		themeFaviconPath := path.Join(DistDir, FaviconFile)
-		content, mimeType, exists := embeddedFileContent(defaultThemeBundle, themeFaviconPath)
+		content, mimeType, exists := getPublicFile(c, themeFaviconPath)
 		if exists {
 			c.Data(http.StatusOK, mimeType, content)
 			return
@@ -494,7 +514,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			return
 		}
 		reqPath := c.Request.URL.Path
-		if isUnmountedAPIOrConnectPath(reqPath) || reqPath == "/themes" || strings.HasPrefix(reqPath, "/themes/") {
+		if isUnmountedAPIOrConnectPath(reqPath) || reqPath == "/themes" || strings.HasPrefix(reqPath, "/themes/") || reqPath == "/system-assets" {
 			c.Status(http.StatusNotFound)
 			return
 		}
@@ -509,10 +529,14 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		var mimeType string
 		var exists bool
 		if !isPrivateApplicationPath(reqPath) {
-			content, mimeType, exists = embeddedFileContent(defaultThemeBundle, distPath)
+			content, mimeType, exists = getPublicFile(c, distPath)
 		}
 		if exists {
-			setStaticCacheHeaders(c, reqPath)
+			if sharedThemes {
+				setNoStoreHeaders(c)
+			} else {
+				setStaticCacheHeaders(c, reqPath)
+			}
 			c.Data(http.StatusOK, mimeType, content)
 			return
 		}
