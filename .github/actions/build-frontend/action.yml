@@ -14,6 +14,9 @@ inputs:
   artifact-name:
     description: Optional artifact name for the packed system UI.
     default: ""
+  audit-artifact-suffix:
+    description: Optional suffix for audit artifacts from a matrix job.
+    default: ""
 
 runs:
   using: composite
@@ -103,7 +106,7 @@ runs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: web-security-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+        name: web-security-${{ github.job }}${{ inputs.audit-artifact-suffix }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: ${{ inputs.source-dir }}/ci-artifacts/
         retention-days: 30
         if-no-files-found: error

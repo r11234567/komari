@@ -10,8 +10,13 @@ const root = process.env.E2E_ROOT;
 const base = 'https://127.0.0.1:29443';
 const metrics = '/komari.metrics.v1.MetricsService/';
 const agent = '/usr/lib/komari/komari-e2e/komari-agent';
-const credentials = path.join(root, 'traffic-agent-credentials.json');
+const agentState = path.join(root, 'traffic-agent-state');
+const credentials = path.join(agentState, 'credentials.json');
 const inbox = path.join(root, 'traffic-inbox');
+const distro = process.env.KOMARI_TRAFFIC_E2E_DISTRO || 'native';
+assert(['native', 'debian13', 'rocky9', 'alpine322'].includes(distro), 'Invalid traffic E2E distribution');
+const image = `komari-traffic-e2e:${distro}`;
+const fixtureID = crypto.randomBytes(6).toString('hex');
 const headers = { Origin: base, 'Connect-Protocol-Version': '1' };
 
 async function jsonPost(context, url, data = {}) {
@@ -42,10 +47,61 @@ function privateProcess(binary, args, name, env = process.env) {
       child.once('error', reject);
       child.once('exit', (code, signal) => resolve({ code, signal }));
     });
-    return { child, result };
+    return { child, result, stop: () => child.kill() };
   } finally {
     fs.closeSync(fd);
   }
+}
+
+function containerProcess(name, options, command, log) {
+  const container = `komari-traffic-${fixtureID}-${name}`;
+  const fixture = privateProcess('docker', ['run', '--rm', '--name', container, ...options, image, ...command], log);
+  fixture.stop = () => {
+    try {
+      execFileSync('docker', ['stop', '--time', '8', container], { stdio: 'ignore', timeout: 15000 });
+    } catch {
+      fixture.child.kill();
+    }
+  };
+  return fixture;
+}
+
+function bind(source, target, writable = false) {
+  return ['--mount', `type=bind,src=${source},dst=${target}${writable ? '' : ',readonly'}`];
+}
+
+function startAgent(name, args, log, evidenceEnabled = false) {
+  if (distro === 'native') {
+    const env = evidenceEnabled ? { ...process.env, KOMARI_TRAFFIC_EVIDENCE_INBOX: inbox } : process.env;
+    return privateProcess(agent, args, log, env);
+  }
+  const options = [
+    '--network', 'host', '--user', `${process.getuid()}:${process.getgid()}`,
+    '--cap-drop', 'all', '--security-opt', 'no-new-privileges',
+    '-e', `HOME=${agentState}`, '-e', 'SSL_CERT_FILE=/fixtures/panel-ca.crt',
+    ...bind(agentState, agentState, true),
+    ...bind(path.join(root, 'tls', 'ca.crt'), '/fixtures/panel-ca.crt'),
+    ...bind(path.join(root, 'bin', 'traffic-container-agent'), '/fixtures/komari-agent'),
+  ];
+  if (evidenceEnabled) {
+    options.push('-e', `KOMARI_TRAFFIC_EVIDENCE_INBOX=${inbox}`, ...bind(inbox, inbox));
+  }
+  return containerProcess(name, options, ['/fixtures/komari-agent', ...args], log);
+}
+
+function startCollector() {
+  const fixture = path.resolve('e2e-agent/scripts/ci/test-traffic-anomaly.py');
+  const xray = path.join(root, 'bin', 'xray');
+  if (distro === 'native') {
+    return privateProcess('sudo', ['-n', 'python3', '-B', fixture, agent, xray, inbox], 'traffic-collector.log');
+  }
+  return containerProcess('capture', [
+    '--privileged', '--network', 'none', '--ulimit', 'memlock=335544320:335544320',
+    ...bind(inbox, inbox, true),
+    ...bind(fixture, '/fixtures/test-traffic-anomaly.py'),
+    ...bind(xray, '/fixtures/xray'),
+    ...bind(path.join(root, 'bin', 'traffic-container-agent'), '/fixtures/komari-agent'),
+  ], ['python3', '-B', '/fixtures/test-traffic-anomaly.py', '/fixtures/komari-agent', '/fixtures/xray', inbox], 'traffic-collector.log');
 }
 
 function successfulUploads() {
@@ -79,7 +135,8 @@ async function main() {
 
     const ticket = await jsonPost(session.request, '/api/bind/ticket');
     assert(ticket.data.expires_in > 0);
-    login = privateProcess(agent, ['login', '--endpoint', base, '--credentials-file', credentials], 'traffic-enrollment.log');
+    fs.mkdirSync(agentState, { mode: 0o700 });
+    login = startAgent('enroll', ['login', '--endpoint', base, '--credentials-file', credentials], 'traffic-enrollment.log');
     const enrollment = '/komari.enrollment.v1.EnrollmentAdminService/';
     const candidates = await until('actual Agent enrollment', 60, async () => {
       assert.equal(login.child.exitCode, null, 'Agent exited before enrollment approval');
@@ -100,21 +157,17 @@ async function main() {
     execFileSync('sudo', ['install', '-d', '-o', 'root', '-g', gid, '-m', '2750', inbox]);
     const daemonArgs = [
       '--endpoint', base, '--credentials-file', credentials, '--disable-auto-update',
-      '--runtime-state-file', path.join(root, 'traffic-agent-runtime.json'),
-      '--privileged-state-file', path.join(root, 'traffic-agent-privileged.json'),
-      '--replay-state-file', path.join(root, 'traffic-agent-replay.json'),
+      '--runtime-state-file', path.join(agentState, 'runtime.json'),
+      '--privileged-state-file', path.join(agentState, 'privileged.json'),
+      '--replay-state-file', path.join(agentState, 'replay.json'),
     ];
-    const daemonEnv = { ...process.env, KOMARI_TRAFFIC_EVIDENCE_INBOX: inbox };
-    daemon = privateProcess(agent, daemonArgs, 'traffic-agent.log', daemonEnv);
+    daemon = startAgent('upload', daemonArgs, 'traffic-agent.log', true);
     const list = () => jsonPost(session.request, metrics + 'ListTrafficEvidence', { agentId });
     const empty = await list();
     assert.equal(empty.incidents?.length ?? 0, 0);
     assert.equal(empty.hours?.length ?? 0, 0);
 
-    collector = privateProcess('sudo', [
-      '-n', 'python3', '-B', path.resolve('e2e-agent/scripts/ci/test-traffic-anomaly.py'),
-      agent, path.join(root, 'bin', 'xray'), inbox,
-    ], 'traffic-collector.log');
+    collector = startCollector();
     const captured = await until('real flow snapshot and Xray hour to arrive via the enrolled Agent', 550, async () => {
       assert.equal(daemon.child.exitCode, null, 'Agent uploader stopped');
       assert([null, 0].includes(collector.child.exitCode), 'Real traffic fixture stopped');
@@ -153,7 +206,7 @@ async function main() {
     await expect(page.getByText(/^Xray ·/).first()).toBeVisible();
     await expect(page.getByText('192.0.2.2', { exact: true })).toHaveCount(0);
 
-    daemon.child.kill();
+    daemon.stop();
     await daemon.result;
     const initialUploads = successfulUploads();
     execFileSync('sudo', ['systemctl', 'restart', 'komari-e2e-panel.service'], { timeout: 30000 });
@@ -162,7 +215,7 @@ async function main() {
     }, body => body?.incidents?.some(row => row.id === incident.id));
     const afterRestart = await jsonPost(session.request, metrics + 'GetTrafficEvidenceIncident', payload);
     assert(afterRestart.incident.ingressSources.some(peer => peer.ip === '2001:db8:1::2'));
-    daemon = privateProcess(agent, daemonArgs, 'traffic-agent-replay.log', daemonEnv);
+    daemon = startAgent('replay', daemonArgs, 'traffic-agent-replay.log', true);
     await until('an authenticated duplicate submission after restarting the Agent', 45, async () => {
       assert.equal(daemon.child.exitCode, null);
       return successfulUploads();
@@ -181,10 +234,10 @@ async function main() {
     throw error;
   } finally {
     for (const p of [daemon, login]) {
-      if (p?.child.exitCode === null && p.child.signalCode === null) p.child.kill();
+      if (p?.child.exitCode === null && p.child.signalCode === null) p.stop();
     }
     if (collector?.child.exitCode === null && collector.child.signalCode === null) {
-      collector.child.kill();
+      collector.stop();
     }
     if (browser) await browser.close();
     await bootstrap.dispose();

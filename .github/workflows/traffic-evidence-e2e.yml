@@ -18,9 +18,21 @@ permissions:
 
 jobs:
   traffic-evidence:
-    name: Real Agent capture → panel → admin browser
+    name: ${{ matrix.distribution }} / capture → panel → browser
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distribution: Ubuntu 24.04
+            image: native
+          - distribution: Debian 13
+            image: debian13
+          - distribution: Rocky Linux 9
+            image: rocky9
+          - distribution: Alpine 3.22 without systemd
+            image: alpine322
     env:
       GOMAXPROCS: '2'
       GOMEMLIMIT: 3GiB
@@ -35,7 +47,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: r11234567/komari-agent
-          ref: d7ac90c0bc2c2bc20dd95a76eff3daccc76a2413
+          ref: e7a28650efb42eedfcc1b60544dec4e854834c3e
           path: e2e-agent
           submodules: recursive
           persist-credentials: false
@@ -51,8 +63,19 @@ jobs:
         run: bash scripts/ci/run-audit-check.sh traffic-provenance bash scripts/ci/e2e/provenance.sh
       - name: Build the exact embedded Web using the release action
         uses: ./.github/actions/build-frontend
+        with:
+          audit-artifact-suffix: -${{ matrix.image }}
       - name: Build the real server, Agent and installation tool
         run: bash scripts/ci/run-audit-check.sh traffic-build bash scripts/ci/e2e/build.sh
+      - name: Prepare the distro's capture tools and portable Agent
+        if: matrix.image != 'native'
+        working-directory: e2e-agent
+        env:
+          DISTRO: ${{ matrix.image }}
+          CGO_ENABLED: '0'
+        run: |
+          docker build --target "$DISTRO" --tag "komari-traffic-e2e:$DISTRO" - < scripts/ci/traffic-e2e.Dockerfile
+          go build -trimpath -o "$E2E_ROOT/bin/traffic-container-agent" .
       - name: Install browser, HTTPS proxy and flow tools
         run: |
           sudo apt-get update
@@ -67,6 +90,7 @@ jobs:
         run: bash scripts/ci/run-audit-check.sh traffic-setup bash scripts/ci/e2e/setup.sh
       - name: Enroll, capture real traffic and verify browser evidence
         env:
+          KOMARI_TRAFFIC_E2E_DISTRO: ${{ matrix.image }}
           NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
           NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
         run: bash scripts/ci/run-audit-check.sh traffic-evidence-e2e node scripts/ci/e2e/traffic-evidence.cjs
@@ -76,7 +100,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: traffic-evidence-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          name: traffic-evidence-e2e-${{ matrix.image }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ci-artifacts/
           retention-days: 7
           if-no-files-found: warn
