@@ -92,7 +92,7 @@ func Open(path string) (*Store, error) {
 		CREATE TABLE IF NOT EXISTS evidence (
 			agent_id TEXT NOT NULL, kind TEXT NOT NULL, record_id TEXT NOT NULL,
 			revision INTEGER NOT NULL, expires_at INTEGER NOT NULL,
-			summary BLOB NOT NULL, detail BLOB,
+			summary BLOB NOT NULL, detail BLOB, finalized INTEGER NOT NULL,
 			PRIMARY KEY (agent_id, kind, record_id)
 		);
 		CREATE INDEX IF NOT EXISTS evidence_by_agent ON evidence (agent_id, kind, revision DESC, record_id);
@@ -110,19 +110,20 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) Put(ctx context.Context, agent, kind, id string, revision, expires time.Time, summary, detail []byte) error {
+func (s *Store) Put(ctx context.Context, agent, kind, id string, revision, expires time.Time, summary, detail []byte, finalized bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	if _, err = tx.ExecContext(ctx, `
-		INSERT INTO evidence (agent_id, kind, record_id, revision, expires_at, summary, detail)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO evidence (agent_id, kind, record_id, revision, expires_at, summary, detail, finalized)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(agent_id, kind, record_id) DO UPDATE SET
-			revision=excluded.revision, expires_at=excluded.expires_at, summary=excluded.summary, detail=excluded.detail
-		WHERE evidence.kind='hour' AND evidence.revision < excluded.revision
-	`, agent, kind, id, revision.UnixNano(), expires.UnixNano(), summary, detail); err != nil {
+			revision=excluded.revision, expires_at=excluded.expires_at, summary=excluded.summary,
+			detail=excluded.detail, finalized=excluded.finalized
+		WHERE evidence.finalized=0 AND evidence.revision < excluded.revision
+	`, agent, kind, id, revision.UnixNano(), expires.UnixNano(), summary, detail, finalized); err != nil {
 		return err
 	}
 	limit := 168

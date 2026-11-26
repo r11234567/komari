@@ -136,6 +136,7 @@ async function main() {
 
     await page.goto('/admin/traffic-evidence');
     await expect(page.getByRole('heading', { name: 'Traffic evidence' })).toBeVisible();
+    await expect(page.getByText('Collecting', { exact: true })).toBeVisible();
     await expect(page.getByText('192.0.2.2', { exact: true })).toHaveCount(0);
     await page.getByRole('button', { name: 'View', exact: true }).click();
     const dialog = page.getByRole('dialog');

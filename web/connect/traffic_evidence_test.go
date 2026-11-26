@@ -12,6 +12,7 @@ import (
 	metrics "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
 	metricsconnect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -24,8 +25,8 @@ func TestTrafficEvidenceOnlyBoundAgentCanUpload(t *testing.T) {
 	event := &metrics.TrafficEvidenceIncident{
 		Id: uuid.NewString(), Reason: "fast_unexplained_ingress", InterfaceName: "eth0", Sampler: "nfpcapd",
 		Start: timestamppb.New(end.Add(-2 * time.Minute)), End: timestamppb.New(end),
-		TriggeredAt: timestamppb.New(end.Add(-time.Minute)), Complete: true,
-		Observed: &metrics.TrafficEvidenceBytes{RxBytes: 1000},
+		TriggeredAt: timestamppb.New(end.Add(-time.Minute)),
+		Observed:    &metrics.TrafficEvidenceBytes{RxBytes: 1000},
 		IngressSources: []*metrics.TrafficEvidencePeer{
 			{Ip: "192.0.2.2", Bytes: 700}, {Ip: "2001:db8::1", Bytes: 300},
 		},
@@ -50,10 +51,18 @@ func TestTrafficEvidenceOnlyBoundAgentCanUpload(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, response.Msg.Accepted)
 	}
+	event.Complete = true
+	event.End = timestamppb.New(end.Add(30 * time.Second))
+	response, err := agent.SubmitTrafficEvidence(ctx, connect.NewRequest(body))
+	require.NoError(t, err)
+	require.True(t, response.Msg.Accepted)
 	rows, err := trafficevidence.Current().List(ctx, testClientUUID, trafficevidence.Incident, time.Now())
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
-	require.NotContains(t, string(rows[0]), "192.0.2.2")
+	summary := new(metrics.TrafficEvidenceIncident)
+	require.NoError(t, proto.Unmarshal(rows[0], summary))
+	require.True(t, summary.Complete)
+	require.Empty(t, summary.IngressSources)
 	_, err = agent.GetTrafficEvidenceIncident(ctx, connect.NewRequest(&metrics.GetTrafficEvidenceIncidentRequest{
 		AgentId: testClientUUID, IncidentId: event.Id,
 	}))

@@ -44,6 +44,7 @@ func (s *metricsService) SubmitTrafficEvidence(ctx context.Context, req *connect
 	}
 	now := time.Now().UTC()
 	var kind, id string
+	var finalized bool
 	var revision, expires time.Time
 	var summary, detail []byte
 	switch r := req.Msg.Record.(type) {
@@ -69,6 +70,7 @@ func (s *metricsService) SubmitTrafficEvidence(ctx context.Context, req *connect
 			return nil, connectError(connect.CodeInvalidArgument, errInvalidEvidence)
 		}
 		kind, id = trafficevidence.Incident, event.Id
+		finalized = event.Complete
 		revision = event.End.AsTime()
 		expires = revision.Add(trafficevidence.IncidentRetention)
 		event = cleanEvidenceIncident(event)
@@ -84,7 +86,7 @@ func (s *metricsService) SubmitTrafficEvidence(ctx context.Context, req *connect
 		return nil, connectError(connect.CodeInternal, nil)
 	}
 	if expires.After(now) {
-		if err := store.Put(ctx, agent, kind, id, revision, expires, summary, detail); err != nil {
+		if err := store.Put(ctx, agent, kind, id, revision, expires, summary, detail, finalized); err != nil {
 			return nil, connectError(connect.CodeUnavailable, nil)
 		}
 	}
@@ -191,7 +193,7 @@ func validEvidenceHour(hour *metrics.TrafficEvidenceHour, now time.Time) bool {
 }
 
 func validEvidenceIncident(event *metrics.TrafficEvidenceIncident, now time.Time) bool {
-	if event == nil || !event.Complete || !validEvidenceID(event.Id) || !evidenceReason.MatchString(event.Reason) ||
+	if event == nil || !validEvidenceID(event.Id) || !evidenceReason.MatchString(event.Reason) ||
 		!evidenceLabel.MatchString(event.InterfaceName) || !evidenceLabel.MatchString(event.Sampler) ||
 		!validEvidenceTime(event.Start, now) || !validEvidenceTime(event.End, now) || !validEvidenceTime(event.TriggeredAt, now) {
 		return false
