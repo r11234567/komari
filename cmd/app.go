@@ -28,6 +28,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/database/trafficevidence"
 	"github.com/komari-monitor/komari/database/trafficledger"
 	"github.com/komari-monitor/komari/internal/diagnostics"
 	"github.com/komari-monitor/komari/internal/notifications"
@@ -283,6 +284,12 @@ func (a *App) InitStores() error {
 	metricstore.StartTelemetryScheduler()
 	a.addCleanup("telemetry-scheduler", metricstore.StopTelemetryScheduler)
 	a.startExportPolicy()
+	stopEvidence, err := trafficevidence.Start("./data/traffic-evidence/store.db")
+	if err != nil {
+		logger.Infof("traffic-evidence", "Traffic evidence storage unavailable: %v", err)
+	} else {
+		a.addCleanup("traffic-evidence", stopEvidence)
+	}
 	return nil
 }
 

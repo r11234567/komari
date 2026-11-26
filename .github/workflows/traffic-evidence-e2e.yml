@@ -1,0 +1,82 @@
+name: Traffic evidence E2E
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/traffic-evidence-e2e.yml'
+      - '.github/actions/build-frontend/**'
+      - 'cmd/app.go'
+      - 'database/trafficevidence/**'
+      - 'scripts/ci/e2e/**'
+      - 'web/connect/**'
+      - 'third_party/komari-proto'
+      - 'third_party/komari-web'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  traffic-evidence:
+    name: Real Agent capture → panel → admin browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 3GiB
+      CGO_ENABLED: '1'
+      NODE_OPTIONS: --max-old-space-size=4096
+      KOMARI_E2E_SKIP_CSV: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: r11234567/komari-agent
+          ref: ceca08a25534122d4d7ba35bbd95be105924a050
+          path: e2e-agent
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: e2e-agent/go.mod
+      - name: Set isolated fixture paths
+        run: |
+          printf 'E2E_ROOT=%s/komari-e2e\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'E2E_TOOLS=%s/komari-e2e-tools\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'E2E_ARTIFACTS=%s/ci-artifacts/e2e\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - name: Verify the protocol and source revisions
+        run: bash scripts/ci/run-audit-check.sh traffic-provenance bash scripts/ci/e2e/provenance.sh
+      - name: Build the exact embedded Web using the release action
+        uses: ./.github/actions/build-frontend
+      - name: Build the real server, Agent and installation tool
+        run: bash scripts/ci/run-audit-check.sh traffic-build bash scripts/ci/e2e/build.sh
+      - name: Install browser, HTTPS proxy and flow tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nginx libnss3-tools nfdump iproute2
+          sudo systemctl stop nfdump
+          npm install --prefix "$E2E_TOOLS" --no-audit --no-fund --no-package-lock @playwright/test@1.56.1
+          "$E2E_TOOLS/node_modules/.bin/playwright" install --with-deps chromium
+          bash e2e-agent/scripts/ci/fetch-traffic-test-xray.sh "$E2E_ROOT/bin"
+      - name: Validate bounded storage, retention and upload authentication
+        run: bash scripts/ci/run-audit-check.sh traffic-evidence-storage go test ./database/trafficevidence ./web/connect -run TrafficEvidence -count=1 -v
+      - name: Start HTTPS panel and install the Agent
+        run: bash scripts/ci/run-audit-check.sh traffic-setup bash scripts/ci/e2e/setup.sh
+      - name: Enroll, capture real traffic and verify browser evidence
+        env:
+          NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
+        run: bash scripts/ci/run-audit-check.sh traffic-evidence-e2e node scripts/ci/e2e/traffic-evidence.cjs
+      - name: Collect service logs and destroy temporary services and secrets
+        if: always()
+        run: bash scripts/ci/e2e/cleanup.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: traffic-evidence-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 7
+          if-no-files-found: warn
