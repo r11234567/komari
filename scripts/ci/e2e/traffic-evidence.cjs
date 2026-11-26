@@ -48,13 +48,18 @@ function privateProcess(binary, args, name, env = process.env) {
   }
 }
 
+function successfulUploads() {
+  const logs = fs.readFileSync(path.join(process.env.E2E_ARTIFACTS, 'nginx-access.log'), 'utf8');
+  return logs.split('\n').filter(line => line.includes('/SubmitTrafficEvidence 200 ')).length;
+}
+
 async function main() {
   const bootstrap = await request.newContext({ baseURL: base });
   let browser, login, daemon, collector;
   try {
     const username = 'evidence-e2e';
     const password = `Ci9-${crypto.randomBytes(24).toString('hex')}`;
-    console.log(`::add-mask::${password}`);
+    if (process.env.GITHUB_ACTIONS === 'true') console.log(`::add-mask::${password}`);
     await jsonPost(bootstrap, '/api/install/complete', {
       username, password, sitename: 'Traffic evidence E2E', description: '', metric_dsn: './data/metrics.db',
     });
@@ -144,11 +149,12 @@ async function main() {
     }
     await dialog.getByRole('button', { name: 'Close' }).click();
     await page.getByRole('tab', { name: 'Hourly breakdown' }).click();
-    await expect(page.getByText(/^Xray ·/)).toBeVisible();
+    await expect(page.getByText(/^Xray ·/).first()).toBeVisible();
     await expect(page.getByText('192.0.2.2', { exact: true })).toHaveCount(0);
 
     daemon.child.kill();
     await daemon.result;
+    const initialUploads = successfulUploads();
     execFileSync('sudo', ['systemctl', 'restart', 'komari-e2e-panel.service'], { timeout: 30000 });
     await until('panel after restart', 45, async () => {
       try { return await list(); } catch { return null; }
@@ -158,9 +164,8 @@ async function main() {
     daemon = privateProcess(agent, daemonArgs, 'traffic-agent-replay.log', daemonEnv);
     await until('an authenticated duplicate submission after restarting the Agent', 45, async () => {
       assert.equal(daemon.child.exitCode, null);
-      const logs = fs.readFileSync(path.join(process.env.E2E_ARTIFACTS, 'nginx-access.log'), 'utf8');
-      return logs.split('\n').filter(line => line.includes('/SubmitTrafficEvidence 200 ')).length;
-    }, count => count >= 4);
+      return successfulUploads();
+    }, count => count >= initialUploads + captured.hours.length + captured.incidents.length);
     assert.equal((await list()).incidents.length, 1, 'retry duplicated the incident');
 
     const captureExit = await collector.result;

@@ -11,8 +11,9 @@ import (
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/database/auditlog"
-	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/trafficevidence"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	metrics "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
@@ -98,7 +99,8 @@ func trafficEvidenceReader(ctx context.Context, agent string) (*trafficevidence.
 	if !validEvidenceID(agent) {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("invalid agent ID"))
 	}
-	if _, err := clients.GetClientByUUID(agent); err != nil {
+	var node models.Client
+	if err := dbcore.GetDBInstance().WithContext(ctx).Select("uuid").Where("uuid = ?", agent).Take(&node).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, connectError(connect.CodeNotFound, nil)
 		}
