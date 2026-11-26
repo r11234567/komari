@@ -372,7 +372,7 @@ func mountRestrictedStatic(r *gin.Engine, noRoute func(handlers ...gin.HandlerFu
 		frontendpublic.StaticPanel(r.Group("/"), noRoute)
 		return
 	}
-	frontendpublic.Static(r.Group("/"), noRoute)
+	frontendpublic.Static(r.Group("/"), noRoute, false)
 }
 
 // RunInstallGuide starts the restricted first-run HTTP server.

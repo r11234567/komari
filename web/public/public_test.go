@@ -221,7 +221,7 @@ func TestSharedListenerOmitsCustomHTML(t *testing.T) {
 	}
 
 	router := gin.New()
-	Static(router.Group("/"), router.NoRoute)
+	Static(router.Group("/"), router.NoRoute, false)
 
 	tests := []struct {
 		path            string
@@ -262,7 +262,7 @@ func TestSharedListenerOmitsCustomHTML(t *testing.T) {
 	}
 }
 
-func TestInstalledThemeIsServedOnlyByPublicListener(t *testing.T) {
+func TestInstalledThemeServingModes(t *testing.T) {
 	t.Chdir(t.TempDir())
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
@@ -283,8 +283,9 @@ func TestInstalledThemeIsServedOnlyByPublicListener(t *testing.T) {
 	if err := config.Set(config.ThemeKey, "third-party"); err != nil {
 		t.Fatal(err)
 	}
-	shared, public := gin.New(), gin.New()
-	Static(shared.Group("/"), shared.NoRoute)
+	shared, trusted, public := gin.New(), gin.New(), gin.New()
+	Static(shared.Group("/"), shared.NoRoute, false)
+	Static(trusted.Group("/"), trusted.NoRoute, true)
 	StaticPublic(public.Group("/"), public.NoRoute, nil)
 	check := func(server *gin.Engine, path string, status int, hasMarker bool) {
 		t.Helper()
@@ -296,8 +297,33 @@ func TestInstalledThemeIsServedOnlyByPublicListener(t *testing.T) {
 	}
 	check(shared, "/", http.StatusOK, false)
 	check(shared, "/themes/third-party/dist/index.html", http.StatusNotFound, false)
+	check(trusted, "/", http.StatusOK, true)
+	check(trusted, "/index.html", http.StatusOK, true)
+	check(trusted, "/instance/example", http.StatusOK, true)
+	check(trusted, "/admin", http.StatusOK, false)
+	check(trusted, "/login", http.StatusOK, false)
+	check(trusted, "/api/missing", http.StatusNotFound, false)
+	check(trusted, "/themes/third-party/dist/index.html", http.StatusNotFound, false)
 	check(public, "/", http.StatusOK, true)
 	check(public, "/themes/third-party/dist/index.html", http.StatusOK, true)
+
+	asset := filepath.Join(dir, "switch-theme.js")
+	if err := os.WriteFile(asset, []byte("// "+marker), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	check(trusted, "/switch-theme.js", http.StatusOK, true)
+	worker := httptest.NewRequest(http.MethodGet, "/switch-theme.js", nil)
+	worker.Header.Set("Service-Worker", "script")
+	workerResponse := httptest.NewRecorder()
+	trusted.ServeHTTP(workerResponse, worker)
+	if workerResponse.Code != http.StatusNotFound {
+		t.Fatalf("theme service worker script status = %d, want 404", workerResponse.Code)
+	}
+	if err := config.Set(config.ThemeKey, DefaultTheme); err != nil {
+		t.Fatal(err)
+	}
+	check(trusted, "/", http.StatusOK, false)
+	check(trusted, "/switch-theme.js", http.StatusNotFound, false)
 }
 
 func TestEnsureBundledThemesUsesOfficialDefaultForNewInstall(t *testing.T) {
@@ -522,7 +548,7 @@ func TestStaticKeepsSystemUIAndPublicThemeResourcesIsolated(t *testing.T) {
 	}
 
 	router := gin.New()
-	Static(router.Group("/"), router.NoRoute)
+	Static(router.Group("/"), router.NoRoute, false)
 
 	request := func(requestPath string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()

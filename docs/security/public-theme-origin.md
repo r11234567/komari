@@ -1,9 +1,29 @@
-# Serving custom themes on a separate origin
+# Serving installed public themes
 
-The shared listener serves the embedded public and management applications.
-Installed themes, custom head and body HTML, and public plugin HTTP routes and
-hooks need a dedicated public hostname. Their stored settings stay in the
-database while the shared listener is in use.
+## One hostname
+
+Set `KOMARI_ALLOW_SHARED_ORIGIN_THEMES=true` in the Komari process environment.
+In Docker Compose, add it under the Komari service and recreate that service:
+
+```yaml
+environment:
+  KOMARI_ALLOW_SHARED_ORIGIN_THEMES: "true"
+```
+
+Open **Settings → Theme** or **Theme Market**, choose an installed theme and
+select **Set as Active Theme**. You can switch back to the built-in theme from
+the same page. When the setting is unset, Komari serves the built-in theme on
+the shared listener.
+
+An activated theme runs on the same browser origin as the management panel.
+Only activate themes you trust with access to that origin. Keep using separate
+origins for untrusted themes. Site-wide custom HTML and public plugin HTTP hooks
+are available through the dedicated public origin.
+
+## Separate public and management hostnames
+
+The dedicated public listener serves installed themes, custom head and body
+HTML, and public plugin HTTP routes and hooks.
 
 Configure both upstreams in the reverse proxy. For example:
 

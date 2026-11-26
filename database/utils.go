@@ -14,6 +14,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/datadir"
 	"github.com/komari-monitor/komari/pkg/config"
+	publicweb "github.com/komari-monitor/komari/web/public"
 )
 
 func GetPublicInfo() (map[string]interface{}, error) {
@@ -39,9 +40,7 @@ func GetPublicInfo() (map[string]interface{}, error) {
 	if !hasKey("description") {
 		cst.Description = "Komari Monitor, a simple server monitoring tool."
 	}
-	if !hasKey("theme") {
-		cst.Theme = "default"
-	}
+	cst.Theme = publicweb.EffectiveThemeID(cst.Theme)
 	if !hasKey("o_auth_provider") {
 		cst.OAuthProvider = "github"
 	}
