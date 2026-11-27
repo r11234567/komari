@@ -10,6 +10,7 @@ const browserURL = 'https://127.0.0.1:29483';
 const agentURL = 'https://10.0.2.100:8443';
 const manifest = '/etc/komari/services/komari-agent.json';
 const binaryDir = '/usr/lib/komari/komari-agent';
+const fixtureName = 'Approval node';
 const sshOptions = ['-i', path.join(dir, 'client'), '-o', `UserKnownHostsFile=${path.join(dir, 'known_hosts')}`,
   '-o', 'StrictHostKeyChecking=yes', '-o', 'BatchMode=yes', '-o', 'LogLevel=ERROR'];
 
@@ -51,7 +52,7 @@ async function verifyRootApproval(context, page) {
   };
   await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: browserURL });
   await page.goto('/admin/servers');
-  const node = page.getByRole('row').filter({ hasText: 'Host approval fixture node' });
+  const node = page.getByRole('row').filter({ hasText: fixtureName });
   await node.getByRole('button', { name: '配置下发', exact: true }).click();
   const deployment = page.getByRole('dialog', { name: '配置下发', exact: true });
   const heading = deployment.getByText('特权配置下发状态', { exact: true });
@@ -121,7 +122,7 @@ async function main() {
       return candidate?.userCode;
     }, { timeout: 30000 }).toBeTruthy();
     const { agentId } = await receive(context, admin + 'ApproveEnrollment', {
-      userCode: candidate.userCode, newAgent: { name: 'Host approval fixture node' },
+      userCode: candidate.userCode, newAgent: { name: fixtureName },
     });
     assert.match(agentId, /^[0-9a-f-]{36}$/);
     await expect.poll(() => enrollment.exitCode, { timeout: 45000 }).toBe(0);
