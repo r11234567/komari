@@ -81,6 +81,13 @@ func PrepareOperation(db *gorm.DB, r *hostv1.PrepareHostOperationRequest) (*host
 		if err != nil || a == nil {
 			return errors.New("missing signed authorization")
 		}
+		missingRoot, err := missingRootApproval(tx, state, row, a)
+		if err != nil {
+			return err
+		}
+		if missingRoot {
+			return errors.New("remote root requires fresh panel confirmation and local authorization")
+		}
 		required := make([]int32, 0, len(a.Actions))
 		for _, action := range a.Actions {
 			required = append(required, int32(action))
@@ -228,6 +235,13 @@ func Observe(db *gorm.DB, id, key string, o *hostv1.DaemonObservation) (Revision
 		if err != nil || a == nil {
 			return errors.New("missing authorization")
 		}
+		missingRoot, err := missingRootApproval(tx, state, row, a)
+		if err != nil {
+			return err
+		}
+		if missingRoot {
+			return errors.New("remote root requires fresh panel confirmation and local authorization")
+		}
 		if len(a.Actions) > 0 {
 			var op models.ClientHostOperation
 			if err := tx.First(&op, "client = ? AND operation_id = ?", id, o.OperationId).Error; err != nil {
@@ -237,8 +251,9 @@ func Observe(db *gorm.DB, id, key string, o *hostv1.DaemonObservation) (Revision
 				return errors.New("host operation has not completed locally")
 			}
 			for _, action := range a.Actions {
-				if action == hostv1.HostAction_HOST_ACTION_SET_SERVICE_IDENTITY && o.StartupId == op.PriorStartupID {
-					return errors.New("identity conversion requires a restarted daemon")
+				if (action == hostv1.HostAction_HOST_ACTION_SET_SERVICE_IDENTITY ||
+					action == hostv1.HostAction_HOST_ACTION_ENABLE_ROOT_EXECUTION) && o.StartupId == op.PriorStartupID {
+					return errors.New("identity or remote root authorization requires a restarted daemon")
 				}
 			}
 		} else if !row.InstallationBaseline && (row.NonceExpires == nil || !time.Now().Before(*row.NonceExpires)) {
@@ -252,6 +267,10 @@ func Observe(db *gorm.DB, id, key string, o *hostv1.DaemonObservation) (Revision
 		available := func(c *reportv1.CapabilityState) bool { return c != nil && c.Available }
 		if available(c.RemoteControl) != settings.RemoteControlEnabled || available(c.Webssh) != (settings.RemoteControlEnabled && settings.WebSSHEnabled) || available(c.Execution) != (settings.RemoteControlEnabled && settings.ExecutionEnabled) {
 			return errors.New("effective remote capabilities do not match approved settings")
+		}
+		if available(c.RootExecution) != (settings.RootExecutionAllowed && settings.RemoteControlEnabled &&
+			o.PrivilegeMode == reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT) {
+			return errors.New("effective remote root capability does not match approved settings")
 		}
 		if !settings.EnableGPU && (available(c.Gpu) || available(c.DetailedGpu)) {
 			return errors.New("GPU collection exceeds approval")

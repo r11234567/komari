@@ -36,6 +36,59 @@ async function receive(context, url, data) {
   return response.json();
 }
 
+async function verifyRootApproval(context, page, agentId) {
+  const qr = await context.request.post('/api/admin/2fa/generate', { headers: { Origin: browserURL } });
+  assert.equal(qr.status(), 200);
+  const cookie = (await context.cookies()).find(({ name }) => name === '__Host-komari_2fa_secret');
+  assert(cookie);
+  let otp = await freshTOTP(cookie.value, -1);
+  await receive(context, `/api/admin/2fa/enable?code=${otp.code}`);
+  const confirm = async () => {
+    await page.getByRole('button', { name: '确认此版本', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('button', { name: 'Start verification / send code' }).click();
+    otp = await freshTOTP(cookie.value, otp.counter);
+    await dialog.locator('input').fill(otp.code);
+    await dialog.getByRole('button', { name: 'Verify and continue' }).click();
+    await expect(dialog).toHaveCount(0, { timeout: 15000 });
+  };
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: browserURL });
+  await page.goto(`/admin/privileged-config?agent=${agentId}`);
+  const applied = page.getByText('已应用', { exact: true });
+  await expect(applied).toBeVisible({ timeout: 30000 });
+  const edit = page.getByRole('button', { name: '编辑新版本', exact: true });
+  const save = page.getByRole('button', { name: '保存并等待确认', exact: true });
+  const checkbox = name => page.getByRole('checkbox', { name, exact: true });
+  await edit.click();
+  await checkbox('远程控制').check();
+  await checkbox('WebSSH').check();
+  await save.click();
+  await confirm();
+  await expect(applied).toBeVisible({ timeout: 30000 });
+  await expect(page.getByText('WebSSH：开启', { exact: true })).toBeVisible();
+  await expect(page.getByText('允许 WebSSH 和远程执行使用 root：关闭', { exact: true })).toBeVisible();
+
+  await edit.click();
+  await checkbox('允许 WebSSH 和远程执行使用 root').check();
+  await save.click();
+  await confirm();
+  await expect(page.getByText('等待本机管理员操作', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Komari WebSSH 不支持此授权/)).toBeVisible();
+  await expect(page.getByText('允许 WebSSH 和远程执行使用 root：关闭', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '复制本机授权命令', exact: true }).click();
+  const command = await page.evaluate(() => navigator.clipboard.readText());
+  assert.match(command, /^sudo komari-host apply --manifest \/etc\/komari\/services\/komari-agent\.json --revision [1-9][0-9]*$/);
+  const unattended = spawnSync('ssh', args(29482, command), { encoding: 'utf8', timeout: 10000 });
+  assert.equal(unattended.status, 1);
+  assert.match(unattended.stderr, /direct interactive|direct SSH|active SSH/);
+  execFileSync('python3', [path.join(__dirname, 'forensic-vms-capture.py'), dir, command, 'root-approval'],
+    { timeout: 85000, stdio: 'inherit' });
+  await expect(applied).toBeVisible({ timeout: 30000 });
+  await expect(page.getByText('允许 WebSSH 和远程执行使用 root：开启', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '复制本机授权命令', exact: true })).toHaveCount(0);
+  console.log('Verified an existing root Agent with WebSSH: panel TOTP, clipboard command, SSH/PAM confirmation and applied acknowledgement');
+}
+
 async function main() {
   const keys = fs.readFileSync(path.join(dir, 'panel-public-keys'), 'utf8');
   const recipientKey = keys.match(/Recipient public key: (\S+)/)[1];
@@ -80,6 +133,10 @@ async function main() {
     assert.match(panelKey, /^[a-zA-Z0-9+/=]+$/);
     ssh(29482, `${binaryDir}/komari-host trust --manifest ${manifest} --agent-id ${agentId} --endpoint ${agentURL} --panel-key-id ${panelKeyID} --panel-public-key ${panelKey} --service-user forensic-fixture && systemctl start komari-agent.service`);
 
+    if (process.argv[3] === 'root-approval') {
+      await verifyRootApproval(context, page, agentId);
+      return;
+    }
     const command = `${binaryDir}/komari-host qga-forensics --manifest ${manifest} --recipient-public-key ${recipientKey} --receipt-public-key ${receiptKey} --duration 45s`;
     const withoutTTY = spawnSync('ssh', args(29482, `SSH_TTY=/dev/pts/1 SSH_CONNECTION='192.0.2.2 2345 192.0.2.1 22' ${command}`), { encoding: 'utf8', timeout: 10000 });
     assert.equal(withoutTTY.status, 1);
