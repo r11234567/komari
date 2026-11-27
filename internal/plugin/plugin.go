@@ -288,7 +288,7 @@ func (m *Manager) instanceFor(short string) *Instance {
 // a manager read lock through rpcHandler) without deadlocking. On failure the
 // instance is dropped and its hooks and RPC methods are cleaned up.
 func (m *Manager) load(short string) error {
-	if isLegacyPasskeyPlugin(short) {
+	if IsRetiredPlugin(short) {
 		return fmt.Errorf("legacy Passkey plugin is retired; configure native Passkey instead")
 	}
 	dir := filepath.Join(datadir.Resolve(DataDir), short)
@@ -296,7 +296,7 @@ func (m *Manager) load(short string) error {
 	if err != nil {
 		return err
 	}
-	if isLegacyPasskeyPlugin(short, info.Short) {
+	if IsRetiredPlugin(short, info.Short) {
 		return fmt.Errorf("legacy Passkey plugin is retired; configure native Passkey instead")
 	}
 	if err := CheckKomariVersion(info.Komari); err != nil {
@@ -497,7 +497,7 @@ func (m *Manager) setEnabled(short string, enabled, approved bool) error {
 	if !enabled {
 		st := m.stateStore().get(short)
 		st.Enabled = false
-		if isLegacyPasskeyPlugin(short, info.Short) {
+		if IsRetiredPlugin(short, info.Short) {
 			st.ApprovedPermissionsHash = ""
 			st.ApprovedPackageDigest = ""
 		}
@@ -506,7 +506,7 @@ func (m *Manager) setEnabled(short string, enabled, approved bool) error {
 		}
 		return m.stateStore().set(short, st)
 	}
-	if isLegacyPasskeyPlugin(short, info.Short) {
+	if IsRetiredPlugin(short, info.Short) {
 		err := fmt.Errorf("legacy Passkey plugin is retired; configure native Passkey instead")
 		st := m.stateStore().get(short)
 		st.Enabled = false
@@ -642,7 +642,7 @@ func (m *Manager) reload(short string) error {
 // the load failure for the startup error summary.
 func (m *Manager) disableWithError(short string, st PluginState, err error) error {
 	st.Enabled = false
-	if isLegacyPasskeyPlugin(short) {
+	if IsRetiredPlugin(short) {
 		st.ApprovedPermissionsHash = ""
 		st.ApprovedPackageDigest = ""
 	}

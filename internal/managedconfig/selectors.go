@@ -120,24 +120,31 @@ func ResolveForOutput(values map[string]any, items []models.ManagedThemeConfigur
 }
 
 func NodeIDs(value any) []string {
-	raw, ok := value.(string)
-	if !ok {
-		return nil
-	}
-	var ids []string
-	if json.Unmarshal([]byte(raw), &ids) != nil {
-		return nil
-	}
-	return ids
+	return selectorIDs[string](value)
 }
 
 func PingTaskIDs(value any) []uint {
-	raw, ok := value.(string)
-	if !ok {
+	return selectorIDs[uint](value)
+}
+
+func selectorIDs[T string | uint](value any) []T {
+	var raw []byte
+	switch value := value.(type) {
+	case string:
+		raw = []byte(value) // Existing forms store a JSON string.
+	case []T:
+		return value
+	case []any:
+		var err error
+		raw, err = json.Marshal(value)
+		if err != nil {
+			return nil
+		}
+	default:
 		return nil
 	}
-	var ids []uint
-	if json.Unmarshal([]byte(raw), &ids) != nil {
+	var ids []T
+	if json.Unmarshal(raw, &ids) != nil {
 		return nil
 	}
 	return ids

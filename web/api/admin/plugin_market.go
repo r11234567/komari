@@ -47,9 +47,17 @@ type PluginMarketPlugin struct {
 	Download    string `json:"download"`
 	SHA256      string `json:"sha256"`
 	Komari      string `json:"komari"`
+	Compatible  bool   `json:"compatible"`
+	Retired     bool   `json:"retired,omitempty"`
 	Installable bool   `json:"installable"`
 	SourceID    string `json:"source_id,omitempty"`
 	SourceName  string `json:"source_name,omitempty"`
+}
+
+func (p *PluginMarketPlugin) setPackageAvailability() {
+	p.Compatible = plugin.CheckKomariVersion(p.Komari) == nil
+	p.Retired = plugin.IsRetiredPlugin(p.Short)
+	p.Installable = p.Compatible && !p.Retired && p.Download != "" && p.SHA256 != ""
 }
 
 type pluginMarketCatalog struct {
@@ -306,6 +314,14 @@ func InstallPluginFromMarket(c *gin.Context) {
 		api.RespondError(c, http.StatusNotFound, "Plugin not found in source")
 		return
 	}
+	if selected.Retired {
+		api.RespondError(c, http.StatusBadRequest, "This plugin is retired")
+		return
+	}
+	if err := plugin.CheckKomariVersion(selected.Komari); err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	if !selected.Installable {
 		api.RespondError(c, http.StatusBadRequest, "This plugin does not provide an installable package")
 		return
@@ -371,8 +387,7 @@ func fetchPluginMarketCatalog(source PluginMarketSource, force bool) ([]PluginMa
 			return nil, fmt.Errorf("plugin %q: %w", plugins[i].Short, err)
 		}
 		plugins[i].SHA256 = strings.TrimPrefix(strings.ToLower(plugins[i].SHA256), "sha256:")
-		plugins[i].Installable = plugins[i].Download != "" && plugins[i].SHA256 != "" &&
-			plugin.CheckKomariVersion(plugins[i].Komari) == nil
+		plugins[i].setPackageAvailability()
 		plugins[i].SourceID = source.ID
 		plugins[i].SourceName = source.Name
 	}
