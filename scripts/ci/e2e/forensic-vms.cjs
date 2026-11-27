@@ -57,8 +57,10 @@ async function verifyRootApproval(context, page, agentId) {
   const node = page.getByRole('row').filter({ hasText: 'Synthetic QGA node' });
   await node.getByRole('button', { name: '配置下发', exact: true }).click();
   const deployment = page.getByRole('dialog', { name: '配置下发', exact: true });
-  await expect(deployment.getByText('特权配置下发状态', { exact: true })).toBeVisible();
-  const applied = page.getByText('已应用', { exact: true });
+  const heading = deployment.getByText('特权配置下发状态', { exact: true });
+  await expect(heading).toBeVisible();
+  const privilege = heading.locator('..');
+  const applied = privilege.getByText('已应用', { exact: true });
   await expect(applied).toBeVisible({ timeout: 30000 });
   const edit = page.getByRole('button', { name: '编辑新版本', exact: true });
   const save = page.getByRole('button', { name: '保存并等待确认', exact: true });
