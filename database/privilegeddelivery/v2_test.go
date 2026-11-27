@@ -191,7 +191,12 @@ func TestV2SameIdentityApprovalExpiresAndCanBeReissued(t *testing.T) {
 	require.NotEqual(t, r.Nonce, renewed.Nonce)
 	_, err = Observe(db, id, "old-generation", observation(r))
 	require.Error(t, err)
-	_, err = Observe(db, id, "renewed", observation(renewed))
+	ack := observation(renewed)
+	ack.ObservedAt = timestamppb.New(renewed.ConfirmedAt.Add(-time.Minute))
+	_, err = Observe(db, id, "before-confirmation", ack)
+	require.ErrorContains(t, err, "invalid observation time")
+	ack.ObservedAt = timestamppb.New(renewed.ConfirmedAt.Add(-2 * time.Second))
+	_, err = Observe(db, id, "renewed", ack)
 	require.NoError(t, err)
 }
 func TestV2LeaseExpiryFailureAndReceiptConflict(t *testing.T) {
@@ -254,6 +259,89 @@ func TestV2HashBindsRootExecutionPermission(t *testing.T) {
 	require.Equal(t, "732d1dcb21b8c7f11ee60fb34e3fb182658abed2d5b0a2e8f7f535cb22d71be2", settingsHash(settings))
 	settings.RootExecutionAllowed = true
 	require.Equal(t, "905ed93eb53892e1f086adcd3c2cd46ad0cdcd913568879d0275c501790e01fa", settingsHash(settings))
+}
+
+func TestV2RootExecutionRequiresFreshLocalOperationForExistingRootAgent(t *testing.T) {
+	db, id := fixtureV2(t)
+	_, err := Negotiate(db, id, "custom.service", "boot-before", 1, []int32{1, 2, 3, 4})
+	require.NoError(t, err)
+	settings := Settings{RequiredPrivilegeMode: 1, RemoteControlEnabled: true, WebSSHEnabled: true, ExecutionEnabled: true, RescueHelperEnabled: true}
+	_, ordinary := saveConfirm(t, db, id, settings)
+	prepare(t, db, id, ordinary)
+	localSuccess(t, db, id)
+	withHelper := func(r Revision) *hostv1.DaemonObservation {
+		o := observation(r)
+		o.HelperInstalled, o.HelperRunning, o.HelperAuthorized, o.HelperLeaseReady = true, true, true, true
+		o.EffectiveCapabilities.RescueHelper = &reportv1.CapabilityState{Available: true}
+		return o
+	}
+	o := withHelper(ordinary)
+	o.OperationId = "operation"
+	_, err = Observe(db, id, "ordinary-ack", o)
+	require.NoError(t, err)
+
+	settings.RootExecutionAllowed = true
+	_, root := saveConfirm(t, db, id, settings)
+	require.Equal(t, StateNeedsManualAuthorization, root.State)
+	auth, err := Authorization(root)
+	require.NoError(t, err)
+	require.Equal(t, []hostv1.HostAction{hostv1.HostAction_HOST_ACTION_ENABLE_ROOT_EXECUTION}, auth.Actions)
+	o = withHelper(root)
+	o.EffectiveCapabilities.RootExecution = &reportv1.CapabilityState{Available: true}
+	_, err = Observe(db, id, "premature-root-ack", o)
+	require.ErrorContains(t, err, "acknowledgement")
+	allowed, err := clients.PrivilegedCapabilityAllowedWithDB(db, id, "root")
+	require.NoError(t, err)
+	require.False(t, allowed)
+
+	// A previously deployed panel could have queued this setting without a local action.
+	auth.Actions = nil
+	legacyAuthorization, err := proto.Marshal(auth)
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&models.ClientPrivilegedRevision{}).Where("client = ? AND revision = ?", id, root.Revision).
+		Updates(map[string]any{"state": StateAwaitingAgent, "authorization": legacyAuthorization}).Error)
+	_, err = Observe(db, id, "old-panel-root-ack", o)
+	require.ErrorContains(t, err, "fresh panel confirmation and local authorization")
+	expired, err := GetStateWithDB(db, id)
+	require.NoError(t, err)
+	require.Equal(t, StateExpired, expired.Desired.State)
+	fresh, err := ConfirmWithDB(db, id, root.Revision, "admin")
+	require.NoError(t, err)
+	require.Equal(t, root.Revision, fresh.Revision)
+	require.Equal(t, root.ApprovalGeneration+1, fresh.ApprovalGeneration)
+	require.NotEqual(t, root.Nonce, fresh.Nonce)
+	require.NoError(t, db.Model(&models.ClientPrivilegedRevision{}).Where("client = ? AND revision = ?", id, root.Revision).
+		Update("nonce_expires", time.Now().Add(-time.Second)).Error)
+	expired, err = GetStateWithDB(db, id)
+	require.NoError(t, err)
+	require.Equal(t, StateExpired, expired.Desired.State)
+	fresh, err = ConfirmWithDB(db, id, root.Revision, "admin")
+	require.NoError(t, err)
+	require.Equal(t, root.ApprovalGeneration+2, fresh.ApprovalGeneration)
+	_, err = PrepareOperation(db, &hostv1.PrepareHostOperationRequest{AgentId: id, OperationId: "old",
+		Revision: root.Revision, ApprovalGeneration: root.ApprovalGeneration, ConfigHash: root.ConfigHash, Nonce: root.Nonce})
+	require.Error(t, err)
+	_, err = PrepareOperation(db, &hostv1.PrepareHostOperationRequest{AgentId: id, OperationId: "root-operation",
+		Revision: fresh.Revision, ApprovalGeneration: fresh.ApprovalGeneration, ConfigHash: fresh.ConfigHash, Nonce: fresh.Nonce})
+	require.NoError(t, err)
+	_, err = ReportOperation(db, &hostv1.ReportHostOperationRequest{AgentId: id, OperationId: "root-operation",
+		ReceiptId: "root-success", Phase: hostv1.HostOperationPhase_HOST_OPERATION_PHASE_LOCAL_APPLIED, LocalAuthentication: "pam", Operator: "admin"})
+	require.NoError(t, err)
+	o = withHelper(fresh)
+	o.OperationId = "root-operation"
+	o.StartupId = "boot-with-root"
+	_, err = Observe(db, id, "without-root-capability", o)
+	require.ErrorContains(t, err, "remote root capability")
+	o.EffectiveCapabilities.RootExecution = &reportv1.CapabilityState{Available: true}
+	_, err = Observe(db, id, "confirmed-root-ack", o)
+	require.NoError(t, err)
+	allowed, err = clients.PrivilegedCapabilityAllowedWithDB(db, id, "root")
+	require.NoError(t, err)
+	require.True(t, allowed)
+
+	settings.RootExecutionAllowed = false
+	_, restricted := saveConfirm(t, db, id, settings)
+	require.Equal(t, StateAwaitingAgent, restricted.State)
 }
 
 func TestV2HelperInstallDoesNotPromoteOrdinaryAgent(t *testing.T) {

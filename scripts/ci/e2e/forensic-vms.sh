@@ -4,13 +4,20 @@ umask 077
 panel_source=$(cd "$(dirname "$0")/../../.." && pwd)
 agent_source=$(realpath "${1:?Agent checkout required}")
 image=$(realpath "${2:?verified Ubuntu cloud image required}")
+scenario=${3:-forensic}
+case "$scenario" in forensic|root-approval) ;; *) exit 2 ;; esac
 (cd "$(dirname "$image")" && sha256sum --check image.sha256)
 work=$(mktemp -d /tmp/komari-forensic-vms.XXXXXX)
 panel_vm= agent_vm= proxy=
 cleanup() {
     status=$?
     if (( status != 0 )) && [[ -s "$work/nginx-access.log" ]]; then
-        grep -F 'SealedRecordService' "$work/nginx-access.log" | tail -n 12 || true
+        grep -E 'SealedRecordService|PrivilegedDeliveryService|HostOperationService' "$work/nginx-access.log" | tail -n 16 || true
+    fi
+    if (( status != 0 )) && [[ -s "$work/known_hosts" ]]; then
+        ssh -i "$work/client" -o BatchMode=yes -o ConnectTimeout=3 -o LogLevel=ERROR \
+            -o "UserKnownHostsFile=$work/known_hosts" -p 29482 root@127.0.0.1 \
+            "journalctl -u komari-agent.service -n 100 --no-pager | grep -Ei 'privileg|baseline|rejected|host protocol' | tail -12" || true
     fi
     for pid in "$panel_vm" "$agent_vm" "$proxy"; do
         if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
@@ -128,13 +135,20 @@ systemctl daemon-reload
 systemctl start komari-forensic-panel.service
 PANEL
 scp "${ssh_flags[@]}" -P 29482 "$work/bin/komari-agent" "$work/bin/komari-host" "$work/tls.crt" "$work/packages/"*.deb root@127.0.0.1:/root/
-ssh "${ssh_flags[@]}" -p 29482 root@127.0.0.1 'bash -se' <<'AGENT'
+ssh "${ssh_flags[@]}" -p 29482 root@127.0.0.1 "bash -se -- $scenario" <<'AGENT'
 dpkg -i /root/*.deb
 install -m 0644 /root/tls.crt /usr/local/share/ca-certificates/komari-forensic-fixture.crt
 update-ca-certificates
 install -d -m 0755 /usr/lib/komari/komari-agent
 install -m 0755 /root/komari-{agent,host} /usr/lib/komari/komari-agent/
-/usr/lib/komari/komari-agent/komari-host install --user root -- --disable-auto-update --disable-remote-control
+options=(--disable-auto-update)
+if [[ $1 == forensic ]]; then options+=(--disable-remote-control); fi
+/usr/lib/komari/komari-agent/komari-host install --user root -- "${options[@]}"
+install -m 0755 /root/komari-host /usr/local/bin/komari-host
+if [[ $1 == root-approval ]]; then
+    timedatectl set-ntp false
+    date --set '2 seconds ago' >/dev/null
+fi
 useradd --system --shell /usr/sbin/nologin forensic-fixture
 systemctl start qemu-guest-agent.service
 AGENT
@@ -142,4 +156,4 @@ openssl rand -hex 32 > "$work/requested"
 openssl rand -hex 32 > "$work/unrequested"
 scp "${ssh_flags[@]}" -P 29482 "$work/requested" "$work/unrequested" root@127.0.0.1:/root/
 export NODE_EXTRA_CA_CERTS="$work/tls.crt"
-node "$panel_source/scripts/ci/e2e/forensic-vms.cjs" "$work"
+node "$panel_source/scripts/ci/e2e/forensic-vms.cjs" "$work" "$scenario"

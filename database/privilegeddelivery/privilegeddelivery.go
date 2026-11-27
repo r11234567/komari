@@ -144,6 +144,9 @@ func SaveWithDB(db *gorm.DB, clientUUID string, settings Settings, expectedRevis
 				return errors.New("actual service identity must be negotiated before saving privileged configuration")
 			}
 		}
+		if settings.RootExecutionAllowed && settings.RequiredPrivilegeMode != int32(reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT) {
+			return errors.New("remote root execution requires the Linux root Agent identity")
+		}
 		class, reasons, from, to := classify(tx, clientUUID, settings)
 		now := time.Now().UTC()
 		if err := supersedePending(tx, state, now); err != nil {
@@ -242,7 +245,11 @@ func ConfirmWithDB(db *gorm.DB, clientUUID string, revision uint64, userUUID str
 			result = toRevision(row)
 			return nil
 		}
-		if row.ConfirmedAt != nil && row.NonceExpires != nil && now.Before(*row.NonceExpires) && (row.State == StateNeedsManualAuthorization || row.State == StateAwaitingAgent || row.State == StateApplying || row.State == StateDelivered) {
+		expired, err := pendingApprovalExpired(tx, state, row, now)
+		if err != nil {
+			return err
+		}
+		if !expired && row.ConfirmedAt != nil && row.NonceExpires != nil && now.Before(*row.NonceExpires) && (row.State == StateNeedsManualAuthorization || row.State == StateAwaitingAgent || row.State == StateApplying) {
 			result = toRevision(row)
 			return nil
 		}

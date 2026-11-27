@@ -60,6 +60,14 @@ root = Path(sys.argv[1])
 with start(root, sys.argv[2], 'incorrect-synthetic-password') as rejected:
     rejected.expect('fresh PAM authentication or account validation failed')
     rejected.expect(pexpect.EOF)
+if len(sys.argv) == 4 and sys.argv[3] == 'root-approval':
+    if rejected.exitstatus != 1:
+        raise RuntimeError(f'invalid PAM unexpectedly returned {rejected.exitstatus}')
+    with start(root, sys.argv[2], (root / 'root-password').read_text().strip()) as accepted:
+        accepted.expect(pexpect.EOF, timeout=55)
+    if accepted.exitstatus != 0:
+        raise RuntimeError(f'root authorization exited {accepted.exitstatus}: {accepted.before.strip()}')
+    sys.exit(0)
 with start(root, sys.argv[2], (root / 'root-password').read_text().strip()) as accepted:
     state = accepted.expect(['QGA forensic capture active in this SSH session', pexpect.EOF])
     if state == 1:
