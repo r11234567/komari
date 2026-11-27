@@ -50,3 +50,27 @@ func TestOpenVerifiedForensicRecord(t *testing.T) {
 		t.Fatalf("overwrote existing disclosure file: %v", err)
 	}
 }
+
+func TestInitForensicKeysDoesNotReplaceExistingKeys(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var public bytes.Buffer
+	if err := initForensicKeys(dir, &public); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(public.Bytes(), []byte("Recipient public key:")) || !bytes.Contains(public.Bytes(), []byte("Receipt public key:")) {
+		t.Fatal("missing public keys")
+	}
+	for name, wantSize := range map[string]int64{"forensic-recipient.key": 32, "forensic-receipt.key": 64} {
+		key := filepath.Join(dir, name)
+		info, err := os.Stat(key)
+		if err != nil || info.Mode().Perm() != 0o600 || info.Size() != wantSize {
+			t.Fatalf("invalid private key file %s: %v", name, err)
+		}
+	}
+	if err := initForensicKeys(dir, &public); !os.IsExist(err) {
+		t.Fatalf("key setup replaced a pre-existing private key: %v", err)
+	}
+}

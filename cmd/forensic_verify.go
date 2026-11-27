@@ -51,6 +51,57 @@ func init() {
 	command.Flags().StringVar(&decryptionKeyPath, "decryption-key-file", "", "local panel X25519 private key file")
 	command.Flags().StringVar(&recordPath, "record-output", "", "new private file for the decrypted record")
 	RootCmd.AddCommand(command)
+	RootCmd.AddCommand(&cobra.Command{
+		Use:   "init-forensic-keys PRIVATE_DIRECTORY",
+		Short: "Create panel forensic keys and print their public halves",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return initForensicKeys(args[0], cmd.OutOrStdout())
+		},
+	})
+}
+
+func initForensicKeys(path string, out io.Writer) error {
+	dir, err := os.OpenRoot(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	info, err := dir.Stat(".")
+	if err != nil || info.Mode().Perm() != 0o700 {
+		return errors.New("key directory must have mode 0700")
+	}
+	recipientPublic, recipientPrivate, err := diagnostics.GenerateKey()
+	if err != nil {
+		return err
+	}
+	defer clear(recipientPrivate)
+	receiptPublic, receiptPrivate, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return err
+	}
+	defer clear(receiptPrivate)
+	const recipientName, receiptName = "forensic-recipient.key", "forensic-receipt.key"
+	if err := writeNewForensicKey(dir, recipientName, recipientPrivate); err != nil {
+		return err
+	}
+	if err := writeNewForensicKey(dir, receiptName, receiptPrivate); err != nil {
+		return errors.Join(err, dir.Remove(recipientName))
+	}
+	_, err = fmt.Fprintf(out, "Recipient public key: %s\nReceipt public key: %s\n", base64.StdEncoding.EncodeToString(recipientPublic), base64.StdEncoding.EncodeToString(receiptPublic))
+	return err
+}
+
+func writeNewForensicKey(dir *os.Root, name string, key []byte) error {
+	file, err := dir.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = file.Write(key)
+	if err = errors.Join(err, file.Sync(), file.Close()); err != nil {
+		return errors.Join(err, dir.Remove(name))
+	}
+	return nil
 }
 
 func openVerifiedForensicRecord(keyPath, recordPath string, envelope []byte) error {
