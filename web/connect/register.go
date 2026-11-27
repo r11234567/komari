@@ -50,6 +50,14 @@ func Register(r *gin.Engine) {
 		connect.WithInterceptors(diagnostics.OutcomeInterceptor{}, policy),
 		connect.WithReadMaxBytes(maxConnectRequestBytes),
 	}
+	r.Any(sealedRecordProcedure, bridge(sealedRecordHandler(
+		connect.WithInterceptors(diagnostics.OutcomeInterceptor{}, policy),
+		connect.WithReadMaxBytes(384<<10),
+	), nil))
+	r.Any(listSealedProcedure, bridge(connect.NewUnaryHandler(listSealedProcedure, listSealedRecords,
+		connect.WithInterceptors(policy), connect.WithReadMaxBytes(1024)), nil))
+	r.Any(downloadSealedProcedure, bridge(connect.NewUnaryHandler(downloadSealedProcedure, downloadSealedRecord,
+		connect.WithInterceptors(policy), connect.WithReadMaxBytes(1024)), nil))
 	handlers := []struct {
 		path    string
 		handler http.Handler

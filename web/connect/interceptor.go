@@ -43,6 +43,9 @@ func newPolicyInterceptor() *policyInterceptor {
 		rescue           = "/komari.rescue.v1.RescueService/"
 	)
 	policies := map[string]procedurePolicy{}
+	policies[sealedRecordProcedure] = procedurePolicy{role: rpc.RoleClient, maxDuration: 5 * time.Second}
+	policies[listSealedProcedure] = procedurePolicy{role: rpc.RoleAdmin, maxDuration: 5 * time.Second}
+	policies[downloadSealedProcedure] = procedurePolicy{role: rpc.RoleAdmin, maxDuration: 8 * time.Second}
 	add := func(prefix, role string, timeout time.Duration, methods ...string) {
 		for _, method := range methods {
 			policies[prefix+method] = procedurePolicy{role: role, maxDuration: timeout}

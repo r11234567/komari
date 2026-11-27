@@ -27,6 +27,7 @@ require (
 )
 
 require (
+	github.com/cloudflare/circl v1.6.4 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/x v0.2.6 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
