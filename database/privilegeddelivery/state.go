@@ -120,9 +120,15 @@ func GetStateWithDB(db *gorm.DB, id string) (Snapshot, error) {
 				}
 				rows[entry.n] = row
 			}
-			if entry.n == state.DesiredRevision && row.ConfirmedAt != nil && row.NonceExpires != nil && !time.Now().Before(*row.NonceExpires) && (row.State == StateNeedsManualAuthorization || row.State == StateAwaitingAgent) {
-				defer Notify(id)
-				return getStateTransactional(db, id)
+			if entry.n == state.DesiredRevision {
+				expired, err := pendingApprovalExpired(db, state, row, time.Now())
+				if err != nil {
+					return Snapshot{}, err
+				}
+				if expired {
+					defer Notify(id)
+					return getStateTransactional(db, id)
+				}
 			}
 			value := toRevision(row)
 			if entry.n == state.DesiredRevision {
@@ -170,7 +176,14 @@ func getStateTransactional(db *gorm.DB, id string) (Snapshot, error) {
 			if err != nil {
 				return err
 			}
-			if entry.n == state.DesiredRevision && r.ConfirmedAt != nil && r.NonceExpires != nil && !time.Now().Before(*r.NonceExpires) && (r.State == StateNeedsManualAuthorization || r.State == StateAwaitingAgent) {
+			var expired bool
+			if entry.n == state.DesiredRevision {
+				expired, err = pendingApprovalExpired(tx, state, r, time.Now())
+				if err != nil {
+					return err
+				}
+			}
+			if expired {
 				if r.EnrollmentReset {
 					if err := approveEnrollmentReset(tx, &state, &r, time.Now().UTC()); err != nil {
 						return err
@@ -214,7 +227,7 @@ func Negotiate(db *gorm.DB, id, service, startup string, mode int32, actions []i
 		return out, errors.New("valid service, startup ID and actual mode are required")
 	}
 	for _, a := range actions {
-		if a < 1 || a > 3 {
+		if a < int32(hostv1.HostAction_HOST_ACTION_SET_SERVICE_IDENTITY) || a > int32(hostv1.HostAction_HOST_ACTION_ENABLE_ROOT_EXECUTION) {
 			return out, errors.New("unsupported host action")
 		}
 	}
@@ -274,7 +287,60 @@ func requiredActions(tx *gorm.DB, state models.ClientPrivilegedState, row models
 	if !settings.RescueHelperEnabled && installed {
 		actions = append(actions, 3)
 	}
+	if settings.RootExecutionAllowed && row.ToPrivilegeMode != privilegeLinuxRoot {
+		return nil, errors.New("remote root execution requires the Linux root Agent identity")
+	}
+	increased, err := rootExecutionIncreased(tx, state, row)
+	if err != nil {
+		return nil, err
+	}
+	if increased {
+		actions = append(actions, int32(hostv1.HostAction_HOST_ACTION_ENABLE_ROOT_EXECUTION))
+	}
 	return actions, nil
+}
+
+func rootExecutionIncreased(db *gorm.DB, state models.ClientPrivilegedState, row models.ClientPrivilegedRevision) (bool, error) {
+	settings := decodeSettings(row.Config)
+	if !settings.RootExecutionAllowed || row.Revision == state.AppliedRevision {
+		return false, nil
+	}
+	var previous Settings
+	if state.AppliedRevision != 0 {
+		var applied models.ClientPrivilegedRevision
+		if err := db.First(&applied, "client = ? AND revision = ?", row.Client, state.AppliedRevision).Error; err != nil {
+			return false, err
+		}
+		previous = decodeSettings(applied.Config)
+	}
+	return !previous.RootExecutionAllowed || (settings.WebSSHEnabled && !previous.WebSSHEnabled) ||
+		(settings.ExecutionEnabled && !previous.ExecutionEnabled), nil
+}
+
+func missingRootApproval(db *gorm.DB, state models.ClientPrivilegedState, row models.ClientPrivilegedRevision, a *hostv1.HostAuthorization) (bool, error) {
+	for _, action := range a.GetActions() {
+		if action == hostv1.HostAction_HOST_ACTION_ENABLE_ROOT_EXECUTION {
+			return false, nil
+		}
+	}
+	return rootExecutionIncreased(db, state, row)
+}
+
+func pendingApprovalExpired(db *gorm.DB, state models.ClientPrivilegedState, row models.ClientPrivilegedRevision, now time.Time) (bool, error) {
+	if row.ConfirmedAt == nil || (row.State != StateNeedsManualAuthorization && row.State != StateAwaitingAgent) {
+		return false, nil
+	}
+	if row.NonceExpires != nil && !now.Before(*row.NonceExpires) {
+		return true, nil
+	}
+	if !decodeSettings(row.Config).RootExecutionAllowed {
+		return false, nil
+	}
+	a, err := Authorization(toRevision(row))
+	if err != nil {
+		return false, err
+	}
+	return missingRootApproval(db, state, row, a)
 }
 func supportsActions(state models.ClientPrivilegedState, required []int32) bool {
 	var supported []int32
