@@ -1,0 +1,79 @@
+name: Host approval E2E
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/host-approval-e2e.yml'
+      - 'scripts/ci/e2e/host-approval-*'
+      - 'database/privilegeddelivery/**'
+      - 'web/connect/privileged*.go'
+      - 'third_party/komari-proto'
+      - 'third_party/komari-web'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-approval:
+    name: Two Ubuntu guests / remote root privilege transition and browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 3GiB
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: r11234567/komari-agent
+          ref: 3aa3146269fcb82181f3f090ae8b32f78ad02d5d
+          path: e2e-agent
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: e2e-agent/go.mod
+          cache-dependency-path: |
+            go.sum
+            e2e-agent/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify all protocol and source revisions
+        run: |
+          export E2E_ROOT="$RUNNER_TEMP/komari-e2e" E2E_TOOLS="$RUNNER_TEMP/komari-e2e-tools"
+          export E2E_ARTIFACTS="$GITHUB_WORKSPACE/ci-artifacts/e2e"
+          bash scripts/ci/e2e/provenance.sh
+      - name: Build the exact Web embedded by the panel
+        uses: ./.github/actions/build-frontend
+        with:
+          audit-artifact-suffix: -host-approval
+      - name: Install virtual machine, terminal and browser tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends acl cloud-image-utils netcat-openbsd nginx openssh-client python3-pexpect qemu-system-x86 qemu-utils ubuntu-keyring
+          if [[ -c /dev/kvm ]]; then sudo setfacl -m "u:$(id -u):rw" /dev/kvm; fi
+          npm install --prefix "$RUNNER_TEMP/host-approval-tools" --no-audit --no-fund --no-package-lock @playwright/test@1.56.1
+          "$RUNNER_TEMP/host-approval-tools/node_modules/.bin/playwright" install --with-deps --only-shell chromium
+      - name: Fetch and verify the official Ubuntu guest image
+        run: |
+          mkdir -p "$RUNNER_TEMP/host-approval-image"
+          cd "$RUNNER_TEMP/host-approval-image"
+          base=https://cloud-images.ubuntu.com/noble/current
+          image=noble-server-cloudimg-amd64.img
+          for file in SHA256SUMS SHA256SUMS.gpg "$image"; do
+            curl --fail --silent --show-error --location --retry 2 --output "$file" "$base/$file"
+          done
+          gpgv --keyring /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg SHA256SUMS.gpg SHA256SUMS
+          awk -v image="$image" '$2 == "*" image || $2 == image {print}' SHA256SUMS > image.sha256
+          sha256sum --check image.sha256
+      - name: Verify panel 2FA, direct SSH, PAM and Agent acknowledgement
+        env:
+          NODE_PATH: ${{ runner.temp }}/host-approval-tools/node_modules
+        run: |
+          bash scripts/ci/e2e/host-approval-vms.sh e2e-agent \
+            "$RUNNER_TEMP/host-approval-image/noble-server-cloudimg-amd64.img"

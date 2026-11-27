@@ -1,0 +1,105 @@
+name: Traffic evidence E2E
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/traffic-evidence-e2e.yml'
+      - '.github/actions/build-frontend/**'
+      - 'cmd/app.go'
+      - 'database/trafficevidence/**'
+      - 'scripts/ci/e2e/**'
+      - 'web/connect/**'
+      - 'third_party/komari-proto'
+      - 'third_party/komari-web'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  traffic-evidence:
+    name: ${{ matrix.distribution }} / eBPF capture → panel → browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distribution: Ubuntu 24.04
+            image: native
+          - distribution: Debian 13
+            image: debian13
+          - distribution: Rocky Linux 9
+            image: rocky9
+          - distribution: Alpine 3.22 without systemd
+            image: alpine322
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 3GiB
+      CGO_ENABLED: '1'
+      NODE_OPTIONS: --max-old-space-size=4096
+      KOMARI_E2E_SKIP_CSV: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: r11234567/komari-agent
+          ref: 3aa3146269fcb82181f3f090ae8b32f78ad02d5d
+          path: e2e-agent
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: e2e-agent/go.mod
+      - name: Set isolated fixture paths
+        run: |
+          printf 'E2E_ROOT=%s/komari-e2e\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'E2E_TOOLS=%s/komari-e2e-tools\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'E2E_ARTIFACTS=%s/ci-artifacts/e2e\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - name: Verify the protocol and source revisions
+        run: bash scripts/ci/run-audit-check.sh traffic-provenance bash scripts/ci/e2e/provenance.sh
+      - name: Build the exact embedded Web using the release action
+        uses: ./.github/actions/build-frontend
+        with:
+          audit-artifact-suffix: -${{ matrix.image }}
+      - name: Build the real server, Agent and installation tool
+        run: bash scripts/ci/run-audit-check.sh traffic-build bash scripts/ci/e2e/build.sh
+      - name: Prepare the distro's capture tools and portable Agent
+        if: matrix.image != 'native'
+        working-directory: e2e-agent
+        env:
+          DISTRO: ${{ matrix.image }}
+          CGO_ENABLED: '0'
+        run: |
+          docker build --target "$DISTRO-ebpf" --tag "komari-traffic-e2e:$DISTRO" - < scripts/ci/traffic-e2e.Dockerfile
+          go build -trimpath -o "$E2E_ROOT/bin/traffic-container-agent" .
+      - name: Install browser, HTTPS proxy and network tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nginx libnss3-tools iproute2
+          npm install --prefix "$E2E_TOOLS" --no-audit --no-fund --no-package-lock @playwright/test@1.56.1
+          "$E2E_TOOLS/node_modules/.bin/playwright" install --with-deps chromium
+          bash e2e-agent/scripts/ci/fetch-traffic-test-xray.sh "$E2E_ROOT/bin"
+      - name: Validate bounded storage, retention and upload authentication
+        run: bash scripts/ci/run-audit-check.sh traffic-evidence-storage go test ./database/trafficevidence ./web/connect -run TrafficEvidence -count=1 -v
+      - name: Start HTTPS panel and install the Agent
+        run: bash scripts/ci/run-audit-check.sh traffic-setup bash scripts/ci/e2e/setup.sh
+      - name: Enroll, capture real traffic and verify browser evidence
+        env:
+          KOMARI_TRAFFIC_E2E_DISTRO: ${{ matrix.image }}
+          NODE_PATH: ${{ runner.temp }}/komari-e2e-tools/node_modules
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/komari-e2e/tls/ca.crt
+        run: bash scripts/ci/run-audit-check.sh traffic-evidence-e2e node scripts/ci/e2e/traffic-evidence.cjs
+      - name: Collect service logs and destroy temporary services and secrets
+        if: always()
+        run: bash scripts/ci/e2e/cleanup.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: traffic-evidence-e2e-${{ matrix.image }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 7
+          if-no-files-found: warn
