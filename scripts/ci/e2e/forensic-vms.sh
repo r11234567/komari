@@ -14,6 +14,11 @@ cleanup() {
     if (( status != 0 )) && [[ -s "$work/nginx-access.log" ]]; then
         grep -E 'SealedRecordService|PrivilegedDeliveryService|HostOperationService' "$work/nginx-access.log" | tail -n 16 || true
     fi
+    if (( status != 0 )) && [[ -s "$work/known_hosts" ]]; then
+        ssh -i "$work/client" -o BatchMode=yes -o ConnectTimeout=3 -o LogLevel=ERROR \
+            -o "UserKnownHostsFile=$work/known_hosts" -p 29482 root@127.0.0.1 \
+            "journalctl -u komari-agent.service -n 100 --no-pager | grep -Ei 'privileg|baseline|rejected|host protocol' | tail -12" || true
+    fi
     for pid in "$panel_vm" "$agent_vm" "$proxy"; do
         if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
     done

@@ -45,7 +45,7 @@ async function verifyRootApproval(context, page, agentId) {
   await receive(context, `/api/admin/2fa/enable?code=${otp.code}`);
   const confirm = async () => {
     await page.getByRole('button', { name: '确认此版本', exact: true }).click();
-    const dialog = page.getByRole('dialog');
+    const dialog = page.getByRole('dialog').filter({ hasText: '确认特权配置版本' });
     await dialog.getByRole('button', { name: 'Start verification / send code' }).click();
     otp = await freshTOTP(cookie.value, otp.counter);
     await dialog.locator('input').fill(otp.code);
@@ -53,7 +53,11 @@ async function verifyRootApproval(context, page, agentId) {
     await expect(dialog).toHaveCount(0, { timeout: 15000 });
   };
   await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: browserURL });
-  await page.goto(`/admin/privileged-config?agent=${agentId}`);
+  await page.goto('/admin/servers');
+  const node = page.getByRole('row').filter({ hasText: 'Synthetic QGA node' });
+  await node.getByRole('button', { name: '配置下发', exact: true }).click();
+  const deployment = page.getByRole('dialog', { name: '配置下发', exact: true });
+  await expect(deployment.getByText('特权配置下发状态', { exact: true })).toBeVisible();
   const applied = page.getByText('已应用', { exact: true });
   await expect(applied).toBeVisible({ timeout: 30000 });
   const edit = page.getByRole('button', { name: '编辑新版本', exact: true });
