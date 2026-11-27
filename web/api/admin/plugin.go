@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/auditlog"
@@ -75,4 +77,30 @@ func requirePluginAdministrator(c *gin.Context) bool {
 // directory inside a sandboxed origin without session cookie access.
 func ServePluginFile(c *gin.Context) {
 	security.ServeSandboxedPluginPage(c, plugin.OpenAdminPageFile, true)
+}
+
+// ServePluginIcon serves only a declared image using an image MIME type and
+// a sandbox that also applies if the image URL is opened as a document.
+func ServePluginIcon(c *gin.Context) {
+	if !requirePluginAdministrator(c) {
+		return
+	}
+	name := strings.TrimPrefix(c.Param("filepath"), "/")
+	file, mediaType, err := plugin.OpenIcon(c.Param("short"), name)
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	c.Header("Content-Type", mediaType)
+	c.Header("Content-Security-Policy", "default-src 'none'; sandbox")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Cross-Origin-Resource-Policy", "same-origin")
+	c.Header("Cache-Control", "private, no-store")
+	http.ServeContent(c.Writer, c.Request, path.Base(name), info.ModTime(), file)
 }

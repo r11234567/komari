@@ -8,7 +8,8 @@ import (
 
 const legacyPasskeyPluginShort = "komari-passkey"
 
-func isLegacyPasskeyPlugin(names ...string) bool {
+// IsRetiredPlugin reports whether an installed or catalog name is retired.
+func IsRetiredPlugin(names ...string) bool {
 	for _, name := range names {
 		if strings.EqualFold(strings.TrimSpace(name), legacyPasskeyPluginShort) {
 			return true

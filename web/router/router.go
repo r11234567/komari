@@ -310,6 +310,7 @@ func registerAdminRoutes(r *gin.Engine) func() error {
 	// records、sessions、logs、clipboard、database 读写已迁移到
 	// komari.admin.v1.MaintenanceService；对应 admin:* 方法仍在 /api/rpc2 上保留。
 
+	g.GET("/plugin-icon/:short/*filepath", admin.ServePluginIcon)
 	pluginGroup := g.Group("/plugin")
 	{
 		pluginGroup.GET("/list", jsonRpc.Bind("admin:listPlugins"))

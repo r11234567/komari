@@ -13,6 +13,7 @@ import (
 	"github.com/komari-monitor/komari/internal/plugingateway"
 	pluginv1 "github.com/r11234567/komari-proto/gen/go/komari/plugin/v1"
 	pluginv1connect "github.com/r11234567/komari-proto/gen/go/komari/plugin/v1/pluginv1connect"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -83,8 +84,15 @@ func (s *pluginService) GetPluginConfiguration(ctx context.Context, req *connect
 	if err != nil {
 		return nil, pluginGatewayConnectError(err)
 	}
-	encoded, err := structpb.NewStruct(values)
+	// Managed selectors resolve to typed slices. Use the JSON representation
+	// of the configuration so both those slices and nested lists retain their
+	// array shape at the protobuf boundary.
+	raw, err := json.Marshal(values)
 	if err != nil {
+		return nil, pluginGatewayConnectError(err)
+	}
+	encoded := &structpb.Struct{}
+	if err := protojson.Unmarshal(raw, encoded); err != nil {
 		return nil, pluginGatewayConnectError(err)
 	}
 	return connect.NewResponse(&pluginv1.GetPluginConfigurationResponse{
