@@ -69,6 +69,7 @@ async function verifyRootApproval(context, page, agentId) {
   await save.click();
   await confirm();
   await expect(applied).toBeVisible({ timeout: 30000 });
+  await expect(deployment.getByText(/^期望配置（r/)).toHaveCount(0);
   await expect(page.getByText('WebSSH：开启', { exact: true })).toBeVisible();
   await expect(page.getByText('允许 WebSSH 和远程执行使用 root：关闭', { exact: true })).toBeVisible();
 
@@ -88,6 +89,7 @@ async function verifyRootApproval(context, page, agentId) {
   execFileSync('python3', [path.join(__dirname, 'forensic-vms-capture.py'), dir, command, 'root-approval'],
     { timeout: 85000, stdio: 'inherit' });
   await expect(applied).toBeVisible({ timeout: 30000 });
+  await expect(deployment.getByText(/^期望配置（r/)).toHaveCount(0);
   await expect(page.getByText('允许 WebSSH 和远程执行使用 root：开启', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '复制本机授权命令', exact: true })).toHaveCount(0);
   console.log('Verified an existing root Agent with WebSSH: panel TOTP, clipboard command, SSH/PAM confirmation and applied acknowledgement');
