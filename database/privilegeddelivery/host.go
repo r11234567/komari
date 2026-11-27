@@ -225,7 +225,11 @@ func Observe(db *gorm.DB, id, key string, o *hostv1.DaemonObservation) (Revision
 		if o.ConfigHash != row.ConfigHash || o.ApprovalGeneration != row.ApprovalGeneration || o.ServiceId != state.ServiceID {
 			return errors.New("observation does not match approval")
 		}
-		if o.ObservedAt == nil || o.ObservedAt.CheckValid() != nil || o.ObservedAt.AsTime().Before(*row.ConfirmedAt) || o.ObservedAt.AsTime().After(time.Now().Add(5*time.Minute)) {
+		// The authenticated daemon may run on a different clock. The current
+		// revision, hash, generation and the host operation bind this observation
+		// to the approval. Nonce and lease deadlines use panel time separately.
+		const approvalClockSkew = 5 * time.Second
+		if o.ObservedAt == nil || o.ObservedAt.CheckValid() != nil || o.ObservedAt.AsTime().Before(row.ConfirmedAt.Add(-approvalClockSkew)) || o.ObservedAt.AsTime().After(time.Now().Add(5*time.Minute)) {
 			return errors.New("invalid observation time")
 		}
 		if int32(o.PrivilegeMode) != row.ToPrivilegeMode {

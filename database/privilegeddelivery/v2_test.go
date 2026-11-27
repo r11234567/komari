@@ -191,7 +191,12 @@ func TestV2SameIdentityApprovalExpiresAndCanBeReissued(t *testing.T) {
 	require.NotEqual(t, r.Nonce, renewed.Nonce)
 	_, err = Observe(db, id, "old-generation", observation(r))
 	require.Error(t, err)
-	_, err = Observe(db, id, "renewed", observation(renewed))
+	ack := observation(renewed)
+	ack.ObservedAt = timestamppb.New(renewed.ConfirmedAt.Add(-time.Minute))
+	_, err = Observe(db, id, "before-confirmation", ack)
+	require.ErrorContains(t, err, "invalid observation time")
+	ack.ObservedAt = timestamppb.New(renewed.ConfirmedAt.Add(-2 * time.Second))
+	_, err = Observe(db, id, "renewed", ack)
 	require.NoError(t, err)
 }
 func TestV2LeaseExpiryFailureAndReceiptConflict(t *testing.T) {

@@ -145,6 +145,10 @@ options=(--disable-auto-update)
 if [[ $1 == forensic ]]; then options+=(--disable-remote-control); fi
 /usr/lib/komari/komari-agent/komari-host install --user root -- "${options[@]}"
 install -m 0755 /root/komari-host /usr/local/bin/komari-host
+if [[ $1 == root-approval ]]; then
+    timedatectl set-ntp false
+    date --set '2 seconds ago' >/dev/null
+fi
 useradd --system --shell /usr/sbin/nologin forensic-fixture
 systemctl start qemu-guest-agent.service
 AGENT
