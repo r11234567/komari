@@ -28,6 +28,7 @@ import (
 	"github.com/komari-monitor/komari/database/privilegeddelivery"
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/utils"
+	"github.com/komari-monitor/komari/web/agent"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	configv1connect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
@@ -208,14 +209,22 @@ func (s *privilegedDeliveryService) UpdatePrivilegedDelivery(ctx context.Context
 	if snapshot.State.ProtocolVersion != 2 {
 		return nil, connectError(connect.CodeFailedPrecondition, errors.New("agent must negotiate privileged_delivery_v2"))
 	}
+	monitoring := settings.GetTrafficMonitoringEnabled()
+	if settings.TrafficMonitoringEnabled == nil && snapshot.Desired != nil {
+		monitoring = snapshot.Desired.Settings.TrafficMonitoringEnabled
+	}
+	if monitoring && (snapshot.Desired == nil || !snapshot.Desired.Settings.TrafficMonitoringEnabled) && !supportsTrafficMonitoring(agentID) {
+		return nil, connectError(connect.CodeFailedPrecondition, errors.New("managed traffic monitoring requires a compatible Linux Agent without the manual upload override"))
+	}
 	revision, err := privilegeddelivery.Save(agentID, privilegeddelivery.Settings{
-		RemoteControlEnabled:  settings.GetRemoteControlEnabled(),
-		WebSSHEnabled:         settings.GetWebsshEnabled(),
-		ExecutionEnabled:      settings.GetExecutionEnabled(),
-		RootExecutionAllowed:  settings.GetRootExecutionAllowed(),
-		EnableGPU:             settings.GetEnableGpu(),
-		RescueHelperEnabled:   settings.GetRescueHelperEnabled(),
-		RequiredPrivilegeMode: int32(settings.GetRequiredPrivilegeMode()),
+		RemoteControlEnabled:     settings.GetRemoteControlEnabled(),
+		WebSSHEnabled:            settings.GetWebsshEnabled(),
+		ExecutionEnabled:         settings.GetExecutionEnabled(),
+		RootExecutionAllowed:     settings.GetRootExecutionAllowed(),
+		TrafficMonitoringEnabled: monitoring,
+		EnableGPU:                settings.GetEnableGpu(),
+		RescueHelperEnabled:      settings.GetRescueHelperEnabled(),
+		RequiredPrivilegeMode:    int32(settings.GetRequiredPrivilegeMode()),
 	}, req.Msg.GetExpectedRevision(), req.Msg.GetReason())
 	if err != nil {
 		return nil, connectError(connect.CodeFailedPrecondition, err)
@@ -432,6 +441,9 @@ func privilegedRevisionToProto(revision privilegeddelivery.Revision) *configv1.P
 		State:   configv1.PrivilegedDeliveryState(revision.State),
 		SavedAt: timestamppb.New(revision.SavedAt),
 	}
+	if revision.Settings.TrafficMonitoringEnabled {
+		result.Privileged.TrafficMonitoringEnabled = &revision.Settings.TrafficMonitoringEnabled
+	}
 	// The manual task travels only while it can still be redeemed. Sending a
 	// spent or expired nonce would invite an Agent to attempt an upgrade that
 	// cannot succeed.
@@ -479,6 +491,7 @@ func (s *privilegedDeliveryService) GetNodeConfigState(ctx context.Context, req 
 		return nil, connectError(connect.CodeNotFound, err)
 	}
 	out := &configv1.GetNodeConfigStateResponse{AppliedRevision: snapshot.State.AppliedRevision, UpdateSequence: snapshot.State.UpdateSequence, ProtocolVersion: snapshot.State.ProtocolVersion}
+	out.TrafficMonitoringSupported = supportsTrafficMonitoring(req.Msg.GetAgentId())
 	out.HostOperation = snapshot.Operation
 	var actions []int32
 	if err = json.Unmarshal([]byte(snapshot.State.SupportedActions), &actions); err == nil {
@@ -500,4 +513,9 @@ func (s *privilegedDeliveryService) GetNodeConfigState(ctx context.Context, req 
 		out.Observation = &observation
 	}
 	return connect.NewResponse(out), nil
+}
+
+func supportsTrafficMonitoring(agentID string) bool {
+	status := agent.GetConnectCapabilities(agentID).GetTrafficMonitoring()
+	return status != nil && status.GetState() != reportv1.TrafficMonitoringState_TRAFFIC_MONITORING_STATE_MANUAL
 }

@@ -33,6 +33,9 @@ func settingsHash(s Settings) string {
 	if s.RootExecutionAllowed {
 		b = append(b, []byte("\x00root_execution_allowed\x01")...)
 	}
+	if s.TrafficMonitoringEnabled {
+		b = append(b, "\x00traffic_monitoring_enabled\x01"...)
+	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }

@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: r11234567/komari-agent
-          ref: 3aa3146269fcb82181f3f090ae8b32f78ad02d5d
+          ref: 61d353dd50f385ffaffb9f143968bb5e18a75c4c
           path: e2e-agent
           submodules: recursive
           persist-credentials: false
@@ -71,7 +71,7 @@ jobs:
           gpgv --keyring /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg SHA256SUMS.gpg SHA256SUMS
           awk -v image="$image" '$2 == "*" image || $2 == image {print}' SHA256SUMS > image.sha256
           sha256sum --check image.sha256
-      - name: Verify panel 2FA, direct SSH, PAM and Agent acknowledgement
+      - name: Verify panel 2FA, automatic traffic monitoring, direct SSH and PAM
         env:
           NODE_PATH: ${{ runner.temp }}/host-approval-tools/node_modules
         run: |

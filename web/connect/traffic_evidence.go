@@ -14,8 +14,10 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/metricstore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/privilegeddelivery"
 	"github.com/komari-monitor/komari/database/trafficevidence"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/web/agent"
 	metrics "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -129,7 +131,13 @@ func (s *metricsService) ListTrafficEvidence(ctx context.Context, req *connect.R
 	if err != nil {
 		return nil, connectError(connect.CodeUnavailable, nil)
 	}
-	result := &metrics.ListTrafficEvidenceResponse{}
+	result := &metrics.ListTrafficEvidenceResponse{
+		Monitoring:  agent.GetConnectCapabilities(req.Msg.AgentId).GetTrafficMonitoring(),
+		AgentOnline: agent.IsAgentOnline(req.Msg.AgentId),
+	}
+	if snapshot, stateErr := privilegeddelivery.GetStateWithDB(dbcore.GetDBInstance().WithContext(ctx), req.Msg.AgentId); stateErr == nil && snapshot.Applied != nil {
+		result.MonitoringEnabled = snapshot.Applied.Settings.TrafficMonitoringEnabled
+	}
 	for _, data := range hours {
 		record := new(metrics.TrafficEvidenceHour)
 		if err := proto.Unmarshal(data, record); err != nil {

@@ -34,7 +34,7 @@ async function receive(context, url, data) {
   return response.json();
 }
 
-async function verifyRootApproval(context, page) {
+async function verifyRootApproval(context, page, agentId) {
   const qr = await context.request.post('/api/admin/2fa/generate', { headers: { Origin: browserURL } });
   assert.equal(qr.status(), 200);
   const cookie = (await context.cookies()).find(({ name }) => name === '__Host-komari_2fa_secret');
@@ -73,6 +73,20 @@ async function verifyRootApproval(context, page) {
   await expect(page.getByText('WebSSH：开启', { exact: true })).toBeVisible();
   await expect(page.getByText('允许 WebSSH 和远程执行使用 root：关闭', { exact: true })).toBeVisible();
 
+  const monitoring = checkbox('Enable traffic anomaly detection');
+  const monitoringRPC = '/komari.metrics.v1.MetricsService/ListTrafficEvidence';
+  const monitoringState = async () => (await receive(context, monitoringRPC, { agentId })).monitoring?.state;
+  await edit.click();
+  await expect(monitoring).toBeEnabled();
+  await monitoring.check();
+  await save.click();
+  await confirm();
+  await expect(applied).toBeVisible({ timeout: 30000 });
+  await expect(page.getByRole('button', { name: '复制本机授权命令', exact: true })).toHaveCount(0);
+  await expect.poll(monitoringState, { timeout: 45000 }).toBe('TRAFFIC_MONITORING_STATE_RUNNING');
+  assert.equal(ssh(29482, 'systemctl show komari-agent.service --property=Environment --value'), '');
+  assert.equal(ssh(29482, 'stat -c "%U:%a" /var/lib/komari-traffic-monitoring/komari-agent'), 'root:700');
+
   await edit.click();
   await checkbox('允许 WebSSH 和远程执行使用 root').check();
   await save.click();
@@ -93,6 +107,26 @@ async function verifyRootApproval(context, page) {
   await expect(page.getByText('允许 WebSSH 和远程执行使用 root：开启', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '复制本机授权命令', exact: true })).toHaveCount(0);
   console.log('Verified an existing root Agent with WebSSH: panel TOTP, clipboard command, SSH/PAM confirmation and applied acknowledgement');
+  await expect.poll(monitoringState, { timeout: 45000 }).toBe('TRAFFIC_MONITORING_STATE_RUNNING');
+
+  const monitoringPage = await context.newPage();
+  await monitoringPage.setViewportSize({ width: 390, height: 844 });
+  await monitoringPage.goto('/admin/traffic-evidence');
+  await expect(monitoringPage.getByRole('heading', { name: 'Traffic monitoring' })).toBeVisible();
+  await expect(monitoringPage.getByRole('status').filter({ hasText: 'Monitoring active' })).toBeVisible();
+  await expect(monitoringPage.getByRole('tab', { name: 'Hourly breakdown' })).toHaveAttribute('aria-selected', 'true');
+  assert(await monitoringPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    'traffic monitoring controls overflow the mobile viewport');
+  await monitoringPage.close();
+
+  await edit.click();
+  await expect(monitoring).toBeChecked();
+  await monitoring.uncheck();
+  await save.click();
+  await confirm();
+  await expect(applied).toBeVisible({ timeout: 30000 });
+  await expect.poll(monitoringState, { timeout: 45000 }).toBe('TRAFFIC_MONITORING_STATE_DISABLED');
+  console.log('Verified panel-controlled eBPF monitoring starts, survives a Host transition and stops without Agent overrides');
 }
 
 async function main() {
@@ -133,7 +167,7 @@ async function main() {
     assert.match(panelKey, /^[a-zA-Z0-9+/=]+$/);
     ssh(29482, `${binaryDir}/komari-host trust --manifest ${manifest} --agent-id ${agentId} --endpoint ${agentURL} --panel-key-id ${panelKeyID} --panel-public-key ${panelKey} --service-user approval-fixture && systemctl start komari-agent.service`);
 
-    await verifyRootApproval(context, page);
+    await verifyRootApproval(context, page, agentId);
   } finally {
     if (enrollment && enrollment.exitCode === null) enrollment.kill();
     await browser.close();

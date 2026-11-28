@@ -232,21 +232,23 @@ func TestV2HashVectors(t *testing.T) {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	var vectors []struct {
-		Booleans             [5]int `json:"booleans"`
-		Mode                 int32  `json:"required_privilege_mode"`
-		RootExecutionAllowed bool   `json:"root_execution_allowed"`
-		Hash                 string `json:"sha256"`
+		Booleans                 [5]int `json:"booleans"`
+		Mode                     int32  `json:"required_privilege_mode"`
+		RootExecutionAllowed     bool   `json:"root_execution_allowed"`
+		TrafficMonitoringEnabled bool   `json:"traffic_monitoring_enabled"`
+		Hash                     string `json:"sha256"`
 	}
 	require.NoError(t, json.Unmarshal(data, &vectors))
 	for _, v := range vectors {
 		require.Equal(t, v.Hash, settingsHash(Settings{
-			RemoteControlEnabled:  v.Booleans[0] != 0,
-			WebSSHEnabled:         v.Booleans[1] != 0,
-			ExecutionEnabled:      v.Booleans[2] != 0,
-			EnableGPU:             v.Booleans[3] != 0,
-			RescueHelperEnabled:   v.Booleans[4] != 0,
-			RequiredPrivilegeMode: v.Mode,
-			RootExecutionAllowed:  v.RootExecutionAllowed,
+			RemoteControlEnabled:     v.Booleans[0] != 0,
+			WebSSHEnabled:            v.Booleans[1] != 0,
+			ExecutionEnabled:         v.Booleans[2] != 0,
+			EnableGPU:                v.Booleans[3] != 0,
+			RescueHelperEnabled:      v.Booleans[4] != 0,
+			RequiredPrivilegeMode:    v.Mode,
+			RootExecutionAllowed:     v.RootExecutionAllowed,
+			TrafficMonitoringEnabled: v.TrafficMonitoringEnabled,
 		}))
 	}
 }
@@ -474,6 +476,12 @@ func TestV2SameIdentityRemoteGrantDoesNotRequireHostOperation(t *testing.T) {
 	allowed, err = clients.PrivilegedCapabilityAllowedWithDB(db, id, "execution")
 	require.NoError(t, err)
 	require.False(t, allowed)
+}
+
+func TestV2TrafficMonitoringRequiresRoot(t *testing.T) {
+	db, id := fixtureV2(t)
+	_, err := SaveWithDB(db, id, Settings{TrafficMonitoringEnabled: true, RequiredPrivilegeMode: privilegeLinuxNonRoot}, 0, "")
+	require.ErrorContains(t, err, "traffic monitoring requires the Linux root Agent identity")
 }
 
 func TestV2FailureDoesNotInventAppliedAndCannotRegressSuccess(t *testing.T) {
