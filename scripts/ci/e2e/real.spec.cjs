@@ -734,7 +734,11 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       verifyPermissions();
       const editorWindow = page.locator('.km-file-editor');
       await editorWindow.getByRole('button', { name: 'Reload from node', exact: true }).click();
-      await editorWindow.getByRole('alertdialog').getByRole('button', { name: 'Reload from node', exact: true }).click();
+      // TerminalDialog mounts under document.body, alongside the editor.
+      const reloadDialog = page.getByRole('alertdialog', { name: 'Reload from node', exact: true });
+      await expect(reloadDialog).toContainText('discard your draft?');
+      await reloadDialog.getByRole('button', { name: 'Reload from node', exact: true }).click();
+      await expect(reloadDialog).toBeHidden();
       await expect(editorWindow.locator('.view-lines')).toContainText('external write');
       await editorWindow.getByRole('button', { name: 'Close File', exact: true }).click();
       await editorWindow.getByRole('button', { name: 'Close', exact: true }).click();
