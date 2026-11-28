@@ -18,6 +18,15 @@ if [[ "${KOMARI_E2E_LOCAL:-}" = 1 ]]; then
 fi
 sudo systemctl daemon-reload
 printf 'editor fixture\n' > "$E2E_ROOT/files/editor.txt"
+chmod 0755 "$E2E_ROOT/files" "$E2E_ROOT/files/editor.txt"
+python3 - "$E2E_ROOT/files/large.log" <<'LARGE_LOG'
+import pathlib
+import sys
+
+first_page = b"PAGE-ONE\n".ljust(128 * 1024, b" ")
+records = b"synthetic service log record for byte range testing\n" * 43_000
+pathlib.Path(sys.argv[1]).write_bytes(first_page + b"PAGE-TWO\n" + records + b"TAIL-BEFORE\n")
+LARGE_LOG
 printf 'destination must survive\n' > "$E2E_ROOT/files/existing.txt"
 mkdir -p "$E2E_ROOT/files/nonempty"
 printf 'keep\n' > "$E2E_ROOT/files/nonempty/keep.txt"

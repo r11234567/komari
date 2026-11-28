@@ -1,7 +1,6 @@
 // Package filemanager correlates panel file requests with agent responses.
 //
-// The control plane only carries metadata. File contents use the one-shot
-// HTTP transfer endpoints, matching the upstream Komari file manager design.
+// Bulk file contents use the one-shot HTTP transfer endpoints.
 package filemanager
 
 import (
@@ -71,8 +70,7 @@ func SetDispatcher(next Dispatcher) {
 	dispatchMu.Unlock()
 }
 
-// Call dispatches a metadata-only filesystem control operation and waits for
-// the matching FileEvent. Binary data must use the HTTP transfer endpoints.
+// Call dispatches a filesystem control operation and waits for its FileEvent.
 func Call(ctx context.Context, uuid string, operation string, args map[string]any, options ...CallOptions) (*filev1.AgentFileEvent, error) {
 	grant := workspace.FromContext(ctx)
 	if grant == nil || grant.Binding.AgentID != uuid || !grant.Alive() {
@@ -169,6 +167,9 @@ func LegacyAssignment(agentID string, assignment *filev1.FileAssignment) (*filev
 	pendingMu.Unlock()
 	if !ok || call.uuid != agentID {
 		return nil, ErrUnknownToken
+	}
+	if assignment.GetOperation() == filev1.FileOperation_FILE_OPERATION_REPLACE {
+		return nil, ErrUnsupported
 	}
 	args := make(map[string]any, len(call.args)+1)
 	for key, arg := range call.args {
@@ -272,6 +273,8 @@ func operationFromString(value string) (filev1.FileOperation, bool) {
 		return filev1.FileOperation_FILE_OPERATION_UPLOAD_COMMIT, true
 	case "upload_cancel":
 		return filev1.FileOperation_FILE_OPERATION_UPLOAD_CANCEL, true
+	case "replace":
+		return filev1.FileOperation_FILE_OPERATION_REPLACE, true
 	default:
 		return filev1.FileOperation_FILE_OPERATION_UNSPECIFIED, false
 	}
@@ -337,14 +340,15 @@ func buildAssignmentPayload(kind filev1.FileOperation, args map[string]any) (any
 	case filev1.FileOperation_FILE_OPERATION_DOWNLOAD_STREAM:
 		return &filev1.FileAssignment_DownloadStream{
 			DownloadStream: &filev1.FileDownloadStreamPayload{
-				TransferId:    argString(args, "transfer_id"),
-				TransferToken: argString(args, "transfer_token"),
-				Path:          argString(args, "path"),
-				Offset:        argInt64(args, "offset"),
-				Length:        argInt64(args, "length"),
-				ChunkIndex:    argInt64(args, "chunk_index"),
-				FileSize:      argInt64(args, "file_size"),
-				ModifiedAt:    argTimestamp(args, "modified_at"),
+				TransferId:       argString(args, "transfer_id"),
+				TransferToken:    argString(args, "transfer_token"),
+				Path:             argString(args, "path"),
+				Offset:           argInt64(args, "offset"),
+				Length:           argInt64(args, "length"),
+				ChunkIndex:       argInt64(args, "chunk_index"),
+				FileSize:         argInt64(args, "file_size"),
+				ModifiedAt:       argTimestamp(args, "modified_at"),
+				FollowInstanceId: argString(args, "follow_instance_id"),
 			},
 		}, nil
 	case filev1.FileOperation_FILE_OPERATION_UPLOAD_STREAM:
@@ -384,6 +388,12 @@ func buildAssignmentPayload(kind filev1.FileOperation, args map[string]any) (any
 				Path:     argString(args, "path"),
 			},
 		}, nil
+	case filev1.FileOperation_FILE_OPERATION_REPLACE:
+		content, _ := args["content"].([]byte)
+		digest, _ := args["expected_digest"].([]byte)
+		return &filev1.FileAssignment_Replace{
+			Replace: &filev1.FileReplacePayload{Path: argString(args, "path"), Content: content, ExpectedSha256: digest},
+		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported file operation %s", kind.String())
 	}
@@ -420,6 +430,8 @@ func setAssignmentPayload(assignment *filev1.FileAssignment, payload any) {
 	case *filev1.FileAssignment_UploadCommit:
 		assignment.Payload = typed
 	case *filev1.FileAssignment_UploadCancel:
+		assignment.Payload = typed
+	case *filev1.FileAssignment_Replace:
 		assignment.Payload = typed
 	}
 }

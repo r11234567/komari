@@ -3,10 +3,12 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/pkg/rpc"
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 	deploymentapp "github.com/komari-monitor/komari/web/deployment"
 	"github.com/komari-monitor/komari/web/rescueapp"
@@ -24,7 +26,7 @@ func (s *deploymentService) GenerateInstallCommand(context.Context, *connect.Req
 	return nil, connectError(connect.CodeUnimplemented, errors.New("install commands with one-time tokens have been retired; install the Agent and enroll using browser approval"))
 }
 
-func (s *deploymentService) GetDeployment(_ context.Context, req *connect.Request[deploymentv1.GetDeploymentRequest]) (*connect.Response[deploymentv1.GetDeploymentResponse], error) {
+func (s *deploymentService) GetDeployment(ctx context.Context, req *connect.Request[deploymentv1.GetDeploymentRequest]) (*connect.Response[deploymentv1.GetDeploymentResponse], error) {
 	if strings.TrimSpace(req.Msg.AgentId) == "" {
 		return nil, connectError(connect.CodeInvalidArgument, errors.New("agent ID is required"))
 	}
@@ -50,7 +52,14 @@ func (s *deploymentService) GetDeployment(_ context.Context, req *connect.Reques
 	if !receivedAt.IsZero() {
 		response.InstallationReceivedAt = timestamppb.New(receivedAt)
 	}
-	return connect.NewResponse(response), nil
+	result := connect.NewResponse(response)
+	meta := rpc.MetaFromContext(ctx)
+	if requireRescueAdministrator(meta) == nil {
+		if addr, err := netip.ParseAddr(meta.RemoteIP); err == nil && addr.Zone() == "" && addr.IsGlobalUnicast() {
+			result.Header().Set("X-Komari-SSH-Source-IP", addr.Unmap().String())
+		}
+	}
+	return result, nil
 }
 
 func (s *deploymentService) SaveDeploymentProfile(_ context.Context, req *connect.Request[deploymentv1.SaveDeploymentProfileRequest]) (*connect.Response[deploymentv1.SaveDeploymentProfileResponse], error) {

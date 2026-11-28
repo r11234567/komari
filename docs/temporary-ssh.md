@@ -2,9 +2,21 @@
 
 [简体中文](temporary-ssh.zh-CN.md)
 
-Temporary SSH admits one source IPv4 or IPv6 address to a fixed SSH port for 15 minutes. The node needs an updated Agent and authorized rescue helper. The host administrator prepares a dedicated nftables entry point. Browser WebSSH remains a separate option.
+Temporary SSH admits one source IPv4 or IPv6 address to a fixed SSH port for 15 minutes. The node needs an updated Agent, an authorized rescue helper and an available nftables entry point. Browser WebSSH remains a separate option.
 
 ## Configure the node
+
+The first rescue helper installation confirmed by `komari-host apply` automatically prepares the entry point on compatible nftables hosts using the same local PAM confirmation. Each subsequent grant is requested from the panel with two-factor verification.
+
+For an existing rescue helper without an entry point, or if setup asks you to select an interface or port, run the following command from an SSH session you opened directly. The command keeps a working configuration already on the node.
+
+```bash
+sudo komari-host setup-rescue-ssh --manifest /etc/komari/services/komari-agent.json
+```
+
+The command verifies the SSH listener, default interface and native nftables input hook, then persists the empty timeout sets and rules. When preparing Rescue with the Agent installer, pass `--install-rescue --install-setup-rescue-ssh` to run this step. If several candidates exist, use `--port`, `--interface`, `--table` and `--chain` to identify the intended entry point. With a custom firewall loader, `--nft-config` can identify the persistent entry file loaded on boot. For UFW, firewalld and legacy iptables, setup identifies the active firewall and directs the administrator to a native nftables entry point or WebSSH.
+
+### Manual configuration
 
 Create the root-owned file `/etc/komari/services/komari-agent.temporary-ssh.json` with mode `0600`. Replace `komari-agent` in the filename when the Agent runs under a custom service name. This example uses the public interface `eth0` and an SSH listener on TCP `8658`.
 
@@ -43,7 +55,7 @@ Komari manages only these two sets. Direct UFW, firewalld and legacy iptables in
 
 ## Request and confirm access
 
-Open the node's Rescue panel, select Temporary SSH, enter the single IPv4 or IPv6 address as seen by the node, and complete two-factor verification. The port comes from the node. The helper first checks for a local SSH listener in the requested address family, then writes the source address and kernel timeout atomically. Two-factor approval binds the source, port, enrollment and any grant being replaced.
+Open the node's Rescue panel and select Temporary SSH. The panel fills in the administrator's source IP as seen by the panel. Adjust it if SSH uses a different egress address, then complete two-factor verification. The port comes from the node. The helper first checks for a local SSH listener in the requested address family, then writes the source address and kernel timeout atomically. Two-factor approval binds the source, port, enrollment and any grant being replaced.
 
 Behind NAT, enter the public egress address of the device that will run SSH. On that device, using the same network or VPN, run:
 
@@ -65,7 +77,7 @@ The Rescue Helper output shows the code and local error details. Fix the cause, 
 
 ### SSH_CONFIG_MISSING
 
-The helper could not find the configuration file on this node. Create the JSON file in [Configure the node](#configure-the-node). The filename must match the installed Agent service name. Run the checks on the destination SSH node.
+The helper could not find the configuration file on this node. Run the automatic setup in [Configure the node](#configure-the-node) on the destination SSH node.
 
 ### SSH_CONFIG_INVALID
 

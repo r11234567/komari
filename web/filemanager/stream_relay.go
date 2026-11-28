@@ -313,7 +313,13 @@ func serveUploadTransfer(c *gin.Context, transfer *streamTransfer) {
 // chunk, then forwards its body directly to the browser response. A new
 // transfer per logical chunk keeps retries and CDN request sizes bounded while
 // the pipe keeps the memory footprint independent of that chunk size.
-func streamDownloadRelay(c *gin.Context, clientUUID, path string, fileSize int64, modifiedAt time.Time, start, size, chunkSize int64, commitHeaders func()) error {
+type downloadSnapshot struct {
+	size           int64
+	modifiedAt     time.Time
+	followInstance string
+}
+
+func streamDownloadRelay(c *gin.Context, clientUUID, path string, snapshot downloadSnapshot, start, size, chunkSize int64, commitHeaders func()) error {
 	if size <= 0 {
 		rememberDownloadChunkSize(clientUUID, chunkSize)
 		return nil
@@ -342,7 +348,7 @@ func streamDownloadRelay(c *gin.Context, clientUUID, path string, fileSize int64
 				if chunkIndex > 0 {
 					commit = nil
 				}
-				copyResult, streamErr := streamDownloadChunk(c, clientUUID, path, fileSize, modifiedAt, offset, length, chunkIndex, commit)
+				copyResult, streamErr := streamDownloadChunk(c, clientUUID, path, snapshot, offset, length, chunkIndex, commit)
 				lastCopyResult = copyResult
 				if copyResult.err == nil && copyResult.bytes == length {
 					// The request has proven that this logical block size is
@@ -458,7 +464,7 @@ func nextReducedTransferChunkSize(failedSize, upperBound int64) (int64, bool) {
 	return candidate, true
 }
 
-func streamDownloadChunk(c *gin.Context, clientUUID, path string, fileSize int64, modifiedAt time.Time, offset, length, chunkIndex int64, commitHeaders func()) (streamCopyResult, error) {
+func streamDownloadChunk(c *gin.Context, clientUUID, path string, snapshot downloadSnapshot, offset, length, chunkIndex int64, commitHeaders func()) (streamCopyResult, error) {
 	transfer, transferErr := newStreamTransfer(c.Request.Context(), clientUUID, streamDownloadDirection, length)
 	if transferErr != nil {
 		return streamCopyResult{}, transferErr
@@ -471,10 +477,13 @@ func streamDownloadChunk(c *gin.Context, clientUUID, path string, fileSize int64
 		"offset":         offset,
 		"length":         length,
 		"chunk_index":    chunkIndex,
-		"file_size":      fileSize,
+		"file_size":      snapshot.size,
 	}
-	if !modifiedAt.IsZero() {
-		args["modified_at"] = modifiedAt.UTC().Format(time.RFC3339Nano)
+	if !snapshot.modifiedAt.IsZero() {
+		args["modified_at"] = snapshot.modifiedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if snapshot.followInstance != "" {
+		args["follow_instance_id"] = snapshot.followInstance
 	}
 
 	ctx, cancel := context.WithCancel(c.Request.Context())

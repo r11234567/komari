@@ -289,6 +289,7 @@ func registerAdminRoutes(r *gin.Engine) func() error {
 		// File control data plane. Control operations use Connect FileService;
 		// these endpoints carry bytes only and must be mounted on every build.
 		clientGroup.POST("/:uuid/file/upload", filemanager.Upload)
+		clientGroup.PUT("/:uuid/file/edit", filemanager.Edit)
 		clientGroup.GET("/:uuid/file/download", filemanager.Download)
 		clientGroup.HEAD("/:uuid/file/download", filemanager.Download)
 		clientGroup.GET("/:uuid/file/preview-token", filemanager.CreatePreviewToken)

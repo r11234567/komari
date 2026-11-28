@@ -2,9 +2,21 @@
 
 [English](temporary-ssh.md)
 
-临时 SSH 允许一个 IPv4 或 IPv6 来源地址连接节点上固定的 SSH 端口，有效期 15 分钟。节点需要新版 Agent、已授权的救援助手，以及管理员配置的 nftables 接入点。网页 WebSSH 可独立使用。
+临时 SSH 允许一个 IPv4 或 IPv6 来源地址连接节点上固定的 SSH 端口，有效期 15 分钟。节点需要新版 Agent、已授权的救援助手和可用的 nftables 接入点。网页 WebSSH 可独立使用。
 
 ## 配置节点
+
+首次通过 `komari-host apply` 确认安装救援助手时，兼容的节点会用同一次本机 PAM 确认自动准备临时 SSH 接入点。之后在面板申请时，按页面提示完成二次验证即可。
+
+已经安装救援助手但缺少接入点，或自动配置提示需要指定网卡、端口时，从你自己打开的 SSH 会话执行以下命令。已有配置且校验通过时，命令会直接保留。
+
+```bash
+sudo komari-host setup-rescue-ssh --manifest /etc/komari/services/komari-agent.json
+```
+
+命令会确认 SSH 监听端口、默认网卡和原生 nftables 入站链，并把空超时集合和规则写入持久配置。准备救援组件时，安装器可同时传入 `--install-rescue --install-setup-rescue-ssh`。若提示多个候选，可用 `--port`、`--interface`、`--table` 和 `--chain` 指定。若用自定义方式加载防火墙，可用 `--nft-config` 指向重启时实际加载的配置入口。UFW、firewalld 和 legacy iptables 会显示所检测到的防火墙，并提示使用原生 nftables 接入点或 WebSSH。
+
+### 手动配置
 
 在 **要开放 SSH 的节点** 上用 `sudo nft list tables` 和 `sudo nft -a list chain inet <表> <链>` 确认现用的入站过滤链。下面以 `public_edge_guard/input`、公网接口 `eth0`、TCP `8658` 为例。表名、链名、接口和端口以本机为准。
 
@@ -43,7 +55,7 @@ iifname "eth0" ip6 saddr @komari_rescue_ssh_v6 tcp dport 8658 accept
 
 ## 申请并验证
 
-在节点的救援面板选择「临时开放 SSH」。页面显示固定端口后，输入节点会看到的一个来源 IP，再完成二次验证。
+在节点的救援面板选择「临时开放 SSH」。面板预填它所看到的管理员来源 IP。核对该 IP 与 SSH 客户端的实际出口一致，必要时修改，然后完成二次验证。
 
 **在 NAT 后，填 SSH 客户端的公网出口 IP。** 在真正发起 SSH 的电脑上，用和 SSH 相同的网络或 VPN 执行：
 
@@ -61,7 +73,7 @@ Windows PowerShell 使用 `curl.exe -4 -fsS https://api.ipify.org`。查 IPv4 �
 
 ### SSH_CONFIG_MISSING
 
-节点没有找到临时 SSH 配置文件。按[配置节点](#配置节点)创建 JSON，文件名要与实际 Agent 服务名一致。先确认终端连的是面板里所选的目标节点。
+节点没有找到临时 SSH 配置文件。先确认终端连的是面板里所选的目标节点，再按[配置节点](#配置节点)运行自动配置。
 
 ### SSH_CONFIG_INVALID
 
