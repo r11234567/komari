@@ -58,13 +58,14 @@ const (
 
 // Settings is the privileged configuration carried by one revision.
 type Settings struct {
-	RemoteControlEnabled  bool  `json:"remote_control_enabled"`
-	WebSSHEnabled         bool  `json:"webssh_enabled"`
-	ExecutionEnabled      bool  `json:"execution_enabled"`
-	RootExecutionAllowed  bool  `json:"root_execution_allowed"`
-	EnableGPU             bool  `json:"enable_gpu"`
-	RescueHelperEnabled   bool  `json:"rescue_helper_enabled"`
-	RequiredPrivilegeMode int32 `json:"required_privilege_mode"`
+	RemoteControlEnabled     bool  `json:"remote_control_enabled"`
+	WebSSHEnabled            bool  `json:"webssh_enabled"`
+	ExecutionEnabled         bool  `json:"execution_enabled"`
+	RootExecutionAllowed     bool  `json:"root_execution_allowed"`
+	TrafficMonitoringEnabled bool  `json:"traffic_monitoring_enabled,omitempty"`
+	EnableGPU                bool  `json:"enable_gpu"`
+	RescueHelperEnabled      bool  `json:"rescue_helper_enabled"`
+	RequiredPrivilegeMode    int32 `json:"required_privilege_mode"`
 }
 
 // Revision is one stored revision with its decision state.
@@ -146,6 +147,9 @@ func SaveWithDB(db *gorm.DB, clientUUID string, settings Settings, expectedRevis
 		}
 		if settings.RootExecutionAllowed && settings.RequiredPrivilegeMode != int32(reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT) {
 			return errors.New("remote root execution requires the Linux root Agent identity")
+		}
+		if settings.TrafficMonitoringEnabled && settings.RequiredPrivilegeMode != privilegeLinuxRoot {
+			return errors.New("traffic monitoring requires the Linux root Agent identity")
 		}
 		class, reasons, from, to := classify(tx, clientUUID, settings)
 		now := time.Now().UTC()

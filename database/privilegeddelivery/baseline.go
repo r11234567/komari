@@ -108,6 +108,9 @@ func InitializeBaseline(db *gorm.DB, r *configv1.InitializeNodeConfigRequest, pr
 		if r.Privileged.GetRootExecutionAllowed() {
 			return errors.New("first-install baseline cannot authorize root execution")
 		}
+		if r.Privileged.GetTrafficMonitoringEnabled() {
+			return errors.New("first-install baseline cannot enable traffic monitoring")
+		}
 		s := Settings{RemoteControlEnabled: r.Privileged.GetRemoteControlEnabled(), WebSSHEnabled: r.Privileged.GetWebsshEnabled(), ExecutionEnabled: r.Privileged.GetExecutionEnabled(), EnableGPU: r.Privileged.GetEnableGpu(), RequiredPrivilegeMode: int32(r.Privileged.RequiredPrivilegeMode)}
 		if r.PreserveRuntime && (s.RemoteControlEnabled || s.WebSSHEnabled || s.ExecutionEnabled || s.EnableGPU) {
 			return errors.New("migration baseline must deny all optional privileged capabilities")
