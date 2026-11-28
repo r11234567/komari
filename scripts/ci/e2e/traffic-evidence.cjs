@@ -191,6 +191,8 @@ async function main() {
 
     await page.goto('/admin/traffic-evidence');
     await expect(page.getByRole('heading', { name: 'Traffic monitoring' })).toBeVisible();
+    await expect(page.getByRole('tab', { name: 'Hourly breakdown' })).toHaveAttribute('aria-selected', 'true');
+    await page.getByRole('tab', { name: 'Incidents' }).click();
     await expect(page.getByText('Collecting', { exact: true })).toBeVisible();
     await expect(page.getByText('192.0.2.2', { exact: true })).toHaveCount(0);
     await page.getByRole('button', { name: 'View', exact: true }).click();
