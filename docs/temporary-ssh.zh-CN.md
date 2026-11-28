@@ -2,11 +2,13 @@
 
 [English](temporary-ssh.md)
 
-临时 SSH 允许一个 IPv4 或 IPv6 来源地址连接节点上固定的 SSH 端口，有效期 15 分钟。节点需要新版 Agent、已授权的救援助手，以及管理员配置的 nftables 接入点。网页 WebSSH 可独立使用。
+临时 SSH 允许一个 IPv4 或 IPv6 来源地址连接节点上固定的 SSH 端口，有效期 15 分钟。节点需要新版 Agent、已授权的救援助手和可用的 nftables 接入点。网页 WebSSH 可独立使用。
 
 ## 配置节点
 
-从你自己打开的 SSH 会话执行以下命令，再输入本机账号密码确认。已有手工配置且校验通过时，命令会直接保留。
+首次通过 `komari-host apply` 确认安装救援助手时，兼容的节点会用同一次本机 PAM 确认自动准备临时 SSH 接入点。之后在面板申请时，按页面提示完成二次验证即可。
+
+已经安装救援助手但缺少接入点，或自动配置提示需要指定网卡、端口时，从你自己打开的 SSH 会话执行以下命令。已有配置且校验通过时，命令会直接保留。
 
 ```bash
 sudo komari-host setup-rescue-ssh --manifest /etc/komari/services/komari-agent.json

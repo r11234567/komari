@@ -670,6 +670,18 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
     });
 
     await stage('actual Monaco editor saves UTF-8 and empty content, and detects stale changes', async () => {
+      const describePermissions = name => {
+        const stat = fs.statSync(fixture(name));
+        return { mode: stat.mode & 0o7777, uid: stat.uid, gid: stat.gid };
+      };
+      const filePermissions = describePermissions('editor.txt');
+      const directoryPermissions = describePermissions('.');
+      expect(filePermissions.mode).toBe(0o755);
+      expect(directoryPermissions.mode).toBe(0o755);
+      const verifyPermissions = () => {
+        expect(describePermissions('editor.txt')).toEqual(filePermissions);
+        expect(describePermissions('.')).toEqual(directoryPermissions);
+      };
       await page.locator('[data-file-path]').filter({ hasText: 'editor.txt' }).dblclick();
       // Current Monaco uses a native EditContext surface in Chromium; address
       // its accessible input instead of assuming the old hidden textarea.
@@ -693,6 +705,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       const utf8Response = await savedUtf8;
       expect(utf8Response.ok(), await utf8Response.text()).toBe(true);
       await expect.poll(() => fs.readFileSync(fixture('editor.txt'), 'utf8')).toBe('Monaco UTF-8: 联调 ✓\n');
+      verifyPermissions();
       // The remote filesystem changes before the upload response and editor's
       // save guard settle. Wait for the actual saved tab state, not a delay.
       await expect(savedMark).toHaveCount(1);
@@ -708,6 +721,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       expect(emptyResponse.ok(), await emptyResponse.text()).toBe(true);
       expect(emptyResponse.status()).toBe(204);
       await expect.poll(() => fs.statSync(fixture('editor.txt')).size).toBe(0);
+      verifyPermissions();
       await expect(savedMark).toHaveCount(1);
       expect((await downloadFile('editor.txt')).length).toBe(0);
       await editor.focus();
@@ -720,6 +734,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await expect(page.locator('.km-file-editor').getByRole('alert')).toContainText('Your draft is still here');
       await expect(page.locator('.km-file-editor .view-lines')).toContainText('preserve this draft');
       expect((await downloadFile('editor.txt')).toString()).toBe('external write\n');
+      verifyPermissions();
       const editorWindow = page.locator('.km-file-editor');
       await editorWindow.getByRole('button', { name: 'Reload from node', exact: true }).click();
       await editorWindow.getByRole('alertdialog').getByRole('button', { name: 'Reload from node', exact: true }).click();

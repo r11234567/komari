@@ -2,11 +2,13 @@
 
 [简体中文](temporary-ssh.zh-CN.md)
 
-Temporary SSH admits one source IPv4 or IPv6 address to a fixed SSH port for 15 minutes. The node needs an updated Agent and authorized rescue helper. The host administrator prepares a dedicated nftables entry point. Browser WebSSH remains a separate option.
+Temporary SSH admits one source IPv4 or IPv6 address to a fixed SSH port for 15 minutes. The node needs an updated Agent, an authorized rescue helper and an available nftables entry point. Browser WebSSH remains a separate option.
 
 ## Configure the node
 
-Run the following command from an SSH session you opened directly and confirm with your local account password. The command keeps a working configuration already on the node.
+The first rescue helper installation confirmed by `komari-host apply` automatically prepares the entry point on compatible nftables hosts using the same local PAM confirmation. Each subsequent grant is requested from the panel with two-factor verification.
+
+For an existing rescue helper without an entry point, or if setup asks you to select an interface or port, run the following command from an SSH session you opened directly. The command keeps a working configuration already on the node.
 
 ```bash
 sudo komari-host setup-rescue-ssh --manifest /etc/komari/services/komari-agent.json

@@ -18,6 +18,7 @@ if [[ "${KOMARI_E2E_LOCAL:-}" = 1 ]]; then
 fi
 sudo systemctl daemon-reload
 printf 'editor fixture\n' > "$E2E_ROOT/files/editor.txt"
+chmod 0755 "$E2E_ROOT/files" "$E2E_ROOT/files/editor.txt"
 python3 - "$E2E_ROOT/files/large.log" <<'LARGE_LOG'
 import pathlib
 import sys
