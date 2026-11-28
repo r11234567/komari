@@ -702,8 +702,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       const isEdit = r => new URL(r.url()).pathname.endsWith('/file/edit') && r.request().method() === 'PUT';
       const savedUtf8 = page.waitForResponse(isEdit);
       await page.keyboard.press('Control+s');
-      const utf8Response = await savedUtf8;
-      expect(utf8Response.ok(), await utf8Response.text()).toBe(true);
+      expect((await savedUtf8).status()).toBe(204);
       await expect.poll(() => fs.readFileSync(fixture('editor.txt'), 'utf8')).toBe('Monaco UTF-8: 联调 ✓\n');
       verifyPermissions();
       // The remote filesystem changes before the upload response and editor's
@@ -717,9 +716,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await expect(savedMark).toHaveCount(0);
       const savedEmpty = page.waitForResponse(isEdit);
       await page.keyboard.press('Control+s');
-      const emptyResponse = await savedEmpty;
-      expect(emptyResponse.ok(), await emptyResponse.text()).toBe(true);
-      expect(emptyResponse.status()).toBe(204);
+      expect((await savedEmpty).status()).toBe(204);
       await expect.poll(() => fs.statSync(fixture('editor.txt')).size).toBe(0);
       verifyPermissions();
       await expect(savedMark).toHaveCount(1);
