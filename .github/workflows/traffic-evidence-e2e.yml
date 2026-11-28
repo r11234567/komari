@@ -47,7 +47,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: r11234567/komari-agent
-          ref: 13f8846d919daea4156091e5ca613d8869edf95e
+          ref: 170baae7cf80bf33adce87adce2ed963c16cc548
           path: e2e-agent
           submodules: recursive
           persist-credentials: false
