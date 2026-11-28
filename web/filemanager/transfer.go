@@ -577,7 +577,21 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 	if info.GetModifiedAt() != nil {
 		modifiedAt = info.GetModifiedAt().AsTime()
 	}
+	instance := info.GetInstanceId()
 	etag := fmt.Sprintf("\"%x-%x\"", size, modifiedAt.UnixNano())
+	if instance != "" {
+		etag = fmt.Sprintf("\"%x-%x-%x\"", size, modifiedAt.UnixNano(), instance)
+	}
+	c.Header("ETag", etag)
+	c.Header("Cache-Control", "no-store, no-transform")
+	if value := c.GetHeader("If-Match"); value != "" && !matchesFileETag(value, etag, false) {
+		api.RespondError(c, http.StatusPreconditionFailed, "file changed since this preview was opened")
+		return
+	}
+	if matchesFileETag(c.GetHeader("If-None-Match"), etag, true) {
+		c.Status(http.StatusNotModified)
+		return
+	}
 	start, end := int64(0), size-1
 	partial := false
 	if rangeHeader := strings.TrimSpace(c.GetHeader("Range")); rangeHeader != "" && ifRangeAllowsRange(c.GetHeader("If-Range"), etag, modifiedAt) {
@@ -676,7 +690,11 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 		setHeaders()
 		committed = true
 	}
-	if err := streamDownloadRelay(c, clientUUID, path, size, modifiedAt, start, contentLength, transferChunkSize, commitHeaders); err != nil {
+	snapshot := downloadSnapshot{size: size, modifiedAt: modifiedAt}
+	if partial && c.Query("follow") == "1" && strings.HasPrefix(c.GetHeader("Range"), "bytes=-") {
+		snapshot.followInstance = instance
+	}
+	if err := streamDownloadRelay(c, clientUUID, path, snapshot, start, contentLength, transferChunkSize, commitHeaders); err != nil {
 		logger.Errorf("file-transfer", "download stream failed client=%s path=%q start=%d length=%d file_size=%d committed=%t: %v", clientUUID, path, start, contentLength, size, committed, err)
 		if !committed {
 			respondTransferError(c, err)
@@ -686,6 +704,19 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 		return
 	}
 	auditFileTransfer(c, "download", clientUUID, path)
+}
+
+func matchesFileETag(header, etag string, weak bool) bool {
+	for value := range strings.SplitSeq(header, ",") {
+		value = strings.TrimSpace(value)
+		if weak {
+			value = strings.TrimPrefix(value, "W/")
+		}
+		if value == "*" || value == etag {
+			return true
+		}
+	}
+	return false
 }
 
 func ifRangeAllowsRange(value, etag string, modifiedAt time.Time) bool {
@@ -1185,6 +1216,8 @@ func respondTransferError(c *gin.Context, err error) {
 	}
 	status := http.StatusBadGateway
 	switch {
+	case strings.Contains(err.Error(), "download_stream: file changed while opening stream"):
+		status = http.StatusConflict
 	case isPayloadTooLargeError(err):
 		// Preserve a proxy/body-size rejection so the browser can renegotiate
 		// the logical chunk instead of retrying the same request forever.

@@ -669,7 +669,7 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await expect(editor).toBeHidden();
     });
 
-    await stage('actual Monaco editor saves UTF-8 and zero-byte content through the Agent', async () => {
+    await stage('actual Monaco editor saves UTF-8 and empty content, and detects stale changes', async () => {
       await page.locator('[data-file-path]').filter({ hasText: 'editor.txt' }).dblclick();
       // Current Monaco uses a native EditContext surface in Chromium; address
       // its accessible input instead of assuming the old hidden textarea.
@@ -687,7 +687,8 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await expect(page.locator('.km-file-editor .view-lines')).toContainText('Monaco UTF-8: 联调 ✓');
       const savedMark = page.locator('.km-file-editor').getByRole('button', { name: 'Close File', exact: true }).locator('svg');
       await expect(savedMark).toHaveCount(0); // React has observed the edited model.
-      const savedUtf8 = page.waitForResponse(r => new URL(r.url()).pathname.endsWith('/file/upload') && new URL(r.url()).searchParams.get('operation') === 'merge');
+      const isEdit = r => new URL(r.url()).pathname.endsWith('/file/edit') && r.request().method() === 'PUT';
+      const savedUtf8 = page.waitForResponse(isEdit);
       await page.keyboard.press('Control+s');
       const utf8Response = await savedUtf8;
       expect(utf8Response.ok(), await utf8Response.text()).toBe(true);
@@ -701,15 +702,54 @@ test('real HTTPS panel and installed Agent: authorization, workspace and files',
       await page.keyboard.press('Backspace');
       await expect(page.locator('.km-file-editor .view-lines')).toHaveText(/^\s*$/);
       await expect(savedMark).toHaveCount(0);
-      // Zero-byte files complete in init; there is no chunk/merge phase.
-      const savedEmpty = page.waitForResponse(r => new URL(r.url()).pathname.endsWith('/file/upload') && new URL(r.url()).searchParams.get('operation') === 'init');
+      const savedEmpty = page.waitForResponse(isEdit);
       await page.keyboard.press('Control+s');
       const emptyResponse = await savedEmpty;
       expect(emptyResponse.ok(), await emptyResponse.text()).toBe(true);
-      expect((await emptyResponse.json()).data.complete).toBe(true);
+      expect(emptyResponse.status()).toBe(204);
       await expect.poll(() => fs.statSync(fixture('editor.txt')).size).toBe(0);
       await expect(savedMark).toHaveCount(1);
       expect((await downloadFile('editor.txt')).length).toBe(0);
+      await editor.focus();
+      await page.keyboard.type('preserve this draft', { delay: 35 });
+      await expect(page.locator('.km-file-editor .view-lines')).toContainText('preserve this draft');
+      execFileSync('sudo', ['-u', serviceUser, 'tee', fixture('editor.txt')], { input: 'external write\n' });
+      const staleSave = page.waitForResponse(isEdit);
+      await page.keyboard.press('Control+s');
+      expect((await staleSave).status()).toBe(412);
+      await expect(page.locator('.km-file-editor').getByRole('alert')).toContainText('Your draft is still here');
+      await expect(page.locator('.km-file-editor .view-lines')).toContainText('preserve this draft');
+      expect((await downloadFile('editor.txt')).toString()).toBe('external write\n');
+      const editorWindow = page.locator('.km-file-editor');
+      await editorWindow.getByRole('button', { name: 'Reload from node', exact: true }).click();
+      await editorWindow.getByRole('alertdialog').getByRole('button', { name: 'Reload from node', exact: true }).click();
+      await expect(editorWindow.locator('.view-lines')).toContainText('external write');
+      await editorWindow.getByRole('button', { name: 'Close File', exact: true }).click();
+      await editorWindow.getByRole('button', { name: 'Close', exact: true }).click();
+    });
+
+    await stage('large log pages by byte range and follows append and rotation', async () => {
+      const filename = 'large.log';
+      const ranged = page.waitForResponse(r => new URL(r.url()).pathname.endsWith('/file/download') && r.request().headers().range?.startsWith('bytes=0-'));
+      await page.locator('[data-file-path]').filter({ hasText: filename }).dblclick();
+      const first = await ranged;
+      expect(first.status()).toBe(206);
+      expect(first.headers()['content-range']).toMatch(/^bytes 0-131074\//);
+      const editorWindow = page.locator('.km-file-editor');
+      const contents = editorWindow.locator('pre');
+      await expect(contents).toContainText('PAGE-ONE');
+      await editorWindow.getByRole('button', { name: 'Next', exact: true }).click();
+      await expect(contents).toContainText('PAGE-TWO');
+      await editorWindow.getByRole('button', { name: 'Follow end of file', exact: true }).click();
+      await expect(contents).toContainText('TAIL-BEFORE');
+      execFileSync('sudo', ['-u', serviceUser, 'tee', '-a', fixture(filename)], { input: 'TAIL-APPENDED\n' });
+      await expect(contents).toContainText('TAIL-APPENDED');
+      execFileSync('sudo', ['-u', serviceUser, 'tee', fixture('large.log.next')], { input: 'TAIL-ROTATED\n' });
+      execFileSync('sudo', ['-u', serviceUser, 'mv', fixture('large.log.next'), fixture(filename)]);
+      await expect(contents).toHaveText('TAIL-ROTATED');
+      await editorWindow.getByRole('button', { name: 'Stop following', exact: true }).click();
+      await editorWindow.getByRole('button', { name: 'Close File', exact: true }).click();
+      await editorWindow.getByRole('button', { name: 'Close', exact: true }).click();
     });
 
     await stage('file authorization requires the real workspace grant and rejects unsafe overwrite/recursive flags', async () => {
